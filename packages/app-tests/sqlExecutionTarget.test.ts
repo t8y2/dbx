@@ -63,5 +63,20 @@ test("non-mongodb backend resolution still asks the backend for the current stat
   });
 
   assert.equal(resolved, "SELECT 2");
-  assert.deepEqual(apiMock.findStatementAtCursor.mock.calls[0], [fullSql, fullSql.indexOf("2"), "postgres"]);
+  assert.deepEqual(apiMock.findStatementAtCursor.mock.calls[0], [fullSql, fullSql.indexOf("2"), "postgres", undefined]);
+});
+
+test("forwards the JDBC syntax dialect when resolving the current statement", async () => {
+  apiMock.findStatementAtCursor.mockResolvedValue("SELECT 2");
+
+  const fullSql = "SELECT 1;\nSELECT 2;";
+  const resolved = await resolveExecutableSqlWithBackend(fullSql, "", {
+    mode: "current",
+    cursorPos: fullSql.indexOf("2"),
+    databaseType: "jdbc",
+    syntaxDialect: "postgres",
+  });
+
+  assert.equal(resolved, "SELECT 2");
+  assert.deepEqual(apiMock.findStatementAtCursor.mock.calls[0], [fullSql, fullSql.indexOf("2"), "jdbc", "postgres"]);
 });

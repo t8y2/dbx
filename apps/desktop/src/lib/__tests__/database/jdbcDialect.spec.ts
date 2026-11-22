@@ -176,6 +176,37 @@ describe("jdbc dialect inference", () => {
     ).toBe("sqlserver");
   });
 
+  it("infers ClickHouse for wrapper and driver-class JDBC identities", () => {
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        connection_string: "jdbc:clickhouse://localhost:8123/default",
+        jdbc_driver_class: "com.example.WrappedDriver",
+      }),
+    ).toBe("clickhouse");
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        connection_string: "jdbc:vendor://localhost:8123/default",
+        jdbc_driver_class: "com.clickhouse.jdbc.ClickHouseDriver",
+      }),
+    ).toBe("clickhouse");
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        connection_string: "jdbc:clickhouse://localhost:8123/default",
+        driver_label: "MySQL-compatible JDBC wrapper",
+      }),
+    ).toBe("clickhouse");
+    expect(
+      codeMirrorSqlDialectForConnection({
+        db_type: "jdbc",
+        connection_string: "jdbc:vendor://localhost:8123/default",
+        driver_label: "ClickHouse JDBC",
+      }),
+    ).toBe("clickhouse");
+  });
+
   it("detects TDengine JDBC connections and keeps the selected database in the object tree", () => {
     const connection = {
       db_type: "jdbc" as const,

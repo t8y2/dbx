@@ -284,6 +284,7 @@ function sqlStatementParameterOptions() {
   return {
     databaseType: kingbaseSqlType.value ?? props.databaseType,
     compatibilityMode,
+    syntaxDialect: props.databaseType === "jdbc" ? sqlSyntaxDialect() : undefined,
     enabledSyntaxes: enabledSqlParameterSyntaxes(toggles),
   };
 }

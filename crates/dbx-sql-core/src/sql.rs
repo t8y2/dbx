@@ -174,6 +174,8 @@ pub struct SqlFileImportStatement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SqlDialectProfile {
     supports_hash_line_comments: bool,
+    supports_slash_line_comments: bool,
+    supports_clickhouse_hash_line_comments: bool,
     supports_backtick_identifiers: bool,
     /// Whether `/* ... */` comments nest. PostgreSQL and SQL Server document
     /// nesting (`/* /* */ */` needs both closers, so commenting out a block that
@@ -227,6 +229,8 @@ impl Default for SqlDialectProfile {
     fn default() -> Self {
         Self {
             supports_hash_line_comments: false,
+            supports_slash_line_comments: false,
+            supports_clickhouse_hash_line_comments: false,
             supports_backtick_identifiers: true,
             supports_nested_block_comments: false,
             supports_oracle_q_quotes: false,
@@ -294,8 +298,7 @@ impl SqlDialectProfile {
         }
 
         if matches!(db_type, DatabaseType::ClickHouse) {
-            // ClickHouse documents that C-style block comments nest.
-            return Self { supports_nested_block_comments: true, ..Self::default() };
+            return Self::clickhouse();
         }
 
         if Self::is_mysql_compatible_database(db_type) {
@@ -331,6 +334,10 @@ impl SqlDialectProfile {
             return Self { supports_oracle_style_routine_bodies: true, ..Self::default() };
         }
 
+        if matches!(db_type, DatabaseType::InfluxDb3) {
+            return Self { supports_nested_block_comments: true, ..Self::default() };
+        }
+
         Self::default()
     }
 
@@ -358,6 +365,16 @@ impl SqlDialectProfile {
             supports_backslash_escaped_quotes: true,
             supports_mysql_routine_blocks: true,
             requires_whitespace_after_line_comment_dashes: true,
+            ..Self::default()
+        }
+    }
+
+    fn clickhouse() -> Self {
+        Self {
+            // ClickHouse documents nested C-style blocks plus //, # and #! line comments.
+            supports_nested_block_comments: true,
+            supports_slash_line_comments: true,
+            supports_clickhouse_hash_line_comments: true,
             ..Self::default()
         }
     }
@@ -458,6 +475,23 @@ pub struct SqlParsingOptions {
 impl SqlParsingOptions {
     pub fn for_database_type(db_type: DatabaseType) -> Self {
         Self::from_profile(SqlDialectProfile::for_database_type(db_type))
+    }
+
+    pub fn for_database_type_and_syntax_dialect(db_type: DatabaseType, syntax_dialect: Option<&str>) -> Self {
+        if db_type == DatabaseType::Jdbc {
+            let profile = match syntax_dialect.map(str::trim).map(|dialect| dialect.to_ascii_lowercase()).as_deref() {
+                Some("mysql") => Some(SqlDialectProfile::mysql_compatible()),
+                Some("postgres") => Some(SqlDialectProfile::postgres_family()),
+                Some("sqlserver") => Some(SqlDialectProfile::sql_server()),
+                Some("oracle") => Some(SqlDialectProfile::oracle_like()),
+                Some("clickhouse") => Some(SqlDialectProfile::clickhouse()),
+                _ => None,
+            };
+            if let Some(profile) = profile {
+                return Self::from_profile(profile);
+            }
+        }
+        Self::for_database_type(db_type)
     }
 
     pub fn for_database_type_and_compatibility(db_type: DatabaseType, compatibility_mode: Option<&str>) -> Self {
@@ -856,6 +890,23 @@ impl SqlStatementSplitter {
                     i += 1;
                     continue;
                 }
+                if self.options.profile.supports_slash_line_comments && ch == '/' && next == Some('/') {
+                    self.in_line_comment = true;
+                    self.buffer.push(ch);
+                    self.previous = Some(ch);
+                    i += 1;
+                    continue;
+                }
+                if self.options.profile.supports_clickhouse_hash_line_comments
+                    && ch == '#'
+                    && matches!(next, Some(' ') | Some('!'))
+                {
+                    self.in_line_comment = true;
+                    self.buffer.push(ch);
+                    self.previous = Some(ch);
+                    i += 1;
+                    continue;
+                }
                 if self.previous == Some('-') && ch == '-' {
                     if self.options.profile.requires_whitespace_after_line_comment_dashes && next.is_none() {
                         self.pending_mysql_line_comment_dashes = true;
@@ -880,7 +931,11 @@ impl SqlStatementSplitter {
                     i += 1;
                     continue;
                 }
-                if self.options.profile.supports_hash_line_comments && ch == '#' {
+                if (self.options.profile.supports_hash_line_comments && ch == '#')
+                    || (self.options.profile.supports_clickhouse_hash_line_comments
+                        && ch == '#'
+                        && matches!(next, Some(' ') | Some('!')))
+                {
                     self.in_line_comment = true;
                     self.buffer.push(ch);
                     self.previous = Some(ch);
@@ -1400,10 +1455,19 @@ pub fn find_statement_at_cursor(sql: &str, cursor_pos: usize) -> String {
 }
 
 pub fn find_statement_at_cursor_for_database(sql: &str, cursor_pos: usize, db_type: DatabaseType) -> String {
-    if db_type == DatabaseType::SqlServer {
+    find_statement_at_cursor_for_database_with_syntax_dialect(sql, cursor_pos, db_type, None)
+}
+
+pub fn find_statement_at_cursor_for_database_with_syntax_dialect(
+    sql: &str,
+    cursor_pos: usize,
+    db_type: DatabaseType,
+    syntax_dialect: Option<&str>,
+) -> String {
+    if db_type == DatabaseType::SqlServer || (db_type == DatabaseType::Jdbc && syntax_dialect == Some("sqlserver")) {
         return find_sqlserver_statement_at_cursor(sql, cursor_pos);
     }
-    let mut options = SqlParsingOptions::for_database_type(db_type);
+    let mut options = SqlParsingOptions::for_database_type_and_syntax_dialect(db_type, syntax_dialect);
     if options.profile.supports_psql_control_commands {
         let (sql, _) = preprocess_psql_control_commands(sql, options.profile);
         options.profile.supports_psql_control_commands = false;
@@ -1645,6 +1709,19 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
             {
                 in_line_comment = true;
                 i += 2;
+                continue;
+            }
+            if options.profile.supports_slash_line_comments && ch == '/' && next == Some('/') {
+                in_line_comment = true;
+                i += ch.len_utf8();
+                continue;
+            }
+            if options.profile.supports_clickhouse_hash_line_comments
+                && ch == '#'
+                && matches!(next, Some(' ') | Some('!'))
+            {
+                in_line_comment = true;
+                i += ch.len_utf8();
                 continue;
             }
             if options.profile.supports_hash_line_comments && ch == '#' {
@@ -3365,7 +3442,13 @@ impl SqlScanner {
                 self.previous = Some(ch);
                 return;
             }
-            if (ch == '-' && next == Some('-')) || (self.profile.supports_hash_line_comments && ch == '#') {
+            if (ch == '-' && next == Some('-'))
+                || (self.profile.supports_slash_line_comments && ch == '/' && next == Some('/'))
+                || (self.profile.supports_hash_line_comments && ch == '#')
+                || (self.profile.supports_clickhouse_hash_line_comments
+                    && ch == '#'
+                    && matches!(next, Some(' ') | Some('!')))
+            {
                 self.in_line_comment = true;
             } else if ch == '/' && next == Some('*') {
                 self.block_comment_depth = 1;
@@ -3714,6 +3797,30 @@ fn leading_executable_sql_with_options(sql: &str, options: SqlParsingOptions) ->
             continue;
         }
 
+        if options.profile.supports_slash_line_comments
+            && i + 1 < bytes.len()
+            && bytes[i] == b'/'
+            && bytes[i + 1] == b'/'
+        {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if options.profile.supports_clickhouse_hash_line_comments
+            && bytes[i] == b'#'
+            && i + 1 < bytes.len()
+            && matches!(bytes[i + 1], b' ' | b'!')
+        {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
         if options.profile.supports_hash_line_comments && bytes[i] == b'#' {
             i += 1;
             while i < bytes.len() && bytes[i] != b'\n' {
@@ -3759,6 +3866,30 @@ fn next_executable_sql_token_with_options(
 
         if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
             i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if options.profile.supports_slash_line_comments
+            && i + 1 < bytes.len()
+            && bytes[i] == b'/'
+            && bytes[i + 1] == b'/'
+        {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if options.profile.supports_clickhouse_hash_line_comments
+            && bytes[i] == b'#'
+            && i + 1 < bytes.len()
+            && matches!(bytes[i + 1], b' ' | b'!')
+        {
+            i += 1;
             while i < bytes.len() && bytes[i] != b'\n' {
                 i += 1;
             }
@@ -4919,7 +5050,18 @@ fn has_executable_sql_with_options(statement: &str, options: SqlParsingOptions) 
             continue;
         }
 
-        if options.profile.supports_hash_line_comments && ch == '#' {
+        if (options.profile.supports_hash_line_comments && ch == '#')
+            || (options.profile.supports_clickhouse_hash_line_comments
+                && ch == '#'
+                && matches!(next, Some(' ') | Some('!')))
+        {
+            in_line_comment = true;
+            previous = Some(ch);
+            i += 1;
+            continue;
+        }
+
+        if options.profile.supports_slash_line_comments && ch == '/' && next == Some('/') {
             in_line_comment = true;
             previous = Some(ch);
             i += 1;
@@ -4966,13 +5108,14 @@ mod tests {
 
     use super::{
         contains_or_fuzzy_match, dash_dash_starts_line_comment, decode_sql_file_bytes,
-        find_statement_at_cursor_for_database, fuzzy_filter_enabled, fuzzy_like_pattern_with_escape,
-        fuzzy_subsequence_match, optimize_sql_file_import_statements, prepare_sql_file_statement,
-        split_oversized_insert_statement, split_sql_script, split_sql_statement_ranges_with_options,
-        split_sql_statements_for_database, starts_with_executable_sql_keyword,
-        starts_with_executable_sql_keyword_for_database, starts_with_executable_sql_keyword_sequence,
-        starts_with_oracle_style_routine_body, SqlDialectProfile, SqlFileRequest, SqlFileStatementAction,
-        SqlParsingOptions, SqlStatementSplitter, SQL_FILE_INSERT_STATEMENT_MAX_BYTES,
+        find_statement_at_cursor_for_database, find_statement_at_cursor_for_database_with_syntax_dialect,
+        fuzzy_filter_enabled, fuzzy_like_pattern_with_escape, fuzzy_subsequence_match,
+        optimize_sql_file_import_statements, prepare_sql_file_statement, split_oversized_insert_statement,
+        split_sql_script, split_sql_statement_ranges_with_options, split_sql_statements_for_database,
+        starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database,
+        starts_with_executable_sql_keyword_sequence, starts_with_oracle_style_routine_body, SqlDialectProfile,
+        SqlFileRequest, SqlFileStatementAction, SqlParsingOptions, SqlStatementSplitter,
+        SQL_FILE_INSERT_STATEMENT_MAX_BYTES,
     };
 
     #[test]
@@ -5422,6 +5565,33 @@ mod tests {
     }
 
     #[test]
+    fn influxdb3_nested_block_comments_keep_commented_out_statements_out() {
+        let sql = "/* outer\n/* inner */\n-- region hidden\nSELECT 1;\n*/\nSELECT 2;";
+        let statements = split_sql_statements_for_database(sql, DatabaseType::InfluxDb3);
+
+        assert_eq!(statements.len(), 1);
+        assert!(!statements.iter().any(|statement| statement.trim_start().starts_with("SELECT 1")), "{statements:?}");
+        assert!(statements.iter().any(|statement| statement.contains("SELECT 2")), "{statements:?}");
+    }
+
+    #[test]
+    fn generic_jdbc_cursor_uses_the_selected_syntax_dialect() {
+        let sql = "/* outer\n/* inner */\nUPDATE prod.orders SET paid = 0;\n*/\nSELECT 1;";
+        let cursor = sql.find("SELECT 1").unwrap() + 3;
+
+        assert_eq!(
+            find_statement_at_cursor_for_database_with_syntax_dialect(
+                sql,
+                cursor,
+                DatabaseType::Jdbc,
+                Some("postgres"),
+            ),
+            "SELECT 1"
+        );
+        assert_ne!(find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Jdbc), "SELECT 1");
+    }
+
+    #[test]
     fn sqlserver_nested_block_comments_keep_commented_out_statements_out() {
         let sql = "/* a\n/* b */ ;\nUPDATE prod.orders SET paid = 0;\n*/\nSELECT 1;";
         let statements = split_sql_statements_for_database(sql, DatabaseType::SqlServer);
@@ -5447,6 +5617,15 @@ mod tests {
 
         assert!(!statements.iter().any(|statement| statement.starts_with("UPDATE")), "{statements:?}");
         assert!(statements.iter().any(|statement| statement.contains("SELECT 1")), "{statements:?}");
+    }
+
+    #[test]
+    fn clickhouse_line_comments_keep_semicolons_and_statements_after_them() {
+        let sql = "// note; draft\nSELECT 1;\n# hash; draft\nSELECT 2;\n#! bang; draft\nSELECT 3;";
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::ClickHouse),
+            vec!["// note; draft\nSELECT 1", "# hash; draft\nSELECT 2", "#! bang; draft\nSELECT 3"]
+        );
     }
 
     #[test]

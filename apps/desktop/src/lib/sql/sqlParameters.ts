@@ -56,10 +56,14 @@ interface DuckDbStructLiteralContext {
 type ComplexTypeDeclarationKind = "struct" | "variant";
 type TriggerPseudoRecordName = "new" | "old" | "parent" | "eventinfo";
 
+export type SqlStatementSyntaxDialect = "mysql" | "postgres" | "sqlserver" | "oracle" | "clickhouse" | "soql";
+
 export interface SqlParameterOptions {
   databaseType?: DatabaseType;
   /** Database-level compatibility mode, for example openGauss A/B/C/PG. */
   compatibilityMode?: string;
+  /** The editor syntax dialect used when databaseType is a generic JDBC connection. */
+  syntaxDialect?: SqlStatementSyntaxDialect;
   // Which placeholder syntaxes are recognized. Undefined enables all of them.
   enabledSyntaxes?: readonly SqlParameterSyntax[];
   preserveQuotedBracedParameters?: boolean;

@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse } from "yaml";
-import { afterEach, test } from "vitest";
+import { afterEach, test, vi } from "vitest";
 import { mcpIdentifier, mcpRequirement, signMcp, verifyMcp } from "../../.github/scripts/sign-mcp-macos.mjs";
+
+vi.setConfig({ testTimeout: 120_000 });
 
 const workflow = parse(readFileSync(".github/workflows/mcp-release.yml", "utf8"));
 

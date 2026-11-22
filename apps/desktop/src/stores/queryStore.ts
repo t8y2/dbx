@@ -7343,7 +7343,7 @@ export const useQueryStore = defineStore("query", () => {
     await executeCurrentSql(tab.sql);
   }
 
-  async function executeCurrentSql(sql: string, options?: { tabId?: string; skipRedisSafetyCheck?: boolean; sourceOffset?: number; openInNewResultTab?: boolean; onExecutionStarted?: () => void }) {
+  async function executeCurrentSql(sql: string, options?: { tabId?: string; skipRedisSafetyCheck?: boolean; sourceOffset?: number; openInNewResultTab?: boolean; syntaxDialect?: SqlParameterOptions["syntaxDialect"]; onExecutionStarted?: () => void }) {
     // Execution targets the requesting tab; only fall back to the global
     // active tab when the caller did not (or could not) capture one.
     const executionTabId = options?.tabId ?? activeTabId.value;
@@ -8617,6 +8617,7 @@ export const useQueryStore = defineStore("query", () => {
       retainDisplayedResult?: boolean;
       skipRedisSafetyCheck?: boolean;
       sourceOffset?: number;
+      syntaxDialect?: SqlParameterOptions["syntaxDialect"];
       sourceTraceId?: string;
       skipEnsureConnected?: boolean;
       openInNewResultTab?: boolean;
@@ -8879,10 +8880,10 @@ export const useQueryStore = defineStore("query", () => {
       const schemaQualifiesSql = schemaFromExplicitTarget || tab.schemaQualifiesSql === true;
       const executionSchema = connectionQueryExecutionSchema(conn, targetDatabase, sqlServerQualifiesSqlWithTabSchema(conn) && !schemaQualifiesSql ? undefined : targetSchema, tab.mode === "data");
       const executionDatabase = targetDatabase;
-      const sqlStatementParameterOptions = sqlStatementParameterOptionsForCompatibility(
-        effectiveDbType,
-        effectiveDbType === "opengauss" ? connStore.databaseCompatibilityMode(executionConnectionId, targetDatabase || conn?.database) : effectiveDbType === "kingbase" ? conn?.database_info?.compatibilityMode : undefined,
-      );
+      const sqlStatementParameterOptions = {
+        ...sqlStatementParameterOptionsForCompatibility(effectiveDbType, effectiveDbType === "opengauss" ? connStore.databaseCompatibilityMode(executionConnectionId, targetDatabase || conn?.database) : effectiveDbType === "kingbase" ? conn?.database_info?.compatibilityMode : undefined),
+        syntaxDialect: options?.syntaxDialect,
+      };
       const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
       if (!batchResume) {

@@ -1970,6 +1970,31 @@ fn sqlserver_url_param_parts(params: Option<&str>) -> Vec<(Option<char>, &str)> 
     parts
 }
 
+pub fn sqlserver_url_instance_name(params: Option<&str>) -> Result<Option<String>, String> {
+    let property = sqlserver_url_param_parts(params)
+        .into_iter()
+        .rev()
+        .filter_map(|(_, part)| part.split_once('='))
+        .find(|(key, _)| percent_decode_str(key.trim()).decode_utf8_lossy().eq_ignore_ascii_case("instanceName"));
+    let Some((_, value)) = property else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    let name = if let Some(quoted) = value.strip_prefix('{').and_then(|value| value.strip_suffix('}')) {
+        quoted.to_owned()
+    } else {
+        percent_decode_str(value)
+            .decode_utf8()
+            .map_err(|_| "Invalid SQL Server instanceName URL parameter")?
+            .into_owned()
+    };
+    // A name must not be interpreted as part of the host or port.
+    if name.contains(['\\', ',', ':', '{', '}']) || name.chars().any(char::is_control) {
+        return Err("Invalid SQL Server instanceName URL parameter".to_owned());
+    }
+    Ok((!name.is_empty()).then_some(name))
+}
+
 fn sqlserver_legacy_compatibility_part(part: &str) -> bool {
     let Some((key, value)) = part.split_once('=') else {
         return false;

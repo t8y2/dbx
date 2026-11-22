@@ -68,6 +68,23 @@ describe("SQL diagnostic keyword recovery", () => {
     expect(analyze).toHaveBeenCalledOnce();
   });
 
+  it("remaps unknown qualifier spans after a keyword repair", async () => {
+    const sql = "SELECT * FRO rules WHERE b.id = 1";
+    const repaired = sql.replace("FRO", "FROM");
+    const analyze = vi.fn(async (statement: string) => {
+      if (statement !== repaired) throw parserError(sql, "rules");
+      return {
+        tables: [{ name: "rules", span: span(repaired, "rules") }],
+        columns: [],
+        unknown_qualifiers: [{ qualifier: "b", span: span(repaired, "b") }],
+      };
+    });
+    const result = await analyzeSqlDiagnosticReferences(sql, "mysql", analyze);
+    // The repair makes the text one character longer, so the qualifier span
+    // has to move back to the original position.
+    expect(result.analysis.unknown_qualifiers?.[0]?.span).toEqual(span(sql, "b"));
+  });
+
   it("keeps the original parser error when no candidate parses", async () => {
     const sql = "SELECT * FRO rules WHERE";
     const error = parserError(sql, "rules");

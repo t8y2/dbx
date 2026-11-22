@@ -33,9 +33,11 @@ import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFile
 import { getSqlFileFoldersUiState, saveSqlFileFoldersUiState, type SqlFileFolderUiState } from "@/lib/sqlFile/sqlFileUiState";
 import { filterAndSortSqlFileEntries, getSqlFileSortOrder, saveSqlFileSortOrder, type SqlFileSortOrder } from "@/lib/sql/sqlFileTreeFilter";
 import { orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
-import { getSqlFileOpenMode, saveSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
+import { saveSqlFileOpenMode, useSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
 import { getSqlFileOrder, saveSqlFileOrder, reorderSqlFiles, remapSqlFileOrder, sqlFileParentPath, type SqlFileOrder } from "@/lib/sqlFile/sqlFileOrder";
 import { useSqlFileReorder } from "@/composables/useSqlFileReorder";
+import { useSqlFileWatch } from "@/composables/useSqlFileWatch";
+import SqlFileInteractionSettingsDialog from "@/components/layout/SqlFileInteractionSettingsDialog.vue";
 
 const props = defineProps<{ locateRequest?: { id: number; path: string } | null }>();
 
@@ -81,7 +83,7 @@ const currentFilePath = computed(() => {
 });
 const filterSettingsOpen = ref(false);
 const fileFilterDraft = ref(getSqlFileFilter());
-const openMode = ref<SqlFileOpenMode>(getSqlFileOpenMode());
+const openMode = useSqlFileOpenMode();
 const openModeDraft = ref<SqlFileOpenMode>(openMode.value);
 const foldersRevision = ref(0);
 const treeId = useId();
@@ -136,6 +138,7 @@ const userCollapsedDuringSearch = ref<Set<string>>(new Set());
 
 watch([searchQuery, searchMode], () => {
   userCollapsedDuringSearch.value.clear();
+  lastClickedKey = null;
 });
 
 function setSortOrder(order: SqlFileSortOrder) {
@@ -210,6 +213,7 @@ function findFileTarget(filePath: string) {
 }
 
 async function locateFileTarget(path: string) {
+  lastClickedKey = null;
   if (disposed) return;
   const target = findFileTarget(path);
   if (!target) return;
@@ -314,6 +318,7 @@ async function locateCurrentFile() {
 }
 
 async function locateFile(path: string) {
+  lastClickedKey = null;
   if (disposed) return;
   if (findFileTarget(path)) {
     await locateFileTarget(path);
@@ -624,6 +629,7 @@ async function openFile(path: string, reveal?: { line: number; column: number })
 }
 
 function handleSearchMatch(rootPath: string, path: string, match: SavedSqlLineMatch) {
+  lastClickedKey = null;
   const key = nodeKey(rootPath, "file", path);
   selectedKeys.value = new Set();
   activeKey.value = key;
@@ -673,6 +679,50 @@ onBeforeUnmount(() => {
   disposed = true;
   persistFoldersUiState();
 });
+
+useSqlFileWatch(
+  () =>
+    folders.value.map(({ path, entries }) => {
+      const directories: string[] = [];
+      const collect = (items: SqlFileEntry[]) => {
+        for (const entry of items)
+          if (entry.is_dir) {
+            directories.push(entry.path);
+            collect(entry.children);
+          }
+      };
+      collect(entries);
+      return { path, recursive: true, revision: JSON.stringify(directories.sort()) };
+    }),
+  async (path) => {
+    if (!folderMutationPending.value && !disposed) {
+      await loadFolderEntries(path);
+      notifySqlFileFoldersChanged();
+    }
+  },
+);
+
+async function refreshOnFocus() {
+  if (!disposed && foldersInitialized.value && !folderMutationPending.value) await refreshMutationFolders();
+}
+onMounted(() => window.addEventListener("focus", refreshOnFocus));
+onBeforeUnmount(() => window.removeEventListener("focus", refreshOnFocus));
+let unlistenFilePanelFocus: (() => void) | undefined;
+onMounted(() => {
+  if (!isTauriRuntime()) return;
+  void import("@tauri-apps/api/window")
+    .then(({ getCurrentWindow }) =>
+      getCurrentWindow().onFocusChanged(({ payload }) => {
+        if (payload) void refreshOnFocus();
+      }),
+    )
+    .then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenFilePanelFocus = unlisten;
+    })
+    .catch(() => {});
+});
+onBeforeUnmount(() => unlistenFilePanelFocus?.());
 
 onMounted(async () => {
   // Restoring folders must not persist a partially loaded list. Register all
@@ -748,7 +798,12 @@ const {
     !showDeleteDialog.value &&
     !showDeleteFolderDialog.value,
   files: () => visibleItems.value.filter((item) => item.type === "file").map((item) => ({ root: item.folder.path, path: item.path, name: item.entry!.name })),
+  directories: () => visibleItems.value.filter((item) => item.type !== "file").map((item) => ({ root: item.folder.path, path: item.path, name: item.entry?.name ?? folderName(item.path) })),
   drop: (source, target) => {
+    if (target.position === "inside") {
+      void moveSqlFile(source, target);
+      return;
+    }
     // Re-check the current tree; a refresh or mutation may have removed a node.
     const siblings = visibleItems.value.filter((item) => item.type === "file" && item.folder.path === source.root && sqlFileParentPath(item.path) === sqlFileParentPath(source.path));
     const next = reorderSqlFiles(
@@ -777,6 +832,31 @@ const {
     focusTree();
   },
 });
+
+async function moveSqlFile(source: { root: string; path: string }, target: { root: string; path: string }) {
+  if (folderMutationPending.value || !visibleItems.value.some((item) => item.type === "file" && item.folder.path === source.root && item.path === source.path) || !visibleItems.value.some((item) => item.type !== "file" && item.folder.path === target.root && item.path === target.path)) return;
+  folderMutationPending.value = true;
+  try {
+    const nextPath = await api.moveSqlFileInFolder(source.root, source.path, target.root, target.path);
+    queryStore.relocateExternalSqlFilePath(source.path, nextPath);
+    moveExternalSqlFileTarget(source.path, nextPath);
+    remapManualOrder(source.path, nextPath);
+    const folder = folders.value.find((item) => item.path === target.root);
+    if (folder) {
+      folder.collapsed = false;
+      if (target.path !== folder.path) folder.expanded.add(target.path);
+    }
+    selectedKeys.value = new Set();
+    activeKey.value = nodeKey(target.root, "file", nextPath);
+    selectionAnchorKey.value = activeKey.value;
+    await refreshMutationFolders();
+    focusTree();
+  } catch (error) {
+    toast(t("sqlFileTree.moveFailed", { message: translateBackendError(t, error) }), 5000);
+  } finally {
+    folderMutationPending.value = false;
+  }
+}
 
 watch(visibleItems, () => cancelFileDrag());
 
@@ -929,7 +1009,10 @@ function handlePathClick(rootPath: string, path: string, type: NodeKind, event: 
 
 function handlePanelClick(event: MouseEvent) {
   const target = event.target as HTMLElement | null;
-  if (!target?.closest("[data-sql-file-row='true']")) clearSelection();
+  if (!target?.closest("[data-sql-file-row='true']")) {
+    clearSelection();
+    lastClickedKey = null;
+  }
 }
 
 function normalizedSqlFileName(name: string) {
@@ -1369,8 +1452,13 @@ function clearContextTarget() {
             <div v-for="(folder, fi) in folders" :key="folder.path" class="border-b last:border-b-0">
               <div
                 data-sql-file-row="true"
+                :data-sql-file-drop-path="folder.path"
+                :data-sql-file-drop-root="folder.path"
                 class="flex cursor-default items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-muted-foreground bg-[color-mix(in_oklab,var(--muted)_10%,var(--background))] sticky top-0 z-10 select-none"
-                :class="isPathHighlighted(folder.path, 'folderHeader', folder.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-[color-mix(in_oklab,var(--accent)_40%,var(--background))]'"
+                :class="[
+                  fileDropTarget?.root === folder.path && fileDropTarget.path === folder.path && fileDropTarget.position === 'inside' ? 'ring-2 ring-inset ring-primary' : '',
+                  isPathHighlighted(folder.path, 'folderHeader', folder.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-[color-mix(in_oklab,var(--accent)_40%,var(--background))]',
+                ]"
                 role="treeitem"
                 :id="visibleRowIds.get(folder)?.get(folder.path)"
                 :aria-level="1"
@@ -1440,6 +1528,7 @@ function clearContextTarget() {
                       :class="[
                         draggedFile?.root === folder.path && draggedFile.path === entry.path ? 'opacity-50' : '',
                         entry.is_dir ? 'rounded-sm' : 'rounded-none',
+                        fileDropTarget?.root === folder.path && fileDropTarget.path === entry.path && fileDropTarget.position === 'inside' ? 'ring-2 ring-inset ring-primary' : '',
                         isPathHighlighted(folder.path, entry.is_dir ? 'dir' : 'file', entry.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40',
                       ]"
                       :style="{ paddingLeft: depth * 16 + 8 + 'px' }"
@@ -1462,7 +1551,11 @@ function clearContextTarget() {
                         onContextMenu($event, contextMenuItems);
                       "
                     >
-                      <div v-if="fileDropTarget?.root === folder.path && fileDropTarget.path === entry.path" class="pointer-events-none absolute left-2 right-2 border-primary" :class="fileDropTarget.position === 'before' ? 'top-0 border-t-2' : 'bottom-0 border-b-2'" />
+                      <div
+                        v-if="fileDropTarget?.root === folder.path && fileDropTarget.path === entry.path && fileDropTarget.position !== 'inside'"
+                        class="pointer-events-none absolute left-2 right-2 border-primary"
+                        :class="fileDropTarget.position === 'before' ? 'top-0 border-t-2' : 'bottom-0 border-b-2'"
+                      />
                       <template v-if="entry.is_dir">
                         <ChevronRight v-if="!getEffectiveExpanded(folder).has(entry.path)" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                         <ChevronDown v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1530,28 +1623,12 @@ function clearContextTarget() {
       </template>
     </CustomContextMenu>
 
-    <Dialog v-model:open="filterSettingsOpen">
-      <DialogContent class="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{{ t("sqlFileTree.panelSettings") }}</DialogTitle>
-        </DialogHeader>
-        <div class="grid gap-2 py-2">
-          <Label for="sql-file-open-mode">{{ t("sqlFileTree.openMode") }}</Label>
-          <select id="sql-file-open-mode" v-model="openModeDraft" class="h-8 rounded-md border border-input bg-background px-2 text-sm">
-            <option value="single">{{ t("sqlFileTree.openModeSingle") }}</option>
-            <option value="double">{{ t("sqlFileTree.openModeDouble") }}</option>
-          </select>
-          <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.keyboardHelp") }}</p>
-          <Label for="sql-file-filter">{{ t("sqlFileTree.fileFilter") }}</Label>
-          <Input id="sql-file-filter" v-model="fileFilterDraft" :placeholder="t('sqlFileTree.fileFilterPlaceholder')" @keydown.enter="saveFileFilter" />
-          <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.fileFilterHint", { regex: fileFilterRegexExample }) }}</p>
-        </div>
-        <DialogFooter>
-          <Button type="button" variant="outline" @click="filterSettingsOpen = false">{{ t("common.cancel") }}</Button>
-          <Button type="button" @click="saveFileFilter">{{ t("common.save") }}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <SqlFileInteractionSettingsDialog v-model:open="filterSettingsOpen" v-model:open-mode="openModeDraft" @save="saveFileFilter">
+      <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.keyboardHelp") }}</p>
+      <Label for="sql-file-filter">{{ t("sqlFileTree.fileFilter") }}</Label>
+      <Input id="sql-file-filter" v-model="fileFilterDraft" :placeholder="t('sqlFileTree.fileFilterPlaceholder')" @keydown.enter="saveFileFilter" />
+      <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.fileFilterHint", { regex: fileFilterRegexExample }) }}</p>
+    </SqlFileInteractionSettingsDialog>
 
     <Dialog :open="showCreateDialog" @update:open="(open) => (showCreateDialog = open)">
       <DialogContent class="sm:max-w-[380px]">

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canPreviewCellGeometry, compactJsonText, formatJsonText, isGeometryColumnType, looksLikeJsonContainerText, valueEditorActions } from "@/lib/dataGrid/cellDetailPresentation";
+import { canPreviewCellGeometry, compactJsonText, formatJsonText, isGeometryColumnType, looksLikeJsonContainerText, valueEditorActions, visibleCellDetailTabs } from "@/lib/dataGrid/cellDetailPresentation";
 
 describe("cellDetailPresentation", () => {
   it("offers compact JSON beside format JSON for editable JSON values", () => {
@@ -45,5 +45,14 @@ describe("cellDetailPresentation", () => {
     expect(canPreviewCellGeometry("result is empty", "text")).toBe(false);
     expect(canPreviewCellGeometry("empty", "text")).toBe(false);
     expect(canPreviewCellGeometry("Meeting notes (see attached 3 items)", "text")).toBe(false);
+  });
+});
+
+describe("visibleCellDetailTabs", () => {
+  it("offers the referenced-row tab only for foreign-key cells, after the other tabs", () => {
+    expect(visibleCellDetailTabs({ isEditable: true })).toEqual(["details", "valueEditor"]);
+    expect(visibleCellDetailTabs({ isEditable: true, hasForeignKeyPreview: false })).toEqual(["details", "valueEditor"]);
+    expect(visibleCellDetailTabs({ isEditable: true, hasForeignKeyPreview: true })).toEqual(["details", "valueEditor", "foreignKey"]);
+    expect(visibleCellDetailTabs({ isEditable: false, hasBinaryHexViewer: true, hasForeignKeyPreview: true })).toEqual(["details", "hexViewer", "foreignKey"]);
   });
 });

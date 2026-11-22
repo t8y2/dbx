@@ -10,6 +10,34 @@ export interface FloatingViewport {
   height: number;
 }
 
+export type FloatingSide = "top" | "right" | "bottom" | "left";
+
+/** The opposite edge, used when the preferred side cannot fit in the viewport. */
+export function flipFloatingSide(side: FloatingSide): FloatingSide {
+  switch (side) {
+    case "top":
+      return "bottom";
+    case "bottom":
+      return "top";
+    case "left":
+      return "right";
+    case "right":
+      return "left";
+    default:
+      return "top";
+  }
+}
+
+/**
+ * Whether a floating surface covers its own trigger. Clamping a surface that
+ * overflows a viewport edge can push it back on top of the trigger, where it
+ * swallows the click the user aimed at the trigger (#15331: a tooltip above a
+ * result-set tab in the fullscreen result pane covered the tab).
+ */
+export function floatingSurfaceOverlapsTrigger(surface: FloatingRect, trigger: FloatingRect): boolean {
+  return surface.left < trigger.right && surface.right > trigger.left && surface.top < trigger.bottom && surface.bottom > trigger.top;
+}
+
 /** Place a cursor-following surface, flipping each axis before clamping to the viewport. */
 export function floatingCursorPosition(cursor: { x: number; y: number }, size: { width: number; height: number }, viewport: FloatingViewport, preferredSide: "left" | "right" = "right", gap = 12, margin = 8): { x: number; y: number } {
   function axis(pointer: number, length: number, extent: number, before: boolean) {

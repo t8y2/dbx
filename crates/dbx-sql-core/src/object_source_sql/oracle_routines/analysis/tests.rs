@@ -7,6 +7,7 @@ fn analyze(body: &str) -> OracleRoutineDraftAnalysis {
         schema: Some("Owner.Mixed".into()),
         name: "Mixed.Func".into(),
         source: format!("CREATE OR REPLACE FUNCTION \"Owner.Mixed\".\"Mixed.Func\" RETURN NUMBER AS {body}"),
+        identifier_quote: None,
     })
 }
 fn function(source: &str) -> OracleRoutineDraftAnalysis {
@@ -16,6 +17,7 @@ fn function(source: &str) -> OracleRoutineDraftAnalysis {
         schema: Some("OWNER".into()),
         name: "F".into(),
         source: source.into(),
+        identifier_quote: None,
     })
 }
 
@@ -25,6 +27,7 @@ fn a_package_specification_reports_public_scalar_exception_and_non_overloaded_si
         database_type: DatabaseType::OceanbaseOracle, object_type: ObjectSourceKind::Package,
         schema: Some("OWNER".into()), name: "P".into(),
         source: "CREATE PACKAGE \"OWNER\".P AUTHID DEFINER AS g NUMBER := 1; e EXCEPTION; FUNCTION f(p NUMBER DEFAULT 2) RETURN NUMBER; PROCEDURE step(p IN OUT NUMBER); END P;".into(),
+        identifier_quote: None,
     });
     assert!(result.complete, "{:?}", result.issues);
     let value = serde_json::to_value(&result).unwrap();
@@ -46,6 +49,7 @@ fn package_default_expressions_keep_internal_calls_out_of_schema_dependencies() 
         source:
             "CREATE PACKAGE \"OWNER\".P AS FUNCTION seed RETURN NUMBER; g NUMBER := seed + OWNER.external_seed(); END P;"
                 .into(),
+        identifier_quote: None,
     });
     assert!(result.complete, "{:?}", result.issues);
     assert_eq!(result.references.len(), 1);
@@ -62,6 +66,7 @@ fn package_edition_attributes_require_target_evidence_without_changing_standalon
             schema: Some("OWNER".into()),
             name: "P".into(),
             source: "CREATE PACKAGE \"OWNER\".P AS g NUMBER := 1; END P;".into(),
+            identifier_quote: None,
         };
         let spec_source = format!("CREATE {option} PACKAGE \"OWNER\".P AS g NUMBER := 1; END P;");
         let spec = analyze_oracle_routine_draft(EditableObjectSourceSqlInput {
@@ -101,6 +106,7 @@ fn body_analysis_requires_its_final_specification_instead_of_guessing_package_bi
         schema: Some("OWNER".into()),
         name: "P".into(),
         source: "CREATE PACKAGE BODY \"OWNER\".P AS FUNCTION f RETURN NUMBER IS BEGIN RETURN g; END; END P;".into(),
+        identifier_quote: None,
     });
     assert!(!result.complete);
     assert!(result.issues.iter().any(|issue| issue.message.contains("final specification")));
@@ -114,6 +120,7 @@ fn package_body_binds_public_contract_and_private_forward_calls_without_schema_d
         schema: Some("APP".into()),
         name: "P".into(),
         source: "CREATE PACKAGE APP.P AS g NUMBER := 1; FUNCTION f(p NUMBER DEFAULT 2) RETURN NUMBER; END P;".into(),
+        identifier_quote: None,
     };
     let body = EditableObjectSourceSqlInput {
         object_type: ObjectSourceKind::PackageBody,
@@ -147,6 +154,7 @@ fn preserved_package_flow_body_is_fully_analyzed_with_its_final_specification() 
         name: "PKG_FLOW".into(),
         source: "CREATE PACKAGE PKG_FLOW AS g_bias NUMBER := 1; FUNCTION score(p NUMBER) RETURN NUMBER; END PKG_FLOW;"
             .into(),
+        identifier_quote: None,
     };
     let body = EditableObjectSourceSqlInput {
         object_type: ObjectSourceKind::PackageBody,
@@ -170,6 +178,7 @@ fn package_procedure(body: &str) -> OracleRoutineDraftAnalysis {
         schema: Some("APP".into()),
         name: "P".into(),
         source: "CREATE PACKAGE APP.P AS PROCEDURE run; END P;".into(),
+        identifier_quote: None,
     };
     analyze_oracle_package_body_draft(
         EditableObjectSourceSqlInput {
@@ -238,6 +247,7 @@ fn package_initialization_is_analyzed_but_cannot_return_a_member_result() {
         schema: Some("APP".into()),
         name: "P".into(),
         source: "CREATE PACKAGE APP.P AS g NUMBER; END P;".into(),
+        identifier_quote: None,
     };
     let body = EditableObjectSourceSqlInput {
         object_type: ObjectSourceKind::PackageBody,
@@ -275,6 +285,7 @@ fn package_self_qualified_assignment_and_external_exception_keep_exact_binding_r
         schema: Some("APP".into()),
         name: "P".into(),
         source: "CREATE PACKAGE APP.P AS g NUMBER; PROCEDURE run; END P;".into(),
+        identifier_quote: None,
     };
     let body = EditableObjectSourceSqlInput { object_type: ObjectSourceKind::PackageBody,
         source: "CREATE PACKAGE BODY APP.P AS PROCEDURE run IS BEGIN P.g := APP.seed(); APP.P.g := g; EXCEPTION WHEN APP.OTHER.bad THEN RAISE APP.OTHER.bad; END run; END P;".into(), ..specification.clone() };
@@ -300,7 +311,7 @@ fn package_sql_column_candidates_keep_exception_and_expired_local_evidence_for_t
 #[test]
 fn constant_and_unicode_comment_bodies_are_fully_consumed_without_changing_the_source() {
     let comment = "-- 原文🙂 Source.Owner.f; EXECUTE IMMEDIATE\n".repeat(140);
-    let input = EditableObjectSourceSqlInput { database_type: DatabaseType::OceanbaseOracle, object_type: ObjectSourceKind::Function, schema: Some("Owner.Mixed".into()), name: "Mixed.Func".into(), source: format!("CREATE OR REPLACE FUNCTION \"Owner.Mixed\".\"Mixed.Func\" RETURN VARCHAR2 AS\n{comment}BEGIN RETURN q'[Source.Owner.f;  保留🙂]'; END;") };
+    let input = EditableObjectSourceSqlInput { database_type: DatabaseType::OceanbaseOracle, object_type: ObjectSourceKind::Function, schema: Some("Owner.Mixed".into()), name: "Mixed.Func".into(), source: format!("CREATE OR REPLACE FUNCTION \"Owner.Mixed\".\"Mixed.Func\" RETURN VARCHAR2 AS\n{comment}BEGIN RETURN q'[Source.Owner.f;  保留🙂]'; END;") , identifier_quote: None};
     let original = input.source.clone();
     let result = analyze_oracle_routine_draft(input.clone());
     assert!(result.complete, "{:?}", result.issues);
@@ -350,6 +361,7 @@ fn standalone_procedure_calls_include_no_argument_calls_and_writable_scalar_argu
         source:
             "CREATE PROCEDURE \"OWNER\".P(a IN OUT NUMBER) AS BEGIN \"OWNER\".ready; \"OWNER\".update_value(a, a+1); RETURN; END P;"
                 .into(),
+        identifier_quote: None,
     });
     assert!(result.complete, "{:?}", result.issues);
     assert!(result.references.iter().all(|reference| reference.role == OracleDraftReferenceRole::Procedure));

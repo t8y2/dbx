@@ -1,5 +1,20 @@
 import type { QueryResult } from "@/types/database";
-import { mysqlUserAccount, normalizeStarrocksCatalog, POSTGRES_TABLE_PRIVILEGES, quoteMySqlIdentifier, quotePostgresIdentifier, type CreatePrincipalInput, type DatabaseTablePrivilegeGrant, type DatabaseUserAdminProvider, type DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
+import {
+  DORIS_TABLE_PRIVILEGES,
+  dorisGrantPrivilegesSql,
+  mysqlUserAccount,
+  normalizeStarrocksCatalog,
+  POSTGRES_TABLE_PRIVILEGES,
+  quoteMySqlIdentifier,
+  quotePostgresIdentifier,
+  starrocksObjectPrivileges,
+  starrocksViewObjectType,
+  type CreatePrincipalInput,
+  type DatabaseTablePrivilegeGrant,
+  type DatabaseUserAdminProvider,
+  type DatabaseUserIdentity,
+  type StarrocksViewObjectType,
+} from "@/lib/database/databaseUserAdmin";
 
 export type AuthorizationAccountType = "standard" | "admin";
 export type AuthorizationPreset = "readWrite" | "readOnly" | "ddl" | "dml" | "custom";
@@ -100,20 +115,38 @@ const STARROCKS_PRESETS: Record<Exclude<AuthorizationPreset, "custom">, string[]
   readWrite: ["SELECT", "INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "EXPORT"],
 };
 
-export function authorizationPresetPrivileges(provider: DatabaseUserAdminProvider, preset: AuthorizationPreset, custom: string[] = [], targetScope: AuthorizationTargetScope = "database"): string[] {
+const DORIS_PRESETS: Record<Exclude<AuthorizationPreset, "custom">, string[]> = {
+  readOnly: ["SELECT_PRIV"],
+  dml: ["SELECT_PRIV", "LOAD_PRIV"],
+  ddl: ["ALTER_PRIV", "CREATE_PRIV", "DROP_PRIV"],
+  readWrite: [...DORIS_TABLE_PRIVILEGES],
+};
+const DORIS_TABLE_PRIVILEGE_SET = new Set<string>(DORIS_TABLE_PRIVILEGES);
+
+export function authorizationPresetPrivileges(provider: DatabaseUserAdminProvider, preset: AuthorizationPreset, custom: string[] = [], targetScope: AuthorizationTargetScope = "database", tables?: readonly AuthorizationTableSelection[]): string[] {
+  if (provider.authorizationModel === "doris") {
+    return preset === "custom" ? uniquePrivileges(custom).filter((privilege) => DORIS_TABLE_PRIVILEGE_SET.has(privilege)) : [...DORIS_PRESETS[preset]];
+  }
   const presetPrivileges = provider.authorizationModel === "starrocks" ? STARROCKS_PRESETS : provider.dialect === "mysql" ? MYSQL_PRESETS : POSTGRES_PRESETS;
   const privileges = preset === "custom" ? uniquePrivileges(custom) : [...presetPrivileges[preset]];
-  if (provider.authorizationModel === "starrocks" && privileges.includes("ALL")) return ["ALL"];
+  if (provider.authorizationModel === "starrocks") {
+    if (privileges.includes("ALL")) return ["ALL"];
+    const allowed = new Set(authorizationPrivileges(provider, targetScope, tables));
+    return privileges.filter((privilege) => allowed.has(privilege));
+  }
   if (targetScope !== "table") return privileges;
   if (provider.authorizationModel === "mysql") return privileges.filter((privilege) => MYSQL_TABLE_PRIVILEGES.has(privilege));
   const tablePrivileges = new Set(provider.privilegesForScope?.("table") ?? []);
   return privileges.filter((privilege) => tablePrivileges.has(privilege));
 }
 
-export function authorizationPrivileges(provider: DatabaseUserAdminProvider, targetScope: AuthorizationTargetScope = "database"): string[] {
+export function authorizationPrivileges(provider: DatabaseUserAdminProvider, targetScope: AuthorizationTargetScope = "database", tables?: readonly AuthorizationTableSelection[]): string[] {
   const privilegesForScope = provider.privilegesForScope;
   if (!privilegesForScope) return [];
-  if (provider.authorizationModel === "starrocks") return Array.from(privilegesForScope("table"));
+  if (provider.authorizationModel === "starrocks" && targetScope === "table" && tables?.length) {
+    return uniquePrivileges(tables.flatMap((table) => starrocksObjectPrivileges(starrocksViewObjectType(table.objectType))));
+  }
+  if (provider.authorizationModel === "starrocks" || provider.authorizationModel === "doris") return Array.from(privilegesForScope("table"));
   if (provider.dialect === "mysql") {
     const privileges = Array.from(privilegesForScope("mysql"));
     return provider.authorizationModel === "mysql" && targetScope === "table" ? privileges.filter((privilege) => MYSQL_TABLE_PRIVILEGES.has(privilege)) : privileges;
@@ -123,7 +156,11 @@ export function authorizationPrivileges(provider: DatabaseUserAdminProvider, tar
 }
 
 export function databaseAuthorizationsFromTableGrants(provider: DatabaseUserAdminProvider, grants: readonly DatabaseTablePrivilegeGrant[]): LoadedDatabaseAuthorizations {
-  const available = authorizationPrivileges(provider, "table");
+  const available = authorizationPrivileges(
+    provider,
+    "table",
+    grants.map((grant) => ({ name: grant.table, objectType: grant.objectType })),
+  );
   const allowed = new Set(available);
   const byDatabase = new Map<string, DatabaseTablePrivilegeGrant[]>();
   for (const grant of grants) {
@@ -141,7 +178,7 @@ export function databaseAuthorizationsFromTableGrants(provider: DatabaseUserAdmi
     const selectedEntries = wildcardEntries.length > 0 ? wildcardEntries : entries;
     const byTable = new Map<string, DatabaseTablePrivilegeGrant[]>();
     for (const entry of selectedEntries) {
-      const key = JSON.stringify([entry.schema ?? "", entry.table]);
+      const key = JSON.stringify([entry.schema ?? "", entry.table, entry.objectType]);
       const tableGrants = byTable.get(key) ?? [];
       tableGrants.push(entry);
       byTable.set(key, tableGrants);
@@ -159,7 +196,7 @@ export function databaseAuthorizationsFromTableGrants(provider: DatabaseUserAdmi
       database: first.database,
       preset: "custom",
       privileges: commonPrivileges,
-      ...(wildcardEntries.length > 0 ? { schemas } : { tables: Array.from(byTable.values(), ([grant]) => ({ name: grant.table, ...(grant.schema ? { schema: grant.schema } : {}) })) }),
+      ...(wildcardEntries.length > 0 ? { schemas } : { tables: Array.from(byTable.values(), ([grant]) => ({ name: grant.table, ...(grant.schema ? { schema: grant.schema } : {}), ...(grant.objectType ? { objectType: grant.objectType } : {}) })) }),
     });
   }
   return { selections, grantOption: selections.length > 0 && everyGrantable };
@@ -204,16 +241,17 @@ export function buildCreateUserAuthorizationPlan(input: CreateUserAuthorizationP
     if (!database) continue;
     if (selection.tables !== undefined && uniqueTables(selection.tables).length === 0) continue;
     if (input.provider.authorizationModel === "starrocks") {
-      const privileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges, "table");
-      if (privileges.length === 0) continue;
       const tables = selection.tables === undefined ? [{ name: "*" }] : uniqueTables(selection.tables);
       for (const table of tables) {
+        const objectType = starrocksViewObjectType(table.objectType);
+        const privileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges, "table", [table]);
+        if (privileges.length === 0) continue;
         const targetTable = table.name === "*" ? undefined : table.name;
         steps.push({
           id: `grant-${steps.length}`,
           label: `grant ${input.provider.label(identity)} access to ${authorizationTargetLabel(selection.catalog, database, undefined, targetTable)}`,
           database,
-          sql: input.provider.grantPrivilegesSql({ user: identity, privileges, catalog: selection.catalog, database, table: table.name, scope: "table" }),
+          sql: input.provider.grantPrivilegesSql({ user: identity, privileges, catalog: selection.catalog, database, table: table.name, objectType, scope: "table" }),
           dependsOn: [createStepId],
           operation: "grantDatabase",
           subject: input.provider.label(identity),
@@ -227,6 +265,7 @@ export function buildCreateUserAuthorizationPlan(input: CreateUserAuthorizationP
     if (input.provider.dialect === "mysql") {
       const targetScope = input.provider.supportsTableGrantsOnCreate && selection.tables !== undefined ? "table" : "database";
       const privileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges, targetScope);
+      if (input.provider.authorizationModel === "doris" && privileges.length === 0) continue;
       const tables = targetScope === "database" ? [{ name: "*" }] : uniqueTables(selection.tables ?? []);
       for (const table of tables) {
         const targetTable = table.name === "*" ? undefined : table.name;
@@ -275,14 +314,14 @@ export interface GrantAuthorizationPlanInput {
 export function buildGrantAuthorizationPlan(input: GrantAuthorizationPlanInput): AuthorizationPlan {
   const changePrivilegesSql = input.revoke ? input.provider.revokePrivilegesSql : input.provider.grantPrivilegesSql;
   if (!changePrivilegesSql) return { steps: [] };
-  if (!input.provider.supportsTableGrantsOnCreate) return { steps: [] };
+  if (!(input.provider.supportsTableGrantsOnEdit ?? input.provider.supportsTableGrantsOnCreate)) return { steps: [] };
   const steps: AuthorizationPlanStep[] = [];
   for (const selection of input.databases) {
     const database = selection.database.trim();
     if (!database) continue;
     const model = input.provider.authorizationModel;
     const targetScope = selection.tables !== undefined || model === "postgres" || model === "starrocks" ? "table" : "database";
-    const desiredPrivileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges, targetScope);
+    const desiredPrivileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges, targetScope, selection.tables);
     if (desiredPrivileges.length === 0) continue;
 
     if (model === "postgres") {
@@ -311,14 +350,22 @@ export function buildGrantAuthorizationPlan(input: GrantAuthorizationPlanInput):
     const tables = selection.tables === undefined ? [{ name: "*" }] : uniqueTables(selection.tables);
     for (const table of tables) {
       const targetTable = table.name === "*" ? undefined : table.name;
-      const privileges = model === "starrocks" ? changedPrivileges(input, { catalog: selection.catalog, database, table: table.name }, desiredPrivileges) : desiredPrivileges;
+      const objectType = model === "starrocks" ? starrocksViewObjectType(table.objectType) : undefined;
+      const privileges =
+        model === "starrocks"
+          ? changedPrivileges(
+              input,
+              { catalog: selection.catalog, database, table: table.name, objectType },
+              desiredPrivileges.filter((privilege) => starrocksObjectPrivileges(objectType).includes(privilege)),
+            )
+          : desiredPrivileges;
       if (privileges.length === 0) continue;
       const scope = model === "mysql" ? "mysql" : "table";
       steps.push({
         id: `change-${steps.length}`,
         label: `${input.revoke ? "revoke" : "grant"} ${input.provider.label(input.user)} ${authorizationTargetLabel(selection.catalog, database, undefined, targetTable)}`,
         database: model === "starrocks" ? database : "",
-        sql: changePrivilegesSql({ user: input.user, privileges, catalog: selection.catalog, database, table: table.name, grantOption: input.grantOption, scope }),
+        sql: changePrivilegesSql({ user: input.user, privileges, catalog: selection.catalog, database, table: table.name, objectType, grantOption: input.grantOption, scope }),
         operation: input.revoke ? "revokePrivileges" : "grantDatabase",
         subject: input.provider.label(input.user),
         targetCatalog: selection.catalog,
@@ -431,6 +478,9 @@ export function authorizationPlanStatus(results: AuthorizationStepResult[]): "su
 }
 
 function adminPrincipalGrantSql(provider: DatabaseUserAdminProvider, principal: CreatePrincipalInput): string {
+  if (provider.authorizationModel === "doris") {
+    return dorisGrantPrivilegesSql({ user: principal, privileges: ["ADMIN_PRIV"], database: "*" });
+  }
   if (provider.dialect === "mysql") {
     return `GRANT ALL PRIVILEGES ON *.* TO ${mysqlUserAccount(principal)} WITH GRANT OPTION;`;
   }
@@ -660,10 +710,10 @@ function uniqueTables(tables: readonly AuthorizationTableSelection[]): Authoriza
     const name = table.name.trim();
     const schema = table.schema?.trim() || undefined;
     if (!name) continue;
-    const key = JSON.stringify([schema ?? "", name]);
+    const key = JSON.stringify([schema ?? "", name, table.objectType]);
     if (seen.has(key)) continue;
     seen.add(key);
-    unique.push({ name, ...(schema ? { schema } : {}) });
+    unique.push({ name, ...(schema ? { schema } : {}), ...(table.objectType ? { objectType: table.objectType } : {}) });
   }
   return unique;
 }
@@ -673,6 +723,7 @@ interface AuthorizationGrantTarget {
   database: string;
   schema?: string;
   table: string;
+  objectType?: StarrocksViewObjectType;
 }
 
 function changedPrivileges(input: GrantAuthorizationPlanInput, target: AuthorizationGrantTarget, desiredPrivileges: string[]): string[] {
@@ -695,6 +746,7 @@ function postgresGrantIsInTargetSchema(grant: DatabaseTablePrivilegeGrant, targe
 }
 
 function tableGrantMatchesTarget(grant: DatabaseTablePrivilegeGrant, target: AuthorizationGrantTarget, allowBroader: boolean): boolean {
+  if (grant.objectType !== target.objectType) return false;
   const targetCatalog = normalizeStarrocksCatalog(target.catalog ?? "") ?? "default_catalog";
   const grantCatalog = normalizeStarrocksCatalog(grant.catalog ?? "") ?? "default_catalog";
   if (target.catalog !== undefined || grant.catalog !== undefined) {

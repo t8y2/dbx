@@ -288,6 +288,17 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
     });
   }
 
+  // A two-part qualifier that names neither a table nor an alias in scope
+  // (`b.id` when only `a` is declared) is an error on its own: the column
+  // itself cannot be checked, because no relation owns it.
+  for (const unknown of analysis.unknown_qualifiers ?? []) {
+    diagnostics.push({
+      span: trimSqlTextSpanWhitespace(schema.sql, unknown.span),
+      message: `Unknown table alias ${unknown.qualifier}`,
+      severity: "error",
+    });
+  }
+
   for (const column of analysis.columns) {
     if (isUnquotedOracleBuiltinReference(column, schema)) continue;
     const table = resolveColumnTable(column, tables, knownTables, schema.sql, scopesById);

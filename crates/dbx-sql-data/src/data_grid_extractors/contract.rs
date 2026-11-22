@@ -31,6 +31,7 @@ pub enum DataGridExtractorId {
     OneRow,
     SqlInList,
     SqlInserts,
+    SqlDeletes,
     SqlDeletesInserts,
     SqlUpdates,
     SqlSelect,

@@ -54,6 +54,17 @@ describe("shortcutRegistry editor actions", () => {
   ];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl", "editSidebarTableStructure"];
 
+  it("registers convert-selection-to-delimited as an editor shortcut", () => {
+    expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "convertSelectionToDelimited")).toMatchObject({
+      id: "convertSelectionToDelimited",
+      labelKey: "settings.shortcutConvertSelectionToDelimited",
+      scope: "editor",
+      defaultShortcut: "Mod+Alt+,",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.convertSelectionToDelimited).toBe("Mod+Alt+,");
+    expect(shortcutToCodeMirrorKey("Mod+Alt+,")).toBe("Mod-Alt-,");
+  });
+
   it("registers copy-result-column shortcuts as global actions defaulting to Alt+1..5", () => {
     for (const column of [1, 2, 3, 4, 5]) {
       const id = `copyResultColumn${column}` as const;

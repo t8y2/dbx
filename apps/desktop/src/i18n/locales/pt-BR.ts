@@ -10896,6 +10896,8 @@ export default withEnglishFallback({
     completionAutoActivationDelay: "Atraso para ativação automática do autocompletar (milissegundos)",
     completionAutoActivationDelayDescription:
       "Tempo de espera após a digitação para exibir as sugestões de autocompletar, padrão de 500 milissegundos; aumentar esse valor pode evitar que o autocompletar apareça com frequência durante a digitação contínua e interfira na edição; 0 significa exibir imediatamente.",
+    cellDetailPanelEnabled: "Painel de detalhes da célula",
+    cellDetailPanelEnabledDescription: "Quando desativado, o painel de detalhes da célula deixa de ser exibido de forma fixa; ao clicar no botão de detalhes ou usar o menu de contexto, os detalhes passam a ser exibidos em um pop-up.",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

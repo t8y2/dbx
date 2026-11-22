@@ -10901,6 +10901,8 @@ export default withEnglishFallback({
     completionAutoActivationDelay: "Ritardo attivazione automatica completamento (millisecondi)",
     completionAutoActivationDelayDescription:
       "Ritardo con cui vengono mostrati i candidati di completamento dopo l'input, predefinito 500 millisecondi; aumentando il valore si evita che il completamento compaia frequentemente durante la digitazione continua e interferisca con l'editing; 0 indica comparsa immediata.",
+    cellDetailPanelEnabled: "Pannello dettagli cella",
+    cellDetailPanelEnabledDescription: "Una volta disattivato, il pannello dei dettagli della cella non viene più visualizzato in modo fisso; facendo clic sul pulsante Dettagli o usando il menu contestuale, viene mostrato in una finestra popup.",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

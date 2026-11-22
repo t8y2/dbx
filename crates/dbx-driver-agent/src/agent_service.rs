@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 use crate::agent_catalog;
 use crate::agent_manager::{
     AgentDriverInfo, AgentInstallCancellation, AgentManager, AgentRegistry, ArtifactFormat, ArtifactInfo,
-    InstalledDriver, JavaRuntimeMode, OperationLockHandle, DEFAULT_JRE_KEY, SQLITE_WORKER_DRIVER_KEY,
-    SQLITE_WORKER_NATIVE_PLATFORMS,
+    InstalledDriver, JavaRuntimeMode, OperationLockHandle, AGENT_JAR_INVALID_HINT, DEFAULT_JRE_KEY,
+    SQLITE_WORKER_DRIVER_KEY, SQLITE_WORKER_NATIVE_PLATFORMS,
 };
 use crate::DownloadSource;
 
@@ -633,7 +633,7 @@ fn install_local_agent_file(am: &AgentManager, db_type: &str, source: &Path) -> 
     std::fs::copy(source, &staging_path).map_err(|e| format!("Failed to copy local agent jar: {e}"))?;
     if !is_valid_agent_jar(&staging_path) {
         std::fs::remove_file(&staging_path).ok();
-        return Err(format!("Local agent jar is invalid or corrupt: {}", source.display()));
+        return Err(format!("Local agent jar is invalid or corrupt: {}{}", source.display(), AGENT_JAR_INVALID_HINT));
     }
     replace_imported_agent_file(&staging_path, &jar_path)
 }
@@ -649,18 +649,14 @@ fn record_local_agent_install(state: &mut crate::agent_manager::AgentState, db_t
     );
 }
 
+/// Rejects jars that cannot start, instead of letting `java -jar` fail later with
+/// "Could not find or load main class". The manifest alone is not enough: a jar
+/// truncated during download/extraction can still contain a readable manifest
+/// while missing the class it points at (#15330).
 fn is_valid_agent_jar(path: &Path) -> bool {
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let Ok(mut archive) = zip::ZipArchive::new(file) else {
-        return false;
-    };
-    let Ok(mut manifest) = archive.by_name("META-INF/MANIFEST.MF") else {
-        return false;
-    };
-    let mut manifest_text = String::new();
-    manifest.read_to_string(&mut manifest_text).is_ok() && manifest_text.contains("Main-Class:")
+    // One implementation for both this install boundary and the launch/health
+    // checks in `agent_manager`, so the two can never disagree (#15330).
+    crate::agent_manager::is_valid_agent_jar_file(path)
 }
 
 pub async fn fetch_registry() -> Result<AgentRegistry, String> {
@@ -1839,7 +1835,11 @@ async fn install_agent_driver_from_registry(
     } else {
         if !am.is_driver_jar_valid(db_type) {
             std::fs::remove_file(&target_path).ok();
-            return Err(format!("Downloaded driver jar is invalid or corrupt: {}", target_path.display()));
+            return Err(format!(
+                "Downloaded driver jar is invalid or corrupt: {}{}",
+                target_path.display(),
+                AGENT_JAR_INVALID_HINT
+            ));
         }
         std::fs::remove_file(am.driver_native_path(db_type)).ok();
     }
@@ -1937,7 +1937,10 @@ fn install_driver_from_tar_zstd_package(
     let result = extract_tar_zstd_file(package_path, &info.entry_name, &staging_path, info.size).and_then(|_| {
         match info.kind {
             DriverArtifactKind::Jar if !is_valid_agent_jar(&staging_path) => {
-                return Err(format!("Packaged driver jar is invalid or corrupt: {}", info.entry_name));
+                return Err(format!(
+                    "Packaged driver jar is invalid or corrupt: {}{}",
+                    info.entry_name, AGENT_JAR_INVALID_HINT
+                ));
             }
             DriverArtifactKind::Native => {
                 let platform = native_platform
@@ -3371,7 +3374,9 @@ pub async fn import_offline_zip(
                 // corrupt offline package cannot destroy the previous installation.
                 if !is_valid_agent_jar(&staging_path) {
                     std::fs::remove_file(&staging_path).ok();
-                    return Err(format!("Offline agent jar is invalid or corrupt: {entry_name}"));
+                    return Err(format!(
+                        "Offline agent jar is invalid or corrupt: {entry_name}{AGENT_JAR_INVALID_HINT}"
+                    ));
                 }
             }
             Ok(staging_path)
@@ -4663,6 +4668,8 @@ mod agent_registry_install_tests {
         let mut archive = zip::ZipWriter::new(file);
         archive.start_file("META-INF/MANIFEST.MF", zip::write::SimpleFileOptions::default()).unwrap();
         archive.write_all(b"Manifest-Version: 1.0\nMain-Class: com.dbx.Agent\n").unwrap();
+        archive.start_file("com/dbx/Agent.class", zip::write::SimpleFileOptions::default()).unwrap();
+        archive.write_all(b"class-bytes").unwrap();
         archive.finish().unwrap();
     }
 
@@ -4788,6 +4795,8 @@ mod agent_registry_install_tests {
             let mut archive = zip::ZipWriter::new(&mut bytes);
             archive.start_file("META-INF/MANIFEST.MF", zip::write::SimpleFileOptions::default()).unwrap();
             archive.write_all(b"Manifest-Version: 1.0\nMain-Class: com.dbx.Agent\n").unwrap();
+            archive.start_file("com/dbx/Agent.class", zip::write::SimpleFileOptions::default()).unwrap();
+            archive.write_all(b"class-bytes").unwrap();
             archive.finish().unwrap();
         }
         bytes.into_inner()
@@ -7171,5 +7180,149 @@ mod jre_dir_remove_tests {
 
         // Cleanup.
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(test)]
+mod agent_jar_validation_tests {
+    use super::*;
+    use std::io::Write;
+
+    const CLASSLESS_MANIFEST: &str =
+        "Manifest-Version: 1.0\nMain-Class: com.dbx.agent.cache.CacheAgent\nAgent-Label: Caché\n";
+
+    fn write_jar(name: &str, manifest: &str, entries: &[&str]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("dbx-agent-jar-{name}-{}.jar", uuid::Uuid::new_v4()));
+        let file = std::fs::File::create(&path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("META-INF/MANIFEST.MF", options).unwrap();
+        archive.write_all(manifest.as_bytes()).unwrap();
+        for entry in entries {
+            archive.start_file(*entry, options).unwrap();
+            archive.write_all(b"class-bytes").unwrap();
+        }
+        archive.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn accepts_a_jar_that_contains_the_class_its_manifest_declares() {
+        let path = write_jar("complete", CLASSLESS_MANIFEST, &["com/dbx/agent/cache/CacheAgent.class"]);
+        assert!(is_valid_agent_jar(&path));
+        std::fs::remove_file(path).ok();
+    }
+
+    /// A truncated jar can keep a readable manifest while losing the class the
+    /// manifest points at; installing it used to succeed and only failed at
+    /// connect time with "Could not find or load main class" (#15330).
+    #[test]
+    fn rejects_a_jar_whose_declared_main_class_is_absent() {
+        let path = write_jar("manifest-only", CLASSLESS_MANIFEST, &["com/dbx/agent/Agent.class"]);
+        assert!(!is_valid_agent_jar(&path));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn accepts_a_multi_release_jar_that_ships_the_main_class_under_versions() {
+        let manifest = "Manifest-Version: 1.0\nMain-Class: com.dbx.agent.cache.CacheAgent\nMulti-Release: true\n";
+        let path = write_jar("multi-release", manifest, &["META-INF/versions/21/com/dbx/agent/cache/CacheAgent.class"]);
+        assert!(is_valid_agent_jar(&path));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rejects_a_jar_without_a_main_class_attribute() {
+        let path = write_jar(
+            "no-main-class",
+            "Manifest-Version: 1.0\nAgent-Label: Caché\n",
+            &["com/dbx/agent/cache/CacheAgent.class"],
+        );
+        assert!(!is_valid_agent_jar(&path));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn reads_a_main_class_wrapped_over_manifest_continuation_lines() {
+        let manifest = "Manifest-Version: 1.0\nMain-Class: com.dbx.agent.cache.Ca\n cheAgent\n";
+        let path = write_jar("wrapped", manifest, &["com/dbx/agent/cache/CacheAgent.class"]);
+        assert!(is_valid_agent_jar(&path));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rejects_a_corrupt_file_that_is_not_a_zip() {
+        let path = std::env::temp_dir().join(format!("dbx-agent-jar-corrupt-{}.jar", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"not-a-jar").unwrap();
+        assert!(!is_valid_agent_jar(&path));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rejects_a_versioned_main_class_when_the_jar_is_not_multi_release() {
+        // Java only honours META-INF/versions/<n>/ when Multi-Release is set, so a
+        // jar that ships the class there alone still cannot start.
+        let path = write_jar(
+            "versioned-only",
+            CLASSLESS_MANIFEST,
+            &["META-INF/versions/21/com/dbx/agent/cache/CacheAgent.class"],
+        );
+        assert!(!is_valid_agent_jar(&path));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rejects_a_multi_release_jar_that_ships_the_class_nowhere() {
+        let manifest = "Manifest-Version: 1.0\nMain-Class: com.dbx.agent.cache.CacheAgent\nMulti-Release: true\n";
+        let path = write_jar("multi-release-missing", manifest, &["META-INF/versions/21/com/other/Agent.class"]);
+        assert!(!is_valid_agent_jar(&path));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn only_matches_versioned_classes_on_a_package_boundary() {
+        let manifest = "Manifest-Version: 1.0\nMain-Class: com.dbx.agent.cache.CacheAgent\nMulti-Release: true\n";
+        let path = write_jar(
+            "versioned-prefixed",
+            manifest,
+            &["META-INF/versions/21/extra/com/dbx/agent/cache/CacheAgent.class"],
+        );
+        assert!(!is_valid_agent_jar(&path));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn accepts_crlf_manifests_and_padded_values() {
+        let manifest = "Manifest-Version: 1.0\r\nMain-Class:   com.dbx.agent.cache.CacheAgent   \r\n\r\n";
+        let path = write_jar("crlf", manifest, &["com/dbx/agent/cache/CacheAgent.class"]);
+        assert!(is_valid_agent_jar(&path));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn accepts_a_main_class_written_with_slashes() {
+        let manifest = "Manifest-Version: 1.0\nMain-Class: com/dbx/agent/cache/CacheAgent\n";
+        let path = write_jar("slash-form", manifest, &["com/dbx/agent/cache/CacheAgent.class"]);
+        assert!(is_valid_agent_jar(&path));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rejects_an_empty_main_class() {
+        let path = write_jar("empty-main-class", "Manifest-Version: 1.0\nMain-Class:   \n", &[]);
+        assert!(!is_valid_agent_jar(&path));
+        std::fs::remove_file(path).ok();
+    }
+
+    /// The download path commits a raw jar before the health check runs, so that
+    /// check has to reject a manifest-only jar too (#15330).
+    #[test]
+    fn installed_driver_health_check_rejects_a_jar_missing_its_main_class() {
+        let temp = tempfile::tempdir().unwrap();
+        let am = AgentManager::new_with_base_dir_and_app_version(temp.path().to_path_buf(), "9.9.9");
+        let jar_path = am.driver_jar_path("cache");
+        std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+        std::fs::write(&jar_path, std::fs::read(write_jar("installed", CLASSLESS_MANIFEST, &[])).unwrap()).unwrap();
+        assert!(!am.is_driver_jar_valid("cache"));
     }
 }

@@ -6378,6 +6378,22 @@ impl AppState {
         self.mysql_preserved_transactions.read().await.contains(pool_key)
     }
 
+    pub(crate) async fn mysql_client_session_physical_id(
+        &self,
+        pool_key: &str,
+        pool: &db::mysql::MySqlPool,
+        database: &str,
+    ) -> Option<u32> {
+        let snapshot = self.pool_publication_snapshot(pool_key).await?;
+        if !matches!(&snapshot.pool, PoolKind::Mysql(current, _) if current.is_same_pool(pool)) {
+            return None;
+        }
+        let sessions = self.mysql_client_sessions.read().await;
+        let session = sessions.get(pool_key)?;
+        (session.publication.is_same_pool(&snapshot.publication) && session.database == database)
+            .then_some(session.physical_connection_id)
+    }
+
     pub(crate) async fn mysql_client_session_database_change(
         &self,
         pool_key: &str,

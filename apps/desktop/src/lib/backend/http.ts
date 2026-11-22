@@ -1,3 +1,4 @@
+import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
 import type { SqlFileEncoding } from "./tauri";
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
@@ -3107,7 +3108,7 @@ export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassp
   return post("/api/cloud-sync/snippet/inspect", { config, snippetPassphrase, secretsPassphrase });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string, automatic = false): Promise<SnippetSyncSummary> {
   return post("/api/cloud-sync/snippet/upload", {
     config,
     editorSettings,
@@ -3115,7 +3116,8 @@ export async function snippetSyncUpload(config: SnippetSyncConfig, editorSetting
     includeSecrets,
     secretsPassphrase,
     selection,
-    expectedRemoteContentHash,
+    expectedRemoteContentHash: expectedRemoteContentHash ?? (config.snippetId?.trim() ? readSnippetRemoteContentHash(config.provider, config.instanceUrl, config.snippetId) : undefined),
+    automatic,
   });
 }
 
@@ -3336,6 +3338,14 @@ export async function renameSqlFileInFolder(_rootPath: string, _filePath: string
 
 export async function deleteSqlFileInFolder(_rootPath: string, _filePath: string): Promise<void> {
   throw new Error("Managing SQL files in folders is only available in the desktop app");
+}
+
+export async function moveSqlFileInFolder(_rootPath: string, _filePath: string, _targetRootPath: string, _directoryPath: string): Promise<string> {
+  throw new Error("Managing SQL files in folders is only available in the desktop app");
+}
+
+export async function watchSqlFileFolder(_folderPath: string, _recursive: boolean, _onChange: () => void): Promise<() => Promise<void>> {
+  throw new Error("Watching SQL folders is only available in the desktop app");
 }
 
 export async function createSqlFolderInFolder(_rootPath: string, _directoryPath: string, _folderName: string): Promise<string> {

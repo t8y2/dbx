@@ -12038,7 +12038,8 @@ export const useQueryStore = defineStore("query", () => {
     const sourceStatement = sourceResult.sourceStatement;
     const truncated = sourceResult.truncated;
     const sourceTotalRows = tab.resultTotalRowCount;
-    const sourceClientSessionId = tabClientSessionId(tab, "export");
+    const exportClientSessionPrefix = tabClientSessionId(tab, "export");
+    const sourceClientSessionId = tab.resultClientSessionId ?? tabClientSessionId(tab);
     const txnSessionId = exportTxnSessionId(tab);
     const transactionEpoch = manualTransactionTargetEpoch(tab);
     const hasUniqueInsertTarget = tab.tableMeta !== undefined && tab.queryAnalysis?.multiSource !== true && (tab.queryAnalysis?.sources?.length ?? 1) === 1 && (tab.queryWriteTargets?.length ?? 1) <= 1;
@@ -12078,7 +12079,7 @@ export const useQueryStore = defineStore("query", () => {
       const setupSql = batchStatements[resultStatementIndex!]?.sql === sourceStatement ? batchStatements.slice(0, resultStatementIndex).map((statement) => statement.sql) : undefined;
       const rowLimit = settings.exportRowLimitEnabled ? settings.exportRowLimit : null;
       const totalRows = typeof sourceTotalRows === "number" ? (rowLimit === null ? sourceTotalRows : Math.min(sourceTotalRows, rowLimit)) : null;
-      const clientSessionId = `${sourceClientSessionId}:${options.exportId}`;
+      const clientSessionId = `${exportClientSessionPrefix}:${options.exportId}`;
 
       return {
         exportId: options.exportId,
@@ -12103,6 +12104,7 @@ export const useQueryStore = defineStore("query", () => {
         csvWithoutBom: settings.csvWithoutBom,
         csvQuoteMode: settings.csvQuoteMode,
         clientSessionId,
+        ...(conn?.db_type === "mysql" && effectiveDbType === "mysql" && !useAgentCursor && !txnSessionId ? { sourceClientSessionId } : {}),
         txnSessionId,
         nullLiteral: csvNullLiteralForMode(settings.csvNullMode),
         executionId: uuid(),

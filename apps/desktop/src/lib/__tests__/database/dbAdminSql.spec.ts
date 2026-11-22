@@ -17,6 +17,7 @@ vi.mock("@/lib/backend/api", () => apiMock);
 
 import {
   buildDuplicateTableStructurePlan,
+  buildMysqlTableMaintenanceSql,
   buildVacuumTableSql,
   buildMysqlAutoIncrementSql,
   collectDuplicateTableColumnComments,
@@ -26,12 +27,56 @@ import {
   oracleDuplicateTableCreateOptions,
   sqlServerClonePrimaryKeyConstraintName,
   SQLSERVER_IDENTIFIER_MAX_LENGTH,
+  summarizeMysqlTableMaintenanceResult,
   supportsMysqlAutoIncrement,
+  supportsMysqlTableMaintenance,
   tableAdminSqlOptionsForRow,
 } from "@/lib/database/dbAdminSql";
 
 beforeEach(() => {
   vi.resetAllMocks();
+});
+
+/**
+ * #14717 review: the Object Browser must hand `foreignTable: true` to the drop
+ * builder, or PostgreSQL answers `DROP TABLE` with "is not a table". The flag has
+ * to survive separately from `row.type`, which the row normalizer folds into
+ * "TABLE" for a foreign table.
+ */
+describe("Object Browser table admin SQL options", () => {
+  it("marks a foreign-table row so the drop uses DROP FOREIGN TABLE", () => {
+    const options = tableAdminSqlOptionsForRow({
+      row: { name: "vmes_bfl_last", schema: "de_dd", foreignTable: true },
+      databaseType: "postgres",
+      schema: "de_dd",
+      identifierQuote: '"',
+    });
+
+    expect(options.foreignTable).toBe(true);
+    expect(options.tableName).toBe("vmes_bfl_last");
+    expect(options.databaseType).toBe("postgres");
+  });
+
+  it("leaves an ordinary table without the foreign flag", () => {
+    const options = tableAdminSqlOptionsForRow({
+      row: { name: "orders", schema: "public" },
+      databaseType: "postgres",
+      schema: "public",
+    });
+
+    expect(options.foreignTable).toBeUndefined();
+    expect(options.cascade).toBeUndefined();
+  });
+
+  it("keeps cascade independent from the foreign flag", () => {
+    const options = tableAdminSqlOptionsForRow({
+      row: { name: "remote", schema: "public", foreignTable: true },
+      databaseType: "postgres",
+      cascade: true,
+    });
+
+    expect(options).toMatchObject({ foreignTable: true, cascade: true });
+  });
 });
 
 /**
@@ -900,5 +945,41 @@ describe("damengDropSchemaExecutionSchema", () => {
 
   it("fails closed when the username is missing", () => {
     expect(damengDropSchemaExecutionSchema(undefined, "TARGET")).toBeNull();
+  });
+});
+
+describe("MySQL table maintenance", () => {
+  it("offers the statements only to plain MySQL-family connections", () => {
+    for (const connection of [{ db_type: "mysql" }, { db_type: "mysql", driver_profile: " MariaDB " }, { db_type: "mysql", driver_profile: "greatsql" }]) {
+      expect(supportsMysqlTableMaintenance(connection as any), JSON.stringify(connection)).toBe(true);
+    }
+    for (const connection of [undefined, { db_type: "postgres" }, { db_type: "mysql", driver_profile: "tidb" }, { db_type: "mysql", driver_profile: "doris" }, { db_type: "doris" }]) {
+      expect(supportsMysqlTableMaintenance(connection as any), JSON.stringify(connection)).toBe(false);
+    }
+  });
+
+  it("builds one statement per operation and escapes backticks in the table name", () => {
+    expect(buildMysqlTableMaintenanceSql("analyze", "orders")).toBe("ANALYZE TABLE `orders`");
+    expect(buildMysqlTableMaintenanceSql("check", "orders")).toBe("CHECK TABLE `orders`");
+    expect(buildMysqlTableMaintenanceSql("optimize", "orders")).toBe("OPTIMIZE TABLE `orders`");
+    expect(buildMysqlTableMaintenanceSql("repair", "we`ird")).toBe("REPAIR TABLE `we``ird`");
+  });
+
+  it("reports the final message, or the error text when the server answered with an error row", () => {
+    const columns = ["Table", "Op", "Msg_type", "Msg_text"];
+    expect(
+      summarizeMysqlTableMaintenanceResult({
+        columns,
+        rows: [
+          ["db.t", "optimize", "note", "Table does not support optimize, doing recreate + analyze instead"],
+          ["db.t", "optimize", "status", "OK"],
+        ],
+      }),
+    ).toEqual({ ok: true, message: "OK" });
+    expect(summarizeMysqlTableMaintenanceResult({ columns, rows: [["db.t", "repair", "error", "The storage engine for the table doesn't support repair"]] })).toEqual({
+      ok: false,
+      message: "The storage engine for the table doesn't support repair",
+    });
+    expect(summarizeMysqlTableMaintenanceResult({ columns: [], rows: [] })).toEqual({ ok: true, message: "" });
   });
 });

@@ -82,6 +82,12 @@ export default withEnglishFallback({
   sidebarMenu,
   oracleIndex: { mixedDraft: "Oracle indeks dəyişikliklərini digər cədvəl quruluşu dəyişikliklərindən ayrıca tətbiq edin." },
   pluginPlatform: {
+    marketplaceStatus: { "requires-newer-dbx": "Needs newer DBX", incompatible: "Incompatible" },
+    requiresNewerDbx: "This version needs a newer DBX release.",
+    requiresNewerDbxWithRequirement: "This version requires {requirement}.",
+    pluginVersionIncompatible: "This version is not compatible with this DBX build.",
+    updateBlockedByNewerDbx: "This plugin version requires {requirement} (installed {current}).",
+    upgradeDbx: "Upgrade DBX",
     openUrlTitle: "Xarici URL aç",
     openUrlPrompt: "{name} plagini bu URL-ni brauzerinizdə açmaq istəyir.",
     dataAccessConsent: '"{name}" "{connection}" bağlantısındakı məlumatları oxumaq istəyir. Bu bağlantı açıq olduqca plagin, Plagin Mərkəzində girişi ləğv edənə qədər orada yalnız oxuma sorğuları icra edə bilər. İcazə verilsin?',
@@ -164,6 +170,10 @@ export default withEnglishFallback({
     pickFormatPlaceholder: "Format seçin…",
     radixHint: "Yalnız tam ədədlər. 0x, 0o və ya 0b prefiksi olmadan rəqəmlər daxil edin; işarə istifadə oluna bilər.",
     urlHint: "URL komponentləri UTF-8 ilə kodlanır və ya dekodlaşdırılır. Dekodlaşdırma + işarəsini boşluğa çevirmir.",
+    pluginCodec: "Deşifrəçi",
+    pluginCodecPlaceholder: "Deşifrəçi seçin…",
+    pluginHint: "Çevirəndə yalnız bu xananın dəyəri seçilmiş plaginə göndərilir. Nəticə yalnız oxunan önizləmədir və heç vaxt geri yazılmır.",
+    pluginDecoding: "Deşifrə edilir…",
     kinds: {
       timestamp: "Zaman damğası → tarix/saat",
       json: "JSON formatla",
@@ -177,6 +187,7 @@ export default withEnglishFallback({
       urlEncode: "URL komponentini kodla",
       urlDecode: "URL komponentini dekodlaşdır",
       radix: "Tam ədədin say sistemini çevir",
+      plugin: "Plaginlə deşifrə",
     },
     units: {
       auto: "Avtomatik (10/13 rəqəm)",
@@ -194,6 +205,10 @@ export default withEnglishFallback({
       invalidInteger: "Mənbə say sisteminə uyğun tam ədədi prefikssiz daxil edin.",
       invalidBase64: "Düzgün Base64 daxil edin; dekodlanmış mətn UTF-8 olmalıdır.",
       invalidBase64Binary: "Base64 məzmunu yanlıştır: məlumat kəsilib və ya Base64-dən kənar simvollar ehtiva edir.",
+      pluginNoCodec: "Əvvəlcə deşifrəçi seçin.",
+      pluginTooLarge: "Dəyər plaginlə deşifrənin 2 MiB limitini keçir.",
+      pluginUndecodableBinary: "Bu ikili dəyərin orijinal baytlarını oxumaq mümkün deyil.",
+      pluginFailed: "Plaginlə deşifrə uğursuz oldu: {message}",
     },
   },
   customType: {
@@ -2561,6 +2576,7 @@ export default withEnglishFallback({
     collapseCellDetailMetadata: "Xananın metaverilənlərini yığ",
     expandCellDetailMetadata: "Xananın metaverilənlərini genişləndir",
     openCellDetailsDialog: "Xananın təfərrüatlarını aç",
+    pluginDecode: "Plaginlə deşifrə et",
     rowDetails: "Sətrin təfərrüatları",
     rowJsonPreview: "JSON önizləməsi",
     rowDetailsFor: "{row} nömrəli sətrin təfərrüatları",
@@ -7198,6 +7214,7 @@ export default withEnglishFallback({
     createFailed: "SQL faylını yaratmaq mümkün olmadı: {message}",
     renameFile: "Adını dəyiş",
     renameFileDescription: ".sql uzantısı avtomatik əlavə edilir.",
+    moveFailed: "SQL faylını köçürmək mümkün olmadı: {message}",
     fileRenamed: "SQL faylının adı dəyişdirildi",
     renameFailed: "SQL faylının adını dəyişmək mümkün olmadı: {message}",
     deleteFile: "Faylı sil",
@@ -7218,6 +7235,9 @@ export default withEnglishFallback({
     fileFilterHint: "*.sql və ya *.sh kimi fayl şablonundan, yaxud {regex} kimi müntəzəm ifadədən istifadə edin.",
   },
   diff: {
+    additionalSchemas: "Bu sxemləri də müqayisə et",
+    additionalSchemasHint: "Hər biri hədəfdəki eyni adlı sxemlə müqayisə olunur, sonra ayrıca yoxlanılır və tətbiq edilir.",
+    schemaResults: "Sxem nəticələri",
     progress: {
       loadingObjects: "Mənbə və hədəf verilənlər bazası obyektləri oxunur...",
       loadingSourceDetails: "Mənbə verilənlər bazasının cədvəl strukturları oxunur",

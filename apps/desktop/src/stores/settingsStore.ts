@@ -1,4 +1,4 @@
-import { DEFAULT_TOOLBAR_ITEM_ORDER, normalizeToolbarItemOrder, type ToolbarItemKey } from "@/lib/settings/toolbarCustomization";
+import { DEFAULT_TOOLBAR_ITEM_ORDER, normalizePinnedToolbarMenuItems, normalizeToolbarItemOrder, type ToolbarItemKey, type ToolbarMenuItemKey } from "@/lib/settings/toolbarCustomization";
 import { SIDEBAR_HOVER_DELAY_DEFAULT, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { DEFAULT_OBJECT_BROWSER_COMPACT_WIDTH, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { normalizeModelTemplates, type ModelTemplate } from "@/lib/model/modelTemplates";
@@ -1259,6 +1259,7 @@ export interface EditorSettings {
   sidebarConnectionIconStyle: SidebarConnectionIconStyle;
   columnFormatters: Record<string, ColumnFormatterConfig>;
   customColumnFormatters: Record<string, CustomColumnFormatterConfig>;
+  globalNumberGrouping: boolean;
   globalDateTimeDisplayFormat: string;
   globalDateTimeExportFormat: string;
   globalDateTimeImportFormat: string;
@@ -1318,6 +1319,8 @@ export interface ToolbarItems {
   newConnection: boolean;
   newQuery: boolean;
   openSql: boolean;
+  recentClosedTabs: boolean;
+  pinnedMenuItems: ToolbarMenuItemKey[];
   databaseBackups: boolean;
   mcpSettings: boolean;
   exportProgress: boolean;
@@ -1349,6 +1352,8 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   newConnection: true,
   newQuery: true,
   openSql: true,
+  recentClosedTabs: true,
+  pinnedMenuItems: [],
   databaseBackups: true,
   mcpSettings: true,
   exportProgress: true,
@@ -1662,6 +1667,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarConnectionIconStyle: "classic",
   columnFormatters: {},
   customColumnFormatters: {},
+  globalNumberGrouping: false,
   globalDateTimeDisplayFormat: "",
   globalDateTimeExportFormat: "",
   globalDateTimeImportFormat: "",
@@ -2087,6 +2093,8 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     newConnection: items.newConnection ?? defaults.newConnection,
     newQuery: items.newQuery ?? defaults.newQuery,
     openSql: items.openSql ?? defaults.openSql,
+    recentClosedTabs: items.recentClosedTabs ?? defaults.recentClosedTabs,
+    pinnedMenuItems: normalizePinnedToolbarMenuItems(items.pinnedMenuItems),
     databaseBackups: items.databaseBackups ?? defaults.databaseBackups,
     mcpSettings: items.mcpSettings ?? defaults.mcpSettings,
     exportProgress: items.exportProgress ?? defaults.exportProgress,
@@ -2485,6 +2493,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarConnectionIconStyle: normalizeSidebarConnectionIconStyle(settings.sidebarConnectionIconStyle),
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
+    globalNumberGrouping: settings.globalNumberGrouping === true,
     globalDateTimeDisplayFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeDisplayFormat),
     globalDateTimeExportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeExportFormat),
     globalDateTimeImportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeImportFormat),
@@ -3479,6 +3488,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarConnectionIconStyle !== undefined) editorSettings.value.sidebarConnectionIconStyle = normalizeSidebarConnectionIconStyle(partial.sidebarConnectionIconStyle);
     if (partial.columnFormatters !== undefined) editorSettings.value.columnFormatters = partial.columnFormatters;
     if (partial.customColumnFormatters !== undefined) editorSettings.value.customColumnFormatters = partial.customColumnFormatters;
+    if (partial.globalNumberGrouping !== undefined) editorSettings.value.globalNumberGrouping = partial.globalNumberGrouping === true;
     if (partial.globalDateTimeDisplayFormat !== undefined) editorSettings.value.globalDateTimeDisplayFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeDisplayFormat);
     if (partial.globalDateTimeExportFormat !== undefined) editorSettings.value.globalDateTimeExportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeExportFormat);
     if (partial.globalDateTimeImportFormat !== undefined) editorSettings.value.globalDateTimeImportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeImportFormat);

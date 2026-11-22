@@ -1,4 +1,4 @@
-import type { MongoCollectionKind, ObjectBrowserFilter, ObjectInfo, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
+import type { DatabaseType, MongoCollectionKind, ObjectBrowserFilter, ObjectInfo, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
 export type { ObjectBrowserFilter } from "@/types/database";
 import { pinnedTreeNodeIdentityMatches, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
@@ -11,6 +11,8 @@ export type ObjectBrowserRow = {
   name: string;
   displayName: string;
   schema?: string;
+  /** Server identifiers retained separately from normalized display names. */
+  postgresSequenceIdentity?: { name: string; schema?: string };
   type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "INDEX" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
   parentSchema?: string;
   parentName?: string;
@@ -88,10 +90,10 @@ export function objectBrowserRowPinnedTreeNodeIdentity(row: ObjectBrowserRow, co
   return {
     connectionId: context.connectionId,
     database: context.database,
-    schema: row.schema ?? context.schema ?? "",
+    schema: row.postgresSequenceIdentity?.schema ?? row.schema ?? context.schema ?? "",
     catalog: context.catalog || "",
     type: objectBrowserRowTreeNodeType(row.type),
-    name: row.name,
+    name: row.postgresSequenceIdentity?.name ?? row.name,
     signature: row.type === "FUNCTION" || row.type === "PROCEDURE" ? row.signature?.trim() || "" : "",
     id: row.id,
   };
@@ -184,7 +186,7 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
   return "TABLE";
 }
 
-export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; database: string; fallbackSchema: string; rowSchema?: string }): ObjectBrowserRow[] {
+export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; database: string; fallbackSchema: string; rowSchema?: string; databaseType?: DatabaseType }): ObjectBrowserRow[] {
   const seen = new Map<string, number>();
   const rows = options.objects.flatMap<ObjectBrowserRow>((object) => {
     const exactTrigger = exactOracleTriggerObjectMetadata(object);
@@ -214,15 +216,16 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
     // only the display text is normalized; trimming here would make
     // `ALTER TABLE` address a different table (#14905).
     const preserveIdentifier = type === "TABLE" || type === "VIEW" || type === "MATERIALIZED_VIEW";
+    const postgresSequenceIdentity = type === "SEQUENCE" && options.databaseType === "postgres" ? { name: object.name, schema: object.schema ?? options.rowSchema } : undefined;
     const name = type === "INDEX" || preserveIdentifier ? object.name : normalizeDatabaseObjectName(object.name);
-    if (!name.trim()) return [];
+    if (!name.trim() && !postgresSequenceIdentity?.name) return [];
     const objectSchema = type === "INDEX" || preserveIdentifier ? object.schema : object.schema ? normalizeDatabaseObjectName(object.schema) : undefined;
     const schema = objectSchema || options.rowSchema;
     const signature = routineSignatureForDisplay(type, object.signature);
     const displayNameBase = preserveIdentifier ? name.trim() : name;
     const displayName = signature === undefined ? displayNameBase : `${displayNameBase}(${signature})`;
     const signatureIdPart = signature === undefined ? "" : `:${signature}`;
-    const baseId = `${schema || options.fallbackSchema || options.database}:${name}:${type}${signatureIdPart}`;
+    const baseId = postgresSequenceIdentity ? `SEQUENCE:${JSON.stringify([postgresSequenceIdentity.schema ?? options.fallbackSchema, postgresSequenceIdentity.name])}` : `${schema || options.fallbackSchema || options.database}:${name}:${type}${signatureIdPart}`;
     const index = seen.get(baseId) ?? 0;
     seen.set(baseId, index + 1);
     return [
@@ -231,6 +234,7 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
         name,
         displayName,
         schema,
+        ...(postgresSequenceIdentity ? { postgresSequenceIdentity } : {}),
         type,
         foreignTable: isForeignTableObjectType(object.object_type) || undefined,
         valid: object.valid,

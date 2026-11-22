@@ -3684,6 +3684,11 @@ export default withEnglishFallback({
       "binary-uuid": "바이너리를 UUID로",
       "binary-uuid-swapped": "바이너리를 UUID로 (시간 비트 교환)",
     },
+    foreignKeyPreview: "참조 행",
+    foreignKeyPreviewOpen: "테이블 열기",
+    foreignKeyPreviewLoading: "참조 행을 불러오는 중…",
+    foreignKeyPreviewEmpty: "{table}에 이 값과 일치하는 행이 없습니다.",
+    foreignKeyPreviewFailed: "참조 행을 불러올 수 없습니다: {message}",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

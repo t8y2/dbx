@@ -3815,6 +3815,11 @@ export default withEnglishFallback({
       "binary-uuid": "Бинарные данные в UUID",
       "binary-uuid-swapped": "Бинарные данные в UUID (с перестановкой битов времени)",
     },
+    foreignKeyPreview: "Ссылающиеся строки",
+    foreignKeyPreviewOpen: "Открыть таблицу",
+    foreignKeyPreviewLoading: "Загрузка ссылающихся строк…",
+    foreignKeyPreviewEmpty: "В таблице «{table}» нет строк, соответствующих этому значению.",
+    foreignKeyPreviewFailed: "Не удалось загрузить ссылающиеся строки: {message}",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

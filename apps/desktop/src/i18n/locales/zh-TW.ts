@@ -3712,6 +3712,11 @@ export default withEnglishFallback({
     structuredFiltersActive: "{count} 個條件篩選",
     mongoJsonPreviewSelected: "選取的文件",
     mongoJsonPreviewPage: "目前頁面",
+    foreignKeyPreview: "參照列",
+    foreignKeyPreviewOpen: "開啟資料表",
+    foreignKeyPreviewLoading: "正在載入參照列…",
+    foreignKeyPreviewEmpty: "「{table}」中沒有與該值相符的資料列。",
+    foreignKeyPreviewFailed: "無法載入參照列：{message}",
   },
   exportProgress: {
     recoveryTitle: "刪除尚未確認結束的匯出？",

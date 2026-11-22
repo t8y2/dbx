@@ -3886,6 +3886,7 @@ export default withEnglishFallback({
       "binary-uuid": "Binario a UUID",
       "binary-uuid-swapped": "Binario a UUID (intercambio de bits de tiempo)",
     },
+    sortOptions: "Opciones de ordenación",
   },
   exportProgress: {
     recoveryTitle: "¿Eliminar la exportación cuyo final no se ha confirmado?",

@@ -3115,6 +3115,7 @@ export default withEnglishFallback({
     sortCurrentPageAscending: "目前頁遞增排序",
     sortCurrentPageDescending: "目前頁遞減排序",
     sortDatabaseAscending: "資料庫遞增排序",
+    sortOptions: "排序選項",
     quickSortHint: "點擊切換遞增或遞減；右鍵選擇排序方式",
     sortDatabaseDescending: "資料庫遞減排序",
     clearSort: "清除排序",

@@ -16749,11 +16749,12 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                               type="button"
                               class="flex h-4 w-4 shrink-0 items-center justify-center rounded"
                               :class="columnIsSorted(col.name, col.actualColIdx) ? 'bg-primary text-primary-foreground opacity-100 shadow-sm hover:bg-primary/90' : 'text-muted-foreground opacity-80 hover:bg-accent hover:text-foreground'"
-                              :title="t('grid.quickSortHint')"
-                              :aria-label="t('grid.sort')"
+                              :title="t('grid.sortOptions')"
+                              :aria-label="t('grid.sortOptions')"
+                              aria-haspopup="menu"
                               :aria-expanded="open"
                               @mousedown.stop
-                              @click.stop="toggleHeaderSort(col.name, col.actualColIdx)"
+                              @click.stop="$event.shiftKey ? toggleHeaderSort(col.name, col.actualColIdx) : toggle()"
                               @contextmenu.prevent.stop="toggle"
                               @keydown.shift.f10.prevent.stop="toggle"
                             >

@@ -4008,6 +4008,7 @@ export default withEnglishFallback({
       "binary-uuid": "ไบนารีเป็น UUID",
       "binary-uuid-swapped": "ไบนารีเป็น UUID (สลับบิตเวลา)",
     },
+    sortOptions: "ตัวเลือกการเรียงลำดับ",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",

@@ -1142,8 +1142,22 @@ fn quote_export_sql_string_for_database(text: &str, database_type: Option<Databa
         Some(DatabaseType::ClickHouse | DatabaseType::Snowflake) => {
             quote_backslash_escaped_export_sql_string(text, SubControlEscape::Hex)
         }
+        // TDengine also interprets `\` escape sequences in string literals
+        // (verified against 3.4.2.8: `SELECT LENGTH('a\\b')` is 3), so `\` must
+        // double for the export→import round trip (#15456). Its escape table is
+        // smaller than MySQL's — `\0`, `\b`, `\f`, `\Z` and `\xhh` are not
+        // spelled there — so other control bytes stay raw instead of borrowing
+        // the MySQL spellings.
+        Some(DatabaseType::Tdengine) => quote_tdengine_export_sql_string(text),
         _ => quote_standard_export_sql_string(text),
     }
+}
+
+/// TDengine string quoting: `\` doubles (TDengine parses backslash escapes in
+/// single-quoted literals) and `'` doubles as usual; every other byte stays
+/// raw (#15456).
+fn quote_tdengine_export_sql_string(text: &str) -> String {
+    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 fn quote_dameng_export_sql_string(text: &str) -> String {
@@ -9219,6 +9233,42 @@ mod tests {
                 "backslash-escaping dialect {database_type:?} must double backslashes"
             );
         }
+    }
+
+    #[test]
+    fn tdengine_export_escapes_backslashes_and_quotes() {
+        // #15456: TDengine parses `\` escape sequences inside single-quoted
+        // literals, so a stored `\\` exported verbatim round-trips as a single
+        // `\` — silent data corruption. The export must double `\` for
+        // TDengine (identifier quoting is backtick per dialect).
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("gw1".to_string()),
+            qualified_table_name: None,
+            columns: vec!["json_desc".to_string()],
+            column_types: vec![Some("VARCHAR(1000)".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(r#"{"a":"x\\y"}"#)], vec![json!(r"C:\new\it's")], vec![json!("中文\\日文")]],
+            // batch_size 是「每条 INSERT 最多行数」而不是语句条数；置 1 让每行
+            // 独立成句，便于逐字面量断言（多行合并由既有批量路径覆盖）。
+            batch_size: Some(1),
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                r#"INSERT INTO `gw1` (`json_desc`) VALUES ('{"a":"x\\\\y"}');"#,
+                r"INSERT INTO `gw1` (`json_desc`) VALUES ('C:\\new\\it''s');",
+                r"INSERT INTO `gw1` (`json_desc`) VALUES ('中文\\日文');",
+            ],
+            "TDengine must double backslashes so the re-import keeps the stored bytes"
+        );
     }
 
     #[test]

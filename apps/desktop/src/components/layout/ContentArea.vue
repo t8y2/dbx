@@ -461,6 +461,13 @@ const activeResultDatabase = computed(() => activeResultExecutionTarget.value?.d
 const activeResultSchema = computed(() => activeResultExecutionTarget.value?.schema ?? props.activeTab.schema);
 const graphViewKey = computed(() => JSON.stringify([props.activeTab.id, props.activeTab.resultViewGeneration, props.activeTab.activeResultRunId, props.activeTab.activeResultIndex, activeResultConnectionId.value, activeResultDatabase.value]));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
+const debugRoutine = computed(() => {
+  const { objectSource, sql, originalSql } = props.activeTab;
+  if (!objectSource || sql !== originalSql) return undefined;
+  const { schema, name, objectType } = objectSource;
+  if (objectType === "PROCEDURE" || objectType === "FUNCTION") return { schema, name, objectType };
+  return undefined;
+});
 const managedTypeSource = computed(() => isOracleFamilyTypeSource(effectiveDatabaseTypeForConnection(props.activeConnection), props.activeTab.objectSource?.objectType));
 const showPackageMembers = computed(() => {
   const type = effectiveDatabaseTypeForConnection(props.activeConnection);
@@ -2435,6 +2442,7 @@ defineExpose({
                   :catalog="activeTab.catalog"
                   :database="activeTab.database"
                   :schema="activeTab.schema"
+                  :debug-routine="debugRoutine"
                   :client-session-id="activeTab.id"
                   :completion-context-version="activeTab.completionContextVersion"
                   :database-type="activeEffectiveDatabaseType"

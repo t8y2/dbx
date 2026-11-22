@@ -3898,6 +3898,8 @@ export default withEnglishFallback({
     foreignKeyPreviewFailed: "No se pudieron cargar las filas de referencia: {message}",
     sortOptions: "Opciones de ordenación",
     pasteRowsTruncated: "Se pegaron {applied} filas y {dropped} filas no se pegaron: el resultado actual no admite agregar filas o no hay suficientes filas disponibles para agregar.",
+    pasteCellText: "Pegar texto en esta celda",
+    pasteCellTextFailed: "No se puede pegar texto en la celda: {message}",
   },
   exportProgress: {
     recoveryTitle: "¿Eliminar la exportación cuyo final no se ha confirmado?",
@@ -5649,6 +5651,15 @@ export default withEnglishFallback({
     doltSystemTables: "Tablas del sistema de Dolt",
   },
   userAdmin: {
+    accountStatus: "Estado de bloqueo",
+    accountAll: "Todos los estados",
+    accountLocked: "Bloqueada",
+    accountUnlocked: "Desbloqueada",
+    accountUnknown: "Desconocido",
+    passwordExpirationFlag: "Indicador de caducidad de contraseña",
+    passwordMarkedExpired: "Marcada como caducada",
+    passwordNotMarkedExpired: "No marcada como caducada",
+    passwordLastChanged: "Último cambio de contraseña",
     oldPassword: "Contraseña actual (opcional)",
     oldPasswordHint: "En Vastbase, salvo el usuario inicial, cambiar la propia contraseña requiere la actual. Puede omitirse al restablecer la de otro usuario con autorización.",
     passwordChangedReconnect: "Contraseña cambiada. Se desconectó esta conexión y se borró la contraseña anterior. Use Guardar y conectar en la configuración de conexión e introduzca la nueva contraseña.",
@@ -11187,6 +11198,7 @@ export default withEnglishFallback({
     completionAutoActivationDelay: "Retardo de activación automática del autocompletado (milisegundos)",
     completionAutoActivationDelayDescription:
       "Cuánto tiempo esperar tras la entrada antes de que aparezcan las sugerencias de autocompletado; el valor predeterminado es 500 milisegundos. Aumentarlo evita que las sugerencias aparezcan con demasiada frecuencia mientras se escribe de forma continua e interrumpan la edición; 0 significa que aparecen inmediatamente.",
+    tabWrapMaxRows: "Número máximo de filas de mosaico de pestañas",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",
@@ -13043,6 +13055,7 @@ export default withEnglishFallback({
     configuration: "Configuración del broker",
     noConfigurations: "No hay entradas de configuración coincidentes",
     configurationUnsupported: "Este broker de Kafka no permite consultar la configuración.",
+    configurationDriverUnsupported: "El controlador de Kafka instalado no permite consultar la configuración del broker. Busca una actualización en el administrador de controladores y vuelve a conectarte.",
     configName: "Nombre",
     configValue: "Valor",
     configSource: "Origen",

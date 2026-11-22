@@ -349,6 +349,25 @@
   row-gap: 0.375rem;
 }
 
+.app-tab-scroll.wrap-mode.wrap-mode--limited {
+  --wrapped-tab-row-height: 1.75rem;
+  --wrapped-tab-row-gap: 0.375rem;
+  --wrapped-tab-padding: 0.75rem;
+  max-height: calc((var(--wrapped-tab-row-height) + var(--wrapped-tab-row-gap)) * var(--tab-wrap-max-rows) - var(--wrapped-tab-row-gap) + var(--wrapped-tab-padding));
+  overflow: hidden auto !important;
+  scrollbar-width: thin;
+}
+
+.app-tab-scroll.wrap-mode--limited.classic-wrap {
+  --wrapped-tab-row-height: 2rem;
+  --wrapped-tab-row-gap: 0.25rem;
+  --wrapped-tab-padding: 0rem;
+}
+
+.app-tab-scroll.wrap-mode--limited .tab-section--horizontal {
+  row-gap: var(--wrapped-tab-row-gap);
+}
+
 .app-tab-scroll.wrap-mode .tab-section-frame--horizontal {
   align-self: flex-start;
 }

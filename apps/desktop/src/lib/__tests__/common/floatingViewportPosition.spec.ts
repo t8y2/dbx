@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it } from "vitest";
-import { floatingArrowOffset, floatingCursorPosition, floatingViewportShift, visibleTriggerRect } from "@/lib/common/floatingViewportPosition";
+import { flipFloatingSide, floatingArrowOffset, floatingCursorPosition, floatingSurfaceOverlapsTrigger, floatingViewportShift, visibleTriggerRect } from "@/lib/common/floatingViewportPosition";
 
 describe("floating viewport position", () => {
   it.each([
@@ -36,6 +36,26 @@ describe("floating viewport position", () => {
     expect(floatingArrowOffset(320, -48)).toBe(208);
     expect(floatingArrowOffset(40, 100)).toBe(8);
     expect(floatingArrowOffset(40, -100)).toBe(32);
+  });
+
+  it("flips a side to the opposite edge", () => {
+    expect(flipFloatingSide("top")).toBe("bottom");
+    expect(flipFloatingSide("bottom")).toBe("top");
+    expect(flipFloatingSide("left")).toBe("right");
+    expect(flipFloatingSide("right")).toBe("left");
+  });
+
+  it("detects a surface that covers its own trigger", () => {
+    const trigger = { left: 100, right: 200, top: 8, bottom: 32 };
+    // Clamped back down over the trigger (#15331).
+    expect(floatingSurfaceOverlapsTrigger({ left: 90, right: 210, top: 8, bottom: 32 }, trigger)).toBe(true);
+    // A partial overlap still swallows the middle of the trigger.
+    expect(floatingSurfaceOverlapsTrigger({ left: 90, right: 210, top: 20, bottom: 44 }, trigger)).toBe(true);
+    // Sitting exactly above or below the trigger is fine.
+    expect(floatingSurfaceOverlapsTrigger({ left: 90, right: 210, top: -16, bottom: 8 }, trigger)).toBe(false);
+    expect(floatingSurfaceOverlapsTrigger({ left: 90, right: 210, top: 32, bottom: 56 }, trigger)).toBe(false);
+    // Horizontally clear also counts as no overlap.
+    expect(floatingSurfaceOverlapsTrigger({ left: 200, right: 320, top: 8, bottom: 32 }, trigger)).toBe(false);
   });
 });
 

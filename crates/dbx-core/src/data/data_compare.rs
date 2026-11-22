@@ -13,7 +13,7 @@ use crate::schema::get_columns_core;
 use crate::sql_dialect::{
     build_count_table_sql, build_iris_table_select_sql, firebird_rows_clause, pagination_strategy,
     qualified_table_name, quote_iris_identifier, quote_table_identifier, table_data_qualified_table_name,
-    PaginationContext, TablePaginationStrategy,
+    uses_single_row_insert_statements, PaginationContext, TablePaginationStrategy,
 };
 use crate::transfer::{
     generate_comment_ddl, generate_create_table_ddl, is_identity_column_extra,
@@ -1004,6 +1004,20 @@ fn generate_data_sync_statements(options: &GenerateDataSyncSqlOptions<'_>) -> Ve
     statements
 }
 
+/// Rows that share one `INSERT … VALUES (…), (…), …` statement.
+///
+/// Oracle-family servers take a single row per `INSERT … VALUES`, so the MySQL
+/// and PostgreSQL multi-row list is a syntax error there (#15442 reports
+/// `ORA-00933: SQL command not properly ended`); those dialects get one
+/// statement per added row instead.
+fn sync_insert_batch_size(database_type: Option<DatabaseType>) -> usize {
+    if database_type.is_some_and(uses_single_row_insert_statements) {
+        1
+    } else {
+        DATA_SYNC_INSERT_BATCH_SIZE
+    }
+}
+
 fn generate_insert_sync_statements(
     options: &GenerateDataSyncSqlOptions<'_>,
     table: &str,
@@ -1042,7 +1056,7 @@ fn generate_insert_sync_statements(
     options
         .diff
         .added
-        .par_chunks(DATA_SYNC_INSERT_BATCH_SIZE)
+        .par_chunks(sync_insert_batch_size(options.database_type))
         .map(|chunk| {
             let values = chunk
                 .iter()
@@ -2438,6 +2452,43 @@ mod tests {
         );
         assert_eq!(preparation.result.ignored_only_count, 1);
         assert_eq!(preparation.result.modified.len(), 1);
+    }
+
+    #[test]
+    fn oracle_family_inserts_one_added_row_per_statement() {
+        // Oracle-family servers accept a single row per `INSERT … VALUES`, so the
+        // batched list raised `ORA-00933: SQL command not properly ended` (#15442).
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let preparation = prepare_data_compare(DataComparePreparationOptions {
+                table_name: "role_oper_func".to_string(),
+                schema: Some("HOPS".to_string()),
+                columns: vec!["ROLE_ID".to_string(), "OPER_ID".to_string(), "FUNC_ID".to_string()],
+                key_columns: vec!["ROLE_ID".to_string(), "OPER_ID".to_string(), "FUNC_ID".to_string()],
+                ignored_columns: Vec::new(),
+                column_info: Vec::new(),
+                source_rows: vec![
+                    vec![json!(1), json!(2), json!(10)],
+                    vec![json!(1), json!(2), json!(11)],
+                    vec![json!(1), json!(2), json!(12)],
+                ],
+                target_rows: Vec::new(),
+                database_type: Some(database_type),
+            })
+            .expect("data compare preparation should succeed");
+
+            assert_eq!(
+                preparation.sync_statements,
+                vec![
+                    "INSERT INTO \"HOPS\".\"role_oper_func\" (\"ROLE_ID\", \"OPER_ID\", \"FUNC_ID\") \
+                     VALUES (1, 2, 10);",
+                    "INSERT INTO \"HOPS\".\"role_oper_func\" (\"ROLE_ID\", \"OPER_ID\", \"FUNC_ID\") \
+                     VALUES (1, 2, 11);",
+                    "INSERT INTO \"HOPS\".\"role_oper_func\" (\"ROLE_ID\", \"OPER_ID\", \"FUNC_ID\") \
+                     VALUES (1, 2, 12);",
+                ],
+                "{database_type:?}"
+            );
+        }
     }
 
     #[test]

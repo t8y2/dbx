@@ -36,6 +36,7 @@ import { useI18n } from "vue-i18n";
 
 import { EditorState as CodeMirrorEditorState, Transaction } from "@codemirror/state";
 import type { Text } from "@codemirror/state";
+import { sameStatementExecutionMarkers, type StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { search as cmSearch } from "@codemirror/search";
 import { useQueryEditorBatchSelection } from "./useQueryEditorBatchSelection";
@@ -119,6 +120,7 @@ import { resolveSqlShortcutTableToken } from "@/lib/sql/sqlShortcutTableTarget";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
+import { highlightActiveCursorLineGutter } from "@/lib/editor/codemirrorActiveLineGutter";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 import { applyVimConfig, isVimMappingCommand, loadVimConfig } from "@/lib/editor/vimConfig";
 import { createVimImeGuard } from "@/lib/editor/vimImeGuard";
@@ -153,7 +155,7 @@ import { createQueryEditorSelectionCaseShortcutBindings } from "@/lib/editor/que
 import { createQueryEditorExecutionShortcutBindings, createQueryEditorExecutionShortcutHandler, createQueryEditorPostCompositionKeyGuard } from "@/lib/editor/queryEditorExecutionShortcut";
 import { supportsPlDebugRoutine, supportsQueryEditorBlockComments, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import { launchPlDebugAnonymous } from "@/components/debug/plDebugLaunch";
+import { launchPlDebug, launchPlDebugAnonymous } from "@/components/debug/plDebugLaunch";
 import { queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -1382,14 +1384,19 @@ const contextMenuActions: QueryEditorContextMenuActions = {
     const currentView = view.value;
     if (!currentView || !props.connectionId || !props.database) return;
     const selection = currentView.state.selection.main;
-    void launchPlDebugAnonymous({
+    const selectedText = currentView.state.doc.sliceString(selection.from, selection.to);
+    const connectionTarget = {
       connectionId: props.connectionId,
       database: props.database,
       databaseType: effectiveDatabaseTypeForConnection(connectionStore.getConfig(props.connectionId)) ?? props.databaseType,
       schema: props.schema,
-      selectedText: currentView.state.doc.sliceString(selection.from, selection.to),
-      documentText: currentView.state.doc.toString(),
-    });
+    };
+    if (!selectedText.trim() && props.debugRoutine) {
+      const { schema, name, objectType } = props.debugRoutine;
+      void launchPlDebug({ ...connectionTarget, schema: schema ?? props.schema, objectName: name, objectType });
+      return;
+    }
+    void launchPlDebugAnonymous({ ...connectionTarget, selectedText, documentText: currentView.state.doc.toString() });
   },
   executeFromContextMenu,
   executeAllFromContextMenu,
@@ -2240,7 +2247,6 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       rectangularSelection,
       hoverTooltip,
       tooltips,
-      highlightActiveLineGutter,
       highlightSpecialChars,
       drawSelection,
       dropCursor,
@@ -2348,7 +2354,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         initializedRuntime.lineNumbersComp.of(lineNumbersExtension(initialSettings.showLineNumbers)),
         createQueryEditorLineNumberAlignmentExtension(ViewPlugin),
         currentStatementFrameExtension,
-        highlightActiveLineGutter(),
+        highlightActiveCursorLineGutter(),
         keepGuttersAttachedDuringSync(ViewPlugin),
         highlightSpecialChars(),
         initializedRuntime.historyResetComp.of(history()),
@@ -2569,7 +2575,8 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
           blur(_event, currentView) {
             imeCompositionActive = false;
             imeCompositionRecovered = false;
-            documentState.recordSelection(currentView);
+            // Focus moving to the sidebar or toolbar is when the tab's selection is read (locate at cursor).
+            documentState.commitSelection(currentView);
             return false;
           },
           compositionstart() {
@@ -2818,13 +2825,24 @@ watch([() => props.executionError, () => props.executionErrorSql, () => props.ex
   reconfigureDiagnostics();
 });
 
+// The parent recomputes the markers from the tab SQL, so every keystroke hands
+// down a fresh (almost always empty) array. Dispatching it anyway cost a whole
+// extra editor update per keystroke; the gutter field already clears itself on
+// every edit, so only a set that differs from what the field holds is sent.
+let dispatchedStatementExecutionMarkers: { doc: Text; markers: StatementExecutionMarker[] } | null = null;
 watch(
   () => props.statementExecutionMarkers ?? [],
   (markers) => {
-    if (!view.value || !codeMirrorRuntime.setStatementExecutionMarkersEffect) return;
-    view.value.dispatch({
+    const currentView = view.value;
+    if (!currentView || !codeMirrorRuntime.setStatementExecutionMarkersEffect) return;
+    const dispatched = dispatchedStatementExecutionMarkers;
+    // After an edit the field is empty again, whatever was dispatched before it.
+    const held = dispatched && dispatched.doc === currentView.state.doc ? dispatched.markers : [];
+    if (sameStatementExecutionMarkers(held, markers)) return;
+    currentView.dispatch({
       effects: codeMirrorRuntime.setStatementExecutionMarkersEffect.of(markers),
     });
+    dispatchedStatementExecutionMarkers = { doc: currentView.state.doc, markers: markers.map((marker) => ({ ...marker })) };
   },
   { deep: true },
 );
@@ -3392,17 +3410,10 @@ defineExpose({
   contain: size layout style;
 }
 
-/* Matches the geometry of the custom-drawn data grid scrollbars (DataGrid.vue):
-   a fixed 10px track with a 4px visual thumb widening on hover/drag, transparent
-   track, capsule thumb, colors from the same --foreground color-mix. The thin
-   idle look comes from a transparent border (background-clip: padding-box);
-   hover drops the border to fill the full track. Partial border widths are not
-   honored on scrollbar part state changes, so the hover endpoint is the full
-   10px track rather than the grid's 6px. Changing the track width on hover
-   would squeeze the content and cause a reflow flicker, so it stays constant. */
+/* Widen the thumb within a fixed track so hovering cannot reflow the editor. */
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar) {
-  width: 10px;
-  height: 10px;
+  width: var(--dbx-workspace-scrollbar-size);
+  height: var(--dbx-workspace-scrollbar-size);
 }
 
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar-track),
@@ -3411,15 +3422,15 @@ defineExpose({
 }
 
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar-thumb) {
-  background: color-mix(in oklch, var(--foreground) 30%, transparent);
+  background: var(--dbx-workspace-scrollbar-thumb);
   background-clip: padding-box;
-  border: 3px solid transparent;
+  border: var(--dbx-workspace-scrollbar-inset) solid transparent;
   border-radius: 999px;
 }
 
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar-thumb:hover),
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar-thumb:active) {
-  background: color-mix(in oklch, var(--foreground) 48%, transparent);
+  background: var(--dbx-workspace-scrollbar-thumb-active);
   border: 0 solid transparent;
 }
 

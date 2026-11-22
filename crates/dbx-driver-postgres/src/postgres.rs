@@ -10135,8 +10135,14 @@ async fn execute_query_with_max_rows_inner(
                 .await
         }
     } else {
-        let affected =
-            if force_unnamed { client.execute_typed(sql, &[]).await } else { client.execute(sql, &[]).await };
+        // Grid writes have no bind parameters. Sending Parse and Bind together
+        // keeps the statement on one backend when a transaction pool releases
+        // its server connection between protocol round trips.
+        let affected = if force_unnamed || starts_with_executable_sql_keyword(sql, &["INSERT", "UPDATE", "DELETE"]) {
+            client.execute_typed(sql, &[]).await
+        } else {
+            client.execute(sql, &[]).await
+        };
         affected.map_err(pg_error_to_string).map(|affected| QueryResult {
             columns: vec![],
             column_types: Vec::new(),

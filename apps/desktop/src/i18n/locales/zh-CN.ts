@@ -3657,6 +3657,7 @@ export default withEnglishFallback({
     hideIdenticalColumnsCount: "隐藏相同数值列（{count} 列）",
     showAllColumnsMenu: "显示全部列",
     pasted: "已粘贴!",
+    pasteRowsTruncated: "已粘贴 {applied} 行，另有 {dropped} 行未粘贴：当前结果不支持新增行，或可新增行数不足。",
     batchAppendPasteNotEditable: "当前结果不可编辑。",
     batchAppendPasteInvalidTarget: "请先选中一个空新增行的行号单元格，再进行粘贴。",
     batchAppendPasteTargetNotEmpty: "选中的新增行已包含数据。",

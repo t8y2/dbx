@@ -103,6 +103,22 @@ Cell details handle values that do not fit well in the grid:
 
 Formatting and preview actions usually affect display only. Actual edits still become pending changes and generate SQL.
 
+### Plugin Decoding
+
+When a column holds values encrypted or encoded with a custom business algorithm, install a native plugin that declares the
+`sql-value-codec-v1` capability. Right-click a cell and choose **Decode with Plugin**, or pick **Plugin decode** in the
+cell details **Convert preview** panel, then click **Convert** (when several decoder plugins are installed, choose one first). DBX shows the text or pretty-printed JSON the
+plugin returns. Binary columns offer plugin decoding only, and the plugin receives the original bytes.
+
+The current cell's value is sent to the selected plugin only when you click **Convert**. The plugin receives the database
+type, column name and column type, never the connection configuration or password. Input and the JSON-serialized result
+are each limited to 2 MiB, calls time out after 10 seconds, and NULL or partially loaded large values cannot be decoded.
+Without a codec plugin installed, neither the context menu nor the transform kinds show this option.
+
+Decoded results are a read-only preview: they are never written back to the database and never enter the grid, exports
+or AI context. Developers can follow the
+[SQL value codec protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md#sql-value-codec-capability).
+
 ## Transposed View
 
 The transposed view swaps rows and columns and works well for:

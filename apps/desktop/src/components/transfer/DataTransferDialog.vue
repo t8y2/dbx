@@ -238,6 +238,7 @@ const pendingSelectedTablesPrefill = ref<string[] | null>(null);
 const pendingSelectedObjectsPrefill = ref<Partial<Record<TransferObjectKind, string[]>> | null>(null);
 // Saved-task per-table filters, applied together with the object selection once the tree loads.
 const pendingTableFiltersPrefill = ref<Record<string, string> | null>(null);
+const pendingTargetTableNamesPrefill = ref<Record<string, string> | null>(null);
 
 // Target state
 const targetConnectionId = ref("");
@@ -272,6 +273,11 @@ const tableFilters = ref<Record<string, string>>({});
 const filterDialogOpen = ref(false);
 const filterEditingTable = ref("");
 const filterDraft = ref("");
+// Per-source-table target name: source table -> explicit target table name.
+const targetTableNames = ref<Record<string, string>>({});
+const renameDialogOpen = ref(false);
+const renameEditingTable = ref("");
+const renameDraft = ref("");
 const isSubmitting = ref(false);
 const pendingTransferId = ref<string | null>(null);
 const showStartConfirm = ref(false);
@@ -344,6 +350,41 @@ function saveTableFilter() {
   if (value) tableFilters.value = { ...tableFilters.value, [table]: value };
   else clearTableFilter(table);
   filterDialogOpen.value = false;
+}
+
+function openTableRename(table: string) {
+  renameEditingTable.value = table;
+  renameDraft.value = targetTableNames.value[table] ?? table;
+  renameDialogOpen.value = true;
+}
+
+function clearTableRename(table: string) {
+  if (!(table in targetTableNames.value)) return;
+  const next = { ...targetTableNames.value };
+  delete next[table];
+  targetTableNames.value = next;
+}
+
+/** Another selected table that already maps to the draft name, which the backend would reject. */
+const renameDraftCollision = computed(() => {
+  const name = renameDraft.value.trim();
+  if (!name) return "";
+  return selectedTableList.value.find((table) => table !== renameEditingTable.value && (targetTableNames.value[table] ?? table) === name) ?? "";
+});
+
+function saveTableRename() {
+  const table = renameEditingTable.value;
+  const value = renameDraft.value.trim();
+  if (!table || !value || renameDraftCollision.value) return;
+  if (value === table) clearTableRename(table);
+  else targetTableNames.value = { ...targetTableNames.value, [table]: value };
+  renameDialogOpen.value = false;
+}
+
+/** Explicit target names for currently selected tables only; undefined when there are none. */
+function requestedTargetTableNames(): Record<string, string> | undefined {
+  const entries = Object.entries(targetTableNames.value).filter(([table, value]) => selectedTables.value.has(table) && value.trim().length > 0);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 /** Filters for currently selected tables only; undefined when there are none. */
@@ -630,6 +671,17 @@ function applyPendingObjectSelection() {
     tableFilters.value = nextFilters;
     pendingTableFiltersPrefill.value = null;
   }
+
+  const restoredNames = pendingTargetTableNamesPrefill.value;
+  if (restoredNames) {
+    const available = new Set(objectGroups.value.TABLE ?? []);
+    const nextNames: Record<string, string> = {};
+    for (const [table, value] of Object.entries(restoredNames)) {
+      if (available.has(table) && value.trim().length > 0) nextNames[table] = value;
+    }
+    targetTableNames.value = nextNames;
+    pendingTargetTableNamesPrefill.value = null;
+  }
 }
 
 async function loadObjects(isCancelled: () => boolean = () => false) {
@@ -709,6 +761,7 @@ watch(sourceConnectionId, async (id) => {
   objectGroups.value = {};
   selectedObjects.value = {};
   tableFilters.value = {};
+  targetTableNames.value = {};
   pendingSourceSchemaPrefill.value = "";
   pendingSelectedTablesPrefill.value = null;
   if (isCatalogCapable(id)) {
@@ -733,6 +786,7 @@ watch(sourceCatalog, async (catalog) => {
   objectGroups.value = {};
   selectedObjects.value = {};
   tableFilters.value = {};
+  targetTableNames.value = {};
   if (catalog) {
     await loadDatabasesForCatalog(sourceConnectionId.value, catalog, "source");
   }
@@ -744,6 +798,7 @@ watch(sourceDatabase, async (db) => {
     return;
   }
   tableFilters.value = {};
+  targetTableNames.value = {};
   if (isTransferDatabaseSelected(db)) {
     const config = store.getConfig(sourceConnectionId.value);
     const database = sourceDatabaseName.value;
@@ -767,6 +822,7 @@ watch(sourceSchema, () => {
     return;
   }
   tableFilters.value = {};
+  targetTableNames.value = {};
   loadObjects();
 });
 
@@ -928,11 +984,16 @@ function resetState(cancelTaskLoad = true) {
   operationTimeoutMode.value = "inherit";
   operationTimeoutSecs.value = DEFAULT_TRANSFER_OPERATION_TIMEOUT_SECS;
   tableFilters.value = {};
+  targetTableNames.value = {};
   filterDialogOpen.value = false;
   filterEditingTable.value = "";
   filterDraft.value = "";
+  renameDialogOpen.value = false;
+  renameEditingTable.value = "";
+  renameDraft.value = "";
   pendingSelectedObjectsPrefill.value = null;
   pendingTableFiltersPrefill.value = null;
+  pendingTargetTableNamesPrefill.value = null;
   activeTaskId.value = null;
   savedConfigSnapshot.value = "";
 }
@@ -1016,6 +1077,7 @@ function swapSourceAndTarget() {
   objectGroups.value = {};
   selectedObjects.value = {};
   tableFilters.value = {};
+  targetTableNames.value = {};
   objectSearch.value = "";
   void loadObjects();
 }
@@ -1051,6 +1113,7 @@ async function requestStartTransfer() {
     batchSize: batchSize.value,
     operationTimeoutSecs: operationTimeoutMode.value === "custom" ? operationTimeoutSecs.value : undefined,
     tableFilters: requestedTableFilters(),
+    targetTableNames: requestedTargetTableNames(),
     dropTargetConfirmed: false,
   };
   if (request.content !== "dataOnly") {
@@ -1156,6 +1219,7 @@ function currentConfig(includePackageDrafts = true): TransferTaskConfig {
     batchSize: batchSize.value,
     operationTimeoutSecs: operationTimeoutMode.value === "custom" && operationTimeoutValid.value ? operationTimeoutSecs.value : undefined,
     tableFilters: requestedTableFilters(),
+    targetTableNames: requestedTargetTableNames(),
     dropTargetConfirmed: false,
   };
   if (includePackageDrafts) {
@@ -1177,7 +1241,8 @@ function configSnapshot(config: TransferTaskConfig) {
     orderedObjects[kind] = [...(config.objects[kind as TransferObjectKind] ?? [])].sort();
   }
   const orderedFilters = Object.fromEntries(Object.entries(config.tableFilters ?? {}).sort(([a], [b]) => a.localeCompare(b)));
-  return JSON.stringify({ ...config, objects: orderedObjects, tableFilters: orderedFilters });
+  const orderedNames = Object.fromEntries(Object.entries(config.targetTableNames ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+  return JSON.stringify({ ...config, objects: orderedObjects, tableFilters: orderedFilters, targetTableNames: orderedNames });
 }
 
 const formHasContent = computed(() => !!sourceConnectionId.value || !!targetConnectionId.value);
@@ -1243,6 +1308,7 @@ function transferConfigFromRequest(request: api.TransferRequest): TransferTaskCo
     batchSize: request.batchSize,
     operationTimeoutSecs: request.operationTimeoutSecs,
     tableFilters: request.tableFilters ? { ...request.tableFilters } : undefined,
+    targetTableNames: request.targetTableNames ? { ...request.targetTableNames } : undefined,
   };
 }
 
@@ -1262,6 +1328,7 @@ async function loadConfigIntoForm(config: TransferTaskConfig, taskId = "") {
   operationTimeoutSecs.value = config.operationTimeoutSecs ?? DEFAULT_TRANSFER_OPERATION_TIMEOUT_SECS;
   pendingSelectedObjectsPrefill.value = Object.keys(config.objects).length > 0 ? JSON.parse(JSON.stringify(config.objects)) : null;
   pendingTableFiltersPrefill.value = config.tableFilters && Object.keys(config.tableFilters).length > 0 ? { ...config.tableFilters } : null;
+  pendingTargetTableNamesPrefill.value = config.targetTableNames && Object.keys(config.targetTableNames).length > 0 ? { ...config.targetTableNames } : null;
 
   skipSourceWatch.value = true;
   sourceConnectionId.value = config.sourceConnectionId;
@@ -1942,6 +2009,15 @@ async function saveConfigTask() {
               </div>
               <ObjectSelectionTree v-model="treeSelection" :groups="treeGroups" :disabled-groups="treeDisabledGroups" :disabled-hints="treeDisabledHints" :qualifiers="objectQualifiers" v-model:search="objectSearch" :loading="loadingObjects" class="min-h-0 flex-1">
                 <template #item-actions="{ kind, item, selected, disabled }">
+                  <div v-if="kind === 'TABLE' && selected" class="flex shrink-0 items-center gap-1 pr-1">
+                    <span v-if="targetTableNames[item]" class="max-w-40 truncate rounded bg-primary/10 px-1 text-[11px] text-primary" :title="targetTableNames[item]">→ {{ targetTableNames[item] }}</span>
+                    <Button variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-[11px]" :disabled="disabled" @click="openTableRename(item)">
+                      {{ targetTableNames[item] ? t("transfer.tableRenameEdit") : t("transfer.tableRenameSet") }}
+                    </Button>
+                    <Button v-if="targetTableNames[item]" variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="disabled" :title="t('transfer.tableRenameClear')" :aria-label="t('transfer.tableRenameClear')" @click="clearTableRename(item)">
+                      <X class="h-3 w-3" />
+                    </Button>
+                  </div>
                   <div v-if="kind === 'TABLE' && selected && tableFilterSupported && transferContent !== 'structureOnly'" class="flex shrink-0 items-center gap-1 pr-1">
                     <span v-if="tableFilters[item]" class="max-w-40 truncate rounded bg-primary/10 px-1 text-[11px] text-primary" :title="tableFilters[item]">
                       {{ tableFilters[item] }}
@@ -2194,6 +2270,34 @@ async function saveConfigTask() {
         <Button size="sm" @click="resolveOwnershipDecision('reassignMissing')">
           {{ t("transfer.ownershipConfirm") }}
         </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="renameDialogOpen">
+    <DialogContent class="sm:max-w-[420px]" @interact-outside.prevent>
+      <DialogHeader>
+        <DialogTitle>{{ t("transfer.tableRenameTitle", { table: renameEditingTable }) }}</DialogTitle>
+        <DialogDescription>{{ t("transfer.tableRenameHint") }}</DialogDescription>
+      </DialogHeader>
+      <Input v-model="renameDraft" spellcheck="false" class="font-mono text-xs" :placeholder="renameEditingTable" @keydown.enter.prevent="saveTableRename" />
+      <p v-if="renameDraftCollision" class="text-xs text-destructive">{{ t("transfer.tableRenameCollision", { table: renameDraftCollision }) }}</p>
+      <DialogFooter class="gap-2">
+        <Button variant="outline" size="sm" @click="renameDialogOpen = false">
+          {{ t("transfer.cancel") }}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          :disabled="!targetTableNames[renameEditingTable]"
+          @click="
+            clearTableRename(renameEditingTable);
+            renameDialogOpen = false;
+          "
+        >
+          {{ t("transfer.tableRenameClear") }}
+        </Button>
+        <Button size="sm" :disabled="!renameDraft.trim() || !!renameDraftCollision" @click="saveTableRename">{{ t("transfer.tableRenameSave") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

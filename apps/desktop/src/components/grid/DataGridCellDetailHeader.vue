@@ -56,6 +56,9 @@ function toggleWordWrap() {
         <TabsTrigger v-if="props.activeTabs.includes('valueEditor')" value="valueEditor" class="h-6 min-w-max flex-1 shrink-0 text-xs">
           {{ t("grid.valueEditor") }}
         </TabsTrigger>
+        <TabsTrigger v-if="props.activeTabs.includes('foreignKey')" value="foreignKey" class="h-6 min-w-max flex-1 shrink-0 text-xs">
+          {{ t("grid.foreignKeyPreview") }}
+        </TabsTrigger>
       </TabsList>
     </div>
     <div class="ml-auto flex shrink-0 items-center gap-1">

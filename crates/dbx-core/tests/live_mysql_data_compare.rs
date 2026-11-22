@@ -188,6 +188,7 @@ async fn run_live_mysql_data_compare_two_databases_with_differences() {
             target_table: "items".to_string(),
             columns: vec!["id".to_string(), "name".to_string(), "qty".to_string()],
             key_columns: vec!["id".to_string()],
+            ignored_columns: Vec::new(),
             source_columns: None,
             fetch_batch_size: None,
             degradation_threshold: None,

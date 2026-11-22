@@ -10,11 +10,15 @@ import {
   buildEmptyTableSql,
   buildMysqlAutoIncrementSql,
   buildTruncateTableSql,
+  buildMysqlTableMaintenanceSql,
   buildVacuumTableSql,
+  summarizeMysqlTableMaintenanceResult,
   supportsDropTableCascade,
   supportsMysqlAutoIncrement,
+  supportsMysqlTableMaintenance,
   supportsTruncateTableCascade,
   type MysqlAutoIncrementSqlOptions,
+  type MysqlTableMaintenanceOperation,
   type TableAdminSqlOptions,
   type VacuumTableSqlOptions,
 } from "@/lib/database/dbAdminSql";
@@ -71,6 +75,10 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
   const supportsVacuum = computed(() => {
     const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
     return activeNode.value.type === "table" && !connectionIsEffectivelyReadOnly(config) && supportsTableVacuum(currentDatabaseType());
+  });
+  const supportsMysqlTableMaintenanceAction = computed(() => {
+    const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+    return isTableNotView.value && !connectionIsEffectivelyReadOnly(config) && supportsMysqlTableMaintenance(config);
   });
   const canDropTableCascade = computed(() => activeNode.value.type === "table" && supportsDropTableCascade(currentDatabaseType()));
   const canTruncateTableCascade = computed(() => activeNode.value.type === "table" && supportsTruncateTableCascade(currentDatabaseType()));
@@ -177,6 +185,26 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
       await options.executeWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
       toast(t("contextMenu.mysqlAutoIncrementSuccess", { name: node.label, value: mysqlAutoIncrementValue.value }), 3000);
       await options.refreshMutatedTableDataTabsForNode(node);
+    } catch (error: any) {
+      toast(t("contextMenu.tableOperationFailed", { message: error?.message || String(error) }), { persistent: true });
+    }
+  }
+
+  async function mysqlTableMaintenance(operation: MysqlTableMaintenanceOperation) {
+    if (!supportsMysqlTableMaintenanceAction.value) return;
+    const node = activeNode.value;
+    if (!node.connectionId || !node.database) return;
+    try {
+      await connectionStore.ensureConnected(node.connectionId);
+      const sql = buildMysqlTableMaintenanceSql(operation, node.label);
+      const result = await options.executeWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+      if (result === undefined) return;
+      const summary = summarizeMysqlTableMaintenanceResult(result as Parameters<typeof summarizeMysqlTableMaintenanceResult>[0]);
+      if (!summary.ok) {
+        toast(t("contextMenu.tableOperationFailed", { message: summary.message }), { persistent: true });
+        return;
+      }
+      toast(t(`contextMenu.mysqlTableMaintenance.${operation}Success`, { name: node.label, message: summary.message }), 3000);
     } catch (error: any) {
       toast(t("contextMenu.tableOperationFailed", { message: error?.message || String(error) }), { persistent: true });
     }
@@ -577,6 +605,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     canDropTableCascade,
     canTruncateTableCascade,
     supportsMysqlAutoIncrement: supportsMysqlAutoIncrementAction,
+    supportsMysqlTableMaintenance: supportsMysqlTableMaintenanceAction,
     refreshDropTablePreviewSql,
     refreshTruncateTablePreviewSql,
     dropTable,
@@ -592,5 +621,6 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     mysqlAutoIncrement,
     refreshMysqlAutoIncrementPreviewSql,
     confirmMysqlAutoIncrement,
+    mysqlTableMaintenance,
   };
 }

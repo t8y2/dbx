@@ -84,6 +84,12 @@ function keydown(target: HTMLElement, key: string) {
   return event;
 }
 
+function pressToggleLineCommentAndAdvance(view: EditorView) {
+  const event = new KeyboardEvent("keydown", { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true });
+  view.contentDOM.dispatchEvent(event);
+  return event;
+}
+
 function foldedRangeCount(view: EditorView): number {
   let count = 0;
   foldedRanges(view.state).between(0, view.state.doc.length, () => count++);
@@ -463,6 +469,47 @@ describe("QueryEditor component split integration", () => {
     expect(selectedCompletionIndex(view.state)).toBeNull();
     expect(view.state.doc.toString()).toBe("SEL");
     expect(closeCompletion(view)).toBe(true);
+  });
+
+  it("advances a single cursor after toggling a line comment and keeps the change undoable", async () => {
+    const source = "SELECT 1;\nSELECT 2;\nSELECT 3;";
+    const { view, settingsStore } = await mountEditor({ modelValue: source });
+    settingsStore.editorSettings.shortcuts.toggleLineCommentAndAdvance = "Ctrl+Shift+C";
+    await nextTick();
+    view.dispatch({ selection: { anchor: 2 } });
+
+    const event = pressToggleLineCommentAndAdvance(view);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(view.state.doc.toString()).toBe("-- SELECT 1;\nSELECT 2;\nSELECT 3;");
+    expect(view.state.selection.main.head).toBe(view.state.doc.line(2).from + 2);
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(source);
+  });
+
+  it("keeps a selected range on the commented line instead of advancing", async () => {
+    const { view, settingsStore } = await mountEditor({ modelValue: "SELECT 1;\nSELECT 2;" });
+    settingsStore.editorSettings.shortcuts.toggleLineCommentAndAdvance = "Ctrl+Shift+C";
+    await nextTick();
+    view.dispatch({ selection: EditorSelection.range(1, 7) });
+
+    pressToggleLineCommentAndAdvance(view);
+
+    expect(view.state.doc.toString()).toBe("-- SELECT 1;\nSELECT 2;");
+    expect(view.state.selection.main.from).toBeGreaterThanOrEqual(3);
+    expect(view.state.doc.lineAt(view.state.selection.main.head).number).toBe(1);
+  });
+
+  it("leaves the cursor on the last line after toggling its comment", async () => {
+    const { view, settingsStore } = await mountEditor({ modelValue: "SELECT 1;\nSELECT 2;" });
+    settingsStore.editorSettings.shortcuts.toggleLineCommentAndAdvance = "Ctrl+Shift+C";
+    await nextTick();
+    view.dispatch({ selection: { anchor: view.state.doc.line(2).from + 2 } });
+
+    pressToggleLineCommentAndAdvance(view);
+
+    expect(view.state.doc.toString()).toBe("SELECT 1;\n-- SELECT 2;");
+    expect(view.state.doc.lineAt(view.state.selection.main.head).number).toBe(2);
   });
 
   it("reconfigures language and wrapping extensions without replacing the view", async () => {

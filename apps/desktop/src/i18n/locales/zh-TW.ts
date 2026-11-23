@@ -9015,6 +9015,7 @@ export default withEnglishFallback({
     shortcutFormatSql: "格式化 SQL",
     shortcutExpandSelectStar: "將 * 展開為欄位",
     shortcutToggleLineComment: "切換行註解",
+    shortcutToggleLineCommentAndAdvance: "切換行註解並移到下一行",
     shortcutToggleBlockComment: "切換區塊註解",
     shortcutIndentMore: "增加縮排",
     shortcutIndentLess: "減少縮排",

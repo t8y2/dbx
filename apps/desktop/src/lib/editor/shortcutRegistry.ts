@@ -12,6 +12,7 @@ export type ShortcutActionId =
   | "formatSql"
   | "expandSelectStar"
   | "toggleLineComment"
+  | "toggleLineCommentAndAdvance"
   | "toggleBlockComment"
   | "saveSql"
   | "acceptCompletion"
@@ -268,6 +269,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutToggleLineComment",
     scope: "editor",
     defaultShortcut: "Mod+/",
+  },
+  {
+    id: "toggleLineCommentAndAdvance",
+    labelKey: "settings.shortcutToggleLineCommentAndAdvance",
+    scope: "editor",
+    defaultShortcut: "",
   },
   {
     id: "toggleBlockComment",

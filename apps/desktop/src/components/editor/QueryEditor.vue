@@ -1645,6 +1645,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.toggleCaseSelection, () => convertSelectedSqlCase("toggle")),
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.convertNamingStyle, () => convertSelectedNamingStyle()),
         ...createQueryEditorLineCommentShortcutBindings(shortcuts.toggleLineComment, (view) => codeMirrorRuntime.codeMirrorToggleLineComment?.(view) ?? false),
+        ...createQueryEditorLineCommentShortcutBindings(shortcuts.toggleLineCommentAndAdvance, toggleLineCommentAndAdvance),
         ...binding(shortcuts.toggleBlockComment, (view) => {
           if (!supportsQueryEditorBlockComments(props.databaseType)) return false;
           return codeMirrorRuntime.codeMirrorToggleBlockComment?.(view) ?? false;
@@ -3283,6 +3284,21 @@ function toggleLineComment(): boolean {
   const handled = codeMirrorRuntime.codeMirrorToggleLineComment?.(currentView) ?? false;
   if (handled) currentView.focus();
   return handled;
+}
+
+function toggleLineCommentAndAdvance(currentView: EditorViewType): boolean {
+  const { doc, selection } = currentView.state;
+  if (!codeMirrorRuntime.codeMirrorToggleLineComment?.(currentView)) return false;
+  if (selection.ranges.length !== 1 || !selection.main.empty) return true;
+  const line = doc.lineAt(selection.main.head);
+  if (line.number === doc.lines) return true;
+  const nextLine = currentView.state.doc.line(line.number + 1);
+  const column = selection.main.head - line.from;
+  currentView.dispatch({
+    selection: { anchor: Math.min(nextLine.from + column, nextLine.to) },
+    scrollIntoView: true,
+  });
+  return true;
 }
 
 function foldAllForView(currentView: EditorViewType): boolean {

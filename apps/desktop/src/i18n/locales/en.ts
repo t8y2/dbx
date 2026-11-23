@@ -11481,6 +11481,7 @@ export default {
     shortcutFormatSql: "Format SQL",
     shortcutExpandSelectStar: "Expand * to columns",
     shortcutToggleLineComment: "Toggle line comment",
+    shortcutToggleLineCommentAndAdvance: "Toggle line comment and advance",
     shortcutToggleBlockComment: "Toggle block comment",
     shortcutIndentMore: "Indent more",
     shortcutIndentLess: "Indent less",

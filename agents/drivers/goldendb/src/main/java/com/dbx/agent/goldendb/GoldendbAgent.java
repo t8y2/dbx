@@ -39,6 +39,20 @@ public final class GoldendbAgent extends AbstractJdbcAgent {
         return buildUrl(params);
     }
 
+    /**
+     * GoldenDB 8.9 access nodes reject the MySQL COM_PING command with
+     * `ERR 10004 (HY000): Parametric information is abnormal`, so
+     * `Connection.isValid()` always fails. HikariCP validates every physical
+     * connection with `isValid()` when the agent declares no validation query,
+     * which makes the pool retry until the connection attempt times out.
+     * Validate with a statement instead, the same way the Dameng, Transwarp and
+     * SQL Server legacy agents do.
+     */
+    @Override
+    protected String connectionValidationQuery() {
+        return "SELECT 1";
+    }
+
     @Override
     public List<DatabaseInfo> listDatabases() {
         return unchecked(() -> {

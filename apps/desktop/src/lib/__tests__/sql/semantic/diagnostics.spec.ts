@@ -332,6 +332,45 @@ describe("buildSqlSemanticDiagnostics projection aliases in GROUP BY / ORDER BY 
     expect(diagnostics).toEqual([]);
   });
 
+  it("does not let an outer JOIN alias shadow a same-named CTE body alias", () => {
+    const sql = "WITH cte AS (SELECT b.trade_dt FROM rates b) SELECT a.trade_dt FROM cte a JOIN projects b ON a.trade_dt = b.name";
+    const token = (value: string, from = 0) => {
+      const start = sql.indexOf(value, from);
+      return span(start + 1, start + value.length);
+    };
+    const analysis: SqlReferenceAnalysis = {
+      tables: [
+        { name: "rates", alias: "b", span: token("rates"), scope_id: 1 },
+        { name: "cte", alias: "a", span: token("cte", sql.indexOf("FROM cte")), scope_id: 0 },
+        { name: "projects", alias: "b", span: token("projects"), scope_id: 0 },
+      ],
+      columns: [
+        { name: "trade_dt", qualifier: "b", span: token("trade_dt"), scope_id: 1 },
+        { name: "trade_dt", qualifier: "a", span: token("trade_dt", sql.indexOf("a.trade_dt")), scope_id: 0 },
+        { name: "trade_dt", qualifier: "a", span: token("trade_dt", sql.lastIndexOf("a.trade_dt")), scope_id: 0 },
+        { name: "name", qualifier: "b", span: token("name", sql.indexOf("b.name")), scope_id: 0 },
+      ],
+      scopes: [
+        { id: 0, parent_id: null },
+        { id: 1, parent_id: 0 },
+      ],
+    };
+
+    const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+      tables: [
+        { name: "rates", type: "table" },
+        { name: "projects", type: "table" },
+      ],
+      columnsByTable: new Map([
+        ["rates", [{ name: "trade_dt", table: "rates" }]],
+        ["projects", [{ name: "name", table: "projects" }]],
+      ]),
+      sql,
+    });
+
+    expect(diagnostics).toEqual([]);
+  });
+
   it("still reports genuinely unknown columns in multi-statement scripts", () => {
     const sql = "SELECT 1;\nSELECT id, name AS user_name FROM users GROUP BY missing_col;";
     const secondLine = "SELECT id, name AS user_name FROM users GROUP BY missing_col;";

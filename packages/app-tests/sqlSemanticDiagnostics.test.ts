@@ -298,6 +298,81 @@ test("resolves qualified aliases against the table in the same statement", () =>
   );
 });
 
+test("does not let an outer JOIN alias shadow a same-named CTE alias", () => {
+  // WITH cte AS (SELECT b.trade_dt FROM rates b) SELECT a.trade_dt FROM cte a JOIN projects b ON a.trade_dt = b.name
+  // Outer `b` (projects) must not validate the CTE body's `b.trade_dt` (rates).
+  const sql = "WITH cte AS (SELECT b.trade_dt FROM rates b) SELECT a.trade_dt FROM cte a JOIN projects b ON a.trade_dt = b.name";
+  const token = (value: string, from = 0) => {
+    const start = sql.indexOf(value, from);
+    return span(start + 1, start + value.length);
+  };
+  const analysis: SqlReferenceAnalysis = {
+    tables: [
+      { name: "rates", alias: "b", span: token("rates"), scope_id: 1 },
+      { name: "cte", alias: "a", span: token("cte", sql.indexOf("FROM cte")), scope_id: 0 },
+      { name: "projects", alias: "b", span: token("projects"), scope_id: 0 },
+    ],
+    columns: [
+      { name: "trade_dt", qualifier: "b", span: token("trade_dt"), scope_id: 1 },
+      { name: "trade_dt", qualifier: "a", span: token("trade_dt", sql.indexOf("a.trade_dt")), scope_id: 0 },
+      { name: "trade_dt", qualifier: "a", span: token("trade_dt", sql.lastIndexOf("a.trade_dt")), scope_id: 0 },
+      { name: "name", qualifier: "b", span: token("name", sql.indexOf("b.name")), scope_id: 0 },
+    ],
+    scopes: [
+      { id: 0, parent_id: null },
+      { id: 1, parent_id: 0 },
+    ],
+  };
+
+  const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+    tables: [
+      { name: "rates", type: "table" },
+      { name: "projects", type: "table" },
+    ],
+    columnsByTable: new Map([
+      ["rates", [{ name: "trade_dt", table: "rates" }]],
+      ["projects", [{ name: "name", table: "projects" }]],
+    ]),
+    sql,
+  });
+
+  assert.deepEqual(diagnostics, []);
+});
+
+test("resolves shadowed aliases by nearest declaration without scopes", () => {
+  // Place outer `b.name` after `projects b` so document order can distinguish it from the CTE's `rates b`.
+  const sql = "WITH cte AS (SELECT b.trade_dt FROM rates b) SELECT * FROM cte a JOIN projects b ON b.name = 'x'";
+  const token = (value: string, from = 0) => {
+    const start = sql.indexOf(value, from);
+    return span(start + 1, start + value.length);
+  };
+  const analysis: SqlReferenceAnalysis = {
+    tables: [
+      { name: "rates", alias: "b", span: token("rates") },
+      { name: "cte", alias: "a", span: token("cte", sql.indexOf("FROM cte")) },
+      { name: "projects", alias: "b", span: token("projects") },
+    ],
+    columns: [
+      { name: "trade_dt", qualifier: "b", span: token("trade_dt") },
+      { name: "name", qualifier: "b", span: token("name", sql.indexOf("b.name")) },
+    ],
+  };
+
+  const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+    tables: [
+      { name: "rates", type: "table" },
+      { name: "projects", type: "table" },
+    ],
+    columnsByTable: new Map([
+      ["rates", [{ name: "trade_dt", table: "rates" }]],
+      ["projects", [{ name: "name", table: "projects" }]],
+    ]),
+    sql,
+  });
+
+  assert.deepEqual(diagnostics, []);
+});
+
 test("resolves correlated subquery columns against the visible query scopes", () => {
   const analysis: SqlReferenceAnalysis = {
     tables: [

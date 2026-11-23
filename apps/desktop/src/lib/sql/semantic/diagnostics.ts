@@ -546,10 +546,69 @@ export function isSqlSemanticDiagnosticInputContext(sql: string, cursor: number,
 function resolveColumnTable(column: SqlColumnReference, tables: SqlTableReference[], knownTables: Map<string, SqlTableReference>, sql?: string, scopesById?: Map<number, SqlReferenceScope>): SqlTableReference | null {
   const candidateTables = candidateTablesForColumn(tables, column, sql, scopesById);
   if (column.qualifier) {
-    return tableLookupFor(candidateTables).get(normalizeName(column.qualifier)) ?? (sql ? null : (knownTables.get(normalizeName(column.qualifier)) ?? null));
+    return resolveQualifierTable(column, candidateTables, sql) ?? (sql ? null : (knownTables.get(normalizeName(column.qualifier)) ?? null));
   }
   if (candidateTables.length !== 1) return null;
   return candidateTables[0];
+}
+
+/**
+ * Resolve `alias.col` when the same alias is reused in an outer query and a CTE /
+ * subquery. Prefer the declaration in the column's own scope, then the nearest
+ * preceding declaration in document order so outer JOIN aliases do not shadow
+ * earlier CTE/subquery aliases (and correlated outer aliases still win when they
+ * are the only preceding match).
+ */
+function resolveQualifierTable(column: SqlColumnReference, candidateTables: SqlTableReference[], sql?: string): SqlTableReference | null {
+  const qualifier = normalizeName(column.qualifier ?? "");
+  if (!qualifier) return null;
+  const matches = candidateTables.filter((table) => tableMatchesQualifier(table, qualifier));
+  if (matches.length === 0) return null;
+  if (matches.length === 1) return matches[0]!;
+  if (column.scope_id != null) {
+    const sameScope = matches.filter((table) => table.scope_id === column.scope_id);
+    if (sameScope.length === 1) return sameScope[0]!;
+    if (sameScope.length > 1 && sql) return nearestAliasDeclaration(sameScope, column, sql) ?? sameScope[sameScope.length - 1]!;
+  }
+  if (sql) return nearestAliasDeclaration(matches, column, sql) ?? matches[matches.length - 1]!;
+  return matches[matches.length - 1]!;
+}
+
+function tableMatchesQualifier(table: SqlTableReference, qualifier: string): boolean {
+  if (table.alias && normalizeName(table.alias) === qualifier) return true;
+  if (normalizeName(table.name) === qualifier) return true;
+  if (table.schema && normalizeName(`${table.schema}.${table.name}`) === qualifier) return true;
+  if (table.database && table.schema && normalizeName(`${table.database}.${table.schema}.${table.name}`) === qualifier) return true;
+  return false;
+}
+
+/**
+ * Pick the alias declaration that owns a qualified reference. Prefer the nearest
+ * preceding FROM item (covers ON/WHERE/outer references). When the reference is
+ * in the SELECT list before FROM, fall back to the nearest following declaration
+ * so CTE/subquery aliases are not stolen by a later outer JOIN with the same name.
+ */
+function nearestAliasDeclaration(tables: SqlTableReference[], column: SqlColumnReference, sql: string): SqlTableReference | null {
+  const columnOffset = spanStartOffset(sql, column.span);
+  if (columnOffset == null) return null;
+  let preceding: SqlTableReference | null = null;
+  let precedingOffset = -1;
+  let following: SqlTableReference | null = null;
+  let followingOffset = Number.POSITIVE_INFINITY;
+  for (const table of tables) {
+    const tableOffset = spanStartOffset(sql, table.span);
+    if (tableOffset == null) continue;
+    if (tableOffset <= columnOffset) {
+      if (tableOffset >= precedingOffset) {
+        preceding = table;
+        precedingOffset = tableOffset;
+      }
+    } else if (tableOffset < followingOffset) {
+      following = table;
+      followingOffset = tableOffset;
+    }
+  }
+  return preceding ?? following;
 }
 
 function candidateTablesForColumn(tables: SqlTableReference[], column: SqlColumnReference, sql?: string, scopesById?: Map<number, SqlReferenceScope>): SqlTableReference[] {
@@ -563,6 +622,14 @@ function tablesInVisibleScopes(tables: SqlTableReference[], column: SqlColumnRef
   if (!column.qualifier) {
     const currentScopeTables = tables.filter((table) => table.scope_id === column.scope_id);
     if (currentScopeTables.length > 0) return currentScopeTables;
+  } else {
+    // Qualified references bind to the current scope first so a CTE/subquery
+    // alias is not overwritten by a same-named outer JOIN alias that sits in a
+    // parent scope (CTE bodies are modeled as children of the outer query).
+    const currentScopeTables = tables.filter((table) => table.scope_id === column.scope_id);
+    if (currentScopeTables.some((table) => tableMatchesQualifier(table, normalizeName(column.qualifier!)))) {
+      return currentScopeTables;
+    }
   }
   const visibleScopeIds = scopeAndParents(column.scope_id, scopesById);
   if (visibleScopeIds.size === 0) return null;
@@ -578,17 +645,6 @@ function scopeAndParents(scopeId: number, scopesById: Map<number, SqlReferenceSc
     current = scope?.parent_id ?? undefined;
   }
   return ids;
-}
-
-function tableLookupFor(tables: SqlTableReference[]): Map<string, SqlTableReference> {
-  const lookup = new Map<string, SqlTableReference>();
-  for (const table of tables) {
-    lookup.set(normalizeName(table.name), table);
-    if (table.alias) lookup.set(normalizeName(table.alias), table);
-    if (table.schema) lookup.set(normalizeName(`${table.schema}.${table.name}`), table);
-    if (table.database && table.schema) lookup.set(normalizeName(`${table.database}.${table.schema}.${table.name}`), table);
-  }
-  return lookup;
 }
 
 function tablesInSameStatement(tables: SqlTableReference[], column: SqlColumnReference, sql: string): SqlTableReference[] {

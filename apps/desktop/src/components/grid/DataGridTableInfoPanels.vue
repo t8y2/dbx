@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { KeyRound, Loader2, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import TablePartitionsPanel from "@/components/structure/TablePartitionsPanel.vue";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
+import { sortObjectBrowserTableColumns, type ObjectBrowserTableColumnSort, type ObjectBrowserTableColumnSortKey } from "@/lib/table/objectBrowserTableInfo";
 import { formatObjectBrowserBytes, formatObjectBrowserCount } from "@/lib/table/objectBrowserRows";
 import type { ColumnInfo, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectStatistics, PgTablePartitioning, TableInfoTab, TriggerInfo } from "@/types/database";
 
@@ -49,6 +50,29 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const columnSort = ref<ObjectBrowserTableColumnSort | null>(null);
+
+const sortedColumns = computed(() => sortObjectBrowserTableColumns(props.columns, columnSort.value));
+
+watch(
+  () => [props.tableName, props.tableSchema, props.database] as const,
+  () => {
+    columnSort.value = null;
+  },
+);
+
+function toggleColumnSort(key: ObjectBrowserTableColumnSortKey) {
+  columnSort.value = columnSort.value?.key === key ? (columnSort.value.direction === "asc" ? { key, direction: "desc" } : null) : { key, direction: "asc" };
+}
+
+function columnSortDirection(key: ObjectBrowserTableColumnSortKey): ObjectBrowserTableColumnSort["direction"] | undefined {
+  return columnSort.value?.key === key ? columnSort.value.direction : undefined;
+}
+
+function columnSortIndicator(key: ObjectBrowserTableColumnSortKey): string {
+  const direction = columnSortDirection(key);
+  return direction === "asc" ? "▲" : direction === "desc" ? "▼" : "↕";
+}
 
 const overviewRows = computed(() => {
   const rows: { label: string; value: string; mono?: boolean }[] = [
@@ -89,23 +113,31 @@ const overviewRows = computed(() => {
       <thead class="sticky top-0 bg-muted text-muted-foreground">
         <tr class="border-b">
           <th class="text-left text-nowrap font-medium px-3 py-2 w-8">#</th>
-          <th class="text-left text-nowrap font-medium px-3 py-2">
-            {{ t("grid.columnName") }}
+          <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="columnSortDirection('name') === 'asc' ? 'ascending' : columnSortDirection('name') === 'desc' ? 'descending' : 'none'">
+            <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('name')">
+              {{ t("grid.columnName") }} <span class="text-[10px]">{{ columnSortIndicator("name") }}</span>
+            </button>
           </th>
-          <th class="text-left text-nowrap font-medium px-3 py-2">
-            {{ t("grid.columnType") }}
+          <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="columnSortDirection('dataType') === 'asc' ? 'ascending' : columnSortDirection('dataType') === 'desc' ? 'descending' : 'none'">
+            <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('dataType')">
+              {{ t("grid.columnType") }} <span class="text-[10px]">{{ columnSortIndicator("dataType") }}</span>
+            </button>
           </th>
-          <th class="text-left text-nowrap font-medium px-3 py-2">
-            {{ t("grid.tableInfoNullable") }}
+          <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="columnSortDirection('nullable') === 'asc' ? 'ascending' : columnSortDirection('nullable') === 'desc' ? 'descending' : 'none'">
+            <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('nullable')">
+              {{ t("grid.tableInfoNullable") }} <span class="text-[10px]">{{ columnSortIndicator("nullable") }}</span>
+            </button>
           </th>
-          <th class="text-left text-nowrap font-medium px-3 py-2">
-            {{ t("structureEditor.defaultValue") }}
+          <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="columnSortDirection('defaultValue') === 'asc' ? 'ascending' : columnSortDirection('defaultValue') === 'desc' ? 'descending' : 'none'">
+            <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('defaultValue')">
+              {{ t("structureEditor.defaultValue") }} <span class="text-[10px]">{{ columnSortIndicator("defaultValue") }}</span>
+            </button>
           </th>
         </tr>
       </thead>
       <tbody>
         <tr
-          v-for="(column, index) in props.columns"
+          v-for="(column, index) in sortedColumns"
           :key="column.name"
           class="border-b cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800/30"
           role="button"

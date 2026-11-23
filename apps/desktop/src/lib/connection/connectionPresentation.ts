@@ -231,6 +231,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
     case "clickhouse":
       return "clickhouse://user:password@host:port/database";
 
+    case "databend":
+      return "databend://user:password@host:443/default?warehouse=default";
+
     case "sqlserver":
       return "mssql://user:password@host:port/database";
 
@@ -282,10 +285,10 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
       return "jdbc:inceptor2://host:10000/default";
 
     case "influxdb":
-      return "influxdb://user:password@host:port/database";
+      return "influxdb://user:password@host:port";
 
     case "influxdb3":
-      return "influxdb3://token@host:8181/database";
+      return "influxdb3://token@host:8181";
 
     case "victoriametrics":
       return "http://user:password@host:port/prometheus";

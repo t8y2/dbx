@@ -231,22 +231,43 @@ describe("MessageBrowser", () => {
     expect(clipboard.copyToClipboard).toHaveBeenCalledWith("AAE=");
   });
 
-  it("decodes thrift.TBinaryProtocol payloads when browsing RabbitMQ messages", async () => {
+  it("keeps payloads raw by default and decodes thrift.TBinaryProtocol only when toggled on", async () => {
     // Raw TSerializer struct: field 1 (string) = "hello", STOP -> base64 "CwABAAAABWhlbGxvAA=="
-    backend.mqPeekMessages.mockResolvedValueOnce([
-      {
-        position: 1,
-        messageId: "thrift-1",
-        payloadBase64: "CwABAAAABWhlbGxvAA==",
-        payloadText: "\u000b\u0000\u0001\u0000\u0000\u0000\u0005hello\u0000",
-        properties: {},
-        headers: {},
-      },
-    ]);
-    const browser = await mountBrowser("rabbitmq");
+    const rawPayloadText = "\u000b\u0000\u0001\u0000\u0000\u0000\u0005hello\u0000";
+    for (const systemKind of ["rabbitmq", "kafka"] as const) {
+      backend.mqPeekMessages.mockResolvedValueOnce([
+        {
+          position: 1,
+          messageId: "thrift-1",
+          payloadBase64: "CwABAAAABWhlbGxvAA==",
+          payloadText: rawPayloadText,
+          properties: {},
+          headers: {},
+        },
+      ]);
+      const browser = await mountBrowser(systemKind);
 
-    await loadMessages(browser);
-    expect(displayedPayloads(browser)).toEqual(['{\n  "1": "hello"\n}']);
+      await loadMessages(browser);
+      const decodeToggle = browser.querySelector<HTMLInputElement>('[data-testid="rabbitmq-decode-payload"]');
+      if (!decodeToggle) throw new Error(`Decode payload checkbox not found for ${systemKind}`);
+      expect(decodeToggle.checked).toBe(false);
+      expect(displayedPayloads(browser)).toEqual([rawPayloadText]);
+
+      decodeToggle.click();
+      await flushUi();
+      expect(decodeToggle.checked).toBe(true);
+      expect(displayedPayloads(browser)).toEqual(['{\n  "1": "hello"\n}']);
+
+      const copyButton = browser.querySelector<HTMLButtonElement>('[data-testid="copy-message-payload"]');
+      copyButton?.click();
+      await flushUi();
+      expect(clipboard.copyToClipboard).toHaveBeenLastCalledWith('{\n  "1": "hello"\n}');
+
+      decodeToggle.click();
+      await flushUi();
+      expect(decodeToggle.checked).toBe(false);
+      expect(displayedPayloads(browser)).toEqual([rawPayloadText]);
+    }
   });
 
   it("copies message headers as formatted JSON", async () => {
@@ -504,6 +525,10 @@ describe("MessageBrowser", () => {
     await setSelectValue(startPosition, "earliest");
     await loadMessages(browser);
     expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "__dbx_kafka_viewer__", 20, { startPosition: "earliest" });
+    const earliestCall = backend.mqPeekMessages.mock.calls.at(-1);
+    if (!earliestCall) throw new Error("earliest peek call not found");
+    // 非 timestamp 模式不下发读取方向，保持纯展示排序语义
+    expect(earliestCall[4]).not.toHaveProperty("sortOrder");
 
     await setSelectValue(startPosition, "offset");
     const partition = browser.querySelector<HTMLInputElement>('[data-testid="kafka-peek-partition"]');
@@ -514,6 +539,39 @@ describe("MessageBrowser", () => {
     await loadMessages(browser);
 
     expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "__dbx_kafka_viewer__", 20, { startPosition: "offset", partition: 2, offset: 17 });
+  });
+
+  it("sends a timestamp window and rejects an end timestamp before the start", async () => {
+    const browser = await mountBrowser();
+    const startPosition = browser.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
+    if (!startPosition) throw new Error("Kafka start position select not found");
+
+    await setSelectValue(startPosition, "timestamp");
+    const startInput = browser.querySelector<HTMLInputElement>('[data-testid="kafka-peek-start-timestamp"]');
+    const endInput = browser.querySelector<HTMLInputElement>('[data-testid="kafka-peek-end-timestamp"]');
+    if (!startInput || !endInput) throw new Error("Kafka timestamp inputs not found");
+
+    await setInputValue(startInput, "2026-11-04T10:00:00");
+    await setInputValue(endInput, "2026-11-04T10:05:00");
+    await loadMessages(browser);
+    expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "__dbx_kafka_viewer__", 20, {
+      startPosition: "timestamp",
+      timestamp: Date.parse("2026-11-04T10:00:00"),
+      endTimestamp: Date.parse("2026-11-04T10:05:00"),
+      sortOrder: "newest",
+    });
+
+    // 时间窗口下「时间顺序」即读取方向，透传给 agent 由其反向回扫
+    const displayOrder = browser.querySelector<HTMLElement>('[data-testid="kafka-message-display-order"]');
+    if (!displayOrder) throw new Error("Kafka display order select not found");
+    await setSelectValue(displayOrder, "oldest");
+    await loadMessages(browser);
+    expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "__dbx_kafka_viewer__", 20, expect.objectContaining({ sortOrder: "oldest" }));
+
+    // 截止时间早于起始时间时不发请求，只提示错误
+    await setInputValue(endInput, "2026-11-04T09:00:00");
+    await loadMessages(browser);
+    expect(browser.textContent).toContain("mqMessages.endTimestampBeforeStart");
   });
 
   it("allows an all-partition offset read but requires an offset", async () => {

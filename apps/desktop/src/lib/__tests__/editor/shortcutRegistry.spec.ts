@@ -29,6 +29,7 @@ describe("shortcutRegistry editor actions", () => {
   const formatterEditorActionIds: ShortcutActionId[] = [
     "formatSql",
     "toggleLineComment",
+    "toggleLineCommentAndAdvance",
     "toggleBlockComment",
     "indentMore",
     "indentLess",
@@ -53,6 +54,42 @@ describe("shortcutRegistry editor actions", () => {
     "unfoldAll",
   ];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl", "editSidebarTableStructure"];
+
+  it("registers commit transaction as an unassigned global shortcut", () => {
+    expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "commitTransaction")).toMatchObject({
+      id: "commitTransaction",
+      labelKey: "settings.shortcutCommitTransaction",
+      scope: "global",
+      defaultShortcut: "",
+    });
+    expect(normalizeShortcutSettings().commitTransaction).toBe("");
+  });
+
+  it("registers convert-selection-to-delimited as an editor shortcut", () => {
+    expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "convertSelectionToDelimited")).toMatchObject({
+      id: "convertSelectionToDelimited",
+      labelKey: "settings.shortcutConvertSelectionToDelimited",
+      scope: "editor",
+      defaultShortcut: "Mod+Alt+,",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.convertSelectionToDelimited).toBe("Mod+Alt+,");
+    expect(shortcutToCodeMirrorKey("Mod+Alt+,")).toBe("Mod-Alt-,");
+  });
+
+  it("registers copy-result-column shortcuts as unassigned global actions", () => {
+    for (const column of [1, 2, 3, 4, 5]) {
+      const id = `copyResultColumn${column}` as const;
+      expect(SHORTCUT_DEFINITIONS.find((item) => item.id === id)).toMatchObject({
+        id,
+        labelKey: `settings.shortcutCopyResultColumn${column}`,
+        scope: "global",
+        defaultShortcut: "",
+      });
+      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe("");
+      expect(findShortcutConflict(id, `Alt+${column}`, normalizeShortcutSettings())).toBeNull();
+      expect(normalizeShortcutSettings()[id]).toBe("");
+    }
+  });
 
   it("registers pagination navigation as unassigned grid shortcuts", () => {
     const paginationActions = [
@@ -234,6 +271,22 @@ describe("shortcutRegistry editor actions", () => {
     }
   });
 
+  it("registers conflict-free line bookmark shortcuts", () => {
+    const toggle = SHORTCUT_DEFINITIONS.find((item) => item.id === "toggleBookmark");
+    const next = SHORTCUT_DEFINITIONS.find((item) => item.id === "nextBookmark");
+    const previous = SHORTCUT_DEFINITIONS.find((item) => item.id === "previousBookmark");
+
+    expect(toggle).toMatchObject({ labelKey: "settings.shortcutToggleBookmark", scope: "editor", defaultShortcut: "Mod+F2" });
+    expect(next).toMatchObject({ labelKey: "settings.shortcutNextBookmark", scope: "editor", defaultShortcut: "F2" });
+    expect(previous).toMatchObject({ labelKey: "settings.shortcutPreviousBookmark", scope: "editor", defaultShortcut: "Shift+F2" });
+
+    for (const id of ["toggleBookmark", "nextBookmark", "previousBookmark"] as const) {
+      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe(SHORTCUT_DEFINITIONS.find((item) => item.id === id)?.defaultShortcut);
+      expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS[id])).not.toBe("");
+      expect(findShortcutConflict(id, DEFAULT_SHORTCUT_SETTINGS[id], DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    }
+  });
+
   it("keeps current-view search and editor find contextual on Mod+F", () => {
     const focusSearch = SHORTCUT_DEFINITIONS.find((item) => item.id === "focusSearch");
     const find = SHORTCUT_DEFINITIONS.find((item) => item.id === "find");
@@ -408,6 +461,7 @@ describe("shortcutRegistry editor actions", () => {
     expect(shortcuts.executeSql).toBe("Mod+Shift+Enter");
     expect(shortcuts.formatSql).toBe("Shift+Mod+F");
     expect(shortcuts.toggleLineComment).toBe("Mod+/");
+    expect(shortcuts.toggleLineCommentAndAdvance).toBe("");
     expect(shortcuts.toggleBlockComment).toBe("Shift+Alt+A");
     expect(shortcuts.indentMore).toBe("");
     expect(shortcuts.indentLess).toBe("Shift+Tab");
@@ -733,6 +787,30 @@ describe("shortcutRegistry editor actions", () => {
         expect(findShortcutConflict("gotoLine", shortcuts.gotoLine, shortcuts, platform)).toBeNull();
         expect(findShortcutConflict("addNextSelectionOccurrence", shortcuts.addNextSelectionOccurrence, shortcuts, platform)).toBeNull();
       }
+    });
+  });
+
+  describe("goToLastEditLocation", () => {
+    it("registers an editor-scope definition with a JetBrains-style default", () => {
+      expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "goToLastEditLocation")).toMatchObject({
+        id: "goToLastEditLocation",
+        labelKey: "settings.shortcutGoToLastEditLocation",
+        scope: "editor",
+        defaultShortcut: "Shift+Mod+Backspace",
+      });
+      expect(DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation).toBe("Shift+Mod+Backspace");
+    });
+
+    it("maps the default to a CodeMirror key that no default binding uses", () => {
+      expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation)).toBe("Shift-Mod-Backspace");
+      expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation, "Win32")).toBe("Ctrl+Shift+Backspace");
+      // CodeMirror 默认键位表只占用 Backspace / Mod-Backspace，Shift+Mod+Backspace 为空闲键位。
+      expect(findShortcutConflict("goToLastEditLocation", DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation, DEFAULT_SHORTCUT_SETTINGS, "Win32")).toBeNull();
+      expect(findShortcutConflict("goToLastEditLocation", DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation, DEFAULT_SHORTCUT_SETTINGS, "MacIntel")).toBeNull();
+    });
+
+    it("keeps an explicit clear as unbound", () => {
+      expect(normalizeShortcutSettings({ goToLastEditLocation: "" }, "Win32").goToLastEditLocation).toBe("");
     });
   });
 

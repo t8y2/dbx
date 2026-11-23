@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { serializeOpenTabs, restoreOpenTabsPayload } from "@/lib/app/openTabsPersistence";
+import { MAX_PERSISTED_TAB_SQL_CHARS, planOpenTabSqlSpill, serializeOpenTabs, restoreOpenTabsPayload } from "@/lib/app/openTabsPersistence";
 import type { QueryTab } from "@/types/database";
 
 function queryTab(overrides: Partial<QueryTab>): QueryTab {
@@ -21,6 +21,20 @@ function roundTrip(tabs: QueryTab[]) {
 }
 
 describe("openTabsPersistence originalSql round-trip", () => {
+  it("persists bookmarks for drafts and clean files before file content hydrates", () => {
+    const tabs = [queryTab({ sql: "a\nb\nc", editorBookmarks: [2, 3] }), queryTab({ id: "file", sql: "a\nb\nc", originalSql: "a\nb\nc", savedSqlId: "saved-example", editorBookmarks: [3] })];
+    const saved = serializeOpenTabs(tabs);
+    expect(saved[1].sql).toBe("");
+    const restored = restoreOpenTabsPayload({ tabs: saved }).tabs;
+    expect(restored.map((tab) => tab.editorBookmarks)).toEqual([[2, 3], [3]]);
+  });
+
+  it("normalizes malformed bookmark state without rejecting the saved session", () => {
+    const restored = restoreOpenTabsPayload({ tabs: [{ ...queryTab({}), editorBookmarks: [3, -1, 0, 3, 1.5, "2", null, 2] }] }).tabs;
+    expect(restored[0].editorBookmarks).toEqual([2, 3]);
+    expect(roundTrip([queryTab({})])[0].editorBookmarks).toEqual([]);
+  });
+
   it("preserves retained result source connections independently of the editor connection", () => {
     const base = { title: "Result", sequence: 1, sql: "SELECT 1", createdAt: 1 };
     const [restored] = roundTrip([
@@ -419,5 +433,70 @@ describe("openTabsPersistence detached connection tabs", () => {
     const [saved] = serializeOpenTabs([queryTab({})]);
 
     expect(saved.detachedConnectionName).toBeUndefined();
+  });
+});
+
+describe("openTabsPersistence oversized SQL", () => {
+  const oversizedSql = `-- head\n${"SELECT 1;\n".repeat(MAX_PERSISTED_TAB_SQL_CHARS / 10)}`;
+
+  it("truncates an oversized editor body and records the original length", () => {
+    const [saved] = serializeOpenTabs([queryTab({ sql: oversizedSql })]).map((tab) => tab as Record<string, unknown>);
+
+    expect((saved.sql as string).length).toBe(MAX_PERSISTED_TAB_SQL_CHARS);
+    expect(saved.sqlTruncated).toBe(true);
+    expect(saved.sqlTruncatedChars).toBe(oversizedSql.length);
+  });
+
+  it("reports the full body as a spill and leaves small tabs alone", () => {
+    const tabs = [queryTab({ id: "big", sql: oversizedSql }), queryTab({ id: "small", sql: "SELECT 1" })];
+
+    const { savedTabs, spills } = planOpenTabSqlSpill(tabs);
+
+    expect(spills.map((spill) => spill.tabId)).toEqual(["big"]);
+    expect(spills[0].sql).toBe(oversizedSql);
+    expect(savedTabs.map((tab) => tab.id)).toEqual(["big", "small"]);
+    expect(savedTabs[0].sqlTruncated).toBe(true);
+    expect(savedTabs[1].sql).toBe("SELECT 1");
+    expect(savedTabs[1].sqlTruncated).toBeUndefined();
+  });
+
+  it("restores the truncation marker and recovery path onto the tab", () => {
+    const [restored] = roundTrip([
+      queryTab({
+        sql: oversizedSql,
+        sqlTruncated: true,
+        sqlTruncatedChars: oversizedSql.length,
+        sqlRecoveryPath: "/tmp/recovery/t1.sql",
+      }),
+    ]);
+
+    expect(restored.sqlTruncated).toBe(true);
+    expect(restored.sqlTruncatedChars).toBe(oversizedSql.length);
+    expect(restored.sqlRecoveryPath).toBe("/tmp/recovery/t1.sql");
+  });
+
+  it("keeps the recovery marker sticky across a re-save", () => {
+    const [restored] = roundTrip([queryTab({ sql: oversizedSql, sqlTruncated: true, sqlTruncatedChars: oversizedSql.length, sqlRecoveryPath: "/tmp/recovery/t1.sql" })]);
+    const [saved] = serializeOpenTabs([restored]);
+
+    expect(saved.sqlTruncated).toBe(true);
+    expect(saved.sqlRecoveryPath).toBe("/tmp/recovery/t1.sql");
+  });
+
+  it("truncates redundant SQL copies (lastExecutedSql, resultBases, result runs)", () => {
+    const [saved] = serializeOpenTabs([
+      queryTab({
+        sql: "SELECT 1",
+        lastExecutedSql: oversizedSql,
+        resultBaseSql: oversizedSql,
+        resultSortedSql: oversizedSql,
+        resultRuns: [{ id: "run-1", title: "Result", sequence: 1, sql: oversizedSql, createdAt: 1 }],
+      }),
+    ]);
+
+    expect(saved.lastExecutedSql?.length).toBe(MAX_PERSISTED_TAB_SQL_CHARS);
+    expect(saved.resultBaseSql?.length).toBe(MAX_PERSISTED_TAB_SQL_CHARS);
+    expect(saved.resultSortedSql?.length).toBe(MAX_PERSISTED_TAB_SQL_CHARS);
+    expect(saved.resultRuns?.[0]?.sql.length).toBe(MAX_PERSISTED_TAB_SQL_CHARS);
   });
 });

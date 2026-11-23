@@ -2622,4 +2622,58 @@ class JdbcConnectionPoolingTest {
             return Collections.emptyList();
         }
     }
+
+    @Test
+    void poolSettingsAndHikariConfigureKeepaliveTime() throws Exception {
+        String prop = "dbx.agent.jdbc.pool.keepaliveTimeMillis";
+        String previous = System.getProperty(prop);
+        try {
+            System.clearProperty(prop);
+            JdbcConnectionPoolRegistry.PoolSettings defaults = JdbcConnectionPoolRegistry.PoolSettings.fromEnvironment();
+            assertEquals(30_000L, defaults.keepaliveTimeMillis());
+            assertEquals(30_000L, defaults.effectiveKeepaliveTimeMillis());
+
+            System.setProperty(prop, "0");
+            JdbcConnectionPoolRegistry.PoolSettings disabled = JdbcConnectionPoolRegistry.PoolSettings.fromEnvironment();
+            assertEquals(0L, disabled.keepaliveTimeMillis());
+            assertEquals(0L, disabled.effectiveKeepaliveTimeMillis());
+
+            System.setProperty(prop, "5000");
+            JdbcConnectionPoolRegistry.PoolSettings clampedMin = JdbcConnectionPoolRegistry.PoolSettings.fromEnvironment();
+            assertEquals(30_000L, clampedMin.keepaliveTimeMillis());
+            assertEquals(30_000L, clampedMin.effectiveKeepaliveTimeMillis());
+
+            System.setProperty(prop, "45000");
+            JdbcConnectionPoolRegistry.PoolSettings custom = JdbcConnectionPoolRegistry.PoolSettings.fromEnvironment();
+            assertEquals(45_000L, custom.keepaliveTimeMillis());
+            assertEquals(45_000L, custom.effectiveKeepaliveTimeMillis());
+
+            // HikariCP requires keepaliveTime < maxLifetime when maxLifetime > 0.
+            JdbcConnectionPoolRegistry.PoolSettings shortLifetime = new JdbcConnectionPoolRegistry.PoolSettings(
+                true, 2, 0, 2_000L, 1_000L, 10_000L, 30_000L, 30_000L, 60_000L, 0, 4, 2
+            );
+            assertEquals(0L, shortLifetime.effectiveKeepaliveTimeMillis());
+
+            String url = h2Url("keepalive_hikari");
+            AtomicInteger opens = new AtomicInteger();
+            try (JdbcConnectionPoolRegistry registry = new JdbcConnectionPoolRegistry(custom)) {
+                try (JdbcConnectionPoolRegistry.Lease lease = registry.borrow("keepalive-pool", () -> openH2(url, opens))) {
+                    assertNotNull(lease.connection());
+                }
+                assertEquals(45_000L, registry.poolKeepaliveTimeMillis("keepalive-pool"));
+            }
+            try (JdbcConnectionPoolRegistry registry = new JdbcConnectionPoolRegistry(disabled)) {
+                try (JdbcConnectionPoolRegistry.Lease lease = registry.borrow("keepalive-disabled-pool", () -> openH2(url, opens))) {
+                    assertNotNull(lease.connection());
+                }
+                assertEquals(0L, registry.poolKeepaliveTimeMillis("keepalive-disabled-pool"));
+            }
+        } finally {
+            if (previous == null) {
+                System.clearProperty(prop);
+            } else {
+                System.setProperty(prop, previous);
+            }
+        }
+    }
 }

@@ -99,12 +99,12 @@ test("cache lockfile paths remain relative to the repository for nested projects
 
 test("pnpm setup precedes setup-node cache restoration and respects nested package.json", () => {
   const pnpmIndex = workflow.indexOf("uses: pnpm/action-setup@v4");
-  const nodeIndex = workflow.indexOf("uses: actions/setup-node@v4");
+  const nodeIndex = workflow.indexOf("uses: actions/setup-node@v7");
   assert.ok(pnpmIndex > 0 && pnpmIndex < nodeIndex);
   const pnpmStep = workflowStep("pnpm/action-setup@v4");
   assert.ok(pnpmStep.includes("package_json_file: ${{ inputs.working-directory }}/package.json"));
   assert.ok(pnpmStep.includes("run_install: false"));
-  assert.ok(workflowStep("actions/setup-node@v4").includes("cache: ${{ steps.node-cache.outputs.cache }}"));
+  assert.ok(workflowStep("actions/setup-node@v7").includes("cache: ${{ steps.node-cache.outputs.cache }}"));
 });
 
 test("Go cache includes backend go.sum and is disabled when no checksum file exists", () => {

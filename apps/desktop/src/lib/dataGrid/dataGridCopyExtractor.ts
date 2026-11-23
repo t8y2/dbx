@@ -1,4 +1,4 @@
-import type { DatabaseType } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
 import type { DataGridCopyInsertMode, DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 
 export const DATA_GRID_COPY_EXTRACTOR_IDS = [
@@ -14,6 +14,7 @@ export const DATA_GRID_COPY_EXTRACTOR_IDS = [
   "one-row",
   "sql-in-list",
   "sql-inserts",
+  "sql-deletes",
   "sql-deletes-inserts",
   "sql-updates",
   "sql-select",
@@ -28,6 +29,12 @@ export const DATA_GRID_COPY_EXTRACTOR_IDS = [
 
 export type DataGridCopyExtractorId = (typeof DATA_GRID_COPY_EXTRACTOR_IDS)[number];
 export type DataGridCopyPreference = "smart" | DataGridCopyExtractorId;
+export const DATA_GRID_SMART_SINGLE_COLUMN_FORMATS = ["raw", "tsv", "csv", "one-row", "sql-in-list", "json", "json-lines"] as const satisfies readonly DataGridCopyExtractorId[];
+export type DataGridSmartSingleColumnFormat = "default" | (typeof DATA_GRID_SMART_SINGLE_COLUMN_FORMATS)[number];
+
+export function normalizeDataGridSmartSingleColumnFormat(value: unknown): DataGridSmartSingleColumnFormat {
+  return DATA_GRID_SMART_SINGLE_COLUMN_FORMATS.find((format) => format === value) ?? "default";
+}
 export type DataGridExtractorCategory = "raw" | "delimited" | "json" | "sql" | "document";
 
 export const DATA_GRID_DEFAULT_COPY_PREFERENCES: readonly DataGridCopyPreference[] = [
@@ -44,6 +51,7 @@ export const DATA_GRID_DEFAULT_COPY_PREFERENCES: readonly DataGridCopyPreference
   "one-row",
   "sql-in-list",
   "sql-inserts",
+  "sql-deletes",
   "sql-deletes-inserts",
   "sql-updates",
   "where-clause",
@@ -60,6 +68,8 @@ export const DATA_GRID_EXTRACTOR_CONTRACT_VERSION = 1 as const;
 // v3：复制/导出 SQL 的「包含数据库名称」默认恢复开启（带库名/模式名，#12146），
 // 历史被 v2 迁移归位为 false 的持久化配置升级到新默认 true。
 export const DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION = 3 as const;
+// v1：已有用户保存的可见复制格式列表需要补入后来新增的 SQL DELETE 提取器。
+export const DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION = 1 as const;
 
 export const DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS: Record<DataGridCopyExtractorId, { category: DataGridExtractorCategory; separatorBefore?: boolean }> = {
   raw: { category: "raw" },
@@ -74,6 +84,7 @@ export const DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS: Record<DataGridCopyExtractorI
   "json-lines": { category: "json" },
   "sql-in-list": { category: "sql", separatorBefore: true },
   "sql-inserts": { category: "sql" },
+  "sql-deletes": { category: "sql" },
   "sql-deletes-inserts": { category: "sql" },
   "sql-updates": { category: "sql" },
   "sql-select": { category: "sql" },
@@ -96,12 +107,14 @@ export type DataGridExtractorOptionsError = "column-separator-empty" | "row-sepa
  * where-clause has no Mongo equivalent, so Mongo IS disabled. */
 const NO_SQL_UPDATE_DATABASE_TYPES: ReadonlyArray<string> = ["neo4j", "tdengine"];
 const NO_SQL_DELETES_INSERTS_DATABASE_TYPES: ReadonlyArray<string> = ["neo4j", "tdengine", "mongodb"];
+const NO_SQL_DELETES_DATABASE_TYPES: ReadonlyArray<string> = ["neo4j", "tdengine", "mongodb"];
 const NO_WHERE_CLAUSE_DATABASE_TYPES: ReadonlyArray<string> = ["neo4j", "tdengine", "mongodb"];
 
 /** True when the extractor emits relational SQL the database type cannot run. */
 export function extractorUnavailableForDatabase(extractor: DataGridCopyExtractorId, databaseType: string | undefined | null): boolean {
   const db = databaseType ?? "";
   if (extractor === "sql-updates") return NO_SQL_UPDATE_DATABASE_TYPES.includes(db);
+  if (extractor === "sql-deletes") return NO_SQL_DELETES_DATABASE_TYPES.includes(db);
   if (extractor === "sql-deletes-inserts") return NO_SQL_DELETES_INSERTS_DATABASE_TYPES.includes(db);
   if (extractor === "where-clause" || extractor === "sql-select") return NO_WHERE_CLAUSE_DATABASE_TYPES.includes(db);
   return false;
@@ -169,6 +182,8 @@ export interface DataGridExtractRequest {
   rows: unknown[][];
   selectionKind: DataGridSelectionKind;
   options: DataGridExtractorOptions;
+  spatialColumns?: QueryResult["spatial_columns"];
+  spatialValues?: QueryResult["spatial_values"];
 }
 
 export type DataGridExtractWarningCode = "omitted-columns" | "duplicate-json-column-names" | "php-date-not-iso";

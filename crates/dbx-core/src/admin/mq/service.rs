@@ -753,6 +753,17 @@ pub async fn mq_get_cluster_info_core(state: &AppState, conn_id: &str) -> Result
     adapter.get_cluster_info().await
 }
 
+pub async fn mq_get_broker_config_core(
+    state: &AppState,
+    conn_id: &str,
+    broker_id: i32,
+) -> Result<serde_json::Value, String> {
+    if broker_id < 0 {
+        return Err("Broker ID must be non-negative".to_string());
+    }
+    get_adapter(state, conn_id).await?.get_broker_config(broker_id).await
+}
+
 pub async fn mq_get_topic_route_core(
     state: &AppState,
     conn_id: &str,

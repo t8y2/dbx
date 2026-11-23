@@ -204,6 +204,7 @@ public final class AgentProtocol {
     public static final String CAPABILITY_NATIVE_JOB_LEGACY_OB_V1 = "native_job_legacy_ob_v1";
     public static final String CAPABILITY_NATIVE_JOB_SESSION_V1 = "native_job_session_v1";
     public static final String CAPABILITY_EXACT_METADATA_IDENTITY_V1 = "exact_metadata_identity_v1";
+    public static final String CAPABILITY_ZOOKEEPER_ENDPOINT_ROUTES = "zookeeper_endpoint_routes";
 
     public static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
         CAPABILITY_CONNECT,
@@ -344,6 +345,8 @@ public final class AgentProtocol {
         MULTI_SESSION_JDBC_CAPABILITIES = Collections.unmodifiableList(jdbcCapabilities);
 
         List<String> jdbcAllCapabilities = new java.util.ArrayList<>(MULTI_SESSION_ALL_CAPABILITIES);
+        // Known optional capability, not a capability advertised by generic JDBC handshakes.
+        jdbcAllCapabilities.add(0, CAPABILITY_ZOOKEEPER_ENDPOINT_ROUTES);
         jdbcAllCapabilities.add(CAPABILITY_STRUCTURED_ERROR_V1);
         jdbcAllCapabilities.add(CAPABILITY_BLOB_BIND_STATEMENTS_V1);
         jdbcAllCapabilities.add(CAPABILITY_NATIVE_JOB_LEGACY_OB_V1);

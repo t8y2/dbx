@@ -12,6 +12,10 @@ export interface CreateDatabaseSqlOptions {
   name: string;
   charset?: string;
   collation?: string;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export function supportsCreateDatabaseCharset(databaseType?: DatabaseType, driverProfile?: string | null): boolean {

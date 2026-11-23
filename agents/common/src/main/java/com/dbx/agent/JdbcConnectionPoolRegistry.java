@@ -46,6 +46,8 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
     private static final long DEFAULT_VALIDATION_TIMEOUT_MILLIS = 5_000L;
     private static final long DEFAULT_IDLE_TIMEOUT_MILLIS = 120_000L;
     private static final long DEFAULT_MAX_LIFETIME_MILLIS = 1_800_000L;
+    private static final long DEFAULT_KEEPALIVE_TIME_MILLIS = 30_000L;
+    private static final long MIN_KEEPALIVE_TIME_MILLIS = 30_000L;
     private static final long DEFAULT_POOL_RETIRE_MILLIS = 300_000L;
     private static final long CHECKOUT_WATCHDOG_GRACE_MILLIS = 50L;
     private static final int DEFAULT_METADATA_RESERVE = 2;
@@ -192,6 +194,11 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
         return entry != null && entry.hasActiveLeases();
     }
 
+    long poolKeepaliveTimeMillis(String identity) {
+        PoolEntry entry = pools.get(digest(identity));
+        return entry == null ? -1L : entry.keepaliveTimeMillis();
+    }
+
     private PoolEntry createPoolEntry(String key, String connectionTestQuery, ConnectionFactory connectionFactory) {
         try {
             ConnectionFactoryDataSource factoryDataSource = new ConnectionFactoryDataSource(
@@ -213,6 +220,7 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             }
             config.setIdleTimeout(settings.idleTimeoutMillis);
             config.setMaxLifetime(settings.maxLifetimeMillis);
+            config.setKeepaliveTime(settings.effectiveKeepaliveTimeMillis());
             config.setInitializationFailTimeout(-1L);
             config.setIsolateInternalQueries(true);
             config.setThreadFactory(daemonThreadFactory("dbx-jdbc-pool-" + key.substring(0, 8)));
@@ -644,6 +652,7 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
         private final long validationTimeoutMillis;
         private final long idleTimeoutMillis;
         private final long maxLifetimeMillis;
+        private final long keepaliveTimeMillis;
         private final long poolRetireMillis;
         private final int metadataReserve;
         private final int globalMaximumPhysicalConnections;
@@ -711,6 +720,36 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             int globalMaximumPhysicalConnections,
             int maxQuarantinedOperations
         ) {
+            this(
+                enabled,
+                maximumPoolSize,
+                minimumIdle,
+                connectionTimeoutMillis,
+                validationTimeoutMillis,
+                idleTimeoutMillis,
+                maxLifetimeMillis,
+                DEFAULT_KEEPALIVE_TIME_MILLIS,
+                poolRetireMillis,
+                metadataReserve,
+                globalMaximumPhysicalConnections,
+                maxQuarantinedOperations
+            );
+        }
+
+        PoolSettings(
+            boolean enabled,
+            int maximumPoolSize,
+            int minimumIdle,
+            long connectionTimeoutMillis,
+            long validationTimeoutMillis,
+            long idleTimeoutMillis,
+            long maxLifetimeMillis,
+            long keepaliveTimeMillis,
+            long poolRetireMillis,
+            int metadataReserve,
+            int globalMaximumPhysicalConnections,
+            int maxQuarantinedOperations
+        ) {
             this.enabled = enabled;
             this.maximumPoolSize = maximumPoolSize;
             this.minimumIdle = minimumIdle;
@@ -718,6 +757,7 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             this.validationTimeoutMillis = validationTimeoutMillis;
             this.idleTimeoutMillis = idleTimeoutMillis;
             this.maxLifetimeMillis = maxLifetimeMillis;
+            this.keepaliveTimeMillis = Math.max(0L, keepaliveTimeMillis);
             this.poolRetireMillis = poolRetireMillis;
             this.metadataReserve = Math.max(0, Math.min(metadataReserve, maximumPoolSize - 1));
             this.globalMaximumPhysicalConnections = Math.max(1, globalMaximumPhysicalConnections);
@@ -778,6 +818,11 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
                     DEFAULT_MAX_LIFETIME_MILLIS,
                     30_000L
                 ),
+                keepaliveSetting(
+                    "dbx.agent.jdbc.pool.keepaliveTimeMillis",
+                    "DBX_AGENT_JDBC_POOL_KEEPALIVE_TIME_MILLIS",
+                    DEFAULT_KEEPALIVE_TIME_MILLIS
+                ),
                 longSetting(
                     "dbx.agent.jdbc.pool.retireMillis",
                     "DBX_AGENT_JDBC_POOL_RETIRE_MILLIS",
@@ -808,6 +853,21 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             );
         }
 
+        long keepaliveTimeMillis() {
+            return keepaliveTimeMillis;
+        }
+
+        long effectiveKeepaliveTimeMillis() {
+            if (keepaliveTimeMillis <= 0L) {
+                return 0L;
+            }
+            if (maxLifetimeMillis > 0L && maxLifetimeMillis <= MIN_KEEPALIVE_TIME_MILLIS) {
+                return 0L;
+            }
+            long clamped = Math.max(MIN_KEEPALIVE_TIME_MILLIS, keepaliveTimeMillis);
+            return maxLifetimeMillis > 0L ? Math.min(clamped, maxLifetimeMillis - 1L) : clamped;
+        }
+
         int effectiveMetadataReserve() {
             return metadataReserve;
         }
@@ -835,6 +895,19 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             }
             try {
                 return Math.max(minimum, Long.parseLong(value.trim()));
+            } catch (NumberFormatException ignored) {
+                return defaultValue;
+            }
+        }
+
+        private static long keepaliveSetting(String property, String environment, long defaultValue) {
+            String value = setting(property, environment);
+            if (value == null) {
+                return defaultValue;
+            }
+            try {
+                long parsed = Long.parseLong(value.trim());
+                return parsed <= 0L ? 0L : Math.max(MIN_KEEPALIVE_TIME_MILLIS, parsed);
             } catch (NumberFormatException ignored) {
                 return defaultValue;
             }
@@ -900,6 +973,10 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             this.checkoutExecutor = checkoutExecutor;
             this.connectionReleaseExecutor = connectionReleaseExecutor;
             this.poolCloseExecutor = poolCloseExecutor;
+        }
+
+        private long keepaliveTimeMillis() {
+            return dataSource.getKeepaliveTime();
         }
 
         private Lease borrow(JdbcSessionRole role) throws SQLException {

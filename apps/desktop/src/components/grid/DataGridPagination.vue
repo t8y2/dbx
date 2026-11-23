@@ -36,6 +36,8 @@ const props = withDefaults(
     canExport?: boolean;
     pageSize: number;
     defaultPageSize: number;
+    allowTablePageSizeDefault?: boolean;
+    hasTablePageSizeDefault?: boolean;
     pageSizeMenuItems: LightDropdownItem[];
     exportMenuItems: LightDropdownItem[];
     exportWarning?: string;
@@ -70,6 +72,8 @@ const emit = defineEmits<{
   loadAllRows: [];
   selectExport: [value: string];
   applyCustomPageSizeAndSetDefault: [];
+  applyCustomPageSizeAndSaveForTable: [];
+  resetTablePageSizeDefault: [];
   // 载荷是聚合值当前显示出来的文本，保证复制到的就是用户看到的那个数
   copySelectionSummary: [text: string];
 }>();
@@ -224,6 +228,10 @@ function handlePageInputKeydown(event: KeyboardEvent) {
         <div class="flex gap-1.5 border-t px-2 py-2">
           <button type="button" class="flex-1 whitespace-nowrap rounded-md border px-2 py-1.5 text-center text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground" @click.stop="emit('applyCustomPageSize')">{{ t("grid.applyForThisQuery") }}</button>
           <button type="button" class="flex-1 whitespace-nowrap rounded-md bg-primary px-2 py-1.5 text-center text-xs text-primary-foreground hover:bg-primary/90" @click.stop="emit('applyCustomPageSizeAndSetDefault')">{{ t("grid.applyAndSetDefault") }}</button>
+        </div>
+        <div v-if="allowTablePageSizeDefault" class="flex flex-col gap-1.5 px-2 pb-2">
+          <button type="button" class="rounded-md border px-2 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground" @click.stop="emit('applyCustomPageSizeAndSaveForTable')">{{ t("grid.setTablePageSizeDefault") }}</button>
+          <button v-if="hasTablePageSizeDefault" type="button" class="rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground" @click.stop="emit('resetTablePageSizeDefault')">{{ t("grid.resetTablePageSizeDefault") }}</button>
         </div>
       </LightDropdown>
       <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || currentPage <= 1" @click="emit('firstPage')"><ChevronsLeft class="h-3 w-3" /></Button>

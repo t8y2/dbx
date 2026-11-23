@@ -1,17 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { isFocusResultGridShortcut, isFocusSqlEditorShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCopyActiveResultShortcut, isFocusResultGridShortcut, isFocusSqlEditorShortcut } from "@/lib/editor/keyboardShortcuts";
 import { DEFAULT_SHORTCUT_SETTINGS, normalizeShortcutSettings, SHORTCUT_DEFINITIONS } from "@/lib/editor/shortcutRegistry";
 import { hasFocusableQueryResult } from "@/lib/query/queryOutput";
 import type { QueryResult, QueryTab } from "@/types/database";
 
 describe("query surface focus shortcuts", () => {
-  it.each(["focusResultGrid", "focusSqlEditor"] as const)("registers %s globally without a default binding", (id) => {
+  it.each(["focusResultGrid", "focusSqlEditor", "copyActiveResult"] as const)("registers %s globally without a default binding", (id) => {
     expect(SHORTCUT_DEFINITIONS.find((definition) => definition.id === id)).toMatchObject({ scope: "global", defaultShortcut: "" });
     expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe("");
     expect(normalizeShortcutSettings({ executeSql: "Mod+Enter" })[id]).toBe("");
   });
 
-  it.each([isFocusResultGridShortcut, isFocusSqlEditorShortcut])("does not consume an unbound shortcut", (matches) => {
+  it.each([isFocusResultGridShortcut, isFocusSqlEditorShortcut, isCopyActiveResultShortcut])("does not consume an unbound shortcut", (matches) => {
     expect(matches({ key: "F6" })).toBe(false);
   });
 
@@ -24,6 +24,16 @@ describe("query surface focus shortcuts", () => {
     expect(isFocusSqlEditorShortcut({ key: "F6" }, shortcuts)).toBe(true);
     expect(isFocusSqlEditorShortcut({ key: "F6", isComposing: true }, shortcuts)).toBe(false);
     expect(isFocusSqlEditorShortcut({ key: "F6" }, { focusSqlEditor: "" })).toBe(false);
+  });
+
+  it("matches only the configured copy-result binding without claiming normal copy by default", () => {
+    const shortcuts = normalizeShortcutSettings({ copyActiveResult: "Mod+Shift+C" });
+    expect(isCopyActiveResultShortcut({ key: "C", ctrlKey: true, shiftKey: true }, shortcuts, "Win32")).toBe(true);
+    expect(isCopyActiveResultShortcut({ key: "C", metaKey: true, shiftKey: true }, shortcuts, "MacIntel")).toBe(true);
+    expect(isCopyActiveResultShortcut({ key: "C", ctrlKey: true, shiftKey: true }, shortcuts, "MacIntel")).toBe(false);
+    expect(isCopyActiveResultShortcut({ key: "c", metaKey: true }, undefined, "MacIntel")).toBe(false);
+    expect(isCopyActiveResultShortcut({ key: "C", metaKey: true, shiftKey: true, isComposing: true }, shortcuts, "MacIntel")).toBe(false);
+    expect(isCopyActiveResultShortcut({ key: "C", metaKey: true, shiftKey: true }, { copyActiveResult: "" }, "MacIntel")).toBe(false);
   });
 });
 

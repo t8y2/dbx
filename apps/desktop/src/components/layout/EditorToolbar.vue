@@ -33,6 +33,7 @@ import {
   RefreshCw,
   UserRound,
   Copy,
+  MessageSquareText,
 } from "@lucide/vue";
 import { supportsInsertValueHints } from "@/lib/sql/insertValueHints";
 import { Button } from "@/components/ui/button";
@@ -52,7 +53,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { catalogDatabaseOptionsKey, databaseAfterCatalogChange, normalizedQueryTabCatalog, queryCatalogSelectorVisible, selectedQueryCatalogName, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
-import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { canClearDefaultDatabase, formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { isSingleDatabase, supportsClearableQuerySchema, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
 import { supportsQueryExecution } from "@/lib/database/databaseFeatureSupport";
 import { connectionIsDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
@@ -61,6 +62,7 @@ import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { formatShortcutDisplay, formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs/editorToolbarLayout";
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
+import { canSaveRoutineToDatabase } from "@/lib/table/routineDefinitionSave";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
@@ -117,9 +119,11 @@ const emit = defineEmits<{
   formatSql: [];
   compressSql: [];
   foldAll: [];
+  toggleLineComment: [];
   unfoldAll: [];
   toggleSqlKeywordCase: [];
   saveSql: [tabId: string];
+  saveRoutineToDatabase: [tabId: string];
   "change-encoding": [value: NonNullable<QueryTab["externalSqlEncoding"]>];
   openSql: [];
   importResultArchive: [];
@@ -150,6 +154,16 @@ const mongoQueryLanguage = computed(() => props.activeTab.mongoQueryLanguage ?? 
 
 function setMongoQueryLanguage(language: MongoQueryLanguage) {
   queryStore.setMongoQueryLanguage(props.activeTab.id, language);
+}
+
+async function copyDatabaseName(database: string) {
+  if (!database) return;
+  try {
+    await copyToClipboard(database);
+    toast(t("connection.copied"));
+  } catch (error) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
 }
 
 async function copyGeneratedMongoShell() {
@@ -353,6 +367,7 @@ const saveTooltip = computed(() => {
 });
 const explainPlanTooltip = computed(() => formatShortcutTooltip(t("toolbar.explainPlan"), settingsStore.editorSettings.shortcuts.explainSql));
 const formatSqlTooltip = computed(() => formatShortcutTooltip(t("toolbar.formatSql"), settingsStore.editorSettings.shortcuts.formatSql));
+const lineCommentTooltip = computed(() => formatShortcutTooltip(t("settings.shortcutToggleLineComment"), settingsStore.editorSettings.shortcuts.toggleLineComment));
 const exPasteSqlInConditionTooltip = computed(() => formatShortcutTooltip(t("toolbar.exPasteSqlInCondition"), settingsStore.editorSettings.shortcuts.exPasteSqlInCondition));
 const isObjectSourceTab = computed(() => !!props.activeTab.objectSource || !!props.activeTab.sourceLoad);
 const objectSourceRefreshing = computed(() => !!props.activeTab.sourceLoad && !props.activeTab.sourceLoad.error);
@@ -380,6 +395,8 @@ const explainAnalyzeTooltip = computed(() => {
   return t("toolbar.autotrace");
 });
 const canSaveSql = computed(() => canSaveSqlTab(props.activeTab));
+const showSaveRoutineToDatabase = computed(() => canSaveRoutineToDatabase(props.activeTab, props.activeConnection));
+watch(showSaveRoutineToDatabase, () => void nextTick(scheduleToolbarMeasurement));
 const keywordCaseIsLower = computed(() => props.sqlKeywordCase === "lower");
 const keywordCaseToggleTooltip = computed(() => (keywordCaseIsLower.value ? t("toolbar.keywordCaseUpper") : t("toolbar.keywordCaseLower")));
 const wordWrapEnabled = computed(() => props.activeTab.forceWordWrap === true || settingsStore.editorSettings.wordWrap);
@@ -420,6 +437,12 @@ const showTxnActions = computed(() => {
   if (props.stickyProvenReadOnlyState) return isTransactionActive.value && props.txnPossiblyDirty === true;
   return isTransactionActive.value;
 });
+const canCommit = computed(() => supportsTransaction.value && showTxnActions.value && !props.activeTab.isExecuting && !props.activeTab.isCancelling && !props.activeTab.isExplaining && props.activeTab.txnStatus !== "ending" && props.activeTab.txnStatus !== "opening");
+function commitFromToolbar() {
+  if (!canCommit.value) return false;
+  emit("commit");
+  return true;
+}
 const transactionTooltip = computed(() => {
   if (hasOpenAutoCommitTransaction.value) return t("settings.keepExplicitTransactionInAutoCommitDescription");
   if (props.activeConnection?.db_type === "sqlserver" && isManualTransactionMode.value) {
@@ -521,6 +544,7 @@ watchEffect(() => {
 });
 
 const isActiveDatabaseDefault = computed(() => isDefaultDatabase(props.activeConnection, activeDatabaseValue.value));
+const isDefaultDatabaseReadOnly = computed(() => isActiveDatabaseDefault.value && !canClearDefaultDatabase(props.activeConnection?.db_type));
 
 // Narrow panes (multi-group splits) condense the toolbar by measured width
 // instead of overflowing or scrolling. See resolveEditorToolbarTier for the
@@ -622,6 +646,7 @@ const databasePickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null
 const schemaPickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null);
 
 defineExpose({
+  commitFromToolbar,
   openConnectionPicker: () => connectionPickerRef.value?.openDropdown() ?? false,
   openDatabasePicker: () => databasePickerRef.value?.openDropdown() ?? false,
   openSchemaPicker: () => schemaPickerRef.value?.openDropdown() ?? false,
@@ -730,6 +755,22 @@ defineExpose({
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ explainAnalyzeTooltip }}</TooltipContent>
+      </Tooltip>
+      <Tooltip v-if="canFormatSql">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground"
+            :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText"
+            :aria-label="t('settings.shortcutToggleLineComment')"
+            @mousedown.prevent
+            @click="emit('toggleLineComment')"
+          >
+            <MessageSquareText class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ lineCommentTooltip }}</TooltipContent>
       </Tooltip>
       <Tooltip v-if="showFormatButton">
         <TooltipTrigger as-child>
@@ -842,6 +883,18 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.blockDangerousRedisCommands") }}</TooltipContent>
       </Tooltip>
+      <Button
+        v-if="showSaveRoutineToDatabase"
+        variant="ghost"
+        size="sm"
+        class="h-6 shrink-0 gap-1 px-2 text-xs text-blue-600 hover:bg-blue-500/10 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200"
+        :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining"
+        :aria-label="t('toolbar.saveRoutineToDatabase')"
+        @click="emit('saveRoutineToDatabase', props.activeTab.id)"
+      >
+        <Save class="h-3.5 w-3.5" />
+        {{ t("toolbar.saveRoutineToDatabase") }}
+      </Button>
       <Tooltip>
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6 text-blue-600 hover:bg-blue-500/10 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200" :disabled="!canSaveSql" @click="emit('saveSql', props.activeTab.id)">
@@ -964,7 +1017,7 @@ defineExpose({
               <X class="h-3.5 w-3.5" />
               {{ t("editor.clearDatabase") }}
             </DropdownMenuItem>
-            <DropdownMenuItem v-if="activeDatabaseValue && !activeTab.catalog" @select="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
+            <DropdownMenuItem v-if="activeDatabaseValue && !activeTab.catalog" :disabled="isDefaultDatabaseReadOnly" @select="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
               <Check v-if="isActiveDatabaseDefault" class="h-3 w-3" />
               {{ isActiveDatabaseDefault ? t("editor.defaultDatabase") : t("editor.setDefaultDatabase") }}
             </DropdownMenuItem>
@@ -992,9 +1045,7 @@ defineExpose({
               <span class="inline-flex items-center gap-px leading-none" aria-hidden="true">
                 <span class="text-[11px] font-bold">Tx:</span>
                 <span class="inline-flex h-3 min-w-3 items-center justify-center rounded-[3px] border border-current px-px text-[8px] font-extrabold leading-none">{{ transactionModeBadge }}</span>
-                <!-- Auto-commit tab with an uncommitted explicit transaction:
-                     the commit/rollback actions next to the badge act on it. -->
-                <span v-if="hasOpenAutoCommitTransaction" data-toolbar-open-transaction-dot class="ml-px h-1.5 w-1.5 rounded-full bg-current" />
+                <span v-if="showTxnActions" data-toolbar-open-transaction-dot class="ml-px h-1.5 w-1.5 rounded-full bg-current" />
               </span>
             </Button>
           </TooltipTrigger>
@@ -1003,14 +1054,7 @@ defineExpose({
         <!-- Commit button (only when a transaction action is warranted) -->
         <Tooltip v-if="showTxnActions">
           <TooltipTrigger as-child>
-            <Button
-              variant="ghost"
-              size="icon"
-              class="h-6 w-6 text-green-600 hover:bg-green-500/10 hover:text-green-700 dark:text-green-300 dark:hover:text-green-200"
-              :disabled="activeTab.isExecuting || activeTab.txnStatus === 'ending' || activeTab.txnStatus === 'opening'"
-              :aria-label="t('toolbar.commit')"
-              @click="emit('commit')"
-            >
+            <Button variant="ghost" size="icon" class="h-6 w-6 text-green-600 hover:bg-green-500/10 hover:text-green-700 dark:text-green-300 dark:hover:text-green-200" :disabled="!canCommit" :aria-label="t('toolbar.commit')" @click="commitFromToolbar">
               <Check class="h-3.5 w-3.5" />
             </Button>
           </TooltipTrigger>
@@ -1037,7 +1081,6 @@ defineExpose({
     </div>
     <div class="flex shrink-0 items-center gap-2">
       <div class="flex shrink-0 items-center gap-1" :class="{ 'connection-required-prompt': connectionRequiredVisible }">
-        <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
         <LightTooltip text="" :disabled="connectionPickerOpen || !activeConnectionDetailRows.length" side="bottom" :side-offset="6" :delay="250" :close-delay="80" surface="popover">
           <ConnectionTreeSelect
             ref="connectionPickerRef"
@@ -1152,6 +1195,20 @@ defineExpose({
               <ProductionContextBadge v-if="databaseOptionIsProduction(option)" compact />
             </div>
           </template>
+          <template #option-action="{ option }">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              class="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+              :data-copy-database-name="option"
+              :aria-label="`${t('contextMenu.copyName')}: ${option}`"
+              :title="`${t('contextMenu.copyName')}: ${option}`"
+              @click.stop="copyDatabaseName(option)"
+            >
+              <Copy class="h-3.5 w-3.5" />
+            </Button>
+          </template>
         </SearchableSelect>
         <Tooltip v-if="showDatabaseHelperButtons && activeDatabaseValue && !isSingleDb">
           <TooltipTrigger as-child>
@@ -1161,7 +1218,7 @@ defineExpose({
           </TooltipTrigger>
           <TooltipContent>{{ t("editor.clearDatabase") }}</TooltipContent>
         </Tooltip>
-        <Button v-if="showDatabaseHelperButtons && activeDatabaseValue && !activeTab.catalog" variant="ghost" size="sm" class="h-6 px-2 text-[11px]" @click="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
+        <Button v-if="showDatabaseHelperButtons && activeDatabaseValue && !activeTab.catalog" variant="ghost" size="sm" class="h-6 px-2 text-[11px]" :disabled="isDefaultDatabaseReadOnly" @click="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
           <Check v-if="isActiveDatabaseDefault" class="h-3 w-3" />
           {{ isActiveDatabaseDefault ? t("editor.defaultDatabase") : t("editor.setDefaultDatabase") }}
         </Button>
@@ -1176,6 +1233,7 @@ defineExpose({
           :empty-text="t('grid.noSearchResults')"
           :loading-text="t('common.loading')"
           :loading="!!activeConnection && isLoadingSchemas(activeConnection.id, schemaDatabaseKey)"
+          :clearable="activeConnection?.db_type === 'postgres' && activeTab.mode === 'query'"
           :clear-selected-option="supportsClearableQuerySchema(activeConnection?.db_type)"
           trigger-variant="ghost"
           trigger-class="gap-1.5"

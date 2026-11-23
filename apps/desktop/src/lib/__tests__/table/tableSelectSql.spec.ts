@@ -321,6 +321,12 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableIdentifierIfNeeded("clickhouse", "col$1")).toBe("`col$1`");
   });
 
+  it("does not wrap an already quoted PostgreSQL identifier again (#14194)", () => {
+    expect(quoteTableIdentifier("postgres", '"neptune"')).toBe('"neptune"');
+    expect(quoteTableIdentifier("postgres", "neptune")).toBe('"neptune"');
+    expect(quoteTableDataIdentifier("postgres", '"neptune"', '"')).toBe('"neptune"');
+  });
+
   it("uses a JDBC driver's reported quote for required identifiers", () => {
     expect(quoteTableIdentifierIfNeeded("jdbc", "student", '"')).toBe("student");
     expect(quoteTableIdentifierIfNeeded("jdbc", "Order", '"')).toBe('"Order"');

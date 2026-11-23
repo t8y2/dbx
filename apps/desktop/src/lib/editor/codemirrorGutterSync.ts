@@ -86,9 +86,21 @@ export function keepGuttersAttachedDuringSync(ViewPlugin: typeof import("@codemi
   return ViewPlugin.fromClass(
     class {
       private guard: GutterSyncGuard | null = null;
+      private scrollDOM?: HTMLElement;
+      private onScroll?: () => void;
+      private scrolledX = false;
+      /** The `.cm-gutters` element the flag was last applied to; `undefined` until it is applied. */
+      private styledGutters: HTMLElement | null | undefined = undefined;
 
       constructor(view: EditorView) {
         this.guard = attachGutterSyncGuard(view);
+        const scrollDOM = (view as unknown as { scrollDOM?: HTMLElement }).scrollDOM;
+        if (scrollDOM && typeof scrollDOM.addEventListener === "function") {
+          this.scrollDOM = scrollDOM;
+          this.onScroll = () => this.syncScroll();
+          this.scrollDOM.addEventListener("scroll", this.onScroll, { passive: true });
+          this.syncScroll();
+        }
       }
 
       update(update: import("@codemirror/view").ViewUpdate) {
@@ -96,14 +108,53 @@ export function keepGuttersAttachedDuringSync(ViewPlugin: typeof import("@codemi
         // that swaps the gutter extensions replaces the plugin value, so the
         // guard is re-attached until it is holding the live host.
         const held = this.guard;
-        if (held && held.host === gutterSyncHost(update.view) && held.host[SYNC_GUTTERS] === held.guarded) return;
-        if (held) releaseGutterSyncGuard(held);
-        this.guard = attachGutterSyncGuard(update.view);
+        if (!held || held.host !== gutterSyncHost(update.view) || held.host[SYNC_GUTTERS] !== held.guarded) {
+          if (held) releaseGutterSyncGuard(held);
+          this.guard = attachGutterSyncGuard(update.view);
+        }
+        // Only a replaced `.cm-gutters` element (a gutter reconfigure) needs the
+        // flag here. The horizontal offset itself only ever moves through a
+        // `scroll` event — including the clamp after content shrinks — so it is
+        // not re-read: reading `scrollLeft` inside a view update forces a
+        // synchronous layout of the DOM CodeMirror has just invalidated, which
+        // cost a reflow on every selection change of a drag.
+        this.applyScrolledX();
       }
 
       destroy() {
         if (this.guard) releaseGutterSyncGuard(this.guard);
         this.guard = null;
+        if (this.scrollDOM && this.onScroll) {
+          this.scrollDOM.removeEventListener("scroll", this.onScroll);
+          this.scrollDOM.removeAttribute("data-scrolled-x");
+          const gutters = this.scrollDOM.querySelector<HTMLElement>(".cm-gutters");
+          gutters?.removeAttribute("data-scrolled-x");
+          gutters?.classList.remove("cm-gutters-scrolled-x");
+        }
+        this.styledGutters = undefined;
+      }
+
+      private syncScroll() {
+        if (!this.scrollDOM) return;
+        const isScrolledX = (this.scrollDOM.scrollLeft ?? 0) > 0;
+        if (isScrolledX !== this.scrolledX) {
+          this.scrolledX = isScrolledX;
+          this.styledGutters = undefined;
+        }
+        this.applyScrolledX();
+      }
+
+      private applyScrolledX() {
+        if (!this.scrollDOM) return;
+        const gutters = this.scrollDOM.querySelector<HTMLElement>(".cm-gutters");
+        if (gutters === this.styledGutters) return;
+        this.styledGutters = gutters;
+        const isScrolledX = this.scrolledX;
+        this.scrollDOM.toggleAttribute("data-scrolled-x", isScrolledX);
+        if (gutters) {
+          gutters.toggleAttribute("data-scrolled-x", isScrolledX);
+          gutters.classList.toggle("cm-gutters-scrolled-x", isScrolledX);
+        }
       }
     },
   );

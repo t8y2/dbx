@@ -91,6 +91,9 @@ pub(crate) fn adopt_published_transport(state: &AppState, connection_id: &str, s
     let mut registry = state.pl_debug.lock();
     if let Some(record) = registry.transports.get_mut(connection_id) {
         if record.stamp.same_runtime(stamp) {
+            if let Some(endpoint) = &record.endpoint {
+                endpoint.mark_zookeeper_transport_published();
+            }
             record.stamp = stamp.clone();
         }
     }
@@ -125,6 +128,47 @@ pub(crate) fn retire_transport(state: &AppState, connection_id: &str, expected: 
         .is_some_and(|record| expected.is_some_and(|stamp| record.stamp.same_token(stamp)))
     {
         registry.transports.remove(connection_id);
+    }
+}
+
+/// Queue cancellation behind any in-flight pool publication. Checking only the
+/// token under the registry lock is insufficient: an older same-runtime attempt
+/// can already own the publication gate while waiting for the pool map lock.
+pub(crate) fn retire_unpublished_zookeeper_transport(
+    state: &AppState,
+    connection_id: &str,
+    stamp: &ConnectionTransportStamp,
+) {
+    let registry = state.pl_debug.clone();
+    let gate = {
+        let mut entries = registry.lock();
+        if !entries.transports.get(connection_id).is_some_and(|record| {
+            record.stamp.same_token(stamp)
+                && record.endpoint.as_ref().is_some_and(ConnectionEndpoint::has_unpublished_zookeeper_transport)
+        }) {
+            return;
+        }
+        entries
+            .connection_gates
+            .entry(connection_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let connection_id = connection_id.to_owned();
+    let stamp = stamp.clone();
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            // This is intentionally detached from the canceled scope. That scope
+            // may itself own a mutation fence and must be able to release it first.
+            let _gate = gate.lock_owned().await;
+            let mut entries = registry.lock();
+            if entries.transports.get(&connection_id).is_some_and(|record| {
+                record.stamp.same_token(&stamp)
+                    && record.endpoint.as_ref().is_some_and(ConnectionEndpoint::has_unpublished_zookeeper_transport)
+            }) {
+                entries.transports.remove(&connection_id);
+            }
+        });
     }
 }
 

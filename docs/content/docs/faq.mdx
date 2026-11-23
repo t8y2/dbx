@@ -30,6 +30,15 @@ description: Frequently asked questions about DBX, including where connection da
 
     The `portable.dbx` marker only works on Windows, and it is ignored when `uninstall.exe` sits next to the executable (installed builds). There is no in-app setting for the data directory.
   </Accordion>
+  <Accordion title="Can I run multiple DBX instances?">
+    Release desktop builds scope their single-instance guard to the resolved data directory. Launching the same directory again still forwards files and deep links to the running instance; different directories can run concurrently. This covers isolated AppData environments, multiple Windows portable folders, and profiles selected with `DBX_DATA_DIR`.
+
+    Directories are created and canonicalized first, so path aliases to the same directory cannot bypass the guard. A directory creation or resolution failure aborts startup rather than launching unlocked. Each profile retains its own configuration database and WAL files; this does not permit multiple instances to open the same configuration database concurrently.
+
+    Custom and portable profiles also keep `.window-state.json` and `.window-geometry.json` inside their data directory; default installations retain their existing window-state location. Each MCP bridge binds an available system port and publishes `mcp-bridge-port` in its own data directory. Point MCP clients to the matching `DBX_DATA_DIR`.
+
+    The application identifier, credential identity, and updater identity remain unchanged. This does not change WebView cache locations or provide OS-account or network isolation; use separate OS accounts or sandbox environments when security isolation is required. Fully quit older versions before upgrading; do not run old and new versions against the same data directory. Debug builds retain their existing disabled single-instance guard.
+  </Accordion>
   <p>See the [Data Security Upgrade and Migration guide](/en/docs/data-security-migration) before upgrading an existing installation.</p>
 </Accordions>
 

@@ -325,6 +325,49 @@ describe("buildSnippetItems", () => {
     const items = buildSnippetItemsForTest("", TEST_SNIPPETS);
     expect(items).toEqual([]);
   });
+
+  it("renumbers a VSCode-style $0 final cursor past the last tabstop", () => {
+    const items = buildSnippetItemsForTest("ssf", [{ id: "1", label: "select", prefix: "ssf", body: "SELECT *\nFROM ${1:table}\nWHERE $0" }]);
+
+    // CodeMirror has no $0: it is renumbered to max tabstop + 1 so Tab walks
+    // ${1} and then lands on the $0 position as the final field.
+    expect(items[0].apply).toBe("SELECT *\nFROM ${1:table}\nWHERE ${2}");
+    // The completion detail keeps showing the body as typed.
+    expect(items[0].detail).toBe("SELECT *\nFROM ${1:table}\nWHERE $0");
+  });
+
+  it("keeps $0 as the only field when the snippet has no other tabstops", () => {
+    const items = buildSnippetItemsForTest("ssf", [{ id: "1", label: "select", prefix: "ssf", body: "SELECT * FROM $0;" }]);
+
+    expect(items[0].apply).toBe("SELECT * FROM ${1};");
+  });
+
+  it.each([
+    ["${0}", "SELECT * FROM ${1:table} ${2};"],
+    ["${0:value}", "SELECT * FROM ${1:table} ${2:value};"],
+  ] as const)("renumbers the braced %s final cursor form", (cursor, expected) => {
+    const items = buildSnippetItemsForTest("ssf", [{ id: "1", label: "select", prefix: "ssf", body: `SELECT * FROM \${1:table} ${cursor};` }]);
+
+    expect(items[0].apply).toBe(expected);
+  });
+
+  it("mirrors repeated $0 positions into one final field", () => {
+    const items = buildSnippetItemsForTest("jf", [{ id: "1", label: "join", prefix: "jf", body: "$0 JOIN $0" }]);
+
+    expect(items[0].apply).toBe("${1} JOIN ${1}");
+  });
+
+  it("does not interpret a longer numeric token as the final cursor", () => {
+    const items = buildSnippetItemsForTest("pf", [{ id: "1", label: "prepared", prefix: "pf", body: "SELECT $01, $0" }]);
+    expect(items[0].apply).toBe("SELECT $01, ${2}");
+  });
+
+  it("keeps escaped and PostgreSQL bind-parameter dollars literal", () => {
+    const items = buildSnippetItemsForTest("pf", [{ id: "1", label: "prepared", prefix: "pf", body: "EXECUTE stmt($1, $2) -- \\$0 stays" }]);
+
+    // $1/$2 are valid PostgreSQL bind parameters, not tabstops; \$0 is escaped.
+    expect(items[0].apply).toBe("EXECUTE stmt($1, $2) -- \\$0 stays");
+  });
 });
 
 describe("snippet ranking", () => {
@@ -361,5 +404,45 @@ describe("snippet ranking", () => {
     const firstNonSequence = items.findIndex((item) => item.type !== "sequence");
     expect(firstSequence).toBeGreaterThanOrEqual(0);
     expect(firstSequence).toBeLessThan(firstNonSequence);
+  });
+});
+
+describe("snippets that only match loosely (#15292)", () => {
+  const HAN_SNIPPETS: SqlSnippet[] = [
+    { id: "han-1", label: "cx企微活码数据", prefix: "cx企微活码数据", body: "SELECT 1;" },
+    { id: "han-2", label: "cx企微工作时间欢迎语调整", prefix: "cx企微工作时间欢迎语调整", body: "SELECT 2;" },
+  ];
+
+  it("keeps the real keyword ahead of a snippet matched only by scattered pinyin initials", () => {
+    const items = buildSqlCompletionItems("SELECT * FROM t wh", 18, {
+      snippets: HAN_SNIPPETS,
+      tables: [{ name: "t", type: "table" }],
+      columnsByTable: new Map(),
+      databaseType: "mysql",
+    });
+
+    const keywordIndex = items.findIndex((item) => item.type === "keyword" && item.label === "WHERE");
+    const snippetIndex = items.findIndex((item) => item.type === "snippet");
+    expect(keywordIndex).toBeGreaterThanOrEqual(0);
+    expect(snippetIndex).toBeGreaterThanOrEqual(0);
+    expect(keywordIndex).toBeLessThan(snippetIndex);
+  });
+
+  it("still ranks a snippet first when the typed letters are its pinyin prefix", () => {
+    const items = buildSnippetItemsForTest("qw", [{ id: "han-3", label: "企微活码", prefix: "企微活码", body: "SELECT 3;" }], undefined, "mysql");
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.boost).toBeGreaterThan(4000);
+  });
+
+  it("still ranks a snippet whose prefix starts with the typed letters ahead of keywords", () => {
+    const items = buildSqlCompletionItems("wh", 2, {
+      snippets: [{ id: "wh-1", label: "where helper", prefix: "wh", body: "WHERE 1 = 1" }],
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "mysql",
+    });
+
+    expect(items[0]).toEqual(expect.objectContaining({ type: "snippet", label: "where helper" }));
   });
 });

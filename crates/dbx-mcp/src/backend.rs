@@ -57,7 +57,7 @@ impl From<&ConnectionConfig> for ConnectionSummary {
     }
 }
 
-fn legacy_mcp_allow_writes() -> Option<bool> {
+pub(crate) fn legacy_mcp_allow_writes() -> Option<bool> {
     parse_legacy_mcp_allow_writes(&std::env::var("DBX_MCP_ALLOW_WRITES").ok()?)
 }
 
@@ -350,6 +350,21 @@ pub trait DbxBackend: Send + Sync {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult;
+    /// Runs the SQL `execute_query` agent tool for the stateless
+    /// `dbx_execute_query` path. Text content and safety gates match
+    /// `execute_agent_tool("execute_query")`; backends may additionally
+    /// return the executed result so the server can attach
+    /// `structuredContent.result` (#15149). The default keeps the text-only
+    /// contract for backends without a structured result.
+    async fn execute_query_agent_tool(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        arguments: Value,
+        permissions: AgentSqlPermissions,
+    ) -> (ToolResult, Option<dbx_core::db::QueryResult>) {
+        (self.execute_agent_tool(connection, database, "execute_query", arguments, permissions).await, None)
+    }
     #[cfg(feature = "mq-admin")]
     async fn send_message(
         &self,
@@ -1028,13 +1043,26 @@ impl LocalBackend {
             if config.plugin_id.as_deref() != Some(plugin_id) {
                 return Err(format!("Connection \"{connection_id}\" is not bound to plugin \"{plugin_id}\""));
             }
-            let lifecycle = self.state.plugin_host.connection_params_standalone(&config)?;
+            let lifecycle = self.plugin_tool_lifecycle(&config).await?;
             params["lifecycle"] = lifecycle;
         }
         self.state
             .plugin_host
             .invoke(plugin_id, "mcp/call", params, None, Some(std::time::Duration::from_secs(300)))
             .await
+    }
+
+    async fn plugin_tool_lifecycle(&self, config: &ConnectionConfig) -> Result<Value, String> {
+        // Validate the saved provider before starting its transport. Keep the
+        // logical endpoint intact for SSH host-key checks and let the shared
+        // host transport resolve profiles, proxy chains and tunnel reuse.
+        let mut lifecycle = self.state.plugin_host.connection_params_standalone(config)?;
+        let endpoint = self.state.plugin_connection_endpoint(&config.id, config).await?;
+        lifecycle["runtime"] = json!({ "host": endpoint.host, "port": endpoint.port });
+        if let Some(proxy) = endpoint.proxy {
+            lifecycle["runtime"]["proxy"] = serde_json::to_value(proxy).map_err(|error| error.to_string())?;
+        }
+        Ok(lifecycle)
     }
 
     /// Opt-in, parallel `mcp/tools` discovery for the external surface:
@@ -1427,6 +1455,32 @@ impl DbxBackend for LocalBackend {
         let call =
             ToolCall { id: format!("mcp-{tool_name}"), name: tool_name.to_string(), arguments, provider_payload: None };
         agent_tools::execute_tool(
+            &call,
+            &self.state,
+            &connection.id,
+            database,
+            schema.as_deref(),
+            &connection.db_type,
+            permissions,
+        )
+        .await
+    }
+
+    async fn execute_query_agent_tool(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        arguments: Value,
+        permissions: AgentSqlPermissions,
+    ) -> (ToolResult, Option<dbx_core::db::QueryResult>) {
+        let schema = arguments.get("schema").and_then(|value| value.as_str()).map(ToOwned::to_owned);
+        let call = ToolCall {
+            id: "mcp-execute_query".to_string(),
+            name: "execute_query".to_string(),
+            arguments,
+            provider_payload: None,
+        };
+        agent_tools::execute_query_tool_with_result(
             &call,
             &self.state,
             &connection.id,
@@ -3180,10 +3234,81 @@ pub fn new_connection_config(
     ssl: bool,
     driver_profile: Option<String>,
 ) -> Result<ConnectionConfig, String> {
+    new_connection_config_with_external_config(
+        id,
+        name,
+        db_type,
+        host,
+        port,
+        username,
+        password,
+        database,
+        ssl,
+        driver_profile,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Nacos connections need a dialect-specific `external_config` to be reachable:
+/// Nacos 2.x only serves its API under the `/nacos` context, and the desktop
+/// dialog defaults new connections to `implementation=nacos`, `versionMode=v2`,
+/// `contextPath=/nacos`. MCP-created connections must get the same defaults, and
+/// a user-provided `external_config` wins field-by-field while host, port,
+/// credentials and the namespace (from `database`) fill the rest (#14527).
+pub fn new_connection_config_with_external_config(
+    id: String,
+    name: String,
+    db_type: DatabaseType,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    database: Option<String>,
+    ssl: bool,
+    driver_profile: Option<String>,
+    external_config: Option<serde_json::Value>,
+) -> Result<ConnectionConfig, String> {
     let minimal =
         NewConnectionConfig { id, name, db_type, host, port, username, password, database, ssl, driver_profile };
-    serde_json::from_value(serde_json::to_value(minimal).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
+    let mut config: ConnectionConfig =
+        serde_json::from_value(serde_json::to_value(minimal).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    if config.db_type != DatabaseType::Nacos {
+        if external_config.is_some() {
+            return Err("external_config is only supported for Nacos connections.".to_string());
+        }
+        return Ok(config);
+    }
+    let mut merged = match external_config {
+        Some(serde_json::Value::Object(map)) => map,
+        Some(_) => return Err("external_config must be a JSON object.".to_string()),
+        None => serde_json::Map::new(),
+    };
+    let scheme = if config.ssl { "https" } else { "http" };
+    merged
+        .entry("serverAddr".to_string())
+        .or_insert_with(|| serde_json::json!(format!("{scheme}://{}:{}", config.host.trim(), config.port)));
+    if config.database.as_deref().is_some_and(|namespace| !namespace.trim().is_empty()) {
+        merged.entry("namespace".to_string()).or_insert_with(|| serde_json::json!(config.database));
+    }
+    if !config.username.trim().is_empty() {
+        merged
+            .entry("auth".to_string())
+            .or_insert_with(|| serde_json::json!({ "kind": "usernamePassword", "username": config.username, "password": config.password }));
+    }
+    merged.entry("implementation".to_string()).or_insert_with(|| serde_json::json!("nacos"));
+    merged.entry("versionMode".to_string()).or_insert_with(|| serde_json::json!("v2"));
+    merged.entry("contextPath".to_string()).or_insert_with(|| serde_json::json!("/nacos"));
+    let parsed: dbx_core::admin::nacos::config::NacosAdminConfig =
+        serde_json::from_value(serde_json::Value::Object(merged))
+            .map_err(|error| format!("Failed to parse Nacos external_config: {error}"))?;
+    config.external_config = Some(serde_json::to_value(&parsed).map_err(|error| error.to_string())?);
+    // Validate and store the normalized form so endpoint/context errors surface
+    // at add time instead of when the connection is first opened.
+    let validated = dbx_core::admin::nacos::config::NacosAdminConfig::from_connection(&config)?;
+    config.external_config = Some(serde_json::to_value(&validated).map_err(|error| error.to_string())?);
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -3281,6 +3406,158 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    async fn plugin_transport_backend(data_dir: &Path, proxy_route: bool) -> (LocalBackend, ConnectionConfig) {
+        let plugins_dir = data_dir.join("plugins");
+        let plugin_dir = plugins_dir.join("sample.transport");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // Lifecycle preparation resolves the provider but never launches it.
+        std::fs::write(plugin_dir.join("unused.exe"), b"").unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            json!({
+                "manifest_version": 1,
+                "id": "sample.transport",
+                "name": "Transport fixture",
+                "version": "1.0.0",
+                "publisher": "sample",
+                "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                "entrypoints": { "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "unused.exe"
+                } },
+                "contributions": [{
+                    "type": "connection-provider",
+                    "id": "sample.transport.connection",
+                    "database_type": "sample",
+                    "capabilities": ["connect"],
+                    "proxy_route": proxy_route
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&data_dir.join("dbx.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir_and_app_version(storage, plugins_dir, "0.7.0");
+        let backend = LocalBackend::from_app_state(Arc::new(state), data_dir.to_path_buf());
+        let mut config = mutation_test_connection();
+        config.db_type = DatabaseType::Plugin;
+        config.host = "192.0.2.65".to_string();
+        config.port = 61050;
+        config.plugin_id = Some("sample.transport".to_string());
+        config.plugin_connection_provider = Some("sample.transport.connection".to_string());
+        config.plugin_connection_type = Some("sample".to_string());
+        (backend, config)
+    }
+
+    #[tokio::test]
+    async fn plugin_mcp_direct_lifecycle_preserves_logical_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let (backend, config) = plugin_transport_backend(dir.path(), false).await;
+        let lifecycle = backend.plugin_tool_lifecycle(&config).await.unwrap();
+        assert_eq!(lifecycle["connection"]["host"], config.host);
+        assert_eq!(lifecycle["connection"]["port"], config.port);
+        assert_eq!(lifecycle["runtime"]["host"], config.host);
+        assert_eq!(lifecycle["runtime"]["port"], config.port);
+        assert!(lifecycle["runtime"].get("proxy").is_none());
+    }
+
+    #[tokio::test]
+    async fn plugin_mcp_saved_proxy_routes_traffic_without_changing_host_key_identity() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        // Both static-endpoint providers (SSH) and proxy-route providers
+        // (multi-endpoint services) must inherit the saved host transport.
+        for proxy_route in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (backend, mut config) = plugin_transport_backend(dir.path(), proxy_route).await;
+            let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let proxy_port = proxy.local_addr().unwrap().port();
+            config.transport_layers = serde_json::from_value(json!([{
+                "type": "proxy", "id": "test-proxy", "enabled": true,
+                "proxy_type": "socks5", "host": "127.0.0.1", "port": proxy_port
+            }]))
+            .unwrap();
+            let fake_proxy = tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let (mut stream, _) = proxy.accept().await.unwrap();
+                    let mut greeting = [0; 2];
+                    stream.read_exact(&mut greeting).await.unwrap();
+                    assert_eq!(greeting[0], 5);
+                    let mut methods = vec![0; greeting[1] as usize];
+                    stream.read_exact(&mut methods).await.unwrap();
+                    assert!(methods.contains(&0));
+                    stream.write_all(&[5, 0]).await.unwrap();
+                    let mut request = [0; 4];
+                    stream.read_exact(&mut request).await.unwrap();
+                    assert_eq!(&request[..3], &[5, 1, 0]);
+                    match request[3] {
+                        1 => {
+                            let mut host = [0; 4];
+                            stream.read_exact(&mut host).await.unwrap();
+                            assert_eq!(host, [192, 0, 2, 65]);
+                        }
+                        3 => {
+                            let len = stream.read_u8().await.unwrap();
+                            let mut host = vec![0; len as usize];
+                            stream.read_exact(&mut host).await.unwrap();
+                            assert_eq!(host, b"192.0.2.65");
+                        }
+                        other => panic!("Unexpected SOCKS5 address type: {other}"),
+                    }
+                    assert_eq!(stream.read_u16().await.unwrap(), 61050);
+                    stream.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 22]).await.unwrap();
+                    stream.write_all(b"SSH-2.0-fixture\r\n").await.unwrap();
+                    // Exercise both relay directions, not just the handshake.
+                    let mut message = [0; 4];
+                    stream.read_exact(&mut message).await.unwrap();
+                    assert_eq!(&message, b"ping");
+                    stream.write_all(b"pong").await.unwrap();
+                })
+                .await
+                .expect("saved proxy was not used");
+            });
+
+            let lifecycle = backend.plugin_tool_lifecycle(&config).await.unwrap();
+            assert_eq!(lifecycle["connection"]["host"], "192.0.2.65");
+            assert_eq!(lifecycle["connection"]["port"], 61050);
+            let runtime = &lifecycle["runtime"];
+            let dial = if proxy_route {
+                assert_eq!(runtime["proxy"]["type"], "socks5");
+                &runtime["proxy"]
+            } else {
+                assert!(runtime.get("proxy").is_none());
+                runtime
+            };
+            assert_eq!(dial["host"], "127.0.0.1");
+            let port = u16::try_from(dial["port"].as_u64().unwrap()).unwrap();
+            let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            if proxy_route {
+                client.write_all(&[5, 1, 0]).await.unwrap();
+                let mut greeting = [0; 2];
+                client.read_exact(&mut greeting).await.unwrap();
+                assert_eq!(greeting, [5, 0]);
+                client.write_all(&[5, 1, 0, 1, 192, 0, 2, 65, 238, 122]).await.unwrap();
+                let mut response = [0; 10];
+                client.read_exact(&mut response).await.unwrap();
+                assert_eq!(&response[..4], &[5, 0, 0, 1]);
+            }
+            let exchange = async {
+                let mut banner = [0; 17];
+                client.read_exact(&mut banner).await.unwrap();
+                assert_eq!(&banner, b"SSH-2.0-fixture\r\n");
+                client.write_all(b"ping").await.unwrap();
+                let mut reply = [0; 4];
+                client.read_exact(&mut reply).await.unwrap();
+                assert_eq!(&reply, b"pong");
+            };
+            tokio::time::timeout(Duration::from_secs(5), exchange).await.unwrap();
+            drop(client);
+            fake_proxy.await.unwrap();
+            backend.state.reset_connection_transport_for_config(&config.id, &config).await;
+        }
     }
 
     #[test]
@@ -4095,6 +4372,8 @@ mod tests {
                     partition: Some(2),
                     offset: Some(17),
                     timestamp: None,
+                    end_timestamp: None,
+                    sort_order: None,
                 },
             )
             .await
@@ -5416,5 +5695,132 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not supported"));
+    }
+}
+
+#[cfg(test)]
+mod nacos_external_config_tests {
+    use super::*;
+    use dbx_core::admin::nacos::config::{NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosVersionMode};
+
+    fn nacos_connection(external_config: Option<Value>) -> ConnectionConfig {
+        new_connection_config_with_external_config(
+            "nacos-1".into(),
+            "Nacos".into(),
+            DatabaseType::Nacos,
+            "127.0.0.1".into(),
+            8848,
+            "nacos".into(),
+            "secret".into(),
+            Some("public".into()),
+            false,
+            None,
+            external_config,
+        )
+        .unwrap()
+    }
+
+    fn parsed_external(config: &ConnectionConfig) -> NacosAdminConfig {
+        serde_json::from_value(config.external_config.clone().expect("external_config must be set")).unwrap()
+    }
+
+    #[test]
+    fn nacos_connections_get_the_desktop_default_context() {
+        let config = nacos_connection(None);
+        let parsed = parsed_external(&config);
+
+        assert_eq!(parsed.server_addr, "http://127.0.0.1:8848");
+        assert_eq!(parsed.context_path, "/nacos");
+        assert_eq!(parsed.implementation, Some(NacosImplementation::Nacos));
+        assert_eq!(parsed.version_mode, Some(NacosVersionMode::V2));
+        assert_eq!(parsed.namespace, "public");
+        assert_eq!(
+            parsed.auth,
+            NacosAuthConfig::UsernamePassword { username: "nacos".to_string(), password: "secret".to_string() }
+        );
+    }
+
+    #[test]
+    fn nacos_user_external_config_wins_over_the_defaults() {
+        let config = nacos_connection(Some(json!({
+            "implementation": "rnacos",
+            "versionMode": "v3",
+            "contextPath": "/my-nacos",
+        })));
+        let parsed = parsed_external(&config);
+
+        assert_eq!(parsed.implementation, Some(NacosImplementation::RNacos));
+        assert_eq!(parsed.version_mode, Some(NacosVersionMode::V3));
+        assert_eq!(parsed.context_path, "/my-nacos");
+        // serverAddr still comes from the connection fields.
+        assert_eq!(parsed.server_addr, "http://127.0.0.1:8848");
+        // Credentials still flow from the connection fields when the user's
+        // external_config does not carry an auth block.
+        assert_eq!(
+            parsed.auth,
+            NacosAuthConfig::UsernamePassword { username: "nacos".to_string(), password: "secret".to_string() }
+        );
+    }
+
+    #[test]
+    fn nacos_ssl_connections_use_https_server_addr() {
+        let config = new_connection_config_with_external_config(
+            "nacos-2".into(),
+            "Nacos TLS".into(),
+            DatabaseType::Nacos,
+            "nacos.example".into(),
+            8848,
+            String::new(),
+            String::new(),
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        let parsed = parsed_external(&config);
+
+        assert_eq!(parsed.server_addr, "https://nacos.example:8848");
+        assert_eq!(parsed.auth, NacosAuthConfig::None);
+    }
+
+    #[test]
+    fn external_config_is_rejected_for_other_database_types() {
+        let error = new_connection_config_with_external_config(
+            "pg-1".into(),
+            "Postgres".into(),
+            DatabaseType::Postgres,
+            "127.0.0.1".into(),
+            5432,
+            "postgres".into(),
+            "pw".into(),
+            None,
+            false,
+            None,
+            Some(json!({ "contextPath": "/nacos" })),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("external_config"), "{error}");
+    }
+
+    #[test]
+    fn malformed_external_config_fails_at_add_time() {
+        let error = new_connection_config_with_external_config(
+            "nacos-3".into(),
+            "Nacos".into(),
+            DatabaseType::Nacos,
+            "127.0.0.1".into(),
+            8848,
+            String::new(),
+            String::new(),
+            None,
+            false,
+            None,
+            Some(json!("not-an-object")),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("external_config"), "{error}");
     }
 }

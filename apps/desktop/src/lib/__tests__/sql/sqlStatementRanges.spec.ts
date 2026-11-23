@@ -659,6 +659,50 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 'GO'\n-- GO\nSELECT 2", "SELECT 3"]);
   });
 
+  it("preserves the SQL Server procedure documentation header in execution ranges", () => {
+    const procedure = `-- =============================================================
+-- 存储过程名 : usp_GetUserById
+-- 功能描述   : 根据用户ID查询单个用户信息
+-- 参数说明   : @UserId  INT  用户唯一标识
+-- 返回值     : 结果集(UserId, UserName, Email, CreatedAt)
+-- 作者       : 张三
+-- 创建日期   : 2026-11-10
+-- 修改记录   : 2026-11-10  张三  初始创建
+-- 备注       : 无
+-- =============================================================
+CREATE PROCEDURE usp_GetUserById
+    @UserId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- 查询用户信息
+    SELECT UserId, UserName, Email, CreatedAt
+    FROM dbo.Users
+    WHERE UserId = @UserId;
+END`;
+    const sql = `SELECT 0;\nGO\n\n${procedure}\nGO\nSELECT 2;`;
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 0", procedure, "SELECT 2"]);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 0", procedure, "SELECT 2"]);
+    for (const marker of ["CREATE PROCEDURE", "SET NOCOUNT", "WHERE UserId"]) {
+      const cursor = sql.indexOf(marker);
+      expect(currentExecutableStatementRange(sql, cursor, "sqlserver")?.sql).toBe(procedure);
+      expect(buildExecutionCandidates(sql, cursor, "sqlserver")[0]?.sql).toBe(procedure);
+    }
+  });
+
+  it.each(["CREATE PROCEDURE", "ALTER PROC", "CREATE OR ALTER PROCEDURE"])("keeps header comments and internal semicolons in a SQL Server %s batch", (operation) => {
+    for (const header of ["-- 作者 : 张三", "/* 根据用户ID查询\nGO\n保留完整注释 */", "/* 说明 /* 内部说明 */\nGO\n保留完整注释 */"]) {
+      const procedure = `${header}\n${operation} dbo.p AS\nBEGIN\n    SELECT 1;\n    SELECT 2;\nEND;`;
+      expect(rangeSqlTexts(executableStatementRanges(`${procedure}\nGO\nSELECT 3;`, "sqlserver"))).toEqual([procedure, "SELECT 3"]);
+    }
+  });
+
+  it("keeps SQL Server nested comment-only batches non-executable", () => {
+    const sql = "/* 说明 /* CREATE PROCEDURE fake AS SELECT 0; */\nGO\n仍是注释 */\nGO\n-- 普通查询说明\nSELECT 1;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 1"]);
+  });
+
   it("keeps Oracle PL/SQL blocks together and treats slash lines as delimiters", () => {
     const ranges = splitSqlStatementRanges(oraclePlSqlFixture, "oracle");
     expect(rangeSqlTexts(ranges)).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);
@@ -2636,6 +2680,81 @@ WHERE t2.product_name = '12345'
     const ranges = executableStatementRanges(`${batch}\n-- gap\nSELECT 999;`, "sqlserver");
 
     expect(rangeSqlTexts(ranges)).toEqual([batch, "SELECT 999"]);
+  });
+});
+
+describe("nested execution candidates (#15213)", () => {
+  it("offers the peeled subquery and keeps current mode on the full statement", () => {
+    const sql = "INSERT INTO t (a) SELECT a FROM (SELECT 1 AS a) src;";
+    const cursor = indexOf(sql, "1 AS a");
+    const candidates = buildExecutionCandidates(sql, cursor);
+
+    expect(candidateKinds(candidates)).toEqual(["nested", "all"]);
+    expect(candidates[0].sql).toBe("SELECT 1 AS a");
+    // The bracket peel must drop the `src` alias — running `SELECT 1 AS a) src`
+    // would be a syntax error, and keeping the alias would run the outer shape.
+    expect(candidates[0].sql.endsWith(") src")).toBe(false);
+    // cursor 候选的真实契约包含结尾分号（statementRangeAtCursor 语义）
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(sql);
+  });
+
+  it("sorts nested candidates innermost-first across nesting levels", () => {
+    const sql = "SELECT * FROM (SELECT * FROM (SELECT 1) x) y;";
+    const cursor = indexOf(sql, "SELECT 1");
+    const candidates = buildExecutionCandidates(sql, cursor);
+
+    expect(candidateKinds(candidates)).toEqual(["nested", "nested", "all"]);
+    expect(candidates[0].sql).toBe("SELECT 1");
+    expect(candidates[0].level).toBe(1);
+    // The middle peel keeps `x`: it is the inner subquery's alias inside the
+    // middle FROM clause, so the executable form of the middle query needs it.
+    expect(candidates[1].sql).toBe("SELECT * FROM (SELECT 1) x");
+    expect(candidates[1].level).toBe(2);
+  });
+
+  it("offers nothing when the cursor is outside every bracket group", () => {
+    const sql = "SELECT * FROM (SELECT 1) x WHERE id = 1;";
+    const cursor = indexOf(sql, "id = 1");
+    const candidates = buildExecutionCandidates(sql, cursor);
+
+    expect(candidateKinds(candidates)).toEqual(["all"]);
+  });
+
+  it("does not treat function-argument or value-list brackets as executable queries", () => {
+    const callSql = "SELECT f(a, (1 + 2)) FROM t;";
+    expect(buildExecutionCandidates(callSql, indexOf(callSql, "1 + 2")).every((item) => item.kind !== "nested")).toBe(true);
+
+    const valuesSql = "INSERT INTO t VALUES (1, 2);";
+    expect(buildExecutionCandidates(valuesSql, indexOf(valuesSql, "1, 2")).every((item) => item.kind !== "nested")).toBe(true);
+  });
+
+  it("ignores brackets inside string literals", () => {
+    const sql = "SELECT '(' FROM t WHERE c = ')';";
+    const cursor = indexOf(sql, "FROM t");
+    expect(buildExecutionCandidates(sql, cursor).every((item) => item.kind !== "nested")).toBe(true);
+  });
+
+  it("offers nothing for an unterminated bracket group", () => {
+    const sql = "SELECT * FROM (SELECT 1";
+    expect(buildExecutionCandidates(sql, indexOf(sql, "SELECT 1")).every((item) => item.kind !== "nested")).toBe(true);
+  });
+
+  it("skips nested collection inside Oracle PL/SQL anonymous blocks", () => {
+    const sql = "BEGIN UPDATE t SET a = 1 WHERE b IN (SELECT c FROM d); END;";
+    const cursor = indexOf(sql, "SELECT c");
+    expect(buildExecutionCandidates(sql, cursor, "oracle").every((item) => item.kind !== "nested")).toBe(true);
+  });
+
+  it("adds a nested candidate next to cursor + all for later statements", () => {
+    const inner = "SELECT 2";
+    const sql = `SELECT 1;\nINSERT INTO t SELECT * FROM (${inner}) s;`;
+    const cursor = indexOf(sql, inner);
+    const candidates = buildExecutionCandidates(sql, cursor);
+
+    expect(candidateKinds(candidates)).toEqual(["nested", "cursor", "all"]);
+    expect(candidates[0].sql).toBe(inner);
+    // 非文末语句的分号是分隔符，不进 cursor 候选（文末语句则含尾分号）
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(`INSERT INTO t SELECT * FROM (${inner}) s`);
   });
 });
 

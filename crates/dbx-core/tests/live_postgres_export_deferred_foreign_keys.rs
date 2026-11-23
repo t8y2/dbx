@@ -128,6 +128,7 @@ async fn live_postgres_export_with_foreign_key_cycle_restores_into_empty_databas
             schema: "public".to_string(),
             file_path: export_path.display().to_string(),
             selected_tables: Vec::new(),
+            selected_objects: None,
             excluded_tables: Vec::new(),
             include_structure: true,
             include_data: true,
@@ -145,6 +146,9 @@ async fn live_postgres_export_with_foreign_key_cycle_restores_into_empty_databas
             snapshot_session_id: None,
             batch_size: 1000,
             split_max_mb: None,
+            row_limit_per_table: None,
+            row_limit_sort_column: None,
+            row_limit_sort_descending: false,
         },
         |_| {},
     )

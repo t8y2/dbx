@@ -1281,6 +1281,60 @@ pub struct AgentLaunchSpec {
     pub env: Vec<(String, String)>,
 }
 
+/// The Java launcher cannot open a jar through a verbatim path: `java -jar
+/// \\?\D:\...\agent.jar` exits with "Could not find or load main class"
+/// (#15318). A portable profile hits this because Windows `canonicalize`
+/// answers with such a path and the agent directory is derived from it.
+///
+/// Return the plain spelling when the path has one. A `\\?\Volume{GUID}\...`
+/// path has none, and a path past the legacy limit needs the prefix, so both
+/// come back untouched.
+#[cfg(target_os = "windows")]
+fn java_compatible_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    /// Windows' legacy path limit, without the terminating NUL.
+    const MAX_PLAIN_PATH_LEN: usize = 259;
+    const VERBATIM_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const UNC_PREFIX: &[u16] = &[b'U' as u16, b'N' as u16, b'C' as u16, b'\\' as u16];
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let Some(rest) = wide.strip_prefix(VERBATIM_PREFIX) else {
+        return path.to_path_buf();
+    };
+    let plain = if let Some(unc) = rest.strip_prefix(UNC_PREFIX) {
+        // `\\?\UNC\server\share` is the verbatim spelling of `\\server\share`.
+        let mut plain = vec![b'\\' as u16, b'\\' as u16];
+        plain.extend_from_slice(unc);
+        plain
+    } else if is_drive_path(rest) {
+        rest.to_vec()
+    } else {
+        return path.to_path_buf();
+    };
+    // A non-verbatim path can normalize trailing dots and spaces to a
+    // different directory. Preserve the original spelling in that case.
+    let has_ambiguous_component = plain
+        .split(|unit| *unit == u16::from(b'\\'))
+        .any(|component| matches!(component.last(), Some(0x0020 | 0x002e)));
+    if plain.len() > MAX_PLAIN_PATH_LEN || has_ambiguous_component {
+        return path.to_path_buf();
+    }
+    PathBuf::from(OsString::from_wide(&plain))
+}
+
+/// `D:\...`: the only verbatim form besides UNC with a plain equivalent.
+#[cfg(target_os = "windows")]
+fn is_drive_path(wide: &[u16]) -> bool {
+    wide.len() > 2 && matches!(wide[0], 0x41..=0x5A | 0x61..=0x7A) && wide[1] == b':' as u16 && wide[2] == b'\\' as u16
+}
+
+#[cfg(not(target_os = "windows"))]
+fn java_compatible_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 impl AgentLaunchSpec {
     pub fn new(program: impl Into<PathBuf>) -> Self {
         Self { program: program.into(), args: Vec::new(), working_dir: None, env: Vec::new() }
@@ -1296,9 +1350,10 @@ impl AgentLaunchSpec {
         extra_java_args: &[String],
     ) -> Self {
         let jar_path = jar_path.as_ref();
+        let launch_jar_path = java_compatible_path(jar_path);
         Self {
             program: java_path.into(),
-            args: agent_java_args_with_extra_args(&jar_path.to_string_lossy(), extra_java_args),
+            args: agent_java_args_with_extra_args(&launch_jar_path.to_string_lossy(), extra_java_args),
             working_dir: jar_path.parent().map(Path::to_path_buf),
             env: Vec::new(),
         }
@@ -1355,6 +1410,7 @@ impl AgentHandshake {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentCapability {
+    ZooKeeperEndpointRoutes,
     ExactMetadataIdentityV1,
     BlobBindStatementsV1,
     Connect,
@@ -1468,7 +1524,8 @@ fn parse_agent_rpc_error_header(header: &str) -> (Option<i64>, String) {
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
+        Self::ZooKeeperEndpointRoutes,
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -1506,6 +1563,7 @@ impl AgentCapability {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::ZooKeeperEndpointRoutes => "zookeeper_endpoint_routes",
             Self::ExactMetadataIdentityV1 => "exact_metadata_identity_v1",
             Self::BlobBindStatementsV1 => "blob_bind_statements_v1",
             Self::NativeJobLegacyV1 => "native_job_legacy_v1",
@@ -2260,6 +2318,7 @@ impl AgentDriverClient {
         timeout_duration: Option<Duration>,
         cancel_token: Option<CancellationToken>,
     ) -> Result<T, AgentCallError> {
+        validate_zookeeper_route_capability(self.handshake.as_ref(), method, &params)?;
         if let Some(runtime) = &self.shared_runtime {
             let agent_session_id = self.agent_session_id.clone();
             let mut params = params;
@@ -3818,10 +3877,25 @@ pub fn is_unsupported_handshake_error(error: &str) -> bool {
         || error.contains("method not found: handshake")
 }
 
+fn validate_zookeeper_route_capability(
+    handshake: Option<&AgentHandshake>,
+    method: &str,
+    params: &Value,
+) -> Result<(), String> {
+    if matches!(method, "connect" | "test_connection" | "open_session")
+        && params.get("zookeeper_endpoint_routes").is_some()
+        && !agent_supports_capability(handshake, AgentCapability::ZooKeeperEndpointRoutes)
+    {
+        return Err("The installed ZooKeeper driver does not support tunneled ensemble routing. Update the ZooKeeper driver and reconnect.".to_owned());
+    }
+    Ok(())
+}
+
 pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability: AgentCapability) -> bool {
     if matches!(
         capability,
-        AgentCapability::ExactMetadataIdentityV1
+        AgentCapability::ZooKeeperEndpointRoutes
+            | AgentCapability::ExactMetadataIdentityV1
             | AgentCapability::BlobBindStatementsV1
             | AgentCapability::Kv
             | AgentCapability::KvTtl
@@ -4027,6 +4101,13 @@ fn agent_java_args_with_extra_opts(
     // fail with InaccessibleObjectException on the managed JRE 21.
     if agent_jar_path_matches_key(jar_path, "dameng") {
         args.push("--add-opens=java.base/java.net=ALL-UNNAMED".to_string());
+    }
+
+    // Snowflake's driver reads results through its bundled Arrow, whose MemoryUtil
+    // reflects into java.nio.Buffer.address; without this open every query fails with
+    // "Could not initialize class ...arrow.memory.RootAllocator" on the managed JRE 21.
+    if agent_jar_path_matches_key(jar_path, "snowflake") {
+        args.push("--add-opens=java.base/java.nio=ALL-UNNAMED".to_string());
     }
 
     // Hive/Kerberos JDBC drivers read JAAS and krb5 settings during JVM startup,
@@ -4383,6 +4464,8 @@ mod pl_debug_runtime_tests;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::java_compatible_path;
     use super::{
         agent_close_query_session_params, agent_error_from_legacy, agent_handshake_params, agent_java_args,
         agent_java_args_with_extra, agent_java_args_with_extra_opts, agent_object_source_params,
@@ -4402,11 +4485,33 @@ mod tests {
     use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
     use std::io::Cursor;
     use std::io::Write;
+    #[cfg(target_os = "windows")]
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn zookeeper_routing_requires_explicit_agent_capability_before_dispatch() {
+        let params = serde_json::json!({"zookeeper_endpoint_routes": {"zk:2181": "127.0.0.1:31001"}});
+        let mut handshake = AgentHandshake {
+            protocol_version: AGENT_PROTOCOL_VERSION,
+            agent_protocol_version: AGENT_PROTOCOL_VERSION,
+            capabilities: vec!["connect".into()],
+            pl_debug: None,
+        };
+        for method in ["connect", "test_connection", "open_session"] {
+            assert!(super::validate_zookeeper_route_capability(None, method, &params)
+                .unwrap_err()
+                .contains("Update the ZooKeeper driver"));
+            assert!(super::validate_zookeeper_route_capability(Some(&handshake), method, &params).is_err());
+        }
+        handshake.capabilities.push("zookeeper_endpoint_routes".into());
+        assert!(super::validate_zookeeper_route_capability(Some(&handshake), "connect", &params).is_ok());
+        assert!(super::validate_zookeeper_route_capability(None, "connect", &serde_json::json!({})).is_ok());
+    }
 
     #[test]
     fn kingbase_connection_info_and_pool_preserve_reported_mode() {
@@ -4996,6 +5101,13 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn agent_java_args_open_java_nio_for_snowflake_arrow() {
+        let args = agent_java_args("/tmp/dbx/drivers/snowflake/agent.jar");
+
+        assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.nio=ALL-UNNAMED"));
+    }
+
+    #[test]
     fn agent_java_args_do_not_open_jdk_internals_for_other_agents() {
         let args = agent_java_args("/tmp/dbx/drivers/kylin/agent.jar");
 
@@ -5017,6 +5129,69 @@ for line in sys.stdin:
 
         assert!(login_config < jar);
         assert!(args.iter().any(|arg| arg == "-Djavax.security.auth.useSubjectCredsOnly=false"));
+    }
+
+    /// A portable profile derives its agent directory from a canonicalized
+    /// data directory, and Windows `canonicalize` answers with `\\?\D:\...`.
+    /// The Java launcher cannot resolve a main class from such a jar (#15318),
+    /// so the launch spec has to carry the plain spelling.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn java_launch_uses_the_plain_spelling_of_a_verbatim_jar_path() {
+        let spec = AgentLaunchSpec::java_jar("java", r"\\?\D:\DBX\data\agents\drivers\iris\agent.jar");
+        let jar = spec.args.iter().position(|arg| arg == "-jar").expect("agent jar marker should be present");
+
+        assert_eq!(spec.args[jar + 1], r"D:\DBX\data\agents\drivers\iris\agent.jar");
+        assert_eq!(spec.working_dir.as_deref(), Some(Path::new(r"\\?\D:\DBX\data\agents\drivers\iris")));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn java_compatible_path_keeps_the_paths_it_cannot_express_plainly() {
+        assert_eq!(
+            java_compatible_path(Path::new(r"\\?\UNC\server\share\agent.jar")),
+            PathBuf::from(r"\\server\share\agent.jar")
+        );
+        let volume = r"\\?\Volume{4c1b02c1-0000-0000-0000-100000000000}\data\agent.jar";
+        assert_eq!(
+            java_compatible_path(Path::new(volume)),
+            PathBuf::from(volume),
+            "a volume path has no plain spelling"
+        );
+        assert_eq!(java_compatible_path(Path::new(r"D:\DBX\agent.jar")), PathBuf::from(r"D:\DBX\agent.jar"));
+        for ambiguous in [r"\\?\D:\DBX.\agent.jar", r"\\?\D:\DBX \agent.jar"] {
+            assert_eq!(java_compatible_path(Path::new(ambiguous)), PathBuf::from(ambiguous));
+        }
+        let long = format!(r"\\?\D:\{}\agent.jar", "a".repeat(280));
+        assert_eq!(java_compatible_path(Path::new(&long)), PathBuf::from(&long), "a long path keeps its prefix");
+    }
+
+    /// End to end: the Java launcher the app ships cannot resolve a main class
+    /// in a jar addressed by a verbatim path, and the launch spec the app builds
+    /// from that same jar starts the agent (#15318).
+    ///
+    /// It needs the bundled JRE and a real driver jar, so it stays opt in:
+    /// `DBX_E2E_JAVA=<jre>\bin\java.exe DBX_E2E_AGENT_JAR=<driver>\agent.jar`
+    /// `cargo test -p dbx-driver-agent -- --ignored launches_the_agent`
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "needs the bundled JRE and a driver jar; see the doc comment"]
+    async fn launches_the_agent_through_a_verbatim_jar_path() {
+        let java = std::env::var("DBX_E2E_JAVA").expect("DBX_E2E_JAVA should point at the bundled java.exe");
+        let jar = std::env::var("DBX_E2E_AGENT_JAR").expect("DBX_E2E_AGENT_JAR should point at a driver jar");
+        let verbatim = std::fs::canonicalize(&jar).expect("canonicalize the driver jar");
+        let verbatim = verbatim.to_string_lossy().into_owned();
+        assert!(verbatim.starts_with(r"\\?\"), "expected a verbatim path, got {verbatim}");
+
+        let raw =
+            std::process::Command::new(&java).args(["-jar", verbatim.as_str()]).output().expect("run the launcher");
+        assert!(!raw.status.success(), "the launcher must not resolve a main class through a verbatim path");
+        let stderr = String::from_utf8_lossy(&raw.stderr);
+        assert!(stderr.contains("ClassNotFoundException"), "unexpected stderr: {stderr}");
+
+        let launch = AgentLaunchSpec::java_jar(&java, &verbatim);
+        let runtime = AgentRuntimeClient::spawn(launch, "e2e").await.expect("the agent should start");
+        runtime.kill_and_wait().await;
     }
 
     #[test]
@@ -6740,7 +6915,7 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::NativeJobSessionV1.as_str(), "native_job_session_v1");
         assert_eq!(AgentCapability::NativeJobLegacyObV1.as_str(), "native_job_legacy_ob_v1");
         assert_eq!(AgentCapability::ExactMetadataIdentityV1.as_str(), "exact_metadata_identity_v1");
-        assert_eq!(AgentCapability::ALL.len(), 33);
+        assert_eq!(AgentCapability::ALL.len(), 34);
     }
 
     #[test]

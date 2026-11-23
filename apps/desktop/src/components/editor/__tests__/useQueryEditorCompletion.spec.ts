@@ -436,6 +436,43 @@ describe("SQL completion trailing space insertion", () => {
   });
 });
 
+describe("SQL completion replacement ranges", () => {
+  beforeEach(() => vi.useRealTimers());
+
+  it("replaces a keyword prefix on a later Doris partition line without changing earlier SQL", async () => {
+    const doc = [
+      "CREATE TABLE single_doris (",
+      "  order_date DATE NOT NULL,",
+      "  order_id BIGINT,",
+      "  region_id INT NOT NULL,",
+      "  status VARCHAR(20) NOT NULL,",
+      "  amount DECIMAL(18,2)",
+      ")DUPLICATE KEY (order_date,order_id)",
+      "PARTITION by range(order_date)",
+      "(",
+      '  PARTITION p20261101 values [("2026-11-01"),("2026-11-02"))',
+      '  PARTITION p20261102 value [("2026-11-02"),("2026-11-02"))',
+      ")distributed by hash(order_id) buckets 4",
+      "PROPERTIES",
+      "(",
+      '  "replication_num"="1"',
+      ");",
+    ].join("\n");
+    const expected = doc.replace("p20261102 value ", "p20261102 VALUES ");
+    const { provide, currentView } = createHarness({ databaseType: "doris", dialect: "doris", modelValue: doc }, undefined, true);
+    const cursor = doc.indexOf("p20261102 value ") + "p20261102 value".length;
+    currentView.dispatch({ selection: { anchor: cursor } });
+
+    const result = await provide(false);
+    const option = result?.options.find((candidate) => candidate.label === "VALUES");
+    expect(option).toBeDefined();
+    expect(result!.from).toBe(cursor - "value".length);
+    (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, cursor);
+
+    expect(currentView.state.doc.toString()).toBe(expected);
+  });
+});
+
 describe("QueryEditor completion provider ownership", () => {
   it.each(["cursor", "document", "view", "composition", "mode"])("rejects asynchronous analysis after a %s change", async (change) => {
     let resolve!: (result: SqlCompletionAnalysisResult) => void;
@@ -793,5 +830,131 @@ describe.each([false, true])("bare alias-dot column resolution (semantic=%s)", (
     store.listCompletionColumns.mockResolvedValue([{ name: "id", table: "users", schema: "myschema" }]);
     const result = await provide(false);
     expect(result?.options.some((option) => option.label === "id")).toBe(true);
+  });
+});
+
+describe("Oracle SQL column completion case-insensitivity and live refresh (#15212)", () => {
+  beforeEach(() => vi.useRealTimers());
+
+  it("passes unquoted table/schema quote flags to local column lookup and matches Oracle cache case-insensitively", async () => {
+    const { provide, store, metadata } = createHarness(
+      {
+        databaseType: "oracle",
+        dialect: "oracle",
+        database: "ORCL",
+        schema: "HR",
+        modelValue: "SELECT * FROM hr.employees WHERE c",
+      },
+      undefined,
+      true,
+    );
+    store.lookupLocalCompletionColumns.mockReturnValue([{ name: "CREATE_TIME", table: "EMPLOYEES", schema: "HR", dataType: "DATE" }]);
+
+    const first = await provide(false);
+    expect(store.lookupLocalCompletionColumns).toHaveBeenCalledWith("connection", "ORCL", "employees", "hr", undefined, expect.objectContaining({ tableQuoted: false, schemaQuoted: false }));
+    expect(first?.options.map((option) => option.label)).toContain("CREATE_TIME");
+
+    // Reusing cached metadata under uppercase HR.EMPLOYEES succeeds case-insensitively.
+    metadata.cachedColumnsByTable.clear();
+    metadata.cachedColumnsByTable.set("HR.EMPLOYEES", [{ name: "CUSTOMER_ID", table: "EMPLOYEES", schema: "HR", dataType: "NUMBER" }]);
+    const second = await provide(false);
+    expect(second?.options.map((option) => option.label)).toContain("CUSTOMER_ID");
+  });
+
+  it("refreshes an open snippet completion menu once background columns finish loading (#15212)", async () => {
+    const sql = "SELECT * FROM hr.employees WHERE id = c";
+    const { provide, store, runtime, settings, startCompletion, currentView } = createHarness(
+      {
+        databaseType: "oracle",
+        dialect: "oracle",
+        database: "ORCL",
+        schema: "HR",
+        modelValue: sql,
+      },
+      undefined,
+      true,
+    );
+    settings.editorSettings.snippets = [{ id: "case-when", label: "case when", prefix: "case", body: "CASE WHEN ${1:cond} THEN ${2:val} END" }];
+    runtime.codeMirrorCompletionStatus = () => "active";
+    let resolveRefresh!: (columns: SqlCompletionColumn[]) => void;
+    store.refreshCompletionColumns.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolveRefresh = done;
+        }),
+    );
+
+    // Local result returns snippets immediately without blocking typing.
+    const initial = await provide(false);
+    expect(initial?.options.some((option) => option.type === "snippet")).toBe(true);
+    expect(store.refreshCompletionColumns).toHaveBeenCalledWith("connection", "ORCL", "employees", "hr", expect.objectContaining({ tableQuoted: false, schemaQuoted: false }), undefined);
+
+    // Once background column load resolves, active completion refreshes and now serves columns.
+    resolveRefresh([{ name: "CREATED_BY", table: "EMPLOYEES", schema: "HR", dataType: "VARCHAR2" }]);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(startCompletion).toHaveBeenCalledWith(currentView);
+    const refreshed = await provide(false);
+    expect(refreshed?.options.map((option) => option.label)).toContain("CREATED_BY");
+  });
+});
+
+describe("unexecuted local DDL completion", () => {
+  beforeEach(() => vi.useRealTimers());
+
+  function harnessAtMarker(markedSql: string, databaseType: "postgres" | "mysql" | "sqlite" = "postgres") {
+    const cursor = markedSql.indexOf("|");
+    const modelValue = markedSql.replace("|", "");
+    const harness = createHarness({ databaseType, dialect: databaseType, modelValue }, undefined, true);
+    harness.currentView.dispatch({ selection: { anchor: cursor } });
+    return harness;
+  }
+
+  it.each(["postgres", "mysql", "sqlite"] as const)("serves CREATE TABLE columns on local and async %s paths without remote metadata", async (dialect) => {
+    const { provide, store } = harnessAtMarker("CREATE TABLE users (id BIGINT, display_name TEXT);\nSELECT | FROM users", dialect);
+    const local = await provide(false);
+    expect(local?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["id", "display_name"]));
+    const asyncResult = await provide();
+    expect(asyncResult?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["id", "display_name"]));
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+  });
+
+  it("keeps alias and JOIN completion available when remote metadata fails", async () => {
+    const { provide, store } = harnessAtMarker("CREATE TABLE users (id BIGINT, display_name TEXT);\nCREATE TABLE orders (id BIGINT, user_id BIGINT);\nSELECT u.| FROM users u JOIN orders o ON o.user_id = u.id");
+    store.listCompletionColumns.mockRejectedValue(new Error("offline"));
+    store.refreshCompletionColumns.mockRejectedValue(new Error("offline"));
+    const result = await provide();
+    expect(result?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["id", "display_name"]));
+    expect(result?.options.map((option) => option.label)).not.toContain("user_id");
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+  });
+
+  it("includes ALTER and CTAS columns from the whole document", async () => {
+    const { provide } = harnessAtMarker("CREATE TABLE source (id BIGINT, payload TEXT);\nCREATE TABLE report AS SELECT id AS source_id, payload FROM source;\nALTER TABLE report ADD COLUMN created_at TEXT;\nSELECT | FROM report");
+    const result = await provide(false);
+    expect(result?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["source_id", "payload", "created_at"]));
+  });
+
+  it("isolates overlays between editor documents", async () => {
+    const first = harnessAtMarker("CREATE TABLE first_table (first_column INT);\nSELECT | FROM first_table");
+    const second = harnessAtMarker("CREATE TABLE second_table (second_column INT);\nSELECT | FROM second_table");
+    const firstResult = await first.provide(false);
+    const secondResult = await second.provide(false);
+    expect(firstResult?.options.map((option) => option.label)).toContain("first_column");
+    expect(firstResult?.options.map((option) => option.label)).not.toContain("second_column");
+    expect(secondResult?.options.map((option) => option.label)).toContain("second_column");
+    expect(secondResult?.options.map((option) => option.label)).not.toContain("first_column");
+  });
+
+  it("preserves quoted PostgreSQL identifier case", async () => {
+    const { provide } = harnessAtMarker('CREATE TABLE "Mixed" ("Id" BIGINT, "Display Name" TEXT);\nSELECT | FROM "Mixed"');
+    const result = await provide(false);
+    const labels = result?.options.map((option) => option.label) ?? [];
+    expect(labels.some((label) => label === "Id" || label.startsWith("Id "))).toBe(true);
+    expect(labels.some((label) => label === "Display Name" || label.startsWith("Display Name "))).toBe(true);
+  });
+  it("keeps case-distinct quoted PostgreSQL tables separate", async () => {
+    const { provide } = harnessAtMarker('CREATE TABLE "Mixed" ("Id" BIGINT);\nCREATE TABLE "mixed" ("other" TEXT);\nSELECT * FROM |');
+    const result = await provide(false);
+    expect(result?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["Mixed", "mixed"]));
   });
 });

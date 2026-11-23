@@ -6,6 +6,7 @@ import {
   extractorUnavailableForDatabase,
   normalizeDataGridCopyPreference,
   normalizeDataGridExtractorOptions,
+  normalizeDataGridSmartSingleColumnFormat,
   normalizeVisibleDataGridCopyExtractors,
   resolveDataGridCopyPreference,
   validateDataGridExtractorOptions,
@@ -60,6 +61,13 @@ describe("data-grid extractor options", () => {
     expect(resolveDataGridCopyPreference("smart", 2)).toBe("tsv");
     expect(resolveDataGridCopyPreference("csv", 1)).toBe("csv");
     expect(resolveDataGridCopyPreference("raw", 3)).toBe("raw");
+  });
+
+  it("normalizes the Smart Copy single-column format setting", () => {
+    expect(normalizeDataGridSmartSingleColumnFormat(undefined)).toBe("default");
+    expect(normalizeDataGridSmartSingleColumnFormat("json")).toBe("json");
+    expect(normalizeDataGridSmartSingleColumnFormat("sql-inserts")).toBe("default");
+    expect(normalizeDataGridSmartSingleColumnFormat("invalid")).toBe("default");
   });
 
   it("normalizes persisted values without sharing the default object", () => {
@@ -151,6 +159,16 @@ describe("data-grid extractor options", () => {
     expect(extractorUnavailableForDatabase("sql-deletes-inserts", "mongodb")).toBe(true);
     expect(extractorUnavailableForDatabase("sql-deletes-inserts", "neo4j")).toBe(true);
     expect(extractorUnavailableForDatabase("sql-deletes-inserts", "tdengine")).toBe(true);
+  });
+
+  it("allows SQL deletes for relational databases and blocks unsupported stores", () => {
+    expect(normalizeDataGridCopyPreference("sql-deletes")).toBe("sql-deletes");
+    expect(resolveDataGridCopyPreference("sql-deletes", 1)).toBe("sql-deletes");
+    expect(extractorUnavailableForDatabase("sql-deletes", "mysql")).toBe(false);
+    expect(extractorUnavailableForDatabase("sql-deletes", "postgres")).toBe(false);
+    expect(extractorUnavailableForDatabase("sql-deletes", "mongodb")).toBe(true);
+    expect(extractorUnavailableForDatabase("sql-deletes", "neo4j")).toBe(true);
+    expect(extractorUnavailableForDatabase("sql-deletes", "tdengine")).toBe(true);
   });
 
   it("adds DbUnit and PHP without changing the extractor contract version", () => {

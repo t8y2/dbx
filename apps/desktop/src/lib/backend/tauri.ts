@@ -1,7 +1,11 @@
+import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
+import type { MongoDeleteId } from "@/lib/mongo/mongoDocumentValues";
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
+import type { AppThemeMode } from "@/lib/app/appTheme";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import { Channel } from "@tauri-apps/api/core";
+import { notifySavedSqlLibraryChanged } from "@/lib/savedSql/savedSqlLibraryEvents";
+import { Channel, Resource } from "@tauri-apps/api/core";
 import { SnapshotCompletionError, unwrapSnapshotCompletion } from "@/lib/export/snapshotCompletion";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
@@ -88,7 +92,7 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
   return tauriInvoke<T>(command, args);
 }
 
-import type { MigrationPreflight, MigrationReport } from "./migration";
+import type { MigrationPreflight, MigrationReport, CredentialResetPreparation, CredentialResetReport } from "./migration";
 export type { MigrationPreflight, MigrationReport } from "./migration";
 export const migrationStatus = (retry = false): Promise<MigrationPreflight> => invoke("migration_status", { retry });
 export const migrationStart = (): Promise<MigrationReport> => invoke("migration_start");
@@ -388,6 +392,7 @@ export interface DriverRuntimeSummary {
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
+  app_theme_mode?: AppThemeMode;
   linux_floating_frame_enabled?: boolean;
   icon_theme: "default" | "black";
   quit_on_close: boolean;
@@ -645,6 +650,9 @@ export interface SortedQuerySqlOptions {
   column: string;
   direction: QuerySortDirection;
   tieBreakerColumnIndexes?: number[];
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (GaussDB M/B/MYSQL mode reports a backtick). */
+  identifierQuote?: string;
 }
 
 export interface QuerySqlBuildResult {
@@ -1132,8 +1140,8 @@ export async function loadEditorSettings(): Promise<unknown | null> {
   return invoke("load_editor_settings");
 }
 
-export async function saveEditorSettings(settings: unknown): Promise<void> {
-  return invoke("save_editor_settings", { settings });
+export async function saveEditorSettings(settings: unknown, patch?: unknown): Promise<unknown> {
+  return invoke("save_editor_settings", { settings, ...(patch ? { patch } : {}) });
 }
 
 export interface GlobalSearchSettings {
@@ -1214,8 +1222,12 @@ export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
   return invoke("save_transfer_task_library", { library });
 }
 
-export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
-  return invoke("complete_app_close", { action });
+export async function completeAppClose(action: "quit" | "hide", quitRequestId?: string): Promise<void> {
+  return invoke("complete_app_close", { action, ...(quitRequestId ? { quitRequestId } : {}) });
+}
+
+export async function completeWindowClose(): Promise<void> {
+  return invoke("complete_window_close");
 }
 
 export async function requestAppClose(): Promise<void> {
@@ -1371,7 +1383,7 @@ export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassp
   return invoke("snippet_sync_inspect", { config, snippetPassphrase, secretsPassphrase });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string, automatic = false): Promise<SnippetSyncSummary> {
   return invoke("snippet_sync_upload", {
     config,
     editorSettings,
@@ -1379,7 +1391,8 @@ export async function snippetSyncUpload(config: SnippetSyncConfig, editorSetting
     includeSecrets,
     secretsPassphrase,
     selection,
-    expectedRemoteContentHash,
+    expectedRemoteContentHash: expectedRemoteContentHash ?? (config.snippetId?.trim() ? readSnippetRemoteContentHash(config.provider, config.instanceUrl, config.snippetId) : undefined),
+    automatic,
   });
 }
 
@@ -1472,6 +1485,8 @@ export interface SqlFileEntry {
   path: string;
   is_dir: boolean;
   children: SqlFileEntry[];
+  /** Last filesystem modification time in Unix milliseconds. */
+  modified_at?: number;
 }
 
 export async function listSqlFilesInFolder(folderPath: string, fileFilter?: string, includeEmptyDirectories?: boolean): Promise<SqlFileEntry[]> {
@@ -1502,6 +1517,18 @@ export async function renameSqlFileInFolder(rootPath: string, filePath: string, 
 
 export async function deleteSqlFileInFolder(rootPath: string, filePath: string): Promise<void> {
   return invoke("delete_sql_file_in_folder", { rootPath, filePath });
+}
+
+export async function moveSqlFileInFolder(rootPath: string, filePath: string, targetRootPath: string, directoryPath: string): Promise<string> {
+  return invoke("move_sql_file_in_folder", { rootPath, filePath, targetRootPath, directoryPath });
+}
+
+export async function watchSqlFileFolder(folderPath: string, recursive: boolean, onChange: () => void): Promise<() => Promise<void>> {
+  const channel = new Channel<null>();
+  channel.onmessage = onChange;
+  const rid = await invoke<number>("watch_sql_file_folder", { folderPath, recursive, onChange: channel });
+  const resource = new Resource(rid);
+  return () => resource.close();
 }
 
 export async function createSqlFolderInFolder(rootPath: string, directoryPath: string, folderName: string): Promise<string> {
@@ -1536,6 +1563,8 @@ export interface GlobalSearchRequest {
    * (Quick Open behavior).
    */
   maxDepth?: number;
+  /** Client generated identifier used to cancel an in-flight scan. */
+  searchId?: string;
 }
 
 export interface GlobalSearchMatch {
@@ -1549,8 +1578,22 @@ export interface GlobalSearchMatch {
   lineText: string;
 }
 
-export async function globalSearch(request: GlobalSearchRequest): Promise<GlobalSearchMatch[]> {
+export interface GlobalSearchError {
+  path: string;
+  message: string;
+}
+
+export interface GlobalSearchResponse {
+  matches: GlobalSearchMatch[];
+  errors: GlobalSearchError[];
+}
+
+export async function globalSearch(request: GlobalSearchRequest): Promise<GlobalSearchResponse> {
   return invoke("global_search", { request });
+}
+
+export async function cancelGlobalSearch(searchId: string): Promise<void> {
+  return invoke("cancel_global_search", { searchId });
 }
 
 // --- AI Conversations ---
@@ -1982,6 +2025,7 @@ export async function listObjects(
     tableNameFilter,
     executionId,
     ...(readOptions?.identityMode ? { identityMode: readOptions.identityMode } : {}),
+    ...(readOptions?.lightweight !== undefined ? { lightweight: readOptions.lightweight } : {}),
     ...(options === true ? { exactIdentity: true } : {}),
   });
 }
@@ -2552,12 +2596,13 @@ export async function buildRenameObjectSql(options: BuildRenameObjectSqlOptions)
   return invoke("build_rename_object_sql", { options });
 }
 
-export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean }): Promise<string> {
+export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean; identifierQuote?: string }): Promise<string> {
   return invoke("build_rename_database_sql", {
     databaseType: options.databaseType,
     oldName: options.oldName,
     newName: options.newName,
     terminateConnections: options.terminateConnections,
+    identifierQuote: options.identifierQuote,
   });
 }
 
@@ -2658,6 +2703,10 @@ export async function buildExecutableObjectSourceSql(input: BuildEditableObjectS
 
 export async function buildEditableObjectSource(input: BuildEditableObjectSourceSqlInput): Promise<string> {
   return invoke("build_editable_object_source", { input });
+}
+
+export async function buildOracleObjectExportSql(input: BuildEditableObjectSourceSqlInput): Promise<string> {
+  return invoke("build_oracle_object_export_sql", { input });
 }
 
 export async function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
@@ -3004,7 +3053,7 @@ export async function listDialectDataTypes(dialectName: string): Promise<string[
   return invoke("list_dialect_data_types", { dialectName });
 }
 
-export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: DatabaseType, targetSchema?: string, functionDiffs?: FunctionDiff[], sequenceDiffs?: SequenceDiff[], ruleDiffs?: RuleDiff[], ownerDiffs?: OwnerDiff[], cascadeDelete?: boolean): Promise<string> {
+export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: DatabaseType, targetSchema?: string, functionDiffs?: FunctionDiff[], sequenceDiffs?: SequenceDiff[], ruleDiffs?: RuleDiff[], ownerDiffs?: OwnerDiff[], cascadeDelete?: boolean, compareCharset?: boolean): Promise<string> {
   return invoke("generate_schema_sync_sql", {
     diffs,
     databaseType,
@@ -3014,6 +3063,7 @@ export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: Da
     ruleDiffs: ruleDiffs ?? [],
     ownerDiffs: ownerDiffs ?? [],
     cascadeDelete: cascadeDelete ?? false,
+    compareCharset: compareCharset ?? true,
   });
 }
 
@@ -3567,23 +3617,30 @@ export async function loadSavedSqlFile(id: string): Promise<SavedSqlFile | null>
 }
 
 export async function saveSavedSqlFolder(folder: SavedSqlFolder): Promise<SavedSqlFolder> {
-  return invoke("save_saved_sql_folder", { folder });
+  const saved = await invoke<SavedSqlFolder>("save_saved_sql_folder", { folder });
+  await notifySavedSqlLibraryChanged();
+  return saved;
 }
 
 export async function deleteSavedSqlFolder(id: string): Promise<void> {
-  return invoke("delete_saved_sql_folder", { id });
+  await invoke("delete_saved_sql_folder", { id });
+  await notifySavedSqlLibraryChanged();
 }
 
 export async function saveSavedSqlFile(file: SavedSqlFile): Promise<SavedSqlFile> {
-  return invoke("save_saved_sql_file", { file });
+  const saved = await invoke<SavedSqlFile>("save_saved_sql_file", { file });
+  await notifySavedSqlLibraryChanged();
+  return saved;
 }
 
 export async function saveDefaultQueryContent(id: string, sql: string, updatedAt: string): Promise<void> {
-  return invoke("save_default_query_content", { id, sql, updatedAt });
+  await invoke("save_default_query_content", { id, sql, updatedAt });
+  await notifySavedSqlLibraryChanged();
 }
 
 export async function deleteSavedSqlFile(id: string): Promise<void> {
-  return invoke("delete_saved_sql_file", { id });
+  await invoke("delete_saved_sql_file", { id });
+  await notifySavedSqlLibraryChanged();
 }
 
 export async function savedSqlStorageDir(): Promise<string> {
@@ -3596,6 +3653,10 @@ export async function openSavedSqlStorageDir(dir?: string | null): Promise<void>
 
 export async function revealPathInFileManager(path: string): Promise<void> {
   return invoke("reveal_path_in_file_manager", { path });
+}
+
+export async function openPathWithDefaultApp(path: string): Promise<void> {
+  return invoke("open_path_with_default_app", { path });
 }
 
 export async function deleteDatabaseBackupFiles(paths: string[], allowedRoots: string[] = []): Promise<number> {
@@ -3651,6 +3712,7 @@ export interface UpdateInfo {
   channel?: "stable" | "beta";
   release_tag?: string;
   is_promoted?: boolean;
+  promoted_from?: string;
 }
 
 export type UpdateDownloadSource = "official" | "cnb";
@@ -4006,8 +4068,8 @@ export async function redisGetTtl(connectionId: string, db: number, keyRaw: stri
   return invoke("redis_get_ttl", { connectionId, db, keyRaw });
 }
 
-export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string): Promise<RedisStreamPage> {
-  return invoke("redis_get_stream_entries", { connectionId, db, keyRaw, cursor });
+export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string, newestFirst?: boolean): Promise<RedisStreamPage> {
+  return invoke("redis_get_stream_entries", { connectionId, db, keyRaw, cursor, ...(newestFirst ? { newestFirst } : {}) });
 }
 
 export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {
@@ -5579,11 +5641,11 @@ export async function mongoUpdateDocuments(connectionId: string, database: strin
   return { affected_rows: affectedRows };
 }
 
-export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string): Promise<number> {
+export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: MongoDeleteId, routing?: string): Promise<number> {
   return documentDeleteDocument(connectionId, database, collection, id, routing);
 }
 
-export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string, documentType?: string): Promise<number> {
+export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: MongoDeleteId, routing?: string, documentType?: string): Promise<number> {
   return invoke("document_delete_document", {
     connectionId,
     database,
@@ -6181,6 +6243,11 @@ export interface TransferRequest {
    * (`select * from t_order where id <= 90000`). Missing/empty = full table.
    */
   tableFilters?: Record<string, string>;
+  /**
+   * Optional explicit target table name per source table (key = source table name).
+   * Wins over `targetTableNameCase`; tables without an entry keep the case option's name.
+   */
+  targetTableNames?: Record<string, string>;
   dropTargetBeforeCreate: boolean;
   dropTargetConfirmed: boolean;
   oraclePackages?: OraclePackageTransferRequest;
@@ -6704,6 +6771,13 @@ export async function cancelMongodbExport(exportId: string): Promise<boolean> {
 }
 
 // --- Database Export ---
+/** An object picked in the object browser for "export selected". */
+export interface DatabaseExportSelectedObject {
+  objectType: string;
+  name: string;
+  signature?: string;
+}
+
 export interface DatabaseExportRequest {
   exportId: string;
   connectionId: string;
@@ -6711,6 +6785,8 @@ export interface DatabaseExportRequest {
   schema: string;
   filePath: string;
   selectedTables?: string[];
+  /** Typed object browser selection; takes precedence over `selectedTables`, and an empty list is rejected. */
+  selectedObjects?: DatabaseExportSelectedObject[];
   excludedTables?: string[];
   includeStructure: boolean;
   includeData: boolean;
@@ -6728,6 +6804,19 @@ export interface DatabaseExportRequest {
   snapshotSessionId?: string;
   batchSize: number;
   splitMaxMb?: number;
+  /**
+   * Cap each exported table at this many data rows (#14750). `undefined` keeps
+   * the unlimited behavior; the backend rejects zero.
+   */
+  rowLimitPerTable?: number;
+  /**
+   * Sort column the per-table cap takes the first/last N rows by (review on
+   * #14799). `undefined`/empty keeps the export's existing read order; the
+   * backend falls back per table with a dump comment when the column is absent.
+   */
+  rowLimitSortColumn?: string;
+  /** `true` takes the newest rows by `rowLimitSortColumn`; only sent with a column. */
+  rowLimitSortDescending?: boolean;
 }
 
 export interface DatabaseBackupSnapshot {
@@ -6766,6 +6855,7 @@ export interface TableExportRequest {
   format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";
   insertMode?: SqlInsertMode;
   insertDialect?: SqlInsertDialect;
+  csvWithoutBom?: boolean;
   csvQuoteMode?: CsvQuoteMode;
   /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
   nullLiteral?: string;
@@ -6805,6 +6895,7 @@ export interface TableCsvExportOptions {
   columns?: string[];
   pageSize?: number;
   timeoutSecs?: number;
+  csvWithoutBom?: boolean;
   csvQuoteMode?: CsvQuoteMode;
   /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
   nullLiteral?: string;
@@ -6833,6 +6924,7 @@ export interface QueryResultExportRequest {
   filePath: string;
   format: "csv" | "xlsx" | "json" | "txt" | "sql";
   insertMode?: SqlInsertMode;
+  csvWithoutBom?: boolean;
   csvQuoteMode?: CsvQuoteMode;
   /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
   nullLiteral?: string;
@@ -6843,6 +6935,8 @@ export interface QueryResultExportRequest {
   timeoutSecs?: number;
   keysetOptimizationEnabled: boolean;
   clientSessionId?: string;
+  /** MySQL source session, borrowed while streaming without transferring ownership. */
+  sourceClientSessionId?: string;
   /** Open manual transaction to read through, so the export sees its uncommitted changes. */
   txnSessionId?: string;
   executionId?: string;
@@ -7068,13 +7162,14 @@ export async function resolveDamengDumpTool(binDir: string, kind: DamengDumpKind
   return invoke("resolve_dameng_dump_tool", { binDir, kind });
 }
 
-export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string): Promise<void> {
+export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string, csvWithoutBom = false): Promise<void> {
   return invoke("export_query_result_csv", {
     request: {
       filePath,
       columns,
       rows,
       csvQuoteMode,
+      csvWithoutBom,
       ...(nullLiteral === undefined ? {} : { nullLiteral }),
     },
   });
@@ -7175,3 +7270,6 @@ export * from "@/lib/backend/nacos-tauri";
 export async function openQueryResultTempFile(path: string): Promise<void> {
   return invoke("open_query_result_temp_file", { path });
 }
+
+export const migrationPrepareCredentialReset = (): Promise<CredentialResetPreparation> => invoke("migration_prepare_credential_reset");
+export const migrationResetCredentials = (confirmationToken: string, confirmed: boolean): Promise<CredentialResetReport> => invoke("migration_reset_credentials", { confirmationToken, confirmed });

@@ -1,5 +1,7 @@
-import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, type EditorSettingsDraftKey } from "./editorSettingsDraft";
-import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_DESKTOP_SETTINGS, DEFAULT_EDITOR_SETTINGS, DEFAULT_TOOLBAR_ITEMS, normalizeDesktopSettings, normalizeEditorSettings, type DesktopSettings, type EditorSettings } from "@/stores/settingsStore";
+import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX } from "@/lib/sidebar/sidebarHoverSettings";
+import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, type EditorSettingsDraftKey, type EditorSettingsImportPatch } from "./editorSettingsDraft";
+import { DEFAULT_TOOLBAR_ITEM_ORDER, normalizePinnedToolbarMenuItems, type ToolbarItemKey } from "./toolbarCustomization";
+import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_DESKTOP_SETTINGS, DEFAULT_EDITOR_SETTINGS, DEFAULT_TOOLBAR_ITEMS, normalizeDesktopSettings, normalizeEditorSettings, isSidebarConnectionIconStyle, type DesktopSettings, type EditorSettings } from "@/stores/settingsStore";
 import type { AppThemeMode } from "@/lib/app/appTheme";
 import { EDITOR_MAX_FONT_SIZE, EDITOR_MIN_FONT_SIZE } from "@/lib/editor/editorZoom";
 import { DATA_GRID_TYPE_COLOR_KEYS, DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID } from "@/lib/dataGrid/dataGridTypeColorScheme";
@@ -80,8 +82,8 @@ export interface ParsedSettingsTransfer {
   formatVersion: number;
   appVersion?: string;
   exportedAt?: string;
-  /** Validated, normalized values for exactly the keys present in the file. */
-  editorSettings: Partial<EditorSettings>;
+  /** Validated values for exactly the keys present in the file. */
+  editorSettings: EditorSettingsImportPatch;
   /** Validated theme mode from the optional appearance section. */
   themeMode?: AppThemeMode;
   /** Validated desktop preferences for exactly the keys present in the file. */
@@ -103,6 +105,11 @@ export interface SettingsTransferExportMeta {
   appVersion?: string;
 }
 
+export interface SettingsTransferExportOptions {
+  /** Omit toolbar entries that have no meaning on the exporting platform. */
+  omitToolbarItemKeys?: readonly ToolbarItemKey[];
+}
+
 export function buildSettingsTransferFilename(date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -117,14 +124,24 @@ export function buildSettingsTransferFilename(date = new Date()): string {
  * The optional extras add the `appearance`/`desktop` sections; files written
  * by older versions simply lack them.
  */
-export function serializeSettingsTransfer(settings: EditorSettings, meta: SettingsTransferExportMeta = {}, extras: SettingsTransferExtras = {}): string {
+export function serializeSettingsTransfer(settings: EditorSettings, meta: SettingsTransferExportMeta = {}, extras: SettingsTransferExtras = {}, options: SettingsTransferExportOptions = {}): string {
   const desktopSettings = extras.desktopSettings ? pickTransferableDesktopSettings(extras.desktopSettings) : {};
+  const omittedToolbarItems = new Set(options.omitToolbarItemKeys ?? []);
+  const editor = editorSettingsDraftFromSettings(settings);
+  const editorPayload =
+    omittedToolbarItems.size === 0
+      ? editor
+      : {
+          ...editor,
+          toolbarItems: Object.fromEntries(Object.entries(editor.toolbarItems).filter(([key]) => !omittedToolbarItems.has(key as ToolbarItemKey))),
+          toolbarItemOrder: editor.toolbarItemOrder.filter((key) => !omittedToolbarItems.has(key)),
+        };
   const payload = {
     formatVersion: SETTINGS_TRANSFER_FORMAT_VERSION,
     app: { name: "dbx", ...(meta.appVersion ? { version: meta.appVersion } : {}) },
     exportedAt: new Date().toISOString(),
     settings: {
-      editor: editorSettingsDraftFromSettings(settings),
+      editor: editorPayload,
       ...(extras.themeMode ? { appearance: { themeMode: extras.themeMode } } : {}),
       ...(Object.keys(desktopSettings).length > 0 ? { desktop: desktopSettings } : {}),
     },
@@ -135,7 +152,7 @@ export function serializeSettingsTransfer(settings: EditorSettings, meta: Settin
 const SETTINGS_TRANSFER_CATEGORY_ORDER: readonly SettingsTransferCategoryId[] = ["appearance", "editor", "formatter", "navigation", "data", "shortcuts", "snippets", "other"];
 
 const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readonly EditorSettingsDraftKey[]> = {
-  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "fontSmoothing", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "welcomePageMode", "webLogoPosition"],
+  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "fontSmoothing", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "toolbarItemOrder", "welcomePageMode", "webLogoPosition", "sidebarConnectionIconStyle"],
   editor: [
     "executeMode",
     "defaultTransactionMode",
@@ -149,6 +166,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "showInsertValueHints",
     "showConnectionGroupPath",
     "autoAliasTables",
+    "qualifyColumnCompletions",
     "batchColumnSelectionIncludeComments",
     "tableCompletionSchemaQualification",
     "insertSpaceAfterCompletion",
@@ -157,7 +175,9 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sequenceCompletionEnabled",
     "sortCompletionColumnsAlphabetically",
     "selectFirstCompletionOnOpen",
+    "completionAutoActivationDelayMs",
     "completionTriggerMode",
+    "completionMatchMode",
     "excludedCompletionItems",
     "wordWrap",
     "showWhitespace",
@@ -188,7 +208,9 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
   navigation: [
     "appLayout",
     "tabLayout",
+    "tabWrapMaxRows",
     "tabPlacement",
+    "crossWindowTabDragPreviewEnabled",
     "tabGroupMode",
     "colorizeConnectionTabs",
     "colorizeConnectionTabsScope",
@@ -197,19 +219,24 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "tabDoubleClickAction",
     "tabGroupRows",
     "sidebarActivation",
+    "sidebarColumnDoubleClickAction",
     "sidebarObjectDisplay",
+    "sidebarSimpleHideIndexes",
     "routineSourceOpenMode",
     "sidebarTableSearchEnabled",
     "sidebarSearchOpenedDatabasesOnly",
     "autoSelectActiveSidebarNode",
     "sidebarPinDefaultDatabase",
     "sidebarBrowseObjectsOnDatabaseActivation",
+    "sidebarAutoExpandOnDatabaseActivation",
+    "sidebarTableClickNavigation",
     "openTabsRestoreMode",
     "autoReloadRestoredDataTabsOnOpen",
     "disconnectTabHandlingMode",
     "deleteConnectionTabHandlingMode",
     "rememberConnectionDatabaseOnDelete",
     "deepLinkConnectionConfirmMode",
+    "duplicateTabTitleMode",
     "dataTabReuseMode",
     "openDataTabsNextToActive",
     "openTablesInDetachedWindow",
@@ -218,6 +245,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sidebarObjectInfoMode",
     "sidebarAllowHorizontalScroll",
     "sidebarShowConnectionEndpoints",
+    "sidebarHoverEnabled",
+    "sidebarHoverDelay",
     "sidebarShowTooltips",
     "sidebarIndent",
     "sidebarFontSize",
@@ -246,6 +275,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridKeepFilterEditorExpanded",
     "dataGridTextFilterPanelHeight",
     "dataGridToolbarLayout",
+    "dataGridOrderByVisible",
+    "dataGridWhereRatio",
     "defaultAutoKeepResults",
     "pinResultTabOnClick",
     "multiStatementDefaultView",
@@ -280,12 +311,14 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "damengClientBinDir",
     "autoOpenExportFolder",
     "applyColumnFormattersOnExport",
+    "csvWithoutBom",
     "csvQuoteMode",
     "csvNullMode",
     "queryResultExportFileNameSource",
     "exportRowLimitEnabled",
     "exportRowLimit",
     "queryExportKeysetOptimizationEnabled",
+    "globalNumberGrouping",
     "globalDateTimeDisplayFormat",
     "globalDateTimeExportFormat",
     "globalDateTimeImportFormat",
@@ -371,10 +404,12 @@ const EXPECTED_JSON_KINDS = new Map<string, string>(EDITOR_SETTINGS_DRAFT_KEYS.m
  * enum or a non-boolean flag refuses the whole file instead.
  */
 const PASS_THROUGH_BOOLEAN_KEYS = [
+  "sidebarTableClickNavigation",
   "wordWrap",
   "showWhitespace",
   "showExecutionTargetPicker",
   "autoAliasTables",
+  "qualifyColumnCompletions",
   "functionCompletionIncludeParams",
   "sequenceCompletionEnabled",
   "fontSmoothing",
@@ -399,6 +434,7 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "autoSelectActiveSidebarNode",
   "sidebarPinDefaultDatabase",
   "sidebarAllowHorizontalScroll",
+  "sidebarHoverEnabled",
   "sidebarShowTooltips",
   "updateNotificationsEnabled",
   "autoDownloadUpdates",
@@ -410,6 +446,7 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
 ] as const satisfies readonly EditorSettingsDraftKey[];
 
 const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
+  sidebarHoverDelay: (value) => typeof value === "number" && Number.isInteger(value) && value >= SIDEBAR_HOVER_DELAY_MIN && value <= SIDEBAR_HOVER_DELAY_MAX,
   // The editor font slider and the Ctrl+wheel zoom both clamp to this range.
   fontSize: (value) => typeof value === "number" && Number.isFinite(value) && value >= EDITOR_MIN_FONT_SIZE && value <= EDITOR_MAX_FONT_SIZE,
   welcomePageMode: (value) => value === "intro" || value === "workspace",
@@ -419,10 +456,12 @@ const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (val
   resultTabNamingMode: (value) => value === "source" || value === "ordinal" || value === "comment",
   activeCustomThemeId: (value) => typeof value === "string" && value.trim().length > 0,
   sidebarDensity: (value) => value === "default" || value === "compact",
-  // normalizeToolbarItems keeps unknown/typed values for every known key, so
-  // each one must already be the boolean the UI writes, and no extra key may
-  // appear.
-  toolbarItems: (value) => isPlainObject(value) && Object.keys(DEFAULT_TOOLBAR_ITEMS).every((key) => typeof value[key] === "boolean") && Object.keys(value).every((key) => key in DEFAULT_TOOLBAR_ITEMS),
+  sidebarConnectionIconStyle: isSidebarConnectionIconStyle,
+  // Each supplied toolbar key must already be the boolean the UI writes. The
+  // object may be partial because older and cross-platform files legitimately
+  // omit keys introduced later or owned by another runtime.
+  toolbarItems: isRawToolbarItemsShape,
+  toolbarItemOrder: isRawToolbarItemOrderShape,
   ...Object.fromEntries(PASS_THROUGH_BOOLEAN_KEYS.map((key) => [key, (value: unknown) => typeof value === "boolean"])),
 };
 
@@ -533,14 +572,48 @@ function isRawShortcutSettingsShape(value: unknown): boolean {
 }
 
 /**
- * Raw shape: every known toolbar key must already be a boolean.
+ * Raw shape: visibility keys are booleans and pinned entries are strings.
  * normalizeToolbarItems coerces `exclusiveRightSidebarPanels` with `!== false`
  * (and fills the rest with nullish defaults), so a non-boolean like "no" would
  * otherwise be silently turned into `true` and pass the normalized round-trip
- * check. Unknown keys stay ignored for forward compatibility.
+ * check. Unknown keys are ignored for forward compatibility.
  */
 function isRawToolbarItemsShape(value: unknown): boolean {
-  return isPlainObject(value) && Object.entries(value).every(([key, entry]) => !(key in DEFAULT_TOOLBAR_ITEMS) || typeof entry === "boolean");
+  return (
+    isPlainObject(value) &&
+    Object.entries(value).every(([key, entry]) => {
+      if (key === "pinnedMenuItems") return Array.isArray(entry) && entry.every((item) => typeof item === "string");
+      return !(key in DEFAULT_TOOLBAR_ITEMS) || typeof entry === "boolean";
+    })
+  );
+}
+
+function isRawToolbarItemOrderShape(value: unknown): boolean {
+  return Array.isArray(value) && value.every((key) => typeof key === "string");
+}
+
+function normalizeImportedToolbarItems(value: unknown): Partial<EditorSettings["toolbarItems"]> {
+  const imported: Partial<EditorSettings["toolbarItems"]> = {};
+  if (!isPlainObject(value)) return imported;
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === "pinnedMenuItems") imported.pinnedMenuItems = normalizePinnedToolbarMenuItems(entry);
+    else if (key in DEFAULT_TOOLBAR_ITEMS && typeof entry === "boolean") imported[key as Exclude<keyof EditorSettings["toolbarItems"], "pinnedMenuItems">] = entry;
+  }
+  return imported;
+}
+
+function normalizeImportedToolbarItemOrder(value: unknown): ToolbarItemKey[] {
+  const seen = new Set<ToolbarItemKey>();
+  const order: ToolbarItemKey[] = [];
+  if (!Array.isArray(value)) return order;
+  for (const key of value) {
+    if (typeof key !== "string" || !DEFAULT_TOOLBAR_ITEM_ORDER.includes(key as ToolbarItemKey)) continue;
+    const typedKey = key as ToolbarItemKey;
+    if (seen.has(typedKey)) continue;
+    seen.add(typedKey);
+    order.push(typedKey);
+  }
+  return order;
 }
 
 const SQL_VARIABLE_SYNTAX_KEY_SET = new Set<string>(SQL_VARIABLE_SYNTAX_KEYS);
@@ -615,6 +688,7 @@ const RAW_STRUCTURED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (v
   tableColumnTemplateFields: isStringArray,
   shortcuts: isRawShortcutSettingsShape,
   toolbarItems: isRawToolbarItemsShape,
+  toolbarItemOrder: isRawToolbarItemOrderShape,
   sqlFormatter: isTransferableSqlFormatterSettings,
   sidebarHiddenTablePrefixes: isStringArray,
   redisKeyTemplates: isStringArray,
@@ -757,6 +831,16 @@ export function parseSettingsTransferFile(text: string, options: SettingsTransfe
     const validator = PASS_THROUGH_FIELD_VALIDATORS[key] ?? NESTED_FIELD_VALIDATORS[key];
     if (validator && !validator(value)) {
       invalidKeys.push(key);
+      continue;
+    }
+    // Keep nested toolbar values partial. The normalizer fills missing keys,
+    // but those defaults must not overwrite the target draft during import.
+    if (key === "toolbarItems") {
+      imported[key] = deepClone(normalizeImportedToolbarItems(raw)) as never;
+      continue;
+    }
+    if (key === "toolbarItemOrder") {
+      imported[key] = normalizeImportedToolbarItemOrder(raw) as never;
       continue;
     }
     if (typeof raw === "boolean" || typeof raw === "number" || typeof raw === "string") {

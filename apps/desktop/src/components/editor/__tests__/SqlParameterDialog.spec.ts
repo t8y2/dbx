@@ -9,11 +9,13 @@ import type { SqlParameterDescriptor, SqlParameterInput } from "@/lib/sql/sqlPar
 const historyMocks = vi.hoisted(() => ({
   load: vi.fn<(key: string) => SqlParameterInput[]>(),
   remember: vi.fn<(values: Record<string, SqlParameterInput>) => Record<string, SqlParameterInput[]>>(),
+  clear: vi.fn<() => void>(),
 }));
 
 vi.mock("@/lib/sql/sqlParameterHistory", () => ({
   loadSqlParameterHistory: historyMocks.load,
   rememberSqlParameterValues: historyMocks.remember,
+  clearSqlParameterHistory: historyMocks.clear,
 }));
 
 vi.mock("@/composables/useSqlHighlighter", () => ({
@@ -260,6 +262,10 @@ describe("SqlParameterDialog clear parameter values action", () => {
 
     const input = parameterInputs()[0];
     expect(input).not.toBeUndefined();
+    // The dialog opens with the first input focused (enter-to-execute mod), so
+    // blur first — focusing an already-active element fires no focus event and
+    // would not open the value-history popover.
+    input?.blur();
     input?.focus();
     await nextTick();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -317,5 +323,63 @@ describe("SqlParameterDialog clear parameter values action", () => {
     expect(state.open).toBe(true);
     expect(onExecute).not.toHaveBeenCalled();
     expect(historyMocks.remember).not.toHaveBeenCalled();
+  });
+
+  /** #14894: a one-click action that clears every remembered parameter value. */
+  it("clears the stored parameter history without touching the current values", async () => {
+    const { state, onExecute } = await mountDialog(MIXED_VALUES);
+    const beforePreview = document.body.querySelector("pre")?.textContent;
+
+    const button = document.body.querySelector<HTMLButtonElement>('[data-testid="sql-parameters-clear-history"]');
+    expect(button).not.toBeNull();
+    button!.click();
+    await nextTick();
+
+    expect(historyMocks.clear).toHaveBeenCalledTimes(1);
+    // Clearing history is not "clear values": the inputs and preview stay put.
+    expect(parameterInputs().map((input) => input.value)).toEqual(["alpha beta", " 42 ", "NULL", "current_date", ""]);
+    expect(document.body.querySelector("pre")?.textContent).toBe(beforePreview);
+    expect(state.open).toBe(true);
+    expect(onExecute).not.toHaveBeenCalled();
+  });
+});
+
+describe("SqlParameterDialog enter-to-execute", () => {
+  it("executes the resolved SQL when the form submits (Enter in a parameter field)", async () => {
+    const { state, onExecute } = await mountDialog();
+    const resolvedPreview = document.body.querySelector("pre")?.textContent;
+    expect(resolvedPreview).not.toBe(SQL);
+
+    const form = document.body.querySelector("form");
+    expect(form).not.toBeNull();
+    form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await nextTick();
+
+    expect(historyMocks.remember).toHaveBeenCalledOnce();
+    expect(onExecute).toHaveBeenCalledOnce();
+    expect(onExecute).toHaveBeenCalledWith(resolvedPreview);
+    expect(state.open).toBe(false);
+  });
+
+  it("types Execute as the only submit button so Enter cannot trigger the other actions", async () => {
+    await mountDialog();
+    expect(buttonWithText("Execute")?.getAttribute("type")).toBe("submit");
+    expect(buttonWithText("Cancel")?.getAttribute("type")).toBe("button");
+    expect(buttonWithText("Copy")?.getAttribute("type")).toBe("button");
+    expect(ignoreActionButton()?.getAttribute("type")).toBe("button");
+    expect(clearActionButton()?.getAttribute("type")).toBe("button");
+    expect(actionButton()?.getAttribute("type")).toBe("button");
+  });
+
+  it("focuses the first parameter value input when the dialog opens", async () => {
+    await mountDialog();
+    expect(document.activeElement).toBe(parameterInputs()[0]);
+  });
+
+  it("skips a disabled NULL parameter when choosing the initial focus", async () => {
+    await mountDialog({ ...MIXED_VALUES, text_value: { kind: "null", value: "" } });
+    const [first, second] = parameterInputs();
+    expect(first.disabled).toBe(true);
+    expect(document.activeElement).toBe(second);
   });
 });

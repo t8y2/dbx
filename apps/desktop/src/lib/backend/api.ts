@@ -204,6 +204,7 @@ export const deleteSavedSqlFile = forward("deleteSavedSqlFile");
 export const savedSqlStorageDir = forward("savedSqlStorageDir");
 export const openSavedSqlStorageDir = forward("openSavedSqlStorageDir");
 export const revealPathInFileManager = forward("revealPathInFileManager");
+export const openPathWithDefaultApp = forward("openPathWithDefaultApp");
 export const deleteDatabaseBackupFiles = forward("deleteDatabaseBackupFiles");
 export const databaseBackupCommand = forward("databaseBackupCommand");
 export const databaseBackupBackground = forward("databaseBackupBackground");
@@ -368,6 +369,7 @@ export const prepareOracleTriggerSql = forward("prepareOracleTriggerSql");
 export const fingerprintOracleRoutineObjectSource = forward("fingerprintOracleRoutineObjectSource");
 export const buildExecutableObjectSourceSql = forward("buildExecutableObjectSourceSql");
 export const buildEditableObjectSource = forward("buildEditableObjectSource");
+export const buildOracleObjectExportSql = forward("buildOracleObjectExportSql");
 export const buildRoutineRenameObjectSourceStatements = forward("buildRoutineRenameObjectSourceStatements");
 export const rewriteOracleRoutineReferences = forward("rewriteOracleRoutineReferences");
 export const rewriteOracleTableReferences = forward("rewriteOracleTableReferences");
@@ -452,6 +454,7 @@ export const saveMcpHistoryRetentionLimit = forward("saveMcpHistoryRetentionLimi
 export const loadMaxRetries = forward("loadMaxRetries");
 export const saveMaxRetries = forward("saveMaxRetries");
 export const completeAppClose = forward("completeAppClose");
+export const completeWindowClose = forward("completeWindowClose");
 export const requestAppClose = forward("requestAppClose");
 export const setShortcutRecording = forward("setShortcutRecording");
 export const setDriverStoreDir = forward("setDriverStoreDir");
@@ -556,10 +559,13 @@ export const saveExternalSqlFile = forward("saveExternalSqlFile");
 export const listSqlFilesInFolder = forward("listSqlFilesInFolder");
 export const searchSqlFileContents = forward("searchSqlFileContents");
 export const globalSearch = forward("globalSearch");
+export const cancelGlobalSearch = forward("cancelGlobalSearch");
 export const loadGlobalSearchSettings = forward("loadGlobalSearchSettings");
 export const saveGlobalSearchSettings = forward("saveGlobalSearchSettings");
 export const createSqlFileInFolder = forward("createSqlFileInFolder");
 export const renameSqlFileInFolder = forward("renameSqlFileInFolder");
+export const moveSqlFileInFolder = forward("moveSqlFileInFolder");
+export const watchSqlFileFolder = forward("watchSqlFileFolder");
 export const deleteSqlFileInFolder = forward("deleteSqlFileInFolder");
 export const createSqlFolderInFolder = forward("createSqlFolderInFolder");
 export const renameSqlFolderInFolder = forward("renameSqlFolderInFolder");
@@ -905,6 +911,7 @@ export const mqGetBacklog = forward("mqGetBacklog");
 export const mqGetConsumerGroupConfig = forward("mqGetConsumerGroupConfig");
 export const mqAlterConsumerGroupConfig = forward("mqAlterConsumerGroupConfig");
 export const mqGetClusterInfo = forward("mqGetClusterInfo");
+export const mqGetBrokerConfig = forward("mqGetBrokerConfig");
 export const mqGetTopicRoute = forward("mqGetTopicRoute");
 export const mqAlterTopicConfig = forward("mqAlterTopicConfig");
 export const mqSkipTopicAccumulation = forward("mqSkipTopicAccumulation");
@@ -1249,6 +1256,7 @@ export type {
   MongoExportProgress,
   MongoExportSummary,
   DatabaseExportRequest,
+  DatabaseExportSelectedObject,
   ExportProgress,
   TableExportProgress,
   TableExportStatus,
@@ -1277,3 +1285,6 @@ export const mqttGetTopicTree = forward("mqttGetTopicTree");
 export const mqttGetMessages = forward("mqttGetMessages");
 export const mqttClearMessages = forward("mqttClearMessages");
 export const mqttDeleteMessage = forward("mqttDeleteMessage");
+
+export const migrationPrepareCredentialReset = forward("migrationPrepareCredentialReset");
+export const migrationResetCredentials = forward("migrationResetCredentials");

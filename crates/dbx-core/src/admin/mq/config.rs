@@ -41,6 +41,19 @@ pub struct MqSocksProxy {
     pub password: String,
 }
 
+/// Kafka PEM certificate paths. Field names are snake_case on the wire and
+/// shared verbatim with the desktop frontend and the Java agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MqKafkaTlsConfig {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ca_cert_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_cert_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_key_path: String,
+}
+
 /// Configuration for an MQ admin connection, decoded from
 /// `ConnectionConfig.external_config`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +67,11 @@ pub struct MqAdminConfig {
     /// Skip TLS certificate verification (self-signed clusters only).
     #[serde(default)]
     pub tls_skip_verify: bool,
+    /// Kafka-only PEM certificate paths, read from the `tls` section of
+    /// `external_config`. Paths stay on this machine and are excluded from
+    /// cloud sync (see `persistence/cloud_sync.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<MqKafkaTlsConfig>,
     /// Manually pin a server version (e.g. `3.1`), skipping auto-detection for
     /// environments where the version endpoint is blocked by a gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -416,5 +434,28 @@ mod tests {
                 .expect("should rewrite admin URL with endpoint");
 
         assert_eq!(rewritten, "https://127.0.0.1:49152/pulsar-admin?tenant=public");
+    }
+
+    #[test]
+    fn kafka_tls_section_is_optional_and_snake_case() {
+        let config: MqAdminConfig = serde_json::from_value(serde_json::json!({
+            "systemKind": "kafka",
+            "adminUrl": "",
+            "tls": {
+                "ca_cert_path": "/certs/ca-chain.pem",
+                "client_cert_path": "/certs/client.crt",
+                "client_key_path": "/certs/client.key"
+            }
+        }))
+        .unwrap();
+        let tls = config.tls.expect("kafka tls section should decode");
+        assert_eq!(tls.ca_cert_path, "/certs/ca-chain.pem");
+        assert_eq!(tls.client_cert_path, "/certs/client.crt");
+        assert_eq!(tls.client_key_path, "/certs/client.key");
+
+        // 没有 tls section 时字段缺省为 None，不影响旧连接反序列化。
+        let legacy: MqAdminConfig =
+            serde_json::from_value(serde_json::json!({ "systemKind": "kafka", "adminUrl": "" })).unwrap();
+        assert!(legacy.tls.is_none());
     }
 }

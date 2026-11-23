@@ -1,11 +1,13 @@
 import { shouldReportOracleCompilationErrors } from "@/lib/query/oracleCompilationErrors";
-import { ref, watch, type Ref, type ComputedRef } from "vue";
+import { getCurrentScope, onScopeDispose, ref, watch, type Ref, type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
+import { dataGridPendingChangesState } from "@/composables/useDataGridEditor";
+import { resultGridInstanceKey } from "@/lib/tabs/tabPresentation";
 import { isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { supportsConnectionScopedQueryExecution } from "@/lib/database/databaseFeatureSupport";
 import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
@@ -164,6 +166,12 @@ function firstQueryExecutionError(tab: Pick<QueryTab, "result" | "results">) {
   return results.find((result) => isQueryExecutionErrorResult(result));
 }
 
+function resultExecutionTimeMs(tab: Pick<QueryTab, "result" | "results">, fallbackMs: number): number {
+  const results = tab.results?.length ? tab.results : tab.result ? [tab.result] : [];
+  if (!results.length || results.some((result) => !Number.isFinite(result.execution_time_ms) || result.execution_time_ms < 0)) return fallbackMs;
+  return results.reduce((total, result) => total + result.execution_time_ms, 0);
+}
+
 export function useSqlExecution(deps: {
   activeTab: ComputedRef<QueryTab | undefined>;
   activeConnection: ComputedRef<ConnectionConfig | undefined>;
@@ -195,6 +203,17 @@ export function useSqlExecution(deps: {
   const dangerSql = ref("");
   const pendingDangerSql = ref("");
   const showDangerDialog = ref(false);
+  const showResultChangesDialog = ref(false);
+  let resolveResultChanges: ((confirmed: boolean) => void) | undefined;
+
+  function onResultChangesConfirm(confirmed: boolean) {
+    const resolve = resolveResultChanges;
+    resolveResultChanges = undefined;
+    showResultChangesDialog.value = false;
+    resolve?.(confirmed);
+  }
+  if (getCurrentScope()) onScopeDispose(() => onResultChangesConfirm(false));
+
   const suppressDangerConfirm = ref(false);
   const explainMode = ref<"explain" | "autotrace">("explain");
   const showSqlParameterDialog = ref(false);
@@ -519,6 +538,38 @@ export function useSqlExecution(deps: {
       cancelEditorViewportRequest(options.editorViewportRequestId);
       return notStarted("missing-database", executionTabId);
     }
+    if (options.openInNewResultTab !== true) {
+      const gridKey = resultGridInstanceKey(tab);
+      const previousResult = tab.result;
+      const gridKeys = Array.from({ length: Math.max(tab.results?.length ?? 0, 1) }, (_, activeResultIndex) => resultGridInstanceKey({ ...tab, activeResultIndex }));
+      const pendingState = () => {
+        const states = gridKeys.map((key) => dataGridPendingChangesState(key, tab.id, tab.resultViewGeneration));
+        return states.includes("saving") ? "saving" : states.includes("pending") ? "pending" : undefined;
+      };
+      if (showResultChangesDialog.value) {
+        cancelEditorViewportRequest(options.editorViewportRequestId);
+        return notStarted("busy", executionTabId);
+      }
+      if (pendingState() === "saving") {
+        toast(t("grid.queryWhileSaving"), 5000);
+        cancelEditorViewportRequest(options.editorViewportRequestId);
+        return notStarted("busy", executionTabId);
+      }
+      if (pendingState() === "pending") {
+        const confirmed = await new Promise<boolean>((resolve) => {
+          resolveResultChanges = resolve;
+          showResultChangesDialog.value = true;
+        });
+        if (!confirmed || resolveExecutionTab(executionTabId) !== tab || resultGridInstanceKey(tab) !== gridKey || tab.result !== previousResult) {
+          cancelEditorViewportRequest(options.editorViewportRequestId);
+          return notStarted("cancelled", executionTabId);
+        }
+        if (tab.isExecuting || pendingState() === "saving") {
+          cancelEditorViewportRequest(options.editorViewportRequestId);
+          return notStarted("busy", executionTabId);
+        }
+      }
+    }
     const statementCount = splitSqlStatementRanges(
       sql,
       executionDatabaseType,
@@ -596,7 +647,7 @@ export function useSqlExecution(deps: {
       connection_name: connName,
       database: currentTab.database,
       sql,
-      execution_time_ms: elapsed,
+      execution_time_ms: resultExecutionTimeMs(currentTab, elapsed),
       success,
       error: failure ? (failure.error ? translateBackendError(t, failure.error, failure.rows?.[0]?.[0]) : String(failure.rows?.[0]?.[0] ?? "")) : undefined,
       activity_kind: classifySqlActivityKind(sql),
@@ -880,7 +931,7 @@ export function useSqlExecution(deps: {
       const mergeResult = snapshotResultForMerge(latest.result);
       const resultStatus = success ? (input.manualTransaction ? "pending_commit" : "success") : "failed";
       recordedRunId = captureWorkerResult(resultStatus, errorMessage);
-      const executionDuration = elapsedMs();
+      const executionDuration = resultExecutionTimeMs(latest, elapsedMs());
       const recordOutcome = async () => {
         await historyStore.add({
           connection_id: executionTab.connectionId,
@@ -1129,6 +1180,8 @@ export function useSqlExecution(deps: {
 
   return {
     dangerSql,
+    showResultChangesDialog,
+    onResultChangesConfirm,
     pendingDangerSql,
     showDangerDialog,
     suppressDangerConfirm,

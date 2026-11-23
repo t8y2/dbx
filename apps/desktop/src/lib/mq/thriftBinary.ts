@@ -385,7 +385,10 @@ export function decodeThriftBinaryBase64(base64?: string, options: { allowRawStr
   return decodeThriftBinary(bytes, options);
 }
 
-export function formatMqMessagePayload(message: Pick<PeekedMessage, "payloadText" | "payloadBase64">, options: { allowRawStructSniff?: boolean } = {}): string {
+export function formatMqMessagePayload(message: Pick<PeekedMessage, "payloadText" | "payloadBase64">, options: { decode?: boolean; allowRawStructSniff?: boolean } = {}): string {
+  if (!options.decode) {
+    return message.payloadText ?? message.payloadBase64;
+  }
   if (message.payloadText !== undefined && message.payloadText !== "" && isPrintableText(message.payloadText)) {
     return message.payloadText;
   }

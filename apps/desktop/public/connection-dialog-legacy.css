@@ -9,11 +9,7 @@
     max-width: 880px !important;
   }
 
-  [data-slot="dialog-content"].connection-dialog-content--standard {
-    max-width: 560px !important;
-  }
-
-  [data-slot="dialog-content"].connection-dialog-content--wide {
+  [data-slot="dialog-content"].connection-dialog-content--config {
     max-width: 660px !important;
   }
 
@@ -83,7 +79,7 @@
     width: calc(100vw - 2rem) !important;
     min-width: 38rem !important;
     height: 720px !important;
-    max-width: 880px !important;
+    max-width: 660px !important;
   }
 
   html.dbx-legacy-webview [data-slot="dialog-content"].connection-dialog-content--config .connection-form-body {

@@ -1,5 +1,39 @@
 import { describe, expect, it } from "vitest";
-import { connectionUsesVisibleSchemaFilter, filterSchemaNamesForConnection, filterSchemaNamesForVisiblePicker, isSystemSchemaName } from "@/lib/database/visibleDatabases";
+import { connectionUsesVisibleSchemaFilter, filterSchemaNamesForConnection, filterSchemaNamesForVisiblePicker, isSystemSchemaName, visibleNameMatchesSearch } from "@/lib/database/visibleDatabases";
+
+describe("visibleNameMatchesSearch", () => {
+  it("keeps the case-insensitive substring match when no wildcard is used", () => {
+    expect(visibleNameMatchesSearch("app_orders", "APP")).toBe(true);
+    expect(visibleNameMatchesSearch("app_orders", "orders")).toBe(true);
+    expect(visibleNameMatchesSearch("app_orders", "users")).toBe(false);
+  });
+
+  it("treats an underscore as a literal character, not a single-character wildcard", () => {
+    expect(visibleNameMatchesSearch("app_orders", "app_")).toBe(true);
+    expect(visibleNameMatchesSearch("appXorders", "app_")).toBe(false);
+  });
+
+  it("matches the whole name when % is present", () => {
+    expect(visibleNameMatchesSearch("app_orders", "app_%")).toBe(true);
+    expect(visibleNameMatchesSearch("my_app_orders", "app_%")).toBe(false);
+    expect(visibleNameMatchesSearch("reporting", "%port%")).toBe(true);
+    expect(visibleNameMatchesSearch("reporting", "%xyz%")).toBe(false);
+  });
+
+  it("is case-insensitive for % patterns too", () => {
+    expect(visibleNameMatchesSearch("App_Orders", "app_%")).toBe(true);
+  });
+
+  it("escapes regular-expression characters in the search text", () => {
+    expect(visibleNameMatchesSearch("a.b(c)", "a.b(c)")).toBe(true);
+    expect(visibleNameMatchesSearch("axb(c)", "a.b(c)")).toBe(false);
+    expect(visibleNameMatchesSearch("a.b(c)", "%.%")).toBe(true);
+  });
+
+  it("returns every name for a blank search", () => {
+    expect(visibleNameMatchesSearch("app_orders", "   ")).toBe(true);
+  });
+});
 
 describe("visibleDatabases schema filtering", () => {
   it("hides common Kingbase system schemas by default", () => {
@@ -118,6 +152,16 @@ describe("visible database wildcard patterns (issue #7164)", () => {
     const { filterDatabaseNamesForConnection } = await import("@/lib/database/visibleDatabases");
     const connection = { db_type: "mysql" as const, visible_database_patterns: ["%n1%"] };
     expect(filterDatabaseNamesForConnection(["n1_order", "main", "mysql", "sys"], connection)).toEqual(["n1_order"]);
+  });
+
+  it.each([
+    [["main"], [], true],
+    [[], ["%ak%"], true],
+    [[], [], false],
+    [[], ["  "], false],
+  ])("allows saving checks %j with patterns %j: %s (issue #14221)", async (selected, patterns, expected) => {
+    const { canSaveVisibleDatabaseSelection } = await import("@/lib/database/visibleDatabases");
+    expect(canSaveVisibleDatabaseSelection(selected, patterns)).toBe(expected);
   });
 
   it("parses user pattern input with separators, trimming and dedupe", async () => {

@@ -135,12 +135,14 @@ export function createDataGridColumnContextMenuItems(options: {
   /** 当前被隐藏的列数量，用于决定是否显示「显示全部列」。 */
   hiddenColumnCount?: number;
   canHideIdenticalColumns?: boolean;
+  canDeleteColumn?: boolean;
+  deferDeleteToDangerousMenu?: boolean;
   labels: Record<
     "copyName" | "copyComment" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns" | "hideColumn" | "hideSelectedColumns" | "showAllColumnsMenu",
     string
   > &
-    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn" | "hideIdenticalColumns" | "copyMetadata" | "clearRememberedColumnWidths", string>>;
-  icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort"> & Partial<Record<"clearRememberedColumnWidths", Component>>;
+    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn" | "hideIdenticalColumns" | "copyMetadata" | "clearRememberedColumnWidths" | "deleteColumn", string>>;
+  icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort"> & Partial<Record<"clearRememberedColumnWidths" | "deleteColumn", Component>>;
   actions: {
     copyName: () => void;
     copyComment: () => void;
@@ -158,6 +160,7 @@ export function createDataGridColumnContextMenuItems(options: {
     hideSelectedColumns: () => void;
     hideIdenticalColumns?: () => void;
     showAllColumnsMenu: () => void;
+    deleteColumn?: () => void;
     clearRememberedColumnWidths?: () => void;
   };
   filterSubmenu: DataGridContextMenuItem;
@@ -220,6 +223,10 @@ export function createDataGridColumnContextMenuItems(options: {
       if ((options.contextVisibleColIdx ?? -1) < (options.frozenColumnCount ?? 0) && options.labels.unfreezeCurrentColumn && options.actions.unfreezeCurrentColumn) items.push({ label: options.labels.unfreezeCurrentColumn, action: options.actions.unfreezeCurrentColumn });
       items.push({ label: options.labels.unfreezeColumns, action: options.actions.unfreezeColumns });
     }
+    if (!options.deferDeleteToDangerousMenu && options.canDeleteColumn !== undefined && options.actions.deleteColumn) {
+      items.push({ label: "", separator: true });
+      items.push({ label: options.labels.deleteColumn ?? "Delete column", action: options.actions.deleteColumn, disabled: !options.canDeleteColumn, variant: "destructive" });
+    }
     if (options.hasColumnSelection) {
       items.push({ label: options.labels.freezeSelectedColumns, action: options.actions.freezeSelectedColumns });
     }
@@ -257,10 +264,13 @@ export function createDataGridCellContextMenuItems(options: {
   labels: Record<"cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose", string>;
   icons: Pick<DataGridContextMenuIcons, "cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose">;
   actions: Record<"cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose", () => void>;
+  binaryTextPreviewItem?: DataGridContextMenuItem | null;
+  pluginDecodeItem?: DataGridContextMenuItem | null;
   importItem?: DataGridContextMenuItem | null;
   downloadItem?: DataGridContextMenuItem | null;
   foreignKeyItem?: DataGridContextMenuItem | null;
   copySubmenu: DataGridContextMenuItem;
+  pasteCellItem?: DataGridContextMenuItem | null;
   clearSelectionItem?: DataGridContextMenuItem;
   generateSubmenu?: DataGridContextMenuItem;
 }): DataGridContextMenuItem[] {
@@ -268,6 +278,8 @@ export function createDataGridCellContextMenuItems(options: {
   if (options.hasCell) {
     if (options.hasColumn) {
       items.push({ label: options.labels.cellDetails, action: options.actions.cellDetails, icon: options.icons.cellDetails });
+      if (options.binaryTextPreviewItem) items.push(options.binaryTextPreviewItem);
+      if (options.pluginDecodeItem) items.push(options.pluginDecodeItem);
       if (options.importItem) items.push(options.importItem);
       if (options.downloadItem) items.push(options.downloadItem);
       if (options.foreignKeyItem) items.push(options.foreignKeyItem);
@@ -276,6 +288,7 @@ export function createDataGridCellContextMenuItems(options: {
     items.push({ label: options.labels.rowDetails, action: options.actions.rowDetails, icon: options.icons.rowDetails }, { label: "", separator: true });
   }
   if (!options.headerColumn) items.push(options.copySubmenu);
+  if (options.pasteCellItem) items.push(options.pasteCellItem);
   if (options.editable && options.hasCellSelection) {
     if (!options.headerColumn) items.push({ label: options.labels.setNull, action: options.actions.setNull, disabled: !options.hasEditableSelection, icon: options.icons.setNull });
     items.push({ label: options.labels.bulkEdit, action: options.actions.bulkEdit, disabled: !options.hasEditableSelection, icon: options.icons.bulkEdit });
@@ -292,6 +305,7 @@ export function createDataGridRowContextMenuItems(options: {
   canClone: boolean;
   deleted: boolean;
   canDelete: boolean;
+  deferDeleteToDangerousMenu?: boolean;
   labels: Record<"clone" | "restore" | "delete", string>;
   icons: Pick<DataGridContextMenuIcons, "clone" | "restore" | "delete">;
   actions: Record<"clone" | "restore" | "delete", () => void>;
@@ -300,7 +314,7 @@ export function createDataGridRowContextMenuItems(options: {
   const items: DataGridContextMenuItem[] = [{ label: "", separator: true }];
   if (options.canClone) items.push({ label: options.labels.clone, action: options.actions.clone, icon: options.icons.clone });
   if (options.deleted) items.push({ label: options.labels.restore, action: options.actions.restore, icon: options.icons.restore });
-  else if (options.canDelete) items.push({ label: options.labels.delete, action: options.actions.delete, icon: options.icons.delete, variant: "destructive" });
+  else if (options.canDelete && !options.deferDeleteToDangerousMenu) items.push({ label: options.labels.delete, action: options.actions.delete, icon: options.icons.delete, variant: "destructive" });
   items.push({ label: "", separator: true });
   return items;
 }

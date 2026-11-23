@@ -4,6 +4,11 @@ import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 
+vi.mock("@/lib/backend/browserAppStateStorage", () => ({
+  loadBrowserAppState: vi.fn(async () => null),
+  saveBrowserAppState: vi.fn(async () => undefined),
+}));
+
 vi.mock("@/components/ui/popover", async () => {
   const { defineComponent, h } = await import("vue");
   const passthrough = defineComponent({
@@ -29,7 +34,7 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 
 vi.mock("@/lib/backend/api", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/backend/api")>();
-  return { ...original, revealPathInFileManager: vi.fn() };
+  return { ...original, revealPathInFileManager: vi.fn(), startTransfer: vi.fn() };
 });
 
 import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue";
@@ -183,7 +188,7 @@ describe("data generation background task", () => {
     await mountPopover();
 
     expect(document.body.textContent).toContain("Data generation: app.users");
-    expect(document.body.textContent).toContain("1 / 2 tables · users · 250 / 1,000 rows");
+    expect(document.body.textContent).toContain(`1 / 2 tables · users · 250 / ${(1000).toLocaleString()} rows`);
     const openButton = document.body.querySelector<HTMLButtonElement>('button[title="Open task"]');
     expect(openButton).not.toBeNull();
     openButton?.click();
@@ -292,7 +297,7 @@ describe("ExportProgressPopover task duration", () => {
     await mountPopover();
 
     expect(document.body.textContent).toContain("Database export: demo_2000_tables");
-    expect(document.body.textContent).toContain("Current: t_0123_with_a_long_descriptive_name (123/2,000)");
+    expect(document.body.textContent).toContain(`Current: t_0123_with_a_long_descriptive_name (123/${(2000).toLocaleString()})`);
     expect(document.body.querySelector('[title="t_0123_with_a_long_descriptive_name"]')).not.toBeNull();
   });
 
@@ -878,5 +883,57 @@ describe("ExportProgressPopover file name and reveal action", () => {
     await vi.waitFor(() => {
       expect(useToast().message.value).toContain("Failed to open folder");
     });
+  });
+
+  it("does not offer direct re-execution bypass from the task list and routes via task details (#13621)", async () => {
+    vi.mocked(api.startTransfer).mockResolvedValue(undefined);
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const task = tracker.startDataTransferTask(
+      {
+        transferId: "popover-transfer",
+        sourceConnectionId: "source",
+        sourceDatabase: "sdb",
+        targetConnectionId: "target",
+        targetDatabase: "tdb",
+        tables: ["customers"],
+        createTable: true,
+        content: "structureAndData",
+        objects: [],
+        mode: "append",
+        targetTableNameCase: "preserve",
+        quoteTargetColumnNames: true,
+        batchSize: 1000,
+        dropTargetBeforeCreate: false,
+        dropTargetConfirmed: false,
+      },
+      "sdb → tdb",
+      { openTask: onOpen },
+    );
+
+    // Complete the task
+    tracker.updateDataTransferTask(task.exportId, {
+      transferId: task.exportId,
+      table: "customers",
+      tableIndex: 1,
+      totalTables: 1,
+      rowsTransferred: 50,
+      totalRows: 50,
+      status: "done",
+      terminal: true,
+      error: null,
+    });
+
+    await mountPopover();
+
+    const reexecuteTitle = i18n.global.t("transfer.reexecute");
+    const reexecuteButton = document.body.querySelector<HTMLButtonElement>(`button[title="${reexecuteTitle}"]`);
+    expect(reexecuteButton).toBeNull();
+
+    const openButton = document.body.querySelector<HTMLButtonElement>('button[title="Open task"]');
+    expect(openButton).not.toBeNull();
+    openButton!.click();
+    expect(onOpen).toHaveBeenCalledWith(task.exportId);
+    expect(api.startTransfer).toHaveBeenCalledTimes(1);
   });
 });

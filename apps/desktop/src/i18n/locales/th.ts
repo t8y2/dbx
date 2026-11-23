@@ -10371,6 +10371,7 @@ export default withEnglishFallback({
     displayModeConnection: "จัดกลุ่มตามการเชื่อมต่อ",
     unassociated: "ไม่ได้เชื่อมโยง",
     deletedConnection: "การเชื่อมต่อถูกลบแล้ว",
+    changeConnectionCapacity: "หลังบันทึก จำนวนไฟล์ที่มีบันทึกแหล่งข้อมูลจะเกินขีดจำกัด {count} รายการ โปรดลดจำนวนไฟล์ที่ยังไม่ได้เชื่อมโยงแหล่งข้อมูล",
   },
   marketplace: {
     viewGrid: "ดูเป็นกริด",

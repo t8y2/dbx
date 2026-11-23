@@ -11901,6 +11901,7 @@ export default withEnglishFallback({
     displayModeConnection: "Agrupar por conexão",
     unassociated: "Não associado",
     deletedConnection: "Conexão excluída",
+    changeConnectionCapacity: "Após salvar, o limite de registros de fonte de dados de {count} arquivos será excedido; reduza os arquivos que ainda não estão associados a uma fonte de dados.",
   },
   mqTopics: {
     title: "Gerenciamento de tópicos",

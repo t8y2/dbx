@@ -10030,6 +10030,7 @@ export default withEnglishFallback({
     displayModeConnection: "По подключениям",
     unassociated: "Не связано",
     deletedConnection: "Подключение удалено",
+    changeConnectionCapacity: "После сохранения будет превышен лимит записей источника данных в {count} файлов. Сократите число файлов, ещё не связанных с источником данных.",
   },
   diff: {
     additionalSchemas: "Также сравнить эти схемы",

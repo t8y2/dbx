@@ -11882,6 +11882,7 @@ export default withEnglishFallback({
     displayModeConnection: "按連線分組",
     unassociated: "未關聯",
     deletedConnection: "連線已刪除",
+    changeConnectionCapacity: "儲存後將超過 {count} 個檔案的資料來源記錄上限，請減少尚未關聯資料來源的檔案。",
   },
   mqTopics: {
     title: "主題管理",

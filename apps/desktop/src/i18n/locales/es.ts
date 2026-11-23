@@ -12364,6 +12364,7 @@ export default withEnglishFallback({
     displayModeConnection: "Agrupar por conexión",
     unassociated: "Sin asociar",
     deletedConnection: "Conexión eliminada",
+    changeConnectionCapacity: "Después de guardar, se superará el límite de {count} archivos para los registros de origen de datos; reduzca los archivos que aún no están asociados a un origen de datos.",
   },
   impact: {
     title: "Informe de impacto",

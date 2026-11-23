@@ -11908,6 +11908,7 @@ export default withEnglishFallback({
     displayModeConnection: "Per connessione",
     unassociated: "Non associato",
     deletedConnection: "Connessione eliminata",
+    changeConnectionCapacity: "Dopo il salvataggio verrà superato il limite di {count} file per i record delle origini dati. Riduci i file non ancora associati a un'origine dati.",
   },
   mqTopics: {
     title: "Gestione topic",

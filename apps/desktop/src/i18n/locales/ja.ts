@@ -11931,6 +11931,7 @@ export default withEnglishFallback({
     displayModeConnection: "接続別にグループ化",
     unassociated: "未関連付け",
     deletedConnection: "接続が削除されました",
+    changeConnectionCapacity: "保存すると、データソースが記録されたファイルの上限 {count} 件を超えます。データソースがまだ関連付けられていないファイルを減らしてください。",
   },
   mqTopics: {
     title: "トピック管理",

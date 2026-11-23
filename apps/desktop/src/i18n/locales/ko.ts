@@ -8578,6 +8578,7 @@ export default withEnglishFallback({
     displayModeConnection: "연결별 그룹화",
     unassociated: "연결되지 않음",
     deletedConnection: "연결이 삭제됨",
+    changeConnectionCapacity: "저장하면 {count}개 파일의 데이터 소스 기록 상한을 초과하게 됩니다. 데이터 소스에 아직 연결되지 않은 파일을 줄여 주세요.",
   },
   diff: {
     additionalSchemas: "다음 스키마도 비교",

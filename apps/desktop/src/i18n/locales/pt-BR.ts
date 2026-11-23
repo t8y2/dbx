@@ -10944,6 +10944,7 @@ export default withEnglishFallback({
     completionAutoActivationDelayDescription:
       "Tempo de espera após a digitação para exibir as sugestões de autocompletar, padrão de 500 milissegundos; aumentar esse valor pode evitar que o autocompletar apareça com frequência durante a digitação contínua e interfira na edição; 0 significa exibir imediatamente.",
     tabWrapMaxRows: "Número máximo de linhas lado a lado das abas",
+    shortcutGoToLastEditLocation: "Ir para o último local de edição",
     shortcutToggleLineCommentAndAdvance: "Alternar comentário de linha e avançar para a próxima linha",
   },
   driverStore: {

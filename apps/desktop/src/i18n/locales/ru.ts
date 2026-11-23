@@ -12538,6 +12538,7 @@ export default withEnglishFallback({
     completionAutoActivationDelay: "Задержка автоматической активации автодополнения (мс)",
     completionAutoActivationDelayDescription: "Задержка перед показом вариантов автодополнения после ввода; по умолчанию — 500 мс. Увеличение значения предотвращает частое появление автодополнения при непрерывном вводе, мешающее редактированию; 0 означает показывать сразу.",
     tabWrapMaxRows: "Максимальное количество строк для вкладок",
+    shortcutGoToLastEditLocation: "Перейти к последнему месту редактирования",
     shortcutToggleLineCommentAndAdvance: "Переключить комментарий строки и перейти к следующей строке",
   },
   driverStore: {

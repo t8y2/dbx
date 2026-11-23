@@ -11491,6 +11491,7 @@ export default {
     shortcutExecuteSqlInNewResultTab: "Execute SQL in new result tab",
     shortcutFind: "Find",
     shortcutGotoLine: "Go to Line",
+    shortcutGoToLastEditLocation: "Go to Last Edit Location",
     shortcutReplace: "Replace",
     shortcutSaveSql: "Save SQL",
     shortcutAcceptCompletion: "Accept completion",

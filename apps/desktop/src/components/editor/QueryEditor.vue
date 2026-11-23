@@ -108,6 +108,7 @@ import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShort
 import { createQueryEditorEscapeHandler } from "@/lib/editor/queryEditorEscape";
 import { buildQueryEditorLineNumbersExtension, createQueryEditorLineNumberAlignmentExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { createQueryEditorBookmarks, type QueryEditorBookmarks } from "@/lib/editor/codemirrorBookmarks";
+import { createQueryEditorLastEditLocations, type QueryEditorLastEditLocations } from "@/lib/editor/codemirrorLastEditLocation";
 import { keepGuttersAttachedDuringSync } from "@/lib/editor/codemirrorGutterSync";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
@@ -1481,6 +1482,7 @@ function runSqlShortcutAction(action: ReturnType<typeof enabledSqlShortcutAction
 }
 
 let bookmarkShortcuts: QueryEditorBookmarks | null = null;
+let lastEditLocations: QueryEditorLastEditLocations | null = null;
 
 function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view"))["keymap"]) {
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
@@ -1591,6 +1593,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         },
         ...binding(shortcuts.find, openSearch),
         ...binding(shortcuts.gotoLine, openGotoLine),
+        ...binding(shortcuts.goToLastEditLocation, (currentView) => lastEditLocations?.goBack(currentView) ?? false),
         ...replaceShortcutBindings,
         ...executeInNewResultTabBindings,
         ...executeAllBindings,
@@ -2304,6 +2307,10 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       toggleLabel: () => t("settings.shortcutToggleBookmark"),
     });
     bookmarkShortcuts = bookmarks;
+    const lastEditLocationRuntime = createQueryEditorLastEditLocations({
+      modules: { StateField: modules.StateField, StateEffect: modules.StateEffect },
+    });
+    lastEditLocations = lastEditLocationRuntime;
     const initialSettings = settingsStore.editorSettings;
     const theme = await loadEditorTheme(initialSettings.theme, editorThemeAppearance(), resolveEditorThemeColors(initialSettings), themePalette.value);
     if (initialSettings.vimModeEnabled) {
@@ -2352,6 +2359,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         createQueryEditorNativeSelectionGuard(ViewPlugin, { enabled: isTauriRuntime() && isMacOS(), inputHandler: EditorView.inputHandler, finalizeClipboardText: (text) => clipboardLineEndings(text) }),
         initializedRuntime.runGutterComp.of(runStatementGutterExtension()),
         bookmarks.extension,
+        lastEditLocationRuntime.extension,
         initializedRuntime.lineNumbersComp.of(lineNumbersExtension(initialSettings.showLineNumbers)),
         createQueryEditorLineNumberAlignmentExtension(ViewPlugin),
         currentStatementFrameExtension,

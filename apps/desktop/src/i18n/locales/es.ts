@@ -11228,6 +11228,7 @@ export default withEnglishFallback({
     completionAutoActivationDelayDescription:
       "Cuánto tiempo esperar tras la entrada antes de que aparezcan las sugerencias de autocompletado; el valor predeterminado es 500 milisegundos. Aumentarlo evita que las sugerencias aparezcan con demasiada frecuencia mientras se escribe de forma continua e interrumpan la edición; 0 significa que aparecen inmediatamente.",
     tabWrapMaxRows: "Número máximo de filas de mosaico de pestañas",
+    shortcutGoToLastEditLocation: "Ir a la última ubicación de edición",
     shortcutToggleLineCommentAndAdvance: "Alternar comentario de línea y pasar a la línea siguiente",
   },
   driverStore: {

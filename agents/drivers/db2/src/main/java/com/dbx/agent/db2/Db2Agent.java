@@ -28,11 +28,17 @@ import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class Db2Agent extends AbstractJdbcAgent {
+    static {
+        // JCC reads this as a JVM system property and ignores it in connection properties.
+        // With it set, undecodable bytes in catalog text (for example column comments) are
+        // returned as U+FFFD instead of failing the whole statement with CharConversionException.
+        System.setProperty("db2.jcc.charsetDecoderEncoder", "3");
+    }
+
     private static final String LARGE_VALUE_BYTES_COLUMN_PREFIX = "__DBX_LARGE_VALUE_BYTES_";
     private static final String DEFERRED_LOB_MARKER = "D:1";
     private static final Set<String> NUMERIC_PRECISION_TYPES = Set.of(
@@ -56,13 +62,6 @@ public final class Db2Agent extends AbstractJdbcAgent {
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
         return buildUrl(params);
-    }
-
-    @Override
-    protected Properties buildConnectionProperties(ConnectParams params) {
-        Properties properties = super.buildConnectionProperties(params);
-        properties.setProperty("db2.jcc.charsetDecoderEncoder", "3");
-        return properties;
     }
 
     @Override

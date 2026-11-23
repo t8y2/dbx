@@ -57,6 +57,13 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void setsCharsetDecoderEncoderAsJvmProperty() {
+        new Db2Agent();
+
+        assertEquals("3", System.getProperty("db2.jcc.charsetDecoderEncoder"));
+    }
+
+    @Test
     void formatsDecimalResultsWithoutExponentsOrPrecisionLoss() {
         Db2Agent agent = new Db2Agent();
         assertEquals("0.0000000000", agent.resultValue(decimalResult("0E-10"), 1, Types.DECIMAL));

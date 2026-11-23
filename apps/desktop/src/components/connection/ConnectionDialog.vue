@@ -53,6 +53,7 @@ import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
 import { insertSqliteRemoteTransportLayer, isSqliteRemoteTransportLayerType, sqliteRemoteTransportError } from "@/lib/connection/sqliteRemoteTransport";
 import { sanitizeConnectionCredentials } from "@/lib/connection/credentialSanitizer";
+import { connectionColorOptions as colorOptions } from "@/lib/connection/connectionColors";
 import { applySshAuthMethod, inferSshAuthMethod } from "@/lib/connection/sshAuthMethod";
 import { editableSshLocalPort, normalizeSshLocalPort, sshLocalPortState, sshLocalPortSupportedForConnection } from "@/lib/connection/sshLocalPort";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
@@ -1285,16 +1286,6 @@ watch(nacosImplementation, (implementation) => {
   if (implementation === "rnacos") nacosVersionMode.value = "v2";
   if (implementation !== "rnacos") nacosHistoryEnabled.value = false;
 });
-
-const colorOptions = [
-  { value: "", class: "bg-transparent border-dashed", labelKey: "connection.colorNone" },
-  { value: "#22c55e", class: "bg-green-500", labelKey: "connection.colorGreen" },
-  { value: "#eab308", class: "bg-yellow-500", labelKey: "connection.colorYellow" },
-  { value: "#f97316", class: "bg-orange-500", labelKey: "connection.colorOrange" },
-  { value: "#ef4444", class: "bg-red-500", labelKey: "connection.colorRed" },
-  { value: "#3b82f6", class: "bg-blue-500", labelKey: "connection.colorBlue" },
-  { value: "#a855f7", class: "bg-purple-500", labelKey: "connection.colorPurple" },
-];
 
 const isPresetColor = (color: string | undefined) => colorOptions.some((c) => c.value === (color || ""));
 const customColorInput = ref("");

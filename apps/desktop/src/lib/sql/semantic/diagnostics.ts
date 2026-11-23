@@ -544,10 +544,21 @@ export function isSqlSemanticDiagnosticInputContext(sql: string, cursor: number,
 }
 
 function resolveColumnTable(column: SqlColumnReference, tables: SqlTableReference[], knownTables: Map<string, SqlTableReference>, sql?: string, scopesById?: Map<number, SqlReferenceScope>): SqlTableReference | null {
-  const candidateTables = candidateTablesForColumn(tables, column, sql, scopesById);
   if (column.qualifier) {
-    return tableLookupFor(candidateTables).get(normalizeName(column.qualifier)) ?? (sql ? null : (knownTables.get(normalizeName(column.qualifier)) ?? null));
+    const qualifier = normalizeName(column.qualifier);
+    if (column.scope_id != null && scopesById?.size) {
+      // The nearest binding shadows the same qualifier in an enclosing query.
+      for (const scopeId of scopeAndParents(column.scope_id, scopesById)) {
+        const table = tableLookupFor(tables.filter((candidate) => candidate.scope_id === scopeId)).get(qualifier);
+        if (table) return table;
+      }
+    } else {
+      const table = tableLookupFor(sql ? tablesInSameStatement(tables, column, sql) : tables).get(qualifier);
+      if (table) return table;
+    }
+    return sql ? null : (knownTables.get(qualifier) ?? null);
   }
+  const candidateTables = candidateTablesForColumn(tables, column, sql, scopesById);
   if (candidateTables.length !== 1) return null;
   return candidateTables[0];
 }
@@ -560,10 +571,8 @@ function candidateTablesForColumn(tables: SqlTableReference[], column: SqlColumn
 
 function tablesInVisibleScopes(tables: SqlTableReference[], column: SqlColumnReference, scopesById?: Map<number, SqlReferenceScope>): SqlTableReference[] | null {
   if (column.scope_id == null || !scopesById || scopesById.size === 0) return null;
-  if (!column.qualifier) {
-    const currentScopeTables = tables.filter((table) => table.scope_id === column.scope_id);
-    if (currentScopeTables.length > 0) return currentScopeTables;
-  }
+  const currentScopeTables = tables.filter((table) => table.scope_id === column.scope_id);
+  if (currentScopeTables.length > 0) return currentScopeTables;
   const visibleScopeIds = scopeAndParents(column.scope_id, scopesById);
   if (visibleScopeIds.size === 0) return null;
   return tables.filter((table) => table.scope_id != null && visibleScopeIds.has(table.scope_id));

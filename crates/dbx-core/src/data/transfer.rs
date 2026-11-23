@@ -6267,12 +6267,16 @@ const OPENGAUSS_ONLY_TABLE_STORAGE_OPTIONS: &[&str] = &[
 /// PostgreSQL connection profiled as openGauss/GaussDB reads its table DDL through that
 /// same function (`schema::opengauss_table_ddl`), so the profile counts exactly like the
 /// database type — the same grouping `is_opengauss_family_config` uses.
+fn is_opengauss_family_transfer_config(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
+    matches!(db_type, DatabaseType::OpenGauss | DatabaseType::Gaussdb)
+        || matches!(driver_profile, Some("opengauss" | "gaussdb"))
+}
+
 fn source_ddl_carries_opengauss_table_options(
     source_db_type: &DatabaseType,
     source_driver_profile: Option<&str>,
 ) -> bool {
-    matches!(source_db_type, DatabaseType::OpenGauss | DatabaseType::Gaussdb)
-        || matches!(source_driver_profile, Some("opengauss" | "gaussdb"))
+    is_opengauss_family_transfer_config(source_db_type, source_driver_profile)
 }
 
 /// Targets that speak the openGauss dialect and therefore accept its table storage
@@ -9630,8 +9634,13 @@ pub async fn get_columns_for_transfer(
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
-            let db_type = get_db_type(state, connection_id).await.ok();
-            if matches!(db_type, Some(DatabaseType::OpenGauss | DatabaseType::Gaussdb)) {
+            let is_opengauss_family = {
+                let configs = state.configs.read().await;
+                configs.get(connection_id).is_some_and(|config| {
+                    is_opengauss_family_transfer_config(&config.db_type, config.driver_profile.as_deref())
+                })
+            };
+            if is_opengauss_family {
                 db::postgres::get_columns_compat_first(&p, &schema, &table).await
             } else {
                 db::postgres::get_columns(&p, &schema, &table).await
@@ -20556,6 +20565,13 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         // A target profiled as openGauss understands the clause too.
         assert!(strip(&DatabaseType::OpenGauss, None, Some("gaussdb")), "GaussDB-profiled target");
         assert!(!strip(&DatabaseType::OpenGauss, None, Some("postgres")), "unrelated target profile");
+
+        assert!(is_opengauss_family_transfer_config(&DatabaseType::Postgres, Some("opengauss")));
+        assert!(is_opengauss_family_transfer_config(&DatabaseType::Postgres, Some("gaussdb")));
+        assert!(is_opengauss_family_transfer_config(&DatabaseType::OpenGauss, None));
+        assert!(is_opengauss_family_transfer_config(&DatabaseType::Gaussdb, None));
+        assert!(!is_opengauss_family_transfer_config(&DatabaseType::Postgres, Some("postgres")));
+        assert!(!is_opengauss_family_transfer_config(&DatabaseType::Postgres, None));
     }
 
     #[test]

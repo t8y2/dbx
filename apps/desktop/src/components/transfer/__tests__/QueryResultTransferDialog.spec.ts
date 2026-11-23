@@ -120,7 +120,7 @@ vi.mock("@/components/connection/ConnectionTreeSelect.vue", async () => {
   const { defineComponent, h } = await import("vue");
   return {
     default: defineComponent({
-      props: { modelValue: { type: String, default: "" }, connections: { type: Array, default: () => [] } },
+      props: { modelValue: { type: String, default: "" }, connections: { type: Array, default: () => [] }, triggerClass: { type: String, default: "" } },
       emits: ["update:modelValue"],
       setup(props, { emit }) {
         return () =>
@@ -128,6 +128,7 @@ vi.mock("@/components/connection/ConnectionTreeSelect.vue", async () => {
             "select",
             {
               "data-testid": "target-connection",
+              "data-trigger-class": props.triggerClass,
               value: props.modelValue,
               onChange: (event: Event) => emit("update:modelValue", (event.target as HTMLSelectElement).value),
             },
@@ -293,6 +294,14 @@ describe("QueryResultTransferDialog execution boundaries", () => {
     expect(statements.some((statement) => /^CREATE TABLE /i.test(statement))).toBe(true);
     expect(statements.some((statement) => /^INSERT INTO /i.test(statement))).toBe(true);
     expect(api.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("renders the target connection picker as a bordered, full-width form control like the selects below it", async () => {
+    const { container } = await mountDialog(config("target", "mysql"));
+    const classes = container.querySelector('[data-testid="target-connection"]')?.getAttribute("data-trigger-class")?.split(/\s+/) ?? [];
+
+    // ConnectionTreeSelect defaults to a borderless, max-w-56 toolbar trigger.
+    expect(classes).toEqual(expect.arrayContaining(["border", "border-input", "rounded-md", "w-full", "max-w-none"]));
   });
 
   it("loads searchable database options for the selected connection", async () => {

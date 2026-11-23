@@ -9736,6 +9736,7 @@ export default {
     changeConnectionForFilesDescription: "Choose the connection and its default database to use the next time the selected local SQL files open.",
     changeConnectionCloseFiles: "Close any selected files that are already open.",
     changeConnectionLimit: "You can set the data source for up to {count} files at once.",
+    changeConnectionCapacity: "The {count}-file data source limit would be exceeded. Select fewer unassigned files.",
     changeConnectionSaveFailed: "Could not save the data source for the files.",
     displayMode: "Display mode",
     displayModeFolder: "Folder structure",

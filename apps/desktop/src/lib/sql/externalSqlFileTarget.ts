@@ -70,18 +70,19 @@ function saveExternalSqlFileTargets(targets: StoredExternalSqlFileTarget[]): boo
 }
 
 export function rememberExternalSqlFileTarget(path: string, target: ExternalSqlFileTarget) {
-  rememberExternalSqlFileTargets([path], target);
+  rememberExternalSqlFileTargets([path], target, { allowEviction: true });
 }
 
-export function rememberExternalSqlFileTargets(paths: readonly string[], target: ExternalSqlFileTarget): boolean {
+export function rememberExternalSqlFileTargets(paths: readonly string[], target: ExternalSqlFileTarget, options: { allowEviction?: boolean } = {}): "saved" | "capacity" | "storage-error" {
   const normalizedPaths = new Set(paths.map(normalizeExternalSqlPath).filter(Boolean));
-  if (normalizedPaths.size === 0) return true;
-  if (target.connectionId && normalizedPaths.size > MAX_EXTERNAL_SQL_FILE_TARGETS) return false;
+  if (normalizedPaths.size === 0) return "saved";
   const remaining = loadExternalSqlFileTargets().filter((item) => !normalizedPaths.has(item.path));
-  if (!target.connectionId) return saveExternalSqlFileTargets(remaining);
+  if (!target.connectionId) return saveExternalSqlFileTargets(remaining) ? "saved" : "storage-error";
+  if (!options.allowEviction && normalizedPaths.size + remaining.length > MAX_EXTERNAL_SQL_FILE_TARGETS) return "capacity";
   const updatedAt = Date.now();
   const updated = [...normalizedPaths].map((path) => ({ path, ...target, updatedAt }));
-  return saveExternalSqlFileTargets([...updated, ...remaining].slice(0, MAX_EXTERNAL_SQL_FILE_TARGETS));
+  const targets = [...updated, ...remaining].slice(0, MAX_EXTERNAL_SQL_FILE_TARGETS);
+  return saveExternalSqlFileTargets(targets) ? "saved" : "storage-error";
 }
 
 export function moveExternalSqlFileTarget(previousPath: string, nextPath: string) {

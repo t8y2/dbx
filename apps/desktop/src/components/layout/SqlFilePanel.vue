@@ -1474,8 +1474,10 @@ function changeFileConnection() {
   const paths = changeConnectionPaths.value;
   if (!connection || paths.length < 2 || hasOpenTargetFiles.value) return;
   const database = resolveDefaultDatabase(connection, []);
-  if (!rememberExternalSqlFileTargets(paths, { connectionId: connection.id, database, schema: connection.default_schema || undefined })) {
-    toast(t("sqlFileTree.changeConnectionSaveFailed"), 5000);
+  const saved = rememberExternalSqlFileTargets(paths, { connectionId: connection.id, database, schema: connection.default_schema || undefined });
+  if (saved !== "saved") {
+    const message = saved === "capacity" ? t("sqlFileTree.changeConnectionCapacity", { count: MAX_EXTERNAL_SQL_FILE_TARGETS }) : t("sqlFileTree.changeConnectionSaveFailed");
+    toast(message, 5000);
     return;
   }
   fileTargetsRevision.value++;

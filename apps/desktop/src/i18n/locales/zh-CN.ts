@@ -9698,6 +9698,7 @@ export default withEnglishFallback({
     changeConnectionForFilesDescription: "为所选本地 SQL 文件设置下次打开时使用的连接和默认数据库。",
     changeConnectionCloseFiles: "请先关闭已打开的所选文件。",
     changeConnectionLimit: "一次最多可设置 {count} 个文件。",
+    changeConnectionCapacity: "保存后将超过 {count} 个文件的数据源记录上限，请减少尚未关联数据源的文件。",
     changeConnectionSaveFailed: "保存文件数据源失败。",
     displayMode: "展示方式",
     displayModeFolder: "按文件夹结构",

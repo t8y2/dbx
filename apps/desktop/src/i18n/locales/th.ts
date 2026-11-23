@@ -1447,6 +1447,13 @@ export default withEnglishFallback({
     displayModeConnection: "จัดกลุ่มตามการเชื่อมต่อ",
   },
   connection: {
+    batchTestConnections: "ทดสอบการเชื่อมต่อ ({count})",
+    batchTestTitle: "ทดสอบการเชื่อมต่อหลายรายการ",
+    batchTestProgress: "ทดสอบแล้ว {completed} จาก {total} การเชื่อมต่อ",
+    batchTestPending: "รอทดสอบ",
+    batchTestSkipped: "ยังไม่ได้ทดสอบ",
+    batchTestFailed: "ทดสอบไม่สำเร็จ",
+    batchTestStop: "หยุดการทดสอบที่เหลือ",
     groupPath: "เส้นทางกลุ่ม",
     mysqlDataCharsetWriteBlocked: "โหมดความเข้ากันได้ของชุดอักขระข้อมูลบังคับให้อ่านอย่างเดียว ไม่สามารถเขียนหรือปลดล็อกชั่วคราวได้",
     mysqlDataCharsetUnsupported: "รองรับ dataCharset เฉพาะโปรไฟล์ MySQL แบบเนทีฟ ไม่รองรับ MariaDB, TiDB หรือโปรไฟล์อื่น",

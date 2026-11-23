@@ -1374,6 +1374,13 @@ export default withEnglishFallback({
   },
 
   connection: {
+    batchTestConnections: "Probar conexiones ({count})",
+    batchTestTitle: "Probar conexiones",
+    batchTestProgress: "Conexiones probadas: {completed} de {total}",
+    batchTestPending: "En espera",
+    batchTestSkipped: "Sin probar",
+    batchTestFailed: "Prueba fallida",
+    batchTestStop: "Detener las pruebas restantes",
     groupPath: "Ruta del grupo",
     mysqlDataCharsetWriteBlocked: "El modo de compatibilidad del juego de caracteres impone acceso de solo lectura. No permite escrituras ni desbloqueo temporal.",
     mysqlDataCharsetUnsupported: "dataCharset solo es compatible con el perfil MySQL nativo, no con MariaDB, TiDB ni otros perfiles de base de datos.",

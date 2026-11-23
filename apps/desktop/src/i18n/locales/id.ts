@@ -864,6 +864,13 @@ export default withEnglishFallback({
   },
 
   connection: {
+    batchTestConnections: "Uji koneksi ({count})",
+    batchTestTitle: "Uji koneksi",
+    batchTestProgress: "{completed} dari {total} koneksi telah diuji",
+    batchTestPending: "Menunggu",
+    batchTestSkipped: "Belum diuji",
+    batchTestFailed: "Pengujian gagal",
+    batchTestStop: "Hentikan pengujian yang tersisa",
     groupPath: "Jalur grup",
     mysqlDataCharsetWriteBlocked: "Mode kompatibilitas pengodean data mewajibkan akses hanya baca. Penulisan dan pembukaan kunci sementara tidak tersedia.",
     mysqlDataCharsetUnsupported: "dataCharset hanya didukung oleh profil MySQL native, bukan MariaDB, TiDB, atau profil lainnya.",

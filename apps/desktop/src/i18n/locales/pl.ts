@@ -925,6 +925,13 @@ export default withEnglishFallback({
   },
 
   connection: {
+    batchTestConnections: "Testuj połączenia ({count})",
+    batchTestTitle: "Testowanie połączeń",
+    batchTestProgress: "Przetestowano {completed} z {total} połączeń",
+    batchTestPending: "Oczekuje",
+    batchTestSkipped: "Nie przetestowano",
+    batchTestFailed: "Test nieudany",
+    batchTestStop: "Zatrzymaj pozostałe testy",
     groupPath: "Ścieżka grupy",
     title: "Nowe połączenie",
     name: "Nazwa",

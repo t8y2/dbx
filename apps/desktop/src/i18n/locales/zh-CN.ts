@@ -1516,6 +1516,13 @@ export default withEnglishFallback({
   },
 
   connection: {
+    batchTestConnections: "测试连接（{count}）",
+    batchTestTitle: "批量测试连接",
+    batchTestProgress: "已测试 {completed} / {total} 个连接",
+    batchTestPending: "等待测试",
+    batchTestSkipped: "未测试",
+    batchTestFailed: "测试失败",
+    batchTestStop: "停止后续测试",
     groupPath: "分组路径",
     parameterEditor: {
       title: "连接参数",

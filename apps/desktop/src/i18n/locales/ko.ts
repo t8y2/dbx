@@ -1371,6 +1371,13 @@ export default withEnglishFallback({
     displayModeConnection: "연결별 그룹화",
   },
   connection: {
+    batchTestConnections: "연결 테스트 ({count}개)",
+    batchTestTitle: "연결 일괄 테스트",
+    batchTestProgress: "연결 {total}개 중 {completed}개 테스트 완료",
+    batchTestPending: "대기 중",
+    batchTestSkipped: "테스트하지 않음",
+    batchTestFailed: "테스트 실패",
+    batchTestStop: "남은 테스트 중지",
     groupPath: "그룹 경로",
     mqttTopicAlias: "별칭 (선택 사항)",
     mysqlDataCharsetWriteBlocked: "데이터 문자 집합 호환 모드에서는 읽기 전용이 강제됩니다. 쓰기와 임시 잠금 해제는 사용할 수 없습니다.",

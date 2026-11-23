@@ -99,6 +99,7 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "contextMenu.clearDefaultSchema",
     "contextMenu.editDatabaseProperties",
     "contextMenu.renameDatabase",
+    "contextMenu.renameSchema",
     "contextMenu.createSchema",
     "contextMenu.editSchemaComment",
     "contextMenu.configureVisibleObjects",

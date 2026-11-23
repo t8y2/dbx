@@ -605,6 +605,12 @@ interface DataGridProps {
   schema?: string;
   columnLayoutScopeKey?: string;
   context?: "results" | "table-data";
+  /**
+   * Whether the host listens to `sendResultToAi`. The grid itself cannot know
+   * that, and the entry must not be a silent no-op in hosts that only view rows
+   * (document, vector, HBase browsers), so the entry is opt-in.
+   */
+  sendResultToAiEnabled?: boolean;
   pageSizePreference?: DataGridPageSizePreference;
   autoTransposeSingleRow?: boolean;
   sourceColumns?: Array<string | undefined>;
@@ -756,6 +762,9 @@ const props = withDefaults(defineProps<DataGridProps>(), {
   // Omitted row-action limits must keep normal table-data editing.
   allowInsertRows: undefined,
   allowDeleteRows: undefined,
+  // Explicit entry point only: hosts that render the grid without a
+  // `sendResultToAi` listener must not offer a menu item that does nothing.
+  sendResultToAiEnabled: false,
 });
 
 const tableColumnsByResultIndex = computed(() =>
@@ -15549,10 +15558,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     previewItems,
     // 显式把当前结果交回 AI（#15023）：只有真正带行的结果集才出现，错误/空结果
     // 不提供入口。行数据是否离开本机由这一次点击决定，不改变全局隐私开关。
+    // 还要宿主真的监听 `sendResultToAi`（`sendResultToAiEnabled`），否则在只读
+    // 浏览型网格上是点了没反应的死入口。
     createDataGridSendResultToAiItems({
       label: t("ai.sendResultToAi"),
       icon: Sparkles,
-      visible: canSendResultToAi.value,
+      visible: props.sendResultToAiEnabled && canSendResultToAi.value,
       send: () => emit("sendResultToAi"),
     }),
     // 右键刷新：与工具栏刷新按钮/Mod+R 走同一个 onToolbarRefresh，方便

@@ -116,7 +116,7 @@ A single selection is capped at 12,000 characters; anything beyond that is trunc
 
 ### Send a Result to AI
 
-Right-click a query result grid and choose **Send result to AI**, or use the same entry on the result toolbar. The assistant opens with the executed SQL, typed columns, and a bounded row preview attached, and asks the model to explain the result. The payload travels as **data**, not as an instruction; the chip reports how many rows were sent, and rows, cell values, or total characters beyond the caps are truncated with an explicit note in the content.
+Right-click a query result grid and choose **Send result to AI**. The assistant opens with the executed SQL, typed columns, and a bounded row preview attached, and asks the model to explain the result. The payload travels as **data**, not as an instruction; the chip reports how many rows were sent, and rows, cell values, or total characters beyond the caps are truncated with an explicit note in the content.
 
 This is an explicit per-click hand-off and does not change the default-off **Send query results to AI** setting, which attaches a five-row preview to every request. Execution errors and results without rows do not show the entry.
 

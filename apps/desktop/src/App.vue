@@ -2319,6 +2319,11 @@ function sendResultToAi(tabId: string) {
   // The result surface hides the entry for error/empty results; guard the
   // handler too so a programmatic trigger cannot open an empty AI request.
   if (!selection) return;
+  // The preview is bounded by a row cap and a char budget, and neither is
+  // visible in the composer chip, so say when loaded rows were left out.
+  if (selection.sentRows < selection.loadedRows) {
+    toast(t("ai.queryResultPreviewTruncated", { sent: selection.sentRows, loaded: selection.loadedRows }), 4000);
+  }
   // Same target rule as Fix with AI: the result's own execution namespace, not
   // whichever tab happens to be active once the async panel mount completes.
   const target = aiTargetFromTab(queryStore.activeResultExecutionTarget(tabId) ?? tab, (connectionId) => !!connectionStore.getConfig(connectionId));

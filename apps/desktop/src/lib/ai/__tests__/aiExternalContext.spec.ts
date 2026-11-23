@@ -41,6 +41,8 @@ describe("queryResultSelection", () => {
     expect(selection.content).toContain("Loaded rows: 2");
     expect(selection.content).toContain('Rows (showing 2 of 2 loaded):\n#1: id=1, name="alice"\n#2: id=2, name="bob"');
     expect(selection.content).not.toContain("Result truncated");
+    expect(selection.sentRows).toBe(2);
+    expect(selection.loadedRows).toBe(2);
     expect(selection.truncated).toBeUndefined();
   });
 
@@ -56,6 +58,9 @@ describe("queryResultSelection", () => {
     expect(selection.content).toContain('#30: id=29, name="name-29"');
     expect(selection.content).not.toContain("#31:");
     expect(selection.content).toContain("(Result truncated: 70 more loaded row(s) not sent.)");
+    // The counts the "send to AI" toast reports: dropped rows are visible.
+    expect(selection.sentRows).toBe(30);
+    expect(selection.loadedRows).toBe(100);
   });
 
   it("truncates individual values and the executed SQL instead of dumping them whole", () => {
@@ -77,6 +82,9 @@ describe("queryResultSelection", () => {
     const selection = queryResultSelection(tab({ result: result({ columns, column_types: [], rows }) }))!;
     expect(selection.content.length).toBeLessThan(AI_SELECTION_CONTEXT_MAX_CHARS);
     expect(selection.content).toContain("Result truncated:");
+    // The char budget, not the row cap, is what drops rows here.
+    expect(selection.loadedRows).toBe(100);
+    expect(selection.sentRows).toBeLessThan(selection.loadedRows);
   });
 
   it("clips one pathological column name instead of starving the rows", () => {

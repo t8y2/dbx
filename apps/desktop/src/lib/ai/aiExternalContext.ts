@@ -109,12 +109,27 @@ function previewRowLine(columns: readonly string[], row: readonly unknown[], ind
 }
 
 /**
+ * A query-result selection plus how much of the displayed result it carries.
+ *
+ * The preview is bounded by the row cap and the char budget, and both are
+ * silent inside the attached content (no `truncated` flag: the content itself
+ * stays below the per-selection hard cap). The counts let the caller tell the
+ * user when loaded rows were left out.
+ */
+export interface QueryResultSelection extends AiSelectionContextInput {
+  /** Row lines actually included in `content`. */
+  sentRows: number;
+  /** `result.rows.length` at the time the selection was built. */
+  loadedRows: number;
+}
+
+/**
  * Bounded snapshot of the displayed result, attached only when the user
  * explicitly asks for it ("Send result to AI"). Row data therefore never rides
  * along with an ordinary request: the global `includeQueryResult` setting and
  * its privacy default are untouched.
  */
-export function queryResultSelection(tab: Pick<QueryTab, "title" | "result" | "resultSortedSql" | "resultBaseSql" | "lastExecutedSql"> | undefined): AiSelectionContextInput | undefined {
+export function queryResultSelection(tab: Pick<QueryTab, "title" | "result" | "resultSortedSql" | "resultBaseSql" | "lastExecutedSql"> | undefined): QueryResultSelection | undefined {
   const result = tab?.result;
   if (!result || isQueryExecutionErrorResult(result) || !result.columns.length || !result.rows.length) return undefined;
   const rawSql = queryResultExecutionSql({ ...tab, sql: "" }).trim();
@@ -154,7 +169,7 @@ export function queryResultSelection(tab: Pick<QueryTab, "title" | "result" | "r
   if (rows.length) parts.push(`Rows (showing ${rows.length} of ${result.rows.length} loaded):\n${rows.join("\n")}`);
   const omitted = result.rows.length - rows.length;
   if (omitted > 0) parts.push(`(Result truncated: ${omitted} more loaded row(s) not sent.)`);
-  return { source: "query-result", label: tab?.title, content: parts.join("\n\n") };
+  return { source: "query-result", label: tab?.title, content: parts.join("\n\n"), sentRows: rows.length, loadedRows: result.rows.length };
 }
 
 /**

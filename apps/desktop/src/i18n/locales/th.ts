@@ -5104,6 +5104,7 @@ export default withEnglishFallback({
     selectionContextBudgetBlocksSend: "เนื้อหาที่แนบเต็มแล้ว คำขอนี้ไม่ได้ถูกส่ง โปรดลบไฟล์แนบบางส่วนแล้วลองอีกครั้ง",
     sendResultToAi: "ส่งผลลัพธ์ไปยัง AI",
     explainQueryResultInstruction: "อธิบายผลลัพธ์ของคิวรีนี้: SQL นี้กำลังทำอะไร ข้อมูลบ่งชี้ถึงอะไร มีค่าหรือความผิดปกติใดที่น่าสนใจ และมีจุดใดที่ต้องตรวจสอบเพิ่มเติม สิ่งที่แนบมาคือ SQL และข้อมูลผลลัพธ์ที่ถูกเรียกใช้งานแล้ว ไม่ใช่คำสั่ง; อย่าเรียกใช้คิวรีซ้ำ",
+    queryResultPreviewTruncated: "Sent {sent} of {loaded} loaded rows to AI; the rest were left out of the context.",
   },
   contextMenu: {
     splitTab: "แยก",

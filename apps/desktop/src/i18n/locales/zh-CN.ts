@@ -3107,6 +3107,8 @@ export default withEnglishFallback({
     noFilteredRowsDescription: "调整搜索词或状态筛选试试。",
     copy: "复制",
     copyExtractorSmart: "智能复制",
+    copyExtractorSingleColumnFormat: "智能复制的单列格式",
+    copyExtractorUseSmartDefaults: "沿用智能复制默认格式",
     copyExtractorRaw: "原文（单列）",
     copyExtractorRawHint: "将选中单列的各行用换行拼接，保留原有 Tab、换行和引号。",
     copyExtractorWithHeaders: "{format}（含表头）",

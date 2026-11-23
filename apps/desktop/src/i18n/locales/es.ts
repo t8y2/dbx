@@ -3908,6 +3908,8 @@ export default withEnglishFallback({
     pasteRowsTruncated: "Se pegaron {applied} filas y {dropped} filas no se pegaron: el resultado actual no admite agregar filas o no hay suficientes filas disponibles para agregar.",
     pasteCellText: "Pegar texto en esta celda",
     pasteCellTextFailed: "No se puede pegar texto en la celda: {message}",
+    copyExtractorSingleColumnFormat: "Formato de una sola columna de copia inteligente",
+    copyExtractorUseSmartDefaults: "Usar el formato predeterminado de copia inteligente",
   },
   exportProgress: {
     recoveryTitle: "¿Eliminar la exportación cuyo final no se ha confirmado?",

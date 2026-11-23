@@ -3768,6 +3768,8 @@ export default withEnglishFallback({
     pasteRowsTruncated: "Foram coladas {applied} linhas; {dropped} linhas não foram coladas: o resultado atual não permite adicionar linhas, ou a quantidade de linhas que podem ser adicionadas é insuficiente.",
     pasteCellText: "Colar texto nesta célula",
     pasteCellTextFailed: "Não foi possível colar o texto na célula: {message}",
+    copyExtractorSingleColumnFormat: "Formato de coluna única do Smart Copy",
+    copyExtractorUseSmartDefaults: "Usar o formato padrão do Smart Copy",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",

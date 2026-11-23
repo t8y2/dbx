@@ -3792,6 +3792,8 @@ export default withEnglishFallback({
     pasteRowsTruncated: "{applied} 行を貼り付けました。残りの {dropped} 行は貼り付けられませんでした：現在の結果は行の追加をサポートしていないか、追加できる行数が不足しています。",
     pasteCellText: "このセルにテキストを貼り付け",
     pasteCellTextFailed: "セルにテキストを貼り付けできません：{message}",
+    copyExtractorSingleColumnFormat: "スマートコピーの単一列形式",
+    copyExtractorUseSmartDefaults: "スマートコピーのデフォルト形式を使用",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

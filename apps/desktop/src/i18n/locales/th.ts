@@ -4032,6 +4032,8 @@ export default withEnglishFallback({
     pasteRowsTruncated: "วางแล้ว {applied} แถว และอีก {dropped} แถวไม่ได้วาง: ผลลัพธ์ปัจจุบันไม่รองรับการเพิ่มแถว หรือจำนวนแถวที่เพิ่มได้ไม่เพียงพอ",
     pasteCellText: "วางข้อความลงในเซลล์นี้",
     pasteCellTextFailed: "ไม่สามารถวางข้อความลงในเซลล์: {message}",
+    copyExtractorSingleColumnFormat: "รูปแบบคอลัมน์เดียวของการคัดลอกอัจฉริยะ",
+    copyExtractorUseSmartDefaults: "ใช้รูปแบบเริ่มต้นของการคัดลอกอัจฉริยะ",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",

@@ -3788,8 +3788,6 @@ defineExpose({
           v-if="activeTab.result && (!activeTab.isExecuting || !isQueryExecutionErrorResult(activeTab.result))"
           ref="dataGridRef"
           @open-dependency-object="(context, target) => emit('openDependencyObject', context, target)"
-          @send-result-to-ai="emit('sendResultToAi', activeTab.id)"
-          send-result-to-ai-enabled
           class="flex-1 min-h-0"
           :key="activeTab.id"
           :cache-key="activeTab.id"

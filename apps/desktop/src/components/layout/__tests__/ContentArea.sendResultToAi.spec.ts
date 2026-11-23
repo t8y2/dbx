@@ -87,8 +87,8 @@ describe("ContentArea send result to AI", () => {
     const sends: string[] = [];
     const host = await mountContentArea(result(), (tabId) => sends.push(tabId));
 
-    // Both result grid instances listen to the event, so both must opt in to
-    // rendering the context-menu entry.
+    // The query-result grid must opt in to rendering the context-menu entry, or
+    // it would offer a dead menu item.
     const grids = await vi.waitFor(() => {
       const elements = [...host.querySelectorAll<HTMLElement>("[data-test=data-grid]")];
       expect(elements.length).toBeGreaterThan(0);
@@ -102,21 +102,48 @@ describe("ContentArea send result to AI", () => {
     expect(sends).toEqual(["query-tab-1"]);
   });
 
-  it("opts every sendResultToAi listener into the grid entry", async () => {
-    // Only one of the two query-result grids is mounted per output view, so the
-    // other instance is pinned at source level: the self-closing tag that
-    // listens to `sendResultToAi` must also carry the enabling prop, or that
-    // grid would offer a dead menu item.
+  it("enables the grid entry only on the SQL query-result surface", async () => {
+    // Only the active tab's grid is mounted, so the data-tab grid is pinned at
+    // source level. The feature is scoped to the SQL query result: a table data
+    // page has no query the user ran, so its grid must neither listen to nor
+    // enable the entry (the page tag is identified by `context="table-data"`).
     // happy-dom resolves `new URL(..., import.meta.url)` against the dev-server
     // base, so the source path must come from the real file URL.
     const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../ContentArea.vue"), "utf8");
-    const listenerIndexes = [...source.matchAll(/@send-result-to-ai=/g)].map((match) => match.index);
-    expect(listenerIndexes.length).toBeGreaterThan(0);
-    for (const index of listenerIndexes) {
-      const tagEnd = source.indexOf("/>", index);
-      expect(tagEnd).toBeGreaterThan(index);
-      expect(source.slice(index, tagEnd)).toContain("send-result-to-ai-enabled");
+
+    function dataGridOpeningTag(attributeIndex: number): string {
+      const start = source.lastIndexOf("<DataGrid", attributeIndex);
+      expect(start).toBeGreaterThan(-1);
+      // These tags are not self-closing and their attribute values contain `>`
+      // (arrow functions), so the end must be found quote-aware.
+      let quote: string | null = null;
+      for (let index = start + "<DataGrid".length; index < source.length; index += 1) {
+        const char = source[index];
+        if (quote) {
+          if (char === quote) quote = null;
+        } else if (char === '"' || char === "'") {
+          quote = char;
+        } else if (char === ">") {
+          return source.slice(start, index + 1);
+        }
+      }
+      throw new Error("unterminated DataGrid tag");
     }
+
+    const listenerIndexes = [...source.matchAll(/@send-result-to-ai=/g)].map((match) => match.index!);
+    expect(listenerIndexes.length).toBe(1);
+    const listenerTag = dataGridOpeningTag(listenerIndexes[0]);
+    expect(listenerTag).toContain("@send-result-to-ai=");
+    expect(listenerTag).toContain("send-result-to-ai-enabled");
+    // Sanity-pin that the single listener is the query-result grid.
+    expect(listenerTag).toContain('context="results"');
+
+    const tableDataAttributeIndex = source.indexOf('context="table-data"');
+    expect(tableDataAttributeIndex).toBeGreaterThan(-1);
+    const tableDataTag = dataGridOpeningTag(tableDataAttributeIndex);
+    expect(tableDataTag).toContain('context="table-data"');
+    expect(tableDataTag).not.toContain("@send-result-to-ai");
+    expect(tableDataTag).not.toContain("send-result-to-ai-enabled");
   });
 
   it("keeps the toolbar entry absent for error and empty results", async () => {

@@ -5140,6 +5140,8 @@ export default withEnglishFallback({
     objectDropRefreshFailed: "物件已刪除，但側邊欄重新整理失敗：{message}",
     duplicateNameTitle: "克隆為新資料表",
     duplicateNamePlaceholder: "新資料表名稱",
+    copyView: "複製檢視",
+    pasteView: "貼上檢視",
     copyTable: "複製資料表",
     pasteTable: "貼上資料表",
     pasteOptionStructureAndData: "結構和資料",

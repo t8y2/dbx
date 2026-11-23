@@ -5325,6 +5325,8 @@ export default withEnglishFallback({
     objectDropRefreshFailed: "Объекты удалены, но не удалось обновить боковую панель: {message}",
     duplicateNameTitle: "Клонировать как новую таблицу",
     duplicateNamePlaceholder: "Имя новой таблицы",
+    copyView: "Копировать представление",
+    pasteView: "Вставить представление",
     copyTable: "Копировать таблицу",
     pasteTable: "Вставить таблицу",
     pasteOptionStructureAndData: "Структура и данные",

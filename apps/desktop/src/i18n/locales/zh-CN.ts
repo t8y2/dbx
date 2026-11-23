@@ -5631,6 +5631,8 @@ export default withEnglishFallback({
     objectDropRefreshFailed: "对象已删除，但侧边栏刷新失败：{message}",
     duplicateNameTitle: "克隆为新表",
     duplicateNamePlaceholder: "新表名",
+    copyView: "复制视图",
+    pasteView: "粘贴视图",
     copyTable: "复制表",
     pasteTable: "粘贴表",
     pasteOptionStructureAndData: "结构和数据",

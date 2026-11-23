@@ -5356,6 +5356,8 @@ export default withEnglishFallback({
     objectDropRefreshFailed: "Los objetos se eliminaron, pero no se pudo actualizar la barra lateral: {message}",
     duplicateNameTitle: "Clonar como tabla nueva",
     duplicateNamePlaceholder: "Nombre de la nueva tabla",
+    copyView: "Copiar vista",
+    pasteView: "Pegar vista",
     copyTable: "Copiar tabla",
     pasteTable: "Pegar tabla",
     pasteOptionStructureAndData: "Estructura y datos",

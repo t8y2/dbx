@@ -4140,6 +4140,8 @@ export default withEnglishFallback({
     objectDropRefreshFailed: "Nesneler silindi, ancak kenar çubuğu yenilenemedi: {message}",
     duplicateNameTitle: "Yeni Tablo Olarak Çoğalt",
     duplicateNamePlaceholder: "Yeni tablo adı",
+    copyView: "Görünümü kopyala",
+    pasteView: "Görünümü yapıştır",
     copyTable: "Tabloyu Kopyala",
     pasteTable: "Tabloyu Yapıştır",
     pasteOptionStructureAndData: "Yapı ve Veri",

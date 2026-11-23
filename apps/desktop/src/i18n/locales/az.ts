@@ -4166,6 +4166,8 @@ export default withEnglishFallback({
     objectDropRefreshFailed: "Obyektlər silindi, lakin yan paneli yeniləmək mümkün olmadı: {message}",
     duplicateNameTitle: "Yeni cədvəl kimi klonla",
     duplicateNamePlaceholder: "Yeni cədvəlin adı",
+    copyView: "Görünüşü kopyala",
+    pasteView: "Görünüşü yapışdır",
     copyTable: "Cədvəli kopyala",
     pasteTable: "Cədvəli yerləşdir",
     pasteOptionStructureAndData: "Struktur və məlumatlar",

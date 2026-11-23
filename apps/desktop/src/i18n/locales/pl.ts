@@ -4549,6 +4549,8 @@ export default withEnglishFallback({
     objectDropRefreshFailed: "Obiekty zostały usunięte, ale odświeżanie paska bocznego nie powiodło się: {message}",
     duplicateNameTitle: "Sklonuj jako nową tabelę",
     duplicateNamePlaceholder: "Nazwa nowej tabeli",
+    copyView: "Kopiuj widok",
+    pasteView: "Wklej widok",
     copyTable: "Kopiuj tabelę",
     pasteTable: "Wklej tabelę",
     pasteOptionStructureAndData: "Struktura i dane",

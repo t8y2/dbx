@@ -3766,6 +3766,8 @@ export default withEnglishFallback({
     pasteRowsTruncated: "Sono state incollate {applied} righe, mentre {dropped} righe non sono state incollate: il risultato corrente non supporta l'aggiunta di righe oppure il numero di righe aggiungibili non è sufficiente.",
     pasteCellText: "Incolla il testo in questa cella",
     pasteCellTextFailed: "Impossibile incollare il testo nella cella: {message}",
+    copyExtractorSingleColumnFormat: "Formato a colonna singola di Copia intelligente",
+    copyExtractorUseSmartDefaults: "Usa il formato predefinito di Copia intelligente",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

@@ -3851,6 +3851,8 @@ export default withEnglishFallback({
     pasteRowsTruncated: "Вставлено строк: {applied}, не вставлено строк: {dropped}: текущий результат не поддерживает добавление строк или доступно недостаточно строк для добавления.",
     pasteCellText: "Вставить текст в эту ячейку",
     pasteCellTextFailed: "Не удалось вставить текст в ячейку: {message}",
+    copyExtractorSingleColumnFormat: "Формат одного столбца для Smart Copy",
+    copyExtractorUseSmartDefaults: "Использовать формат Smart Copy по умолчанию",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

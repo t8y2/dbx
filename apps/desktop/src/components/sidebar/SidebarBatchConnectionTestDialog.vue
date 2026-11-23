@@ -33,11 +33,16 @@ const stopRequested = ref(false);
 const completed = computed(() => rows.value.filter((row) => row.status === "success" || row.status === "failure").length);
 let disposed = false;
 
+function currentConfig(row: TestRow) {
+  const config = store.getConfig(row.id);
+  return config && connectionConfigFingerprint(config) === row.fingerprint ? config : undefined;
+}
+
 onMounted(async () => {
   for (const row of rows.value) {
     if (disposed) return;
-    const config = store.getConfig(row.id);
-    if (stopRequested.value || !config || connectionConfigFingerprint(config) !== row.fingerprint) {
+    const config = currentConfig(row);
+    if (stopRequested.value || !config) {
       row.status = "skipped";
       continue;
     }
@@ -45,10 +50,16 @@ onMounted(async () => {
     row.status = "running";
     try {
       await api.testConnectionWithInfo(config);
-      row.status = "success";
+      if (disposed) return;
+      row.status = currentConfig(row) ? "success" : "skipped";
     } catch (error) {
-      row.status = "failure";
-      row.error = translateBackendError(t, error);
+      if (disposed) return;
+      if (currentConfig(row)) {
+        row.status = "failure";
+        row.error = translateBackendError(t, error);
+      } else {
+        row.status = "skipped";
+      }
     }
   }
   running.value = false;

@@ -86,6 +86,7 @@ const props = defineProps<{
   prefillCatalog?: string;
   prefillSchema?: string;
   prefillTables?: string[];
+  prefillViews?: string[];
   prefillTargetConnectionId?: string;
   prefillTargetDatabase?: string;
   prefillTargetSchema?: string;
@@ -199,7 +200,7 @@ const treeDisabledGroups = computed<TransferObjectKind[]>(() => {
 });
 
 const objectSelectionSummary = computed(() => {
-  if (transferDatabaseTypeForConnection(store.getConfig(sourceConnectionId.value)) !== "xugu") {
+  if (!props.prefillViews?.length && transferDatabaseTypeForConnection(store.getConfig(sourceConnectionId.value)) !== "xugu") {
     return { selected: selectedTables.value.size, total: objectGroups.value.TABLE?.length ?? 0 };
   }
   const enabled = treeGroups.value.filter((group) => !treeDisabledGroups.value.includes(group.kind));
@@ -233,6 +234,7 @@ const objectQualifiers = computed(() => [sourceCatalog.value, sourceDatabase.val
 
 const pendingSourceSchemaPrefill = ref("");
 const pendingSelectedTablesPrefill = ref<string[] | null>(null);
+const pendingSelectedViewsPrefill = ref<string[] | null>(null);
 // Pending object selection for saved-task loading (covers all object kinds,
 // unlike the table-only dialog prefill used by sidebar entry points).
 const pendingSelectedObjectsPrefill = ref<Partial<Record<TransferObjectKind, string[]>> | null>(null);
@@ -649,6 +651,12 @@ function applyPendingTableSelection() {
 
 /** Applies a saved task's object selection and per-table filters, dropping missing objects. */
 function applyPendingObjectSelection() {
+  const pendingViews = pendingSelectedViewsPrefill.value;
+  pendingSelectedViewsPrefill.value = null;
+  if (pendingViews && sourceConnectionId.value === props.prefillConnectionId && sourceDatabaseName.value === props.prefillDatabase && (sourceSchema.value || sourceDatabaseName.value) === (props.prefillSchema || props.prefillDatabase)) {
+    selectedObjects.value = { VIEW: new Set((objectGroups.value.VIEW ?? []).filter((view) => pendingViews.includes(view))) };
+  }
+
   const pending = pendingSelectedObjectsPrefill.value;
   if (pending) {
     const next: Partial<Record<TransferObjectKind, Set<string>>> = { ...selectedObjects.value };
@@ -887,6 +895,10 @@ async function applyTransferPrefill() {
   resetState();
   pendingSourceSchemaPrefill.value = props.prefillSchema ?? "";
   pendingSelectedTablesPrefill.value = props.prefillTables?.length ? [...props.prefillTables] : null;
+  if (props.prefillViews?.length) {
+    pendingSelectedViewsPrefill.value = [...props.prefillViews];
+    transferContent.value = "structureOnly";
+  }
   pendingTargetSchemaPrefill.value = props.prefillTargetSchema ?? "";
   if (props.prefillConnectionId) {
     skipSourceWatch.value = true;
@@ -938,7 +950,7 @@ watch(
         [props.prefillTargetDatabase, targetDatabaseName.value],
         [props.prefillTargetSchema, targetSchema.value || targetDatabaseName.value],
       ].every(([requested, current]) => !requested || requested === current);
-      if (sameContext && !props.prefillTables?.length) return;
+      if (sameContext && !props.prefillTables?.length && !props.prefillViews?.length) return;
       requestDiscardableAction(() => {
         void applyTransferPrefill();
       });
@@ -966,6 +978,7 @@ function resetState(cancelTaskLoad = true) {
   loadingObjects.value = false;
   pendingSourceSchemaPrefill.value = "";
   pendingSelectedTablesPrefill.value = null;
+  pendingSelectedViewsPrefill.value = null;
   objectSearch.value = "";
   targetConnectionId.value = "";
   targetCatalog.value = "";

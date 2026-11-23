@@ -5161,6 +5161,8 @@ export default withEnglishFallback({
     objectDropRefreshFailed: "オブジェクトは削除されましたが、サイドバーの更新に失敗しました: {message}",
     duplicateNameTitle: "新しいテーブルとして複製",
     duplicateNamePlaceholder: "新しいテーブル名",
+    copyView: "ビューをコピー",
+    pasteView: "ビューを貼り付け",
     copyTable: "テーブルをコピー",
     pasteTable: "テーブルを貼り付け",
     pasteOptionStructureAndData: "構造とデータ",

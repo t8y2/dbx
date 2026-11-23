@@ -5703,6 +5703,8 @@ export default {
     objectDropRefreshFailed: "Objects were deleted, but refreshing the sidebar failed: {message}",
     duplicateNameTitle: "Clone as New Table",
     duplicateNamePlaceholder: "New table name",
+    copyView: "Copy View",
+    pasteView: "Paste View",
     copyTable: "Copy Table",
     pasteTable: "Paste Table",
     pasteOptionStructureAndData: "Structure and Data",

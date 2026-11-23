@@ -249,7 +249,8 @@ import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
 import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
-import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection, transferDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
 import { isObjectCacheInvalidationError } from "@/lib/metadata/objectCacheInvalidationError";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import {
@@ -1633,6 +1634,54 @@ function normalizedTreeClipboardTableEntries(): TableClipboardTableContext[] {
   }));
 }
 
+function viewTransferPrefill() {
+  const clipboard = connectionStore.treeClipboard;
+  const node = activeNode.value;
+  if (clipboard?.kind !== "view-copy" || node.catalog || (node.type !== "database" && node.type !== "schema" && node.type !== "group-views")) return null;
+  const target = pasteTableTargetContext();
+  if (!target) return null;
+
+  const sourceConfig = connectionStore.getConfig(clipboard.connectionId);
+  const targetConfig = connectionStore.getConfig(target.connectionId);
+  if (!sourceConfig || !targetConfig || connectionIsEffectivelyReadOnly(targetConfig)) return null;
+  const sourceType = transferDatabaseTypeForConnection(sourceConfig);
+  if (!supportsTransfer(sourceType) || !transferObjectKindsForDatabase(sourceType).includes("VIEW") || sourceType !== transferDatabaseTypeForConnection(targetConfig) || effectiveDatabaseTypeForConnection(sourceConfig) !== effectiveDatabaseTypeForConnection(targetConfig)) return null;
+
+  const sourceSchema = normalizeTreeClipboardSchema(clipboard.connectionId, clipboard.database, clipboard.schema);
+  const targetSchema = target.schema ?? undefined;
+  if (clipboard.connectionId === target.connectionId && clipboard.database === target.database && sourceSchema === targetSchema) return null;
+
+  return {
+    connectionId: clipboard.connectionId,
+    database: clipboard.database,
+    schema: sourceSchema,
+    views: [clipboard.viewName],
+    targetConnectionId: target.connectionId,
+    targetDatabase: target.database,
+    targetSchema,
+  };
+}
+
+function viewClipboardMenuItem(node: TreeNode): ContextMenuItem | null {
+  if (node.type === "view" && node.connectionId && node.database && !node.catalog) {
+    const config = connectionStore.getConfig(node.connectionId);
+    const type = transferDatabaseTypeForConnection(config);
+    if (!supportsTransfer(type) || !transferObjectKindsForDatabase(type).includes("VIEW")) return null;
+    const source = { kind: "view-copy" as const, connectionId: node.connectionId, database: node.database, schema: node.schema, viewName: node.objectName || node.label };
+    return {
+      sidebarActionId: "contextMenu.copyView",
+      label: t("contextMenu.copyView"),
+      icon: Copy,
+      action: () => {
+        connectionStore.treeClipboard = source;
+        toast(t("connection.copied"), 2000);
+      },
+    };
+  }
+
+  return viewTransferPrefill() ? { sidebarActionId: "contextMenu.pasteView", label: t("contextMenu.pasteView"), icon: Clipboard, action: requestPasteTreeClipboard } : null;
+}
+
 function canPasteTreeClipboardToCurrentNode(): boolean {
   return currentDatabaseType() !== "victoriametrics" && tableClipboardMatchesTarget(normalizedTreeClipboardTableEntries(), pasteTableTargetContext());
 }
@@ -1692,6 +1741,12 @@ function requestPasteTreeClipboard(): boolean {
         if (count > 0) toast(count > 1 ? t("connection.duplicatedSelected", { count }) : t("connection.duplicated"), 2000);
       })
       .catch((e: any) => toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000));
+    return true;
+  }
+  if (clipboard?.kind === "view-copy") {
+    const prefill = viewTransferPrefill();
+    if (!prefill) return false;
+    connectionStore.transferSource = prefill;
     return true;
   }
   if (clipboard?.kind !== "table-copy") return false;
@@ -9155,7 +9210,8 @@ const sidebarMenuFactories: readonly SidebarMenuFactory[] = [buildConnectionSide
 
 function treeItemMenuItems(): ContextMenuItem[] {
   const node = activeNode.value;
-  const items: ContextMenuItem[] = [];
+  const viewClipboardItem = viewClipboardMenuItem(node);
+  const items: ContextMenuItem[] = viewClipboardItem ? [viewClipboardItem] : [];
   const batchDropCount = selectedBatchDropTargets().length;
   const batchEmptyCount = selectedBatchEmptyTargets().length;
   const batchTruncateCount = selectedBatchTruncateTargets().length;

@@ -457,6 +457,13 @@ export type TreeClipboard =
       tables: TreeClipboardTableEntry[];
     }
   | {
+      kind: "view-copy";
+      connectionId: string;
+      database: string;
+      schema?: string;
+      viewName: string;
+    }
+  | {
       kind: "connection-copy";
       connections: TreeClipboardConnectionEntry[];
     }
@@ -673,6 +680,7 @@ export const useConnectionStore = defineStore("connection", () => {
     catalog?: string;
     schema?: string;
     tables?: string[];
+    views?: string[];
     targetConnectionId?: string;
     targetDatabase?: string;
     targetSchema?: string;

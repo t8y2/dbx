@@ -5100,6 +5100,8 @@ export default withEnglishFallback({
     objectDropRefreshFailed: "개체는 삭제되었지만 사이드바 새로 고침에 실패했습니다: {message}",
     duplicateNameTitle: "새 테이블로 복제",
     duplicateNamePlaceholder: "새 테이블 이름",
+    copyView: "뷰 복사",
+    pasteView: "뷰 붙여넣기",
     copyTable: "테이블 복사",
     pasteTable: "테이블 붙여넣기",
     pasteOptionStructureAndData: "구조와 데이터",

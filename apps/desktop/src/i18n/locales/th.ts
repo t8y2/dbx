@@ -5494,6 +5494,8 @@ export default withEnglishFallback({
     objectDropRefreshFailed: "ลบ Objects แล้ว แต่รีเฟรช Sidebar ไม่สำเร็จ: {message}",
     duplicateNameTitle: "Clone เป็น Table ใหม่",
     duplicateNamePlaceholder: "ชื่อ Table ใหม่",
+    copyView: "คัดลอกวิว",
+    pasteView: "วางวิว",
     copyTable: "คัดลอก Table",
     pasteTable: "วาง Table",
     pasteOptionStructureAndData: "โครงสร้างและข้อมูล",

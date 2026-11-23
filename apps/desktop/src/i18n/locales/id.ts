@@ -4498,6 +4498,8 @@ export default withEnglishFallback({
     objectDropRefreshFailed: "Objek telah dihapus, tetapi penyegaran bilah sisi gagal: {message}",
     duplicateNameTitle: "Klon sebagai Tabel Baru",
     duplicateNamePlaceholder: "Nama tabel baru",
+    copyView: "Salin tampilan",
+    pasteView: "Tempel tampilan",
     copyTable: "Salin Tabel",
     pasteTable: "Tempel Tabel",
     pasteOptionStructureAndData: "Struktur dan Data",

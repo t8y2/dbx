@@ -711,7 +711,8 @@ describe("DataGrid multi-row paste from a blank cell", () => {
     expect(visibleCellTexts(rows[4]!)[2]).toBe("row-4");
     expect(visibleCellTexts(rows[5]!)[2]).toBe("row-5");
     expect(visibleCellTexts(rows[4999]!)[2]).toBe("row-4999");
-  });
+    // Preparing 5000 pasted rows takes ~10s on CI runners, right at the default timeout.
+  }, 30_000);
 
   it("rejects overflow with an explicit toast when insert is not supported (#15263)", async () => {
     const result = { ...defaultResult(), rows: Array.from({ length: 5 }, (_, i) => [i + 1, null, `seed-${i}`, "x"]) };

@@ -264,6 +264,7 @@ export function createDataGridCellContextMenuItems(options: {
   labels: Record<"cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose", string>;
   icons: Pick<DataGridContextMenuIcons, "cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose">;
   actions: Record<"cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose", () => void>;
+  binaryTextPreviewItem?: DataGridContextMenuItem | null;
   pluginDecodeItem?: DataGridContextMenuItem | null;
   importItem?: DataGridContextMenuItem | null;
   downloadItem?: DataGridContextMenuItem | null;
@@ -277,6 +278,7 @@ export function createDataGridCellContextMenuItems(options: {
   if (options.hasCell) {
     if (options.hasColumn) {
       items.push({ label: options.labels.cellDetails, action: options.actions.cellDetails, icon: options.icons.cellDetails });
+      if (options.binaryTextPreviewItem) items.push(options.binaryTextPreviewItem);
       if (options.pluginDecodeItem) items.push(options.pluginDecodeItem);
       if (options.importItem) items.push(options.importItem);
       if (options.downloadItem) items.push(options.downloadItem);

@@ -105,6 +105,7 @@ import DataGridTableInfoPanels from "@/components/grid/DataGridTableInfoPanels.v
 import DataGridColumnFilterPopover from "@/components/grid/DataGridColumnFilterPopover.vue";
 import DataGridCellDetailHeader from "@/components/grid/DataGridCellDetailHeader.vue";
 import DataGridCellDetailHexViewer from "@/components/grid/DataGridCellDetailHexViewer.vue";
+import DataGridCellDetailTextPreview from "@/components/grid/DataGridCellDetailTextPreview.vue";
 import DataGridCellDetailForeignKey, { type ForeignKeyRowPreviewState } from "@/components/grid/DataGridCellDetailForeignKey.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
@@ -1253,6 +1254,7 @@ const showMongoJsonPreview = ref(false);
 const mongoJsonPreviewScope = ref<"selected" | "page">("selected");
 const activeCellDetailTab = ref<CellDetailTab>(defaultCellDetailTab());
 const cellDetailDialogOpen = ref(false);
+const binaryTextPreviewDetail = shallowRef<DataGridCellDetail | null>(null);
 const cellDetailDialogTarget = ref<{ rowIndex: number; col: number } | null>(null);
 const cellDetailPanelRef = ref<{ openSearch: () => boolean } | null>(null);
 const rowDetailDialogOpen = ref(false);
@@ -12726,6 +12728,18 @@ async function downloadDetailBinaryValue(detail: DataGridCellDetail | null, mode
   }
 }
 
+function binaryTextPreviewItem(detail: DataGridCellDetail | null): ContextMenuItem | null {
+  if (!detail || (detail.isNull ?? detail.value === null) || !isBinaryCellColumnType(detail.type)) return null;
+  const sourceResult = props.result;
+  return {
+    label: t("grid.binaryTextPreview"),
+    icon: Code2,
+    action: () => {
+      if (props.result === sourceResult) binaryTextPreviewDetail.value = detail;
+    },
+  };
+}
+
 function binaryDownloadSubmenu(detail: DataGridCellDetail | null): ContextMenuItem | null {
   const sourceResult = props.result;
   const snapshotTarget = detail ? largeValueRuntimeInstance.captureSnapshotDownloadTarget(detail.rowId, detail.colIndex) : undefined;
@@ -15057,6 +15071,7 @@ onActivated(() => {
 });
 onDeactivated(() => {
   gridClipboardActive = false;
+  binaryTextPreviewDetail.value = null;
   pendingColumnOrder.value = null;
   pendingPasteAsNewRows.value = null;
   gridClipboardLifecycle++;
@@ -15894,6 +15909,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         bulkEdit: openBulkEditDialog,
         transpose: openContextTranspose,
       },
+      binaryTextPreviewItem: binaryTextPreviewItem(contextCellDetail.value),
       pluginDecodeItem: pluginDecodeItem(contextCellDetail.value),
       importItem: binaryImportItem(contextCellDetail.value),
       downloadItem: binaryDownloadSubmenu(contextCellDetail.value),
@@ -18302,6 +18318,18 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       :database-type="resolvedDatabaseType"
       :plugin-decode-request="cellDetailPluginDecodeRequest"
       @edit="openDialogCellInSidePanel"
+    />
+
+    <DataGridCellDetailTextPreview
+      v-if="binaryTextPreviewDetail"
+      :open="true"
+      hide-trigger
+      :identity="`${binaryTextPreviewDetail.rowId}:${binaryTextPreviewDetail.colIndex}`"
+      :value="binaryTextPreviewDetail.value"
+      :column-type="binaryTextPreviewDetail.type"
+      :database-type="resolvedDatabaseType"
+      :incomplete="binaryTextPreviewDetail.isSourceTruncated"
+      @update:open="!$event && (binaryTextPreviewDetail = null)"
     />
 
     <DataGridValueDiffDialog v-if="detailValueDiffSnapshot" v-model:open="detailValueDiffOpen" :snapshot="detailValueDiffSnapshot" />

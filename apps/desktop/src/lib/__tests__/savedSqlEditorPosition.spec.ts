@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { __resetSavedSqlEditorPositionsForTests, createSavedSqlEditorPosition, forgetSavedSqlEditorPosition, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "../app/savedSqlEditorPosition";
+import { __resetSavedSqlEditorPositionsForTests, createSavedSqlEditorFoldSnapshot, createSavedSqlEditorPosition, forgetSavedSqlEditorPosition, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "../app/savedSqlEditorPosition";
 
 vi.mock("@/lib/backend/api", () => ({
   loadSavedSqlEditorPositions: vi.fn().mockResolvedValue(null),
@@ -19,6 +19,17 @@ beforeEach(() => {
 });
 
 describe("savedSqlEditorPosition", () => {
+  it("keeps fold offsets when line endings change and drops them when the SQL changes", () => {
+    const sql = "SELECT\n  1;";
+    const folds = createSavedSqlEditorFoldSnapshot(sql, [{ from: 6, to: 10 }]);
+    const crlf = sql.replace("\n", "\r\n");
+    saveSavedSqlEditorPosition(createSavedSqlEditorPosition({ savedSqlId: "line-endings", sql: crlf, folds }));
+
+    expect(restoreSavedSqlEditorPosition("line-endings", crlf).folds).toEqual(folds);
+    expect(restoreSavedSqlEditorPosition("line-endings", sql).folds).toEqual(folds);
+    expect(restoreSavedSqlEditorPosition("line-endings", "SELECT\n  2;").folds).toBeUndefined();
+  });
+
   it("restores the saved cursor and viewport when the file is unchanged", () => {
     const sql = "select 1;\n\nselect 2;\n";
     const head = sql.indexOf("select 2");

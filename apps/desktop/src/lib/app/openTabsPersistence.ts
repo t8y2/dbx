@@ -2,6 +2,7 @@ import type { QueryResultSourceLabelKind, QueryTab, TabOutputView } from "@/type
 import { sanitizeTabUiState } from "@/lib/tabs/tabUiState";
 import { restoreOracleTypeManagementDraft } from "@/lib/table/oracleTypeManagement";
 import { normalizePersistedBookmarks } from "@/lib/editor/workspaceBookmarks";
+import { restoreSavedSqlEditorFoldSnapshot } from "@/lib/app/savedSqlEditorPosition";
 
 export const OPEN_TABS_STORAGE_KEY = "dbx-open-tabs";
 export const ACTIVE_TAB_STORAGE_KEY = "dbx-active-tab";
@@ -58,6 +59,7 @@ export interface SavedOpenTab {
   editorViewport?: QueryTab["editorViewport"];
   editorSelection?: QueryTab["editorSelection"];
   editorBookmarks?: number[];
+  editorFolds?: QueryTab["editorFolds"];
   originalSql?: string;
   savedSqlId?: string;
   isDefaultQuery?: boolean;
@@ -236,6 +238,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
       ...(tab.editorViewport ? { editorViewport: tab.editorViewport } : {}),
       ...(tab.editorSelection ? { editorSelection: tab.editorSelection } : {}),
       ...(tab.editorBookmarks?.length ? { editorBookmarks: normalizePersistedBookmarks(tab.editorBookmarks) } : {}),
+      ...(tab.savedSqlId && tab.editorFolds ? { editorFolds: tab.editorFolds } : {}),
       // File-backed drafts retain their baseline, including when the edited SQL is empty.
       // Clean file-backed tabs omit it so startup can hydrate the current file content.
       ...(tab.originalSql !== undefined && ((!tab.savedSqlId && !tab.externalSqlPath) || tab.sql !== tab.originalSql) ? { originalSql: tab.originalSql } : {}),
@@ -343,6 +346,12 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
     });
     const tabs: QueryTab[] = filtered.map((tab) => {
       const mode = tab.mode ?? "query";
+      const sql = typeof tab.sql === "string" ? tab.sql : "";
+      const awaitingSavedSql = !!tab.savedSqlId && !sql && tab.originalSql === undefined;
+      let editorFolds: QueryTab["editorFolds"];
+      if (mode === "query" && tab.savedSqlId) {
+        editorFolds = awaitingSavedSql ? tab.editorFolds : restoreSavedSqlEditorFoldSnapshot(tab.editorFolds, sql);
+      }
       const resultRuns =
         mode === "query"
           ? tab.resultRuns?.map((run) => ({
@@ -356,7 +365,7 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         ...tab,
         mode,
         mongoQueryLanguage: tab.mongoQueryLanguage === "sql" ? "sql" : undefined,
-        sql: typeof tab.sql === "string" ? tab.sql : "",
+        sql,
         isExecuting: false,
         redisMonitorActive: false,
         isCancelling: false,
@@ -368,10 +377,11 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         typeSourceEditing: false,
         executingResultRunId: undefined,
         editorViewport: restoredEditorViewport(tab),
-        editorSelection: restoredEditorSelection(tab, typeof tab.sql === "string" ? tab.sql.length : 0),
+        editorSelection: restoredEditorSelection(tab, sql.length),
         editorBookmarks: normalizePersistedBookmarks(tab.editorBookmarks),
+        editorFolds,
         isExplaining: false,
-        originalSql: restoredOriginalSql(tab, mode, typeof tab.sql === "string" ? tab.sql : ""),
+        originalSql: restoredOriginalSql(tab, mode, sql),
         resultEvicted: mode === "data" ? undefined : tab.resultEvicted,
         resultCacheKey: mode === "data" ? undefined : tab.resultCacheKey,
         resultCacheState: mode !== "data" && tab.resultCacheKey ? "disk" : undefined,

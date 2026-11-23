@@ -164,7 +164,7 @@ import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode"
 import { recordQueryCancellationLatency, resourceLifecycleDiagnostics } from "@/lib/diagnostics/resourceLifecycleDiagnostics";
 import { appendDebugLog } from "@/lib/backend/debugLog";
 import { BackendErrorException, formatError, isManualTransactionSessionExpired, isUnsupportedManualTransactionMethod, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
-import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition, type SavedSqlEditorFold } from "@/lib/app/savedSqlEditorPosition";
+import { createSavedSqlEditorFoldSnapshot, createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorFoldSnapshot, restoreSavedSqlEditorPosition, savedSqlFoldDocument, saveSavedSqlEditorPosition, type SavedSqlEditorFold } from "@/lib/app/savedSqlEditorPosition";
 import { isDetachedWindow, resolveWindowContext } from "@/lib/app/windowContext";
 import { normalizeDetachedTabRuntime, type DetachedTabHandoff, type DetachedTabRuntimeState } from "@/lib/app/detachedTabHandoff";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -3043,6 +3043,7 @@ export const useQueryStore = defineStore("query", () => {
       editorViewport: t.editorViewport,
       editorSelection: t.editorSelection,
       editorBookmarks: t.editorBookmarks,
+      editorFolds: t.editorFolds,
       savedSqlId: t.savedSqlId,
       isDefaultQuery: t.isDefaultQuery,
       externalSqlPath: t.externalSqlPath,
@@ -3276,9 +3277,11 @@ export const useQueryStore = defineStore("query", () => {
     if (restoredTab.savedSqlId && restoredTab.mode === "query" && !restoredTab.sql && restoredTab.originalSql === undefined) {
       const file = await api.loadSavedSqlFile(restoredTab.savedSqlId).catch(() => undefined);
       if (file) {
+        const folds = restoreSavedSqlEditorFoldSnapshot(restoredTab.editorFolds, file.sql);
         restoredTab.title = restoredTab.customTitle ? restoredTab.title : file.name;
         setTabSql(restoredTab, file.sql);
         restoredTab.originalSql = file.sql;
+        restoredTab.editorFolds = folds;
       }
     }
     Object.assign(restoredTab, normalizeDetachedTabRuntime(handoff.runtime));
@@ -5167,7 +5170,7 @@ export const useQueryStore = defineStore("query", () => {
       clearTimeout(pending);
       savedSqlEditorPositionTimers.delete(tab.savedSqlId);
     }
-    saveSavedSqlEditorPosition(
+    return saveSavedSqlEditorPosition(
       createSavedSqlEditorPosition({
         savedSqlId: tab.savedSqlId,
         sql: tab.sql,
@@ -5178,11 +5181,10 @@ export const useQueryStore = defineStore("query", () => {
     );
   }
 
-  function flushEditorState(id: string): Promise<void> {
+  async function flushEditorState(id: string): Promise<void> {
     const tab = tabs.value.find((item) => item.id === id);
-    if (!tab) return Promise.resolve();
-    persistSavedSqlEditorPosition(tab);
-    return flushPendingPersist();
+    if (!tab) return;
+    await Promise.all([persistSavedSqlEditorPosition(tab), flushPendingPersist()]);
   }
 
   function queueSavedSqlEditorPositionPersist(tab: QueryTab | undefined) {
@@ -6752,12 +6754,13 @@ export const useQueryStore = defineStore("query", () => {
     queueSavedSqlEditorPositionPersist(tab);
   }
 
-  function updateEditorFolds(id: string, folds: SavedSqlEditorFold[]) {
+  function updateEditorFolds(id: string, folds: SavedSqlEditorFold[], document: string) {
     const tab = tabs.value.find((item) => item.id === id);
     if (!tab?.savedSqlId || tab.mode !== "query") return;
-    const previous = tab.editorFolds ?? [];
+    if (savedSqlFoldDocument(tab.sql) !== document) return;
+    const previous = tab.editorFolds?.ranges ?? [];
     if (previous.length === folds.length && previous.every((range, index) => range.from === folds[index].from && range.to === folds[index].to)) return;
-    tab.editorFolds = folds.length ? folds : undefined;
+    tab.editorFolds = createSavedSqlEditorFoldSnapshot(document, folds);
     queueSavedSqlEditorPositionPersist(tab);
   }
 
@@ -6927,13 +6930,8 @@ export const useQueryStore = defineStore("query", () => {
     if (existing) {
       existing.isDefaultQuery = file.isDefaultQuery === true;
       persistSavedSqlEditorPosition(existing);
-      if (!existing.sql && file.sql && existing.originalSql === undefined) {
-        setTabSql(existing, file.sql);
-        existing.originalSql = file.sql;
-        const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
-        existing.editorSelection = restored.selection;
-        existing.editorViewport = restored.viewport;
-        existing.editorFolds = restored.folds;
+      if (!existing.sql && existing.originalSql === undefined && file.sqlLoaded !== false) {
+        hydrateSavedSqlTab(existing, file);
       }
       applySavedSqlExecutionTarget(existing, target);
       if (options.reveal) {
@@ -6971,6 +6969,16 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab(tab);
   }
 
+  function hydrateSavedSqlTab(tab: QueryTab, file: SavedSqlFile) {
+    const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
+    const folds = restoreSavedSqlEditorFoldSnapshot(tab.editorFolds, file.sql) ?? restored.folds;
+    setTabSql(tab, file.sql);
+    tab.originalSql = file.sql;
+    tab.editorSelection = restored.selection;
+    tab.editorViewport = restored.viewport;
+    tab.editorFolds = folds;
+  }
+
   async function hydrateSavedSqlTabs() {
     await initSavedSqlEditorPositions();
     const savedSqlStore = useSavedSqlStore();
@@ -6987,12 +6995,7 @@ export const useQueryStore = defineStore("query", () => {
       // Only hydrate the same still-empty snapshot selected above.
       if (!file || !tabs.value.includes(tab) || tab.savedSqlId !== savedSqlId || tab.sql !== "" || tab.originalSql !== undefined) continue;
       tab.title = tab.customTitle ? tab.title : file.name;
-      setTabSql(tab, file.sql);
-      tab.originalSql = file.sql;
-      const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
-      tab.editorSelection = restored.selection;
-      tab.editorViewport = restored.viewport;
-      tab.editorFolds = restored.folds;
+      hydrateSavedSqlTab(tab, file);
     }
   }
 

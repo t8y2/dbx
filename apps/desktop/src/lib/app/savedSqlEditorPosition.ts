@@ -22,11 +22,16 @@ export interface SavedSqlEditorFold {
   to: number;
 }
 
+export interface SavedSqlEditorFoldSnapshot {
+  documentFingerprint: string;
+  ranges: SavedSqlEditorFold[];
+}
+
 export interface SavedSqlEditorPosition {
   savedSqlId: string;
   selection: SavedSqlEditorSelection;
   viewport?: SavedSqlEditorViewport;
-  folds?: { documentFingerprint: string; ranges: SavedSqlEditorFold[] };
+  folds?: SavedSqlEditorFoldSnapshot;
   anchor: {
     before: string;
     after: string;
@@ -34,6 +39,27 @@ export interface SavedSqlEditorPosition {
     docLength: number;
   };
   updatedAt: number;
+}
+
+export type SavedSqlEditorPositionsUpdate = { type: "initialize"; positions: SavedSqlEditorPosition[] } | { type: "save"; position: SavedSqlEditorPosition } | { type: "remove"; savedSqlId: string };
+
+export function savedSqlFoldDocument(sql: string): string {
+  // CodeMirror stores line breaks as one character, including in files saved with CRLF.
+  return sql.replace(/\r\n?/g, "\n");
+}
+
+export function createSavedSqlEditorFoldSnapshot(document: string, ranges: SavedSqlEditorFold[]): SavedSqlEditorFoldSnapshot {
+  return { documentFingerprint: sqlTextFingerprint(document), ranges };
+}
+
+export function restoreSavedSqlEditorFoldSnapshot(snapshot: SavedSqlEditorFoldSnapshot | undefined, sql: string): SavedSqlEditorFoldSnapshot | undefined {
+  if (!Array.isArray(snapshot?.ranges)) return undefined;
+  const document = savedSqlFoldDocument(sql);
+  if (snapshot.documentFingerprint !== sqlTextFingerprint(document)) return undefined;
+  return {
+    documentFingerprint: snapshot.documentFingerprint,
+    ranges: snapshot.ranges.filter((range) => range && Number.isInteger(range.from) && Number.isInteger(range.to) && range.from >= 0 && range.from < range.to && range.to <= document.length),
+  };
 }
 
 function clampOffset(value: number, docLength: number) {
@@ -126,6 +152,7 @@ function parseLegacySavedPositions(): SavedSqlEditorPosition[] {
 let savedPositions: SavedSqlEditorPosition[] = [];
 let savedPositionsLoaded = false;
 let savedPositionsInitPromise: Promise<void> | undefined;
+let savedPositionsWrite = Promise.resolve();
 
 export async function initSavedSqlEditorPositions() {
   if (savedPositionsLoaded) return;
@@ -142,7 +169,7 @@ export async function initSavedSqlEditorPositions() {
     if (legacy.length > 0) {
       savedPositions = legacy;
       try {
-        await api.saveSavedSqlEditorPositions(trimSavedPositions(legacy));
+        await api.saveSavedSqlEditorPositions({ type: "initialize", positions: trimSavedPositions(legacy) });
         // Remove the synchronous startup payload only after the async store
         // accepts the migrated positions.
         safeLocalStorageRemove(SAVED_SQL_EDITOR_POSITIONS_STORAGE_KEY);
@@ -158,27 +185,34 @@ export async function initSavedSqlEditorPositions() {
   return savedPositionsInitPromise;
 }
 
-function readSavedPositions(): SavedSqlEditorPosition[] {
-  return savedPositions;
-}
-
 function trimSavedPositions(positions: SavedSqlEditorPosition[]) {
   return [...positions].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_SAVED_SQL_EDITOR_POSITIONS);
 }
 
-function writeSavedPositions(positions: SavedSqlEditorPosition[]) {
-  savedPositions = trimSavedPositions(positions);
-  void api.saveSavedSqlEditorPositions(savedPositions).catch(() => {});
+export function applySavedSqlEditorPositionsUpdate(current: unknown, update: SavedSqlEditorPositionsUpdate): SavedSqlEditorPosition[] {
+  if (update.type === "initialize") {
+    return trimSavedPositions(Array.isArray(current) ? normalizeSavedPositions(current) : update.positions);
+  }
+  const id = update.type === "save" ? update.position.savedSqlId : update.savedSqlId;
+  const next = normalizeSavedPositions(current).filter((position) => position.savedSqlId !== id);
+  if (update.type === "save") next.unshift(update.position);
+  return trimSavedPositions(next);
 }
 
-export function createSavedSqlEditorPosition(input: { savedSqlId: string; sql: string; selection?: SavedSqlEditorSelection; viewport?: SavedSqlEditorViewport; folds?: SavedSqlEditorFold[]; now?: number }): SavedSqlEditorPosition {
+function writeSavedPosition(update: SavedSqlEditorPositionsUpdate) {
+  savedPositions = applySavedSqlEditorPositionsUpdate(savedPositions, update);
+  savedPositionsWrite = savedPositionsWrite.then(() => api.saveSavedSqlEditorPositions(update)).catch(() => {});
+  return savedPositionsWrite;
+}
+
+export function createSavedSqlEditorPosition(input: { savedSqlId: string; sql: string; selection?: SavedSqlEditorSelection; viewport?: SavedSqlEditorViewport; folds?: SavedSqlEditorFoldSnapshot; now?: number }): SavedSqlEditorPosition {
   const selection = normalizeSelection(input.selection, input.sql.length);
   const head = selection.head;
   return {
     savedSqlId: input.savedSqlId,
     selection,
     viewport: normalizeViewport(input.viewport),
-    folds: input.folds?.length ? { documentFingerprint: sqlTextFingerprint(input.sql), ranges: input.folds } : undefined,
+    folds: restoreSavedSqlEditorFoldSnapshot(input.folds, input.sql),
     anchor: {
       before: input.sql.slice(Math.max(0, head - ANCHOR_CONTEXT_CHARS), head),
       after: input.sql.slice(head, Math.min(input.sql.length, head + ANCHOR_CONTEXT_CHARS)),
@@ -190,24 +224,19 @@ export function createSavedSqlEditorPosition(input: { savedSqlId: string; sql: s
 }
 
 export function saveSavedSqlEditorPosition(position: SavedSqlEditorPosition) {
-  const next = readSavedPositions().filter((item) => item.savedSqlId !== position.savedSqlId);
-  next.unshift(position);
-  writeSavedPositions(next);
+  return writeSavedPosition({ type: "save", position });
 }
 
-export function restoreSavedSqlEditorPosition(savedSqlId: string, sql: string): { selection?: SavedSqlEditorSelection; viewport?: SavedSqlEditorViewport; folds?: SavedSqlEditorFold[] } {
-  const position = readSavedPositions().find((item) => item.savedSqlId === savedSqlId);
+export function restoreSavedSqlEditorPosition(savedSqlId: string, sql: string): { selection?: SavedSqlEditorSelection; viewport?: SavedSqlEditorViewport; folds?: SavedSqlEditorFoldSnapshot } {
+  const position = savedPositions.find((item) => item.savedSqlId === savedSqlId);
   if (!position) return {};
 
   const restoredHead = restoredHeadFromAnchor(position, sql);
   const originalSelection = normalizeSelection(position.selection, position.anchor.docLength);
   const anchorOffsetFromHead = originalSelection.anchor - originalSelection.head;
   const canReuseViewport = sql.length === position.anchor.docLength && restoredHead === originalSelection.head;
-  const savedFolds = position.folds;
-  const folds =
-    Array.isArray(savedFolds?.ranges) && savedFolds.documentFingerprint === sqlTextFingerprint(sql) ? savedFolds.ranges.filter((range) => range && Number.isInteger(range.from) && Number.isInteger(range.to) && range.from >= 0 && range.from < range.to && range.to <= sql.length) : undefined;
   return {
-    folds,
+    folds: restoreSavedSqlEditorFoldSnapshot(position.folds, sql),
     selection: {
       anchor: clampOffset(restoredHead + anchorOffsetFromHead, sql.length),
       head: restoredHead,
@@ -217,7 +246,7 @@ export function restoreSavedSqlEditorPosition(savedSqlId: string, sql: string): 
 }
 
 export function forgetSavedSqlEditorPosition(savedSqlId: string) {
-  writeSavedPositions(readSavedPositions().filter((item) => item.savedSqlId !== savedSqlId));
+  return writeSavedPosition({ type: "remove", savedSqlId });
 }
 
 export function __resetSavedSqlEditorPositionsForTests(positions: SavedSqlEditorPosition[] = []) {

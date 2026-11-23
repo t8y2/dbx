@@ -2487,7 +2487,7 @@ defineExpose({
                   @viewport-change="(viewport, tabId) => emit('editorViewportChange', tabId ?? activeTab.id, viewport)"
                   @selection-state-change="emit('editorSelectionStateChange', activeTab.id, $event)"
                   @bookmarks-change="(lines, tabId) => queryStore.updateEditorBookmarks(tabId ?? activeTab.id, lines)"
-                  @folds-change="(folds, tabId) => queryStore.updateEditorFolds(tabId ?? activeTab.id, folds)"
+                  @folds-change="(folds, tabId, document) => queryStore.updateEditorFolds(tabId, folds, document)"
                   @editor-state-flushed="emit('editorStateFlushed', activeTab.id)"
                   @editor-reveal-consumed="clearEditorRevealRequest(activeTab)"
                   @format-error="emit('formatError', activeTab.id)"

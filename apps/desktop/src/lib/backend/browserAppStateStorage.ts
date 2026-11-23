@@ -73,6 +73,10 @@ export async function loadBrowserAppState(key: string): Promise<unknown | null> 
   const value = await withStore("readonly", (store) => store.get(key));
   if (value !== null && value !== undefined) return value;
 
+  return loadFallback(key);
+}
+
+function loadFallback(key: string): unknown | null {
   const fallback = safeLocalStorageGet(fallbackKey(key));
   if (!fallback) return null;
   try {
@@ -109,4 +113,34 @@ export async function saveBrowserAppState(key: string, value: unknown): Promise<
   }
   if (safeLocalStorageSet(fallbackKey(key), JSON.stringify(stored))) return;
   throw new Error(`Failed to persist browser app state: ${key}`);
+}
+
+export async function updateBrowserAppState(key: string, update: (current: unknown) => unknown): Promise<void> {
+  const db = await openDb();
+  if (db) {
+    const transaction = db.transaction(STORE_NAME, "readwrite");
+    const complete = transactionToPromise(transaction);
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.get(key);
+    request.onsuccess = () => {
+      try {
+        // Queue the write in the same transaction as the read, before another
+        // tab can update the record or this transaction can become inactive.
+        store.put(toStorableValue(update(request.result ?? loadFallback(key))), key);
+      } catch {
+        transaction.abort();
+      }
+    };
+    await complete;
+    safeLocalStorageRemove(fallbackKey(key));
+    return;
+  }
+
+  const updateFallback = () => {
+    if (!safeLocalStorageSet(fallbackKey(key), JSON.stringify(update(loadFallback(key))))) {
+      throw new Error(`Failed to persist browser app state: ${key}`);
+    }
+  };
+  if (globalThis.navigator?.locks) await navigator.locks.request(fallbackKey(key), updateFallback);
+  else updateFallback();
 }

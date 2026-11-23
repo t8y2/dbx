@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
 
 function installIndexedDb(transactionOutcome: "complete" | "abort", capturedPuts?: unknown[]) {
   const transaction: Record<string, any> = {
@@ -119,4 +120,26 @@ describe("saveBrowserAppState", () => {
 
     await expect(saveBrowserAppState("transfer_task_library", { version: 1 })).rejects.toThrow("Failed to persist browser app state: transfer_task_library");
   });
+});
+
+it("keeps concurrent updates to different saved SQL files from separate browser tabs", async () => {
+  vi.stubGlobal("indexedDB", new IDBFactory());
+  installLocalStorage(() => undefined);
+  const { createSavedSqlEditorFoldSnapshot, createSavedSqlEditorPosition } = await import("@/lib/app/savedSqlEditorPosition");
+  const windowA = await import("@/lib/backend/http");
+  vi.resetModules();
+  const windowB = await import("@/lib/backend/http");
+  const sql = "SELECT\n  1;";
+  const folds = createSavedSqlEditorFoldSnapshot(sql, [{ from: 6, to: 10 }]);
+  const a = createSavedSqlEditorPosition({ savedSqlId: "file-a", sql, folds, now: 1 });
+  const b = createSavedSqlEditorPosition({ savedSqlId: "file-b", sql, selection: { anchor: 4, head: 4 }, now: 2 });
+  expect(await windowA.loadSavedSqlEditorPositions()).toBeNull();
+  expect(await windowB.loadSavedSqlEditorPositions()).toBeNull();
+
+  await Promise.all([windowA.saveSavedSqlEditorPositions({ type: "save", position: a }), windowB.saveSavedSqlEditorPositions({ type: "save", position: b })]);
+  expect(await windowB.loadSavedSqlEditorPositions()).toEqual([b, a]);
+  await windowB.saveSavedSqlEditorPositions({ type: "initialize", positions: [] });
+  expect(await windowA.loadSavedSqlEditorPositions()).toEqual([b, a]);
+  await windowB.saveSavedSqlEditorPositions({ type: "remove", savedSqlId: b.savedSqlId });
+  expect(await windowA.loadSavedSqlEditorPositions()).toEqual([a]);
 });

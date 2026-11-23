@@ -2,6 +2,7 @@ import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadC
 import type { MongoDeleteId } from "@/lib/mongo/mongoDocumentValues";
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
 import type { AppThemeMode } from "@/lib/app/appTheme";
+import type { SavedSqlEditorPositionsUpdate } from "@/lib/app/savedSqlEditorPosition";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { notifySavedSqlLibraryChanged } from "@/lib/savedSql/savedSqlLibraryEvents";
@@ -1210,8 +1211,8 @@ export async function loadSavedSqlEditorPositions(): Promise<unknown[] | null> {
   return invoke("load_saved_sql_editor_positions");
 }
 
-export async function saveSavedSqlEditorPositions(positions: unknown[]): Promise<void> {
-  return invoke("save_saved_sql_editor_positions", { positions });
+export async function saveSavedSqlEditorPositions(update: SavedSqlEditorPositionsUpdate): Promise<void> {
+  return invoke("save_saved_sql_editor_positions", { update });
 }
 
 export async function loadTransferTaskLibrary(): Promise<unknown | null> {

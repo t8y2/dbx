@@ -229,7 +229,7 @@ const emit = defineEmits<{
   viewportChange: [viewport: { scrollTop: number; scrollLeft: number }, tabId?: string];
   selectionStateChange: [selection: { anchor: number; head: number }];
   bookmarksChange: [lines: number[], tabId?: string];
-  foldsChange: [ranges: SavedSqlEditorFold[], tabId?: string];
+  foldsChange: [ranges: SavedSqlEditorFold[], tabId: string, document: string];
   editorStateFlushed: [];
   editorRevealConsumed: [];
   sendSelectionToAi: [sql: string];
@@ -2637,6 +2637,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       parent: editorElement,
       onReady() {
         if (!view.value) return;
+        documentState.initializeDocument();
         if (initialSettings.vimModeEnabled) applyVimConfigToCurrentEditor(vimCommands);
         syncQueryEditorInsertContext(view.value);
         batchSelection.attach(view.value, tooltipParent);

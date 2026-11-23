@@ -2681,6 +2681,10 @@ export default withEnglishFallback({
     ...nacosAccessControlTabs,
     ungroupedTabs: "未グループ",
     pluginTabs: "プラグイン",
+    recentTablesTitle: "最近開いたテーブル",
+    recentTablesSearch: "最近開いたテーブルを検索",
+    recentTableOpen: "開いています",
+    recentTableClosed: "最近閉じた",
   },
   executionSummary: {
     empty: "サマリーはありません",

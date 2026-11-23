@@ -2673,6 +2673,10 @@ export default withEnglishFallback({
     settingsSaveFailed: "Не удалось сохранить настройки вкладок: {message}",
     ungroupedTabs: "Без группы",
     pluginTabs: "Плагины",
+    recentTablesTitle: "Недавно открытые таблицы",
+    recentTablesSearch: "Поиск недавно открытых таблиц",
+    recentTableOpen: "Открытые",
+    recentTableClosed: "Недавно закрытые",
   },
   databaseBrowser: {
     search: "Поиск баз данных...",

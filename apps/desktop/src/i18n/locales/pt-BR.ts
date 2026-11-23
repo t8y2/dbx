@@ -2661,6 +2661,10 @@ export default withEnglishFallback({
     ...nacosAccessControlTabs,
     ungroupedTabs: "Não agrupadas",
     pluginTabs: "Plugins",
+    recentTablesTitle: "Tabelas abertas recentemente",
+    recentTablesSearch: "Pesquisar tabelas abertas recentemente",
+    recentTableOpen: "Aberta",
+    recentTableClosed: "Fechada recentemente",
   },
   executionSummary: {
     empty: "Nenhum resumo",

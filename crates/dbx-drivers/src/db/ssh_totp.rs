@@ -74,14 +74,49 @@ pub fn generate_code(secret: &str, unix_time: u64) -> Result<String, String> {
 
 /// Whether a keyboard-interactive prompt is asking for a TOTP code.
 ///
-/// Only used to decide whether DBX may answer *on the user's behalf*, so it
-/// errs toward not matching: a prompt we do not recognise falls through to the
-/// interactive dialog and, headless, to the existing fail-closed path.
+/// This is a *text* match only. Whether the code may actually be submitted is
+/// decided per challenge by [`challenge_allows_local_answer`], which is the
+/// only thing callers should use to gate an automatic answer: a challenge can
+/// contain a prompt that matches here and still not be safe to answer locally.
 pub fn is_totp_prompt(prompt: &str) -> bool {
     let prompt = prompt.to_lowercase();
     const MARKERS: [&str; 9] =
         ["otp", "totp", "one-time", "one time", "verification code", "authenticator", "验证码", "动态密码", "动态口令"];
     MARKERS.iter().any(|marker| prompt.contains(marker))
+}
+
+/// Whether an entire keyboard-interactive challenge may be answered with a
+/// locally generated code.
+///
+/// The decision is deliberately made per *challenge*, not per prompt: a
+/// challenge is answered as a single unit, so a form that mixes a code prompt
+/// with anything else would otherwise have half its answers generated and half
+/// prompted, and the code would be spent even when the server rejects the form.
+///
+/// Only the one shape DBX can be certain about qualifies:
+///
+/// * exactly one prompt — a multi-question form can carry a hidden password
+///   field alongside the code;
+/// * not echoed — an echoed answer is displayed on screen, and a one-time code
+///   must never be written in the clear;
+/// * the prompt text names a one-time code (see [`is_totp_prompt`]);
+/// * a non-blank secret is configured;
+/// * no code was spent yet, so a second round after the server rejected the
+///   first code falls back to the dialog instead of burning fresh codes.
+///
+/// Everything else falls through to the interactive path, which is where a
+/// headless host deliberately fails closed rather than guess a credential.
+pub fn challenge_allows_local_answer(secret: Option<&str>, prompts: &[(&str, bool)], totp_spent: bool) -> bool {
+    if totp_spent {
+        return false;
+    }
+    if secret.is_none_or(|secret| secret.trim().is_empty()) {
+        return false;
+    }
+    let [(prompt, echo)] = prompts else {
+        return false;
+    };
+    !echo && is_totp_prompt(prompt)
 }
 
 #[cfg(test)]
@@ -90,6 +125,11 @@ mod tests {
 
     /// RFC 6238 Appendix B, SHA-1 rows. The SHA-256/SHA-512 rows use different
     /// secrets and are out of scope for this module.
+    ///
+    /// The RFC tabulates 8-digit codes; DBX implements the 6-digit default that
+    /// authenticator apps and bastions use, so each expected value below is the
+    /// low 6 digits of the RFC's 8. (`T=1111111109` is `07081804` in the RFC,
+    /// hence `081804` here.)
     #[test]
     fn rfc6238_sha1_vectors() {
         // ASCII "12345678901234567890", the RFC's seed, in Base32.
@@ -138,5 +178,49 @@ mod tests {
         assert!(!is_totp_prompt("Password: "));
         assert!(!is_totp_prompt("Which account do you want?"));
         assert!(!is_totp_prompt(""));
+    }
+
+    const SECRET: Option<&str> = Some("JBSWY3DPEHPK3PXP");
+
+    /// The only shape that qualifies: one non-echoed prompt naming a code.
+    #[test]
+    fn challenge_answers_the_plain_code_prompt_locally() {
+        assert!(challenge_allows_local_answer(SECRET, &[("OTP Code: ", false)], false));
+        assert!(challenge_allows_local_answer(SECRET, &[("请输入验证码", false)], false));
+    }
+
+    /// An echoed answer is shown on screen; a one-time code must never be
+    /// written in the clear, so an echoed code prompt stays interactive.
+    #[test]
+    fn challenge_never_answers_an_echoed_prompt() {
+        assert!(!challenge_allows_local_answer(SECRET, &[("OTP Code: ", true)], false));
+        assert!(!challenge_allows_local_answer(SECRET, &[("Verification code:", true)], false));
+    }
+
+    /// A form mixing the code with another field must stay fully interactive:
+    /// answering it locally would also spend the code on a form the server may
+    /// reject, and the neighbours could be credentials DBX must not fill.
+    #[test]
+    fn challenge_never_answers_a_multi_prompt_form() {
+        assert!(!challenge_allows_local_answer(SECRET, &[("Username: ", false), ("OTP Code: ", false)], false));
+        assert!(!challenge_allows_local_answer(SECRET, &[("OTP Code: ", false), ("Password: ", false)], false));
+        assert!(!challenge_allows_local_answer(SECRET, &[], false));
+    }
+
+    /// A code is single-use per session: once spent, later rounds are prompted.
+    #[test]
+    fn challenge_answers_nothing_once_the_code_was_spent() {
+        let prompts = [("OTP Code: ", false)];
+        assert!(challenge_allows_local_answer(SECRET, &prompts, false));
+        assert!(!challenge_allows_local_answer(SECRET, &prompts, true));
+    }
+
+    /// No secret, or only whitespace, keeps the previous interactive behaviour.
+    #[test]
+    fn challenge_requires_a_configured_secret() {
+        let prompts = [("OTP Code: ", false)];
+        assert!(!challenge_allows_local_answer(None, &prompts, false));
+        assert!(!challenge_allows_local_answer(Some(""), &prompts, false));
+        assert!(!challenge_allows_local_answer(Some("   "), &prompts, false));
     }
 }

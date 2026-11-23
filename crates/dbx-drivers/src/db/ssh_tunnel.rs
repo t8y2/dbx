@@ -338,41 +338,19 @@ fn keyboard_interactive_prompt_text(name: &str, instructions: &str, prompt: &str
         .join("\n\n")
 }
 
-/// Answers one keyboard-interactive prompt, locally when possible.
+/// Answers one keyboard-interactive prompt through the interactive dialog.
 ///
-/// This is the single decision point for "what replies to this prompt", so the
-/// local-credential path and the interactive path can never drift apart. A
-/// configured TOTP secret answers a one-time-code prompt without any UI; every
-/// other prompt — a password, an account picker, anything unrecognised — goes
-/// to the dialog, which is where headless hosts deliberately fail closed rather
-/// than guess a credential.
-///
-/// `spent` is the caller's one-shot guard: a code may be generated for this
-/// session only once, so a second round after a rejected code falls back to the
-/// dialog instead of burning fresh codes forever.
+/// Whether a prompt may be answered *without* the dialog is decided for the
+/// whole challenge in [`authenticate_keyboard_interactive`] (see
+/// [`ssh_totp::challenge_allows_local_answer`]); this function is the only
+/// interactive path, so there is no second place that could fill a credential.
 async fn request_keyboard_interactive_answer(
     host: &str,
     port: u16,
     name: &str,
     instructions: &str,
     prompt: &russh::client::Prompt,
-    totp_secret: Option<&str>,
-    spent: bool,
 ) -> Result<String, String> {
-    if !spent {
-        if let Some(secret) = totp_secret.filter(|secret| !secret.trim().is_empty()) {
-            if ssh_totp::is_totp_prompt(&prompt.prompt) {
-                return ssh_totp::generate_code(
-                    secret,
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|elapsed| elapsed.as_secs())
-                        .unwrap_or_default(),
-                );
-            }
-        }
-    }
-
     let prompt_text = keyboard_interactive_prompt_text(name, instructions, &prompt.prompt);
     let request = ssh_prompt::secret_input_request(host, port, prompt_text, prompt.echo);
     let Some(responder_rx) = ssh_prompt::request_ssh_prompt(request) else {
@@ -407,14 +385,14 @@ async fn start_keyboard_interactive(
         .map_err(|e| format!("SSH keyboard-interactive auth failed: {e}"))
 }
 
-/// Answers a keyboard-interactive challenge, locally when possible.
+/// Answers a keyboard-interactive challenge, locally when it is safe to.
 ///
-/// A configured TOTP secret is spent only on the narrow shape DBX can be
-/// certain about: exactly one non-echoed prompt that names a one-time code, on
-/// the first challenge of the session. Anything else — a password prompt, an
-/// account picker, a multi-question form, a later round after the code was
-/// already spent — goes through the interactive dialog, which is where headless
-/// hosts deliberately fail closed rather than guess a credential.
+/// Eligibility is decided once per challenge by
+/// [`ssh_totp::challenge_allows_local_answer`], and an eligible challenge is
+/// answered in full from the local secret — every other challenge goes to the
+/// interactive dialog prompt by prompt. A code is spent at most once per
+/// session: after a locally answered round, later rounds are prompted, so a
+/// rejected code does not burn fresh codes in a loop.
 #[allow(clippy::too_many_arguments)]
 async fn authenticate_keyboard_interactive(
     session: &mut Handle<SshClient>,
@@ -441,25 +419,28 @@ async fn authenticate_keyboard_interactive(
                 ));
             }
             KeyboardInteractiveAuthResponse::InfoRequest { name, instructions, prompts } => {
-                let answered_locally = totp_secret.is_some_and(|secret| !secret.trim().is_empty())
-                    && !totp_spent
-                    && prompts.iter().any(|prompt| ssh_totp::is_totp_prompt(&prompt.prompt));
+                let prompt_shapes: Vec<(&str, bool)> =
+                    prompts.iter().map(|prompt| (prompt.prompt.as_str(), prompt.echo)).collect();
+                let answered_locally = ssh_totp::challenge_allows_local_answer(totp_secret, &prompt_shapes, totp_spent);
 
-                let mut answers = Vec::with_capacity(prompts.len());
-                for prompt in &prompts {
-                    answers.push(
-                        request_keyboard_interactive_answer(
-                            host,
-                            port,
-                            &name,
-                            &instructions,
-                            prompt,
-                            totp_secret,
-                            totp_spent,
-                        )
-                        .await?,
-                    );
-                }
+                let answers = if answered_locally {
+                    // Eligibility required a configured, non-blank secret.
+                    let secret = totp_secret.expect("local TOTP answer requires a configured secret");
+                    vec![ssh_totp::generate_code(
+                        secret,
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|elapsed| elapsed.as_secs())
+                            .unwrap_or_default(),
+                    )?]
+                } else {
+                    let mut answers = Vec::with_capacity(prompts.len());
+                    for prompt in &prompts {
+                        answers
+                            .push(request_keyboard_interactive_answer(host, port, &name, &instructions, prompt).await?);
+                    }
+                    answers
+                };
                 totp_spent |= answered_locally;
 
                 response =

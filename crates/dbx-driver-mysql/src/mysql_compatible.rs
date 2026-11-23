@@ -7,8 +7,7 @@ use crate::types::{ColumnInfo, DatabaseInfo, IndexInfo, TableInfo};
 use super::mysql::{
     bytes_to_string_lossy, database_infos_from_names, first_nonempty_str_by_name, fix_potential_double_encoding,
     get_conn_with_health_check, get_conn_with_timeout, get_opt_str, get_str, get_str_by_name, is_mysql_identifier_byte,
-    list_indexes_without_expression, mysql_keyword_at, quote_identifier, show_create_table_ddl, skip_mysql_quoted,
-    MySqlPool,
+    list_indexes, mysql_keyword_at, quote_identifier, show_create_table_ddl, skip_mysql_quoted, MySqlPool,
 };
 
 pub fn uses_show_metadata(config: &ConnectionConfig) -> bool {
@@ -26,10 +25,7 @@ pub async fn list_indexes_with_ddl_fallback(
     database: &str,
     table: &str,
 ) -> Result<Vec<IndexInfo>, String> {
-    // Doris 2.x/3.x and StarRocks in MySQL 5.7 mode omit `EXPRESSION` from
-    // `information_schema.STATISTICS`, so probing it fails with `Unknown column
-    // 'EXPRESSION'` on every table lookup (#15528).
-    let statistics_result = list_indexes_without_expression(pool, database, table).await;
+    let statistics_result = list_indexes(pool, database, table).await;
     if let Err(err) = &statistics_result {
         log::debug!(
             "Falling back to SHOW CREATE TABLE for MySQL-compatible distributed indexes on `{database}`.`{table}` after information_schema.STATISTICS failed: {err}"

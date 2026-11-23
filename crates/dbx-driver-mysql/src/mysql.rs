@@ -8179,30 +8179,12 @@ fn append_mysql_index_row(
 }
 
 pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
-    list_indexes_with_start(pool, database, table, pool.metadata_capabilities.statistics_columns()).await
-}
-
-pub(super) async fn list_indexes_without_expression(
-    pool: &MySqlPool,
-    database: &str,
-    table: &str,
-) -> Result<Vec<IndexInfo>, String> {
-    let start = pool.metadata_capabilities.statistics_columns().max(MySqlStatisticsColumns::WithoutExpression);
-    list_indexes_with_start(pool, database, table, start).await
-}
-
-async fn list_indexes_with_start(
-    pool: &MySqlPool,
-    database: &str,
-    table: &str,
-    start: MySqlStatisticsColumns,
-) -> Result<Vec<IndexInfo>, String> {
+    let mut current = pool.metadata_capabilities.statistics_columns();
     let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     // Column sets shrink in steps: MySQL 8+ carries both EXPRESSION and
     // INDEX_COMMENT, 5.5–5.7 / Doris / StarRocks v5 omit EXPRESSION, and
     // 5.0/5.1 also lack INDEX_COMMENT. Persist downgrades on the pool so later
     // tables do not repeat doomed probes (#14021, #15528).
-    let mut current = start;
     loop {
         let (with_expression, with_comment) = current.flags();
         let sql = mysql_list_indexes_sql(database, table, with_expression, with_comment);
@@ -11819,8 +11801,6 @@ mod tests {
 
         let indexes = list_indexes(&pool, "boyaa_eagle_10036", "events").await.unwrap();
         assert!(indexes.is_empty());
-        let compat_indexes = list_indexes_without_expression(&pool, "boyaa_eagle_10036", "events").await.unwrap();
-        assert!(compat_indexes.is_empty());
 
         let routine_req: CompletionAssistantRequest = serde_json::from_value(serde_json::json!({
             "connection_id": "doris-1",
@@ -11936,6 +11916,28 @@ mod tests {
             queries.iter().all(|sql| !sql.contains("EXPRESSION")),
             "doris::list_indexes must never query STATISTICS.EXPRESSION: {queries:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn starrocks_list_indexes_preserves_the_initial_statistics_expression_probe() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(mysql_doris_metadata_test_server(listener));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+
+        // The shared fallback requests expression metadata when the engine is
+        // unseeded, then remembers the missing-column result for later calls.
+        for _ in 0..2 {
+            let _ = crate::starrocks::list_indexes(&pool, "app", "events").await;
+        }
+        pool.disconnect().await.unwrap();
+
+        let queries = server.await.unwrap();
+        let probes: Vec<_> = queries.iter().filter(|sql| sql.contains("information_schema.STATISTICS")).collect();
+        assert_eq!(probes.len(), 3, "expected initial probe and two fallback reads: {queries:?}");
+        assert!(probes[0].contains("EXPRESSION"));
+        assert!(probes[1..].iter().all(|sql| !sql.contains("EXPRESSION")));
     }
 
     #[tokio::test]

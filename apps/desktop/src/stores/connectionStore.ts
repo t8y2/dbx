@@ -11791,6 +11791,7 @@ export const useConnectionStore = defineStore("connection", () => {
             ...existing,
             label: node.label,
             comment: node.comment,
+            sidebarColor: node.sidebarColor,
             searchAliases: node.searchAliases,
             pinned: node.pinned,
             children: withSavedSqlRoot(node.connectionId!, existing.children || [], existing),
@@ -12741,6 +12742,10 @@ export const useConnectionStore = defineStore("connection", () => {
     },
     renameConnectionGroup(groupId: string, name: string) {
       updateLayoutAndRebuild(renameGroupOp(sidebarLayout.value, groupId, name));
+    },
+    setConnectionGroupColor(groupId: string, color: string) {
+      const layout = sidebarLayout.value;
+      updateLayoutAndRebuild({ ...layout, groups: layout.groups.map((group) => (group.id === groupId ? { ...group, color: color || undefined } : group)) });
     },
     async deleteConnectionGroup(groupId: string) {
       await removeConnectionGroups([groupId]);

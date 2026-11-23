@@ -960,7 +960,8 @@ const databaseOpenVisual = computed(() => {
 
 const connectionColor = computed(() => {
   const connectionId = activeNode.value.connectionId;
-  return connectionId ? connectionStore.getConfig(connectionId)?.color || "" : "";
+  const explicitColor = connectionId ? connectionStore.getConfig(connectionId)?.color : undefined;
+  return explicitColor || activeNode.value.sidebarColor || "";
 });
 
 const isActiveConnectionScope = computed(() => !!activeNode.value.connectionId && connectionStore.activeConnectionId === activeNode.value.connectionId);

@@ -13,6 +13,7 @@ import { useSidebarDatabaseSpecificMutationRuntime } from "@/composables/useSide
 import { useSidebarTableMutationRuntime } from "@/composables/useSidebarTableMutationRuntime";
 import { useSidebarTreeExportRuntime } from "@/composables/useSidebarTreeExportRuntime";
 import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
+import { connectionColorOptions } from "@/lib/connection/connectionColors";
 import { useSidebarTreeToolRuntime } from "@/composables/useSidebarTreeToolRuntime";
 import { canDropDatabaseNode, notifyDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import { dropDatabaseOtherSessionCount } from "@/lib/database/dropDatabaseError";
@@ -84,6 +85,8 @@ import {
   GitBranch,
   Sparkles,
   Link2,
+  Palette,
+  Circle,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
@@ -7966,6 +7969,17 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       action: startRenameGroup,
       icon: Pencil,
       shortcut: shortcutRename,
+    });
+    items.push({
+      label: t("connection.color"),
+      icon: Palette,
+      children: connectionColorOptions.map((color) => ({
+        label: t(color.labelKey),
+        checked: color.value === (node.sidebarColor || ""),
+        icon: Circle,
+        iconClass: `rounded-full ${color.class}`,
+        action: () => connectionStore.setConnectionGroupColor(node.id, color.value),
+      })),
     });
     items.push({ label: "", separator: true });
     items.push({

@@ -73,33 +73,52 @@ function splitTopLevelConjunctions(where: string): Array<{ joiner: "AND" | "OR";
 }
 
 function sameColumn(candidate: string, columns: readonly string[]): string | null {
-  let trimmed = candidate.trim();
+  const trimmed = candidate.trim();
+  // Quoted identifiers are case-sensitive in every dialect we quote for
+  // (PG `"Name"`, MySQL `` `Name` ``, SQL Server `[Name]`): require an exact
+  // column match and never fold to a differently-cased sibling (#15448 review).
   if (trimmed.length > 1 && ((trimmed.startsWith("`") && trimmed.endsWith("`")) || (trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("[") && trimmed.endsWith("]")))) {
-    trimmed = trimmed.slice(1, -1);
+    const exact = trimmed.slice(1, -1);
+    return columns.some((column) => column === exact) ? exact : null;
   }
   const normalized = trimmed.toLowerCase();
-  return columns.find((column) => column.toLowerCase() === normalized) ?? null;
+  const matches = columns.filter((column) => column.toLowerCase() === normalized);
+  // An unquoted identifier folded case-insensitively is ambiguous when the
+  // table carries both `Name` and `name` — importing could switch columns.
+  return matches.length === 1 ? matches[0]! : null;
 }
 
 /**
  * Unwraps the quoted LIKE literal and classifies the pattern. The backend
- * re-adds wildcards per mode (Contains/StartsWith/EndsWith), so the stored
- * value must be the bare pattern: edge wildcards map to a mode, wildcards in
- * the middle would change semantics and are rejected.
+ * re-adds wildcards per mode (Contains/StartsWith/EndsWith) and escapes LIKE
+ * metacharacters in the stored value, so an exact round-trip requires the
+ * pattern to use only edge `%` wildcards with no `_` and no interior `%`
+ * anything else would change semantics and is rejected (#15448 review).
  */
 function parseLikeLiteral(value: string): { mode: DataGridContextFilterMode; pattern: string } | null {
   const literal = value.trim();
   if (literal.length < 2 || !literal.startsWith("'") || !literal.endsWith("'")) return null;
   const pattern = literal.slice(1, -1).replaceAll("''", "'");
   if (pattern.includes("'") || !pattern) return null;
+  if (pattern.includes("_")) return null;
   const startsWithWildcard = pattern.startsWith("%");
   const endsWithWildcard = pattern.endsWith("%");
-  if (pattern.indexOf("%", 1) !== pattern.length - 1 && startsWithWildcard) return null;
+  // A second `%` is only allowed as the trailing wildcard (`%x%`); an interior
+  // one changes what the pattern matches and is rejected.
+  const interiorWildcard = pattern.indexOf("%", 1);
+  if (interiorWildcard !== -1 && interiorWildcard !== pattern.length - 1) return null;
   if (startsWithWildcard && endsWithWildcard) return { mode: "like", pattern: pattern.slice(1, -1) };
   if (endsWithWildcard) return { mode: "begins-with", pattern: pattern.slice(0, -1) };
   if (startsWithWildcard) return { mode: "ends-with", pattern: pattern.slice(1) };
   return null;
 }
+
+/** The structured modes whose SQL template negates the matching LIKE shape. */
+const NEGATED_LIKE_MODES: Record<string, DataGridContextFilterMode> = {
+  like: "not-like",
+  "begins-with": "not-begins-with",
+  "ends-with": "not-ends-with",
+};
 
 function parseFragment(fragment: string, columns: readonly string[]): ParsedFragment | null {
   const text = fragment.trim();
@@ -158,7 +177,13 @@ export function parseDataGridWhereCondition(where: string, columns: readonly str
       if (!column || !literal) return null;
       const like = parseLikeLiteral(literal);
       if (!like) return null;
-      parsed = { column, mode: negative ? "not-like" : like.mode, value: like.pattern, conjunction: "AND" };
+      // Negation must keep the pattern's shape: `NOT LIKE 'abc%'` is
+      // not-begins-with, not the contains-shaped `not-like` — collapsing them
+      // silently widened what rows get excluded (#15448 review). A pattern
+      // with no edge wildcard never maps losslessly and is rejected upstream.
+      const mode = negative ? NEGATED_LIKE_MODES[like.mode] : like.mode;
+      if (!mode) return null;
+      parsed = { column, mode, value: like.pattern, conjunction: "AND" };
     }
     if (!parsed) parsed = parseFragment(text, columns);
     if (!parsed) return null;

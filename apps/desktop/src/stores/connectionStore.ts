@@ -135,7 +135,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { shouldStartSidebarLayoutAutoSync } from "@/lib/sidebar/sidebarLayoutAutoSync";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, schemaNodeHasLoadableName, shouldShowDorisCatalogTree, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
-import { canClearDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { canClearDefaultDatabase, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { invalidateSchemaOptionsCache } from "@/lib/database/schemaOptionsCache";
 import {
   connectionDatabaseMetadataSchema,
@@ -5542,6 +5542,26 @@ export const useConnectionStore = defineStore("connection", () => {
     };
     await persistConnections(nextConnections);
     connections.value = nextConnections;
+    rebuildTreeNodes();
+  }
+
+  async function updateSidebarPreferencesAfterSchemaRename(connectionId: string, database: string, oldName: string, newName: string) {
+    const index = connections.value.findIndex((connection) => connection.id === connectionId);
+    const config = connections.value[index];
+    if (!config) return;
+    const visibleSchemas = config.visible_schemas?.[database];
+    const renamedVisibleSchemas = visibleSchemas?.includes(oldName) ? [...new Set(visibleSchemas.map((name) => (name === oldName ? newName : name)))] : undefined;
+    const updateDefaultSchema = config.default_schema === oldName && resolveDefaultDatabase(config, []) === database;
+    if (!renamedVisibleSchemas && !updateDefaultSchema) return;
+
+    const updated = [...connections.value];
+    updated[index] = {
+      ...config,
+      default_schema: updateDefaultSchema ? newName : config.default_schema,
+      visible_schemas: renamedVisibleSchemas ? { ...config.visible_schemas, [database]: renamedVisibleSchemas } : config.visible_schemas,
+    };
+    await persistConnections(updated);
+    connections.value = updated;
     rebuildTreeNodes();
   }
 
@@ -12545,6 +12565,7 @@ export const useConnectionStore = defineStore("connection", () => {
     clearVisibleDatabases,
     ensureVisibleDatabase,
     setVisibleSchemas,
+    updateSidebarPreferencesAfterSchemaRename,
     clearVisibleSchemas,
     recordPrimaryVisibleObjectNames,
     getSidebarVisibleFilterSummary,

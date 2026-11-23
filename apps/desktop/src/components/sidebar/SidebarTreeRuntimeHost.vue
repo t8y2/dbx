@@ -104,7 +104,7 @@ import * as api from "@/lib/backend/api";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { canClearDefaultDatabase, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
-import { connectionUsesVisibleSchemaFilter } from "@/lib/database/visibleDatabases";
+import { connectionUsesVisibleSchemaFilter, isSystemSchemaName } from "@/lib/database/visibleDatabases";
 import { canTreeNodeExpand, canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { sidebarConnectionVisibleFilterMenu } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectNameFilter";
@@ -212,6 +212,7 @@ import {
   buildDropDatabaseSql,
   buildDropObjectSql,
   buildDropSchemaSql,
+  buildRenamePostgresSchemaSql,
   damengDropSchemaExecutionSchema,
   buildGetDatabaseCommentSql,
   buildGetSchemaCommentSql,
@@ -1748,7 +1749,7 @@ function requestRenameSelectedNode(): boolean {
     openRenameDatabaseDialog();
     return true;
   }
-  if (canRenameObject.value) {
+  if (canRenameObject.value || canRenamePostgresSchema(activeNode.value)) {
     openRenameObjectDialog();
     return true;
   }
@@ -4229,6 +4230,16 @@ const canRenameObject = computed(() => {
   return !!objectType && (supportsObjectRename(currentDatabaseType(), objectType) || (databaseTypeForNode(node) === "oceanbase-oracle" && (objectType === "PROCEDURE" || objectType === "FUNCTION")) || supportsSourceBackedRoutineRename(currentDatabaseType(), objectType as any));
 });
 
+function canRenamePostgresSchema(node: TreeNode): boolean {
+  if (node.type !== "schema" || !node.connectionId || !node.database || !node.schema) return false;
+  const config = connectionStore.getConfig(node.connectionId);
+  return config?.db_type === "postgres" && (!config.driver_profile || config.driver_profile === "postgres") && !connectionIsEffectivelyReadOnly(config) && !isSystemSchemaName("postgres", node.schema);
+}
+
+function isValidPostgresSchemaRenameName(name: string): boolean {
+  return !name.startsWith("pg_") && !name.includes("\0") && new TextEncoder().encode(name).length <= 63;
+}
+
 // Target whose name the rename dialog last showed. Kept apart from currentSidebarViewRenameTargetKey,
 // which follows the selected node even while the dialog is closed.
 let renameObjectDialogTargetKey = "";
@@ -4355,6 +4366,12 @@ async function refreshRenameObjectPreviewSql() {
     viewRenamePlan.value = undefined;
     routineRenamePlan.value = undefined;
     tableRenamePlan.value = undefined;
+    return;
+  }
+  if (node.type === "schema") {
+    const valid = isValidPostgresSchemaRenameName(newName);
+    renameObjectPreviewSql.value = valid && node.schema ? buildRenamePostgresSchemaSql(node.schema, newName) : "";
+    renameObjectError.value = valid ? "" : t("contextMenu.renameSchemaInvalidName");
     return;
   }
   // Database rename path
@@ -4658,11 +4675,64 @@ async function confirmPackageSaveAs() {
   }
 }
 
+async function renamePostgresSchema(node: TreeNode, newName: string) {
+  if (!canRenamePostgresSchema(node) || !node.connectionId || !node.database || !node.schema || viewRenameExecuting.value) return;
+  if (!isValidPostgresSchemaRenameName(newName)) {
+    renameObjectError.value = t("contextMenu.renameSchemaInvalidName");
+    return;
+  }
+
+  const { connectionId, database, schema } = node;
+  function ensureSchemaTabsAreClosed() {
+    if (queryStore.tabs.some((tab) => tab.connectionId === connectionId && tab.database === database && tab.schema === schema)) {
+      throw new Error(t("contextMenu.renameSchemaCloseTabs"));
+    }
+  }
+
+  viewRenameExecuting.value = true;
+  try {
+    ensureSchemaTabsAreClosed();
+    await connectionStore.ensureConnected(connectionId);
+    const sql = buildRenamePostgresSchemaSql(schema, newName);
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, {
+      database,
+      schema: "",
+      beforeExecute: async () => ensureSchemaTabsAreClosed(),
+    });
+    if (executed === undefined) return;
+  } catch (error) {
+    renameObjectError.value = translateBackendError(t, error);
+    return;
+  } finally {
+    viewRenameExecuting.value = false;
+  }
+
+  showRenameObjectDialog.value = false;
+  toast(t("contextMenu.renameObjectSuccess", { oldName: schema, newName }), 3000);
+  connectionStore.invalidateMetadataCache(connectionId, database, schema);
+  try {
+    await connectionStore.updateSidebarPreferencesAfterSchemaRename(connectionId, database, schema, newName);
+  } catch (error) {
+    toast(t("connection.saveFailed", { message: translateBackendError(t, error) }), { persistent: true });
+  }
+  try {
+    await connectionStore.loadSchemas(connectionId, database, { force: true });
+    connectionStore.replacePinnedTreeNode(node, { ...node, label: newName, schema: newName });
+  } catch (error) {
+    connectionStore.removeTreeNode(node.id);
+    toast(t("contextMenu.renameSchemaRefreshFailed", { message: translateBackendError(t, error) }), { persistent: true });
+  }
+}
+
 async function confirmRenameObject() {
   const node = sidebarFormTarget.value ?? activeNode.value;
   let newName = renameObjectName.value.trim();
   if (!newName || newName === (node.objectName || node.label) || !node.connectionId || !node.database) return;
   renameObjectError.value = "";
+  if (node.type === "schema") {
+    await renamePostgresSchema(node, newName);
+    return;
+  }
   let renameApplied = false;
   let updatedViewDependencies: number | undefined;
   let updatedTableDependencies: number | undefined;
@@ -5420,7 +5490,9 @@ const canRenameDatabase = computed(() => {
 });
 
 const renameObjectDialogTitle = computed(() => {
-  if (activeNode.value.type === "database") return t("contextMenu.renameDatabaseTitle");
+  const node = sidebarFormTarget.value ?? activeNode.value;
+  if (node.type === "schema") return t("contextMenu.renameSchema");
+  if (node.type === "database") return t("contextMenu.renameDatabaseTitle");
   return t("contextMenu.renameObjectTitle");
 });
 
@@ -8057,6 +8129,9 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (canCreateSchema.value) {
       items.push({ sidebarActionId: "contextMenu.createSchema", label: t("contextMenu.createSchema"), action: openCreateSchemaDialog, icon: Plus });
+    }
+    if (canRenamePostgresSchema(node)) {
+      items.push({ sidebarActionId: "contextMenu.renameSchema", label: t("contextMenu.renameSchema"), action: openRenameObjectDialog, icon: Pencil, shortcut: shortcutRename });
     }
     if (canEditSchemaComment.value) {
       items.push({ sidebarActionId: "contextMenu.editSchemaComment", label: t("contextMenu.editSchemaComment"), action: openEditSchemaCommentDialog, icon: SquarePen });

@@ -1,5 +1,6 @@
 import * as api from "@/lib/backend/api";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
+import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 
 export const SAVED_SQL_EDITOR_POSITIONS_STORAGE_KEY = "dbx-saved-sql-editor-positions";
 
@@ -16,10 +17,16 @@ export interface SavedSqlEditorViewport {
   scrollLeft: number;
 }
 
+export interface SavedSqlEditorFold {
+  from: number;
+  to: number;
+}
+
 export interface SavedSqlEditorPosition {
   savedSqlId: string;
   selection: SavedSqlEditorSelection;
   viewport?: SavedSqlEditorViewport;
+  folds?: { documentFingerprint: string; ranges: SavedSqlEditorFold[] };
   anchor: {
     before: string;
     after: string;
@@ -164,13 +171,14 @@ function writeSavedPositions(positions: SavedSqlEditorPosition[]) {
   void api.saveSavedSqlEditorPositions(savedPositions).catch(() => {});
 }
 
-export function createSavedSqlEditorPosition(input: { savedSqlId: string; sql: string; selection?: SavedSqlEditorSelection; viewport?: SavedSqlEditorViewport; now?: number }): SavedSqlEditorPosition {
+export function createSavedSqlEditorPosition(input: { savedSqlId: string; sql: string; selection?: SavedSqlEditorSelection; viewport?: SavedSqlEditorViewport; folds?: SavedSqlEditorFold[]; now?: number }): SavedSqlEditorPosition {
   const selection = normalizeSelection(input.selection, input.sql.length);
   const head = selection.head;
   return {
     savedSqlId: input.savedSqlId,
     selection,
     viewport: normalizeViewport(input.viewport),
+    folds: input.folds?.length ? { documentFingerprint: sqlTextFingerprint(input.sql), ranges: input.folds } : undefined,
     anchor: {
       before: input.sql.slice(Math.max(0, head - ANCHOR_CONTEXT_CHARS), head),
       after: input.sql.slice(head, Math.min(input.sql.length, head + ANCHOR_CONTEXT_CHARS)),
@@ -187,7 +195,7 @@ export function saveSavedSqlEditorPosition(position: SavedSqlEditorPosition) {
   writeSavedPositions(next);
 }
 
-export function restoreSavedSqlEditorPosition(savedSqlId: string, sql: string): { selection?: SavedSqlEditorSelection; viewport?: SavedSqlEditorViewport } {
+export function restoreSavedSqlEditorPosition(savedSqlId: string, sql: string): { selection?: SavedSqlEditorSelection; viewport?: SavedSqlEditorViewport; folds?: SavedSqlEditorFold[] } {
   const position = readSavedPositions().find((item) => item.savedSqlId === savedSqlId);
   if (!position) return {};
 
@@ -195,7 +203,11 @@ export function restoreSavedSqlEditorPosition(savedSqlId: string, sql: string): 
   const originalSelection = normalizeSelection(position.selection, position.anchor.docLength);
   const anchorOffsetFromHead = originalSelection.anchor - originalSelection.head;
   const canReuseViewport = sql.length === position.anchor.docLength && restoredHead === originalSelection.head;
+  const savedFolds = position.folds;
+  const folds =
+    Array.isArray(savedFolds?.ranges) && savedFolds.documentFingerprint === sqlTextFingerprint(sql) ? savedFolds.ranges.filter((range) => range && Number.isInteger(range.from) && Number.isInteger(range.to) && range.from >= 0 && range.from < range.to && range.to <= sql.length) : undefined;
   return {
+    folds,
     selection: {
       anchor: clampOffset(restoredHead + anchorOffsetFromHead, sql.length),
       head: restoredHead,

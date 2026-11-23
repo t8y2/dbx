@@ -164,7 +164,7 @@ import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode"
 import { recordQueryCancellationLatency, resourceLifecycleDiagnostics } from "@/lib/diagnostics/resourceLifecycleDiagnostics";
 import { appendDebugLog } from "@/lib/backend/debugLog";
 import { BackendErrorException, formatError, isManualTransactionSessionExpired, isUnsupportedManualTransactionMethod, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
-import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
+import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition, type SavedSqlEditorFold } from "@/lib/app/savedSqlEditorPosition";
 import { isDetachedWindow, resolveWindowContext } from "@/lib/app/windowContext";
 import { normalizeDetachedTabRuntime, type DetachedTabHandoff, type DetachedTabRuntimeState } from "@/lib/app/detachedTabHandoff";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -5160,6 +5160,8 @@ export const useQueryStore = defineStore("query", () => {
 
   function persistSavedSqlEditorPosition(tab: QueryTab | undefined) {
     if (!tab?.savedSqlId || tab.mode !== "query") return;
+    // A restored session tab may still be waiting for its SQL library file.
+    if (!tab.sql && tab.originalSql === undefined) return;
     const pending = savedSqlEditorPositionTimers.get(tab.savedSqlId);
     if (pending) {
       clearTimeout(pending);
@@ -5171,6 +5173,7 @@ export const useQueryStore = defineStore("query", () => {
         sql: tab.sql,
         selection: tab.editorSelection,
         viewport: tab.editorViewport,
+        folds: tab.editorFolds,
       }),
     );
   }
@@ -6350,6 +6353,7 @@ export const useQueryStore = defineStore("query", () => {
       if (tab.editorBookmarks.length && tab.sql !== sql) tab.editorBookmarks = mapPersistedBookmarks(tab.sql, sql, tab.editorBookmarks);
       tab.editorBookmarksDocument = sql;
     }
+    if (tab.sql !== sql) tab.editorFolds = undefined;
     tab.sql = sql;
   }
 
@@ -6748,6 +6752,15 @@ export const useQueryStore = defineStore("query", () => {
     queueSavedSqlEditorPositionPersist(tab);
   }
 
+  function updateEditorFolds(id: string, folds: SavedSqlEditorFold[]) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab?.savedSqlId || tab.mode !== "query") return;
+    const previous = tab.editorFolds ?? [];
+    if (previous.length === folds.length && previous.every((range, index) => range.from === folds[index].from && range.to === folds[index].to)) return;
+    tab.editorFolds = folds.length ? folds : undefined;
+    queueSavedSqlEditorPositionPersist(tab);
+  }
+
   function updateObjectBrowserViewport(id: string, viewport: ObjectBrowserViewport) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.mode !== "objects") return;
@@ -6920,6 +6933,7 @@ export const useQueryStore = defineStore("query", () => {
         const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
         existing.editorSelection = restored.selection;
         existing.editorViewport = restored.viewport;
+        existing.editorFolds = restored.folds;
       }
       applySavedSqlExecutionTarget(existing, target);
       if (options.reveal) {
@@ -6952,6 +6966,7 @@ export const useQueryStore = defineStore("query", () => {
       editorRevealRequest: options.reveal ? { id: ++contentRevealSeq, line: options.reveal.line, column: options.reveal.column } : undefined,
       editorSelection: restoredPosition.selection,
       editorViewport: restoredPosition.viewport,
+      editorFolds: restoredPosition.folds,
     };
     return registerOpenTab(tab);
   }
@@ -6977,6 +6992,7 @@ export const useQueryStore = defineStore("query", () => {
       const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
       tab.editorSelection = restored.selection;
       tab.editorViewport = restored.viewport;
+      tab.editorFolds = restored.folds;
     }
   }
 
@@ -12355,6 +12371,7 @@ export const useQueryStore = defineStore("query", () => {
     rollbackDatabaseTransactions,
     updateSql,
     updateEditorBookmarks,
+    updateEditorFolds,
     revealBookmark,
     updateDataGridLocalColumnFilters,
     updateDataGridHiddenColumnKeys,

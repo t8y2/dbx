@@ -542,6 +542,69 @@ async fn mongo_agent_delete_gridfs_file(
     Ok(())
 }
 
+async fn mongo_agent_cleanup_orphaned_gridfs_chunks(
+    client: &mut AgentDriverClient,
+    database: &str,
+    bucket: &str,
+    file_id_val: &serde_json::Value,
+) {
+    let chunks_filter = serde_json::json!({ "files_id": file_id_val }).to_string();
+    let _ = client
+        .mongo_delete_documents::<serde_json::Value>(serde_json::json!({
+            "database": database,
+            "collection": format!("{bucket}.chunks"),
+            "filter": &chunks_filter,
+            "filter_json": &chunks_filter,
+            "many": true,
+        }))
+        .await;
+
+    let files_filter = serde_json::json!({ "_id": file_id_val }).to_string();
+    let _ = client
+        .mongo_delete_documents::<serde_json::Value>(serde_json::json!({
+            "database": database,
+            "collection": format!("{bucket}.files"),
+            "filter": &files_filter,
+            "filter_json": &files_filter,
+            "many": true,
+        }))
+        .await;
+}
+
+fn assemble_and_validate_gridfs_chunks(
+    expected_length: i64,
+    raw_chunks: &[serde_json::Value],
+) -> Result<Vec<u8>, String> {
+    if expected_length < 0 {
+        return Err(format!("Invalid GridFS file metadata: negative length {expected_length}"));
+    }
+
+    let mut bytes = if expected_length > 0 { Vec::with_capacity(expected_length as usize) } else { Vec::new() };
+    let mut expected_n: i64 = 0;
+    for raw in raw_chunks {
+        let chunk_n = json_number_to_i64(raw.get("n"))
+            .ok_or_else(|| "GridFS chunk missing valid 'n' sequence field".to_string())?;
+        if chunk_n != expected_n {
+            return Err(format!(
+                "Corrupt GridFS file: chunk index gap, expected chunk n={expected_n}, but got n={chunk_n}"
+            ));
+        }
+        let doc = mongo_driver::json_object_to_document_extended_json(raw)?;
+        let chunk_bytes = mongo_driver::extract_gridfs_chunk_bytes(&doc)?;
+        bytes.extend_from_slice(&chunk_bytes);
+        expected_n += 1;
+    }
+
+    if bytes.len() != expected_length as usize {
+        return Err(format!(
+            "GridFS file length mismatch: metadata specifies {expected_length} bytes, but found {} bytes across {expected_n} chunks",
+            bytes.len()
+        ));
+    }
+
+    Ok(bytes)
+}
+
 async fn mongo_agent_download_gridfs_file(
     client: &mut AgentDriverClient,
     database: &str,
@@ -565,10 +628,14 @@ async fn mongo_agent_download_gridfs_file(
     let file_res = client.mongo_find_one::<DocumentQueryResult>(file_params).await?;
     let raw_file_doc =
         file_res.extended_documents.as_ref().and_then(|d| d.first()).or_else(|| file_res.documents.first());
-    if raw_file_doc.is_none() {
+    let Some(raw_file_doc) = raw_file_doc else {
         return Err("GridFS file not found".to_string());
+    };
+    let expected_length = json_number_to_i64(raw_file_doc.get("length"))
+        .ok_or_else(|| "GridFS file metadata missing 'length' field".to_string())?;
+    if expected_length < 0 {
+        return Err(format!("Invalid GridFS file metadata: negative length {expected_length}"));
     }
-    let expected_length = raw_file_doc.and_then(|d| json_number_to_i64(d.get("length"))).unwrap_or(0);
 
     let chunks_filter = serde_json::json!({ "files_id": canonical_id }).to_string();
     let chunks_params = serde_json::json!({
@@ -595,13 +662,38 @@ async fn mongo_agent_download_gridfs_file(
         chunks_res.documents
     };
 
-    let mut bytes = if expected_length > 0 { Vec::with_capacity(expected_length as usize) } else { Vec::new() };
-    for raw in raw_chunks {
-        let doc = mongo_driver::json_object_to_document_extended_json(&raw)?;
-        let chunk_bytes = mongo_driver::extract_gridfs_chunk_bytes(&doc)?;
-        bytes.extend_from_slice(&chunk_bytes);
+    assemble_and_validate_gridfs_chunks(expected_length, &raw_chunks)
+}
+
+async fn mongo_agent_insert_documents_checked(
+    client: &mut AgentDriverClient,
+    database: &str,
+    collection: &str,
+    docs_json: &str,
+    expected_count: usize,
+) -> Result<(), String> {
+    let result = client
+        .mongo_insert_documents::<serde_json::Value>(serde_json::json!({
+            "database": database,
+            "collection": collection,
+            "docs_json": docs_json,
+        }))
+        .await?;
+    let outcome = mongo_driver::agent_insert_outcome(&result)?;
+    if let Some(first) = outcome.errors.first() {
+        return Err(format!(
+            "MongoDB Legacy Agent rejected {} document(s) while writing to {collection}: {}",
+            outcome.errors.len(),
+            first.message
+        ));
     }
-    Ok(bytes)
+    if outcome.inserted as usize != expected_count {
+        return Err(format!(
+            "MongoDB Legacy Agent inserted {} of {expected_count} documents into {collection}",
+            outcome.inserted
+        ));
+    }
+    Ok(())
 }
 
 async fn mongo_agent_upload_gridfs_file(
@@ -650,13 +742,26 @@ async fn mongo_agent_upload_gridfs_file(
                 })
                 .collect();
 
-            let _ = client
-                .mongo_insert_documents::<serde_json::Value>(serde_json::json!({
-                    "database": database,
-                    "collection": format!("{bucket}.chunks"),
-                    "docs_json": serde_json::to_string(&chunk_docs).map_err(|e| e.to_string())?,
-                }))
-                .await?;
+            let docs_json = match serde_json::to_string(&chunk_docs) {
+                Ok(j) => j,
+                Err(e) => {
+                    mongo_agent_cleanup_orphaned_gridfs_chunks(client, database, &bucket, &file_id_val).await;
+                    return Err(e.to_string());
+                }
+            };
+
+            let res = mongo_agent_insert_documents_checked(
+                client,
+                database,
+                &format!("{bucket}.chunks"),
+                &docs_json,
+                chunk_batch.len(),
+            )
+            .await;
+            if let Err(err) = res {
+                mongo_agent_cleanup_orphaned_gridfs_chunks(client, database, &bucket, &file_id_val).await;
+                return Err(err);
+            }
         }
     }
 
@@ -671,13 +776,20 @@ async fn mongo_agent_upload_gridfs_file(
         file_doc["contentType"] = serde_json::json!(content_type);
     }
 
-    let _ = client
-        .mongo_insert_documents::<serde_json::Value>(serde_json::json!({
-            "database": database,
-            "collection": format!("{bucket}.files"),
-            "docs_json": serde_json::to_string(&vec![file_doc]).map_err(|e| e.to_string())?,
-        }))
-        .await?;
+    let files_docs_json = match serde_json::to_string(&vec![file_doc]) {
+        Ok(j) => j,
+        Err(e) => {
+            mongo_agent_cleanup_orphaned_gridfs_chunks(client, database, &bucket, &file_id_val).await;
+            return Err(e.to_string());
+        }
+    };
+
+    let res =
+        mongo_agent_insert_documents_checked(client, database, &format!("{bucket}.files"), &files_docs_json, 1).await;
+    if let Err(err) = res {
+        mongo_agent_cleanup_orphaned_gridfs_chunks(client, database, &bucket, &file_id_val).await;
+        return Err(err);
+    }
 
     Ok(file_id_str)
 }
@@ -1787,5 +1899,88 @@ mod tests {
         assert!(mongo_driver::normalized_gridfs_bucket_name("").is_err());
         assert!(mongo_driver::normalized_gridfs_bucket_name("bucket.files").is_err());
         assert!(mongo_driver::normalized_gridfs_bucket_name("bucket.chunks").is_err());
+    }
+
+    #[test]
+    fn validates_and_assembles_gridfs_chunks_correctly() {
+        use super::assemble_and_validate_gridfs_chunks;
+        use base64::Engine;
+
+        let b64_chunk_0 = base64::engine::general_purpose::STANDARD.encode(b"hello ");
+        let b64_chunk_1 = base64::engine::general_purpose::STANDARD.encode(b"world!");
+
+        let valid_chunks = vec![
+            serde_json::json!({
+                "n": 0,
+                "data": { "$binary": { "base64": b64_chunk_0, "subType": "00" } }
+            }),
+            serde_json::json!({
+                "n": 1,
+                "data": { "$binary": { "base64": b64_chunk_1, "subType": "00" } }
+            }),
+        ];
+
+        // Successful assembly
+        let assembled = assemble_and_validate_gridfs_chunks(12, &valid_chunks).unwrap();
+        assert_eq!(assembled, b"hello world!");
+
+        // Empty file with 0 chunks succeeds
+        let empty = assemble_and_validate_gridfs_chunks(0, &[]).unwrap();
+        assert!(empty.is_empty());
+
+        // Negative metadata length fails
+        let err_negative = assemble_and_validate_gridfs_chunks(-5, &valid_chunks).unwrap_err();
+        assert!(err_negative.contains("negative length -5"));
+
+        // Missing 'n' sequence field fails
+        let missing_n = vec![serde_json::json!({
+            "data": { "$binary": { "base64": b64_chunk_0, "subType": "00" } }
+        })];
+        let err_no_n = assemble_and_validate_gridfs_chunks(6, &missing_n).unwrap_err();
+        assert!(err_no_n.contains("missing valid 'n' sequence field"));
+
+        // Gap starting chunk (starts at n=1 instead of n=0) fails
+        let start_gap = vec![serde_json::json!({
+            "n": 1,
+            "data": { "$binary": { "base64": b64_chunk_0, "subType": "00" } }
+        })];
+        let err_start_gap = assemble_and_validate_gridfs_chunks(6, &start_gap).unwrap_err();
+        assert!(err_start_gap.contains("chunk index gap, expected chunk n=0, but got n=1"));
+
+        // Gap intermediate chunk (n=0 then n=2, skipping n=1) fails
+        let intermediate_gap = vec![
+            serde_json::json!({
+                "n": 0,
+                "data": { "$binary": { "base64": b64_chunk_0, "subType": "00" } }
+            }),
+            serde_json::json!({
+                "n": 2,
+                "data": { "$binary": { "base64": b64_chunk_1, "subType": "00" } }
+            }),
+        ];
+        let err_gap = assemble_and_validate_gridfs_chunks(12, &intermediate_gap).unwrap_err();
+        assert!(err_gap.contains("chunk index gap, expected chunk n=1, but got n=2"));
+
+        // Duplicate chunk n=0 fails continuity check
+        let dup_chunk = vec![
+            serde_json::json!({
+                "n": 0,
+                "data": { "$binary": { "base64": b64_chunk_0, "subType": "00" } }
+            }),
+            serde_json::json!({
+                "n": 0,
+                "data": { "$binary": { "base64": b64_chunk_0, "subType": "00" } }
+            }),
+        ];
+        let err_dup = assemble_and_validate_gridfs_chunks(12, &dup_chunk).unwrap_err();
+        assert!(err_dup.contains("chunk index gap, expected chunk n=1, but got n=0"));
+
+        // Length mismatch: chunk data shorter than metadata length fails
+        let err_short = assemble_and_validate_gridfs_chunks(20, &valid_chunks).unwrap_err();
+        assert!(err_short.contains("length mismatch: metadata specifies 20 bytes, but found 12 bytes"));
+
+        // Length mismatch: chunk data longer than metadata length fails
+        let err_long = assemble_and_validate_gridfs_chunks(5, &valid_chunks).unwrap_err();
+        assert!(err_long.contains("length mismatch: metadata specifies 5 bytes, but found 12 bytes"));
     }
 }

@@ -182,6 +182,7 @@ describe("extractor draft preview", () => {
   it("previews and saves the configured Smart Copy single-column format", async () => {
     const preview = vi.fn(async () => result("configured"));
     const { props, host, save } = mountDialog(preview, false, "smart");
+    props.singleColumnFormat = "default";
     props.open = true;
     await nextTick();
     const singleColumnFormatSelect = host.querySelectorAll<HTMLSelectElement>("select")[1];

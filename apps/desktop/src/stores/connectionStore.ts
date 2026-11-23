@@ -135,7 +135,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { shouldStartSidebarLayoutAutoSync } from "@/lib/sidebar/sidebarLayoutAutoSync";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, schemaNodeHasLoadableName, shouldShowDorisCatalogTree, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
-import { canClearDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { canClearDefaultDatabase, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { invalidateSchemaOptionsCache } from "@/lib/database/schemaOptionsCache";
 import {
   connectionDatabaseMetadataSchema,
@@ -457,6 +457,13 @@ export type TreeClipboard =
       tables: TreeClipboardTableEntry[];
     }
   | {
+      kind: "view-copy";
+      connectionId: string;
+      database: string;
+      schema?: string;
+      viewName: string;
+    }
+  | {
       kind: "connection-copy";
       connections: TreeClipboardConnectionEntry[];
     }
@@ -673,6 +680,7 @@ export const useConnectionStore = defineStore("connection", () => {
     catalog?: string;
     schema?: string;
     tables?: string[];
+    views?: string[];
     targetConnectionId?: string;
     targetDatabase?: string;
     targetSchema?: string;
@@ -4430,8 +4438,11 @@ export const useConnectionStore = defineStore("connection", () => {
     if (connectionUsesVisibleSchemaFilter(config)) {
       return schemaCacheKey(connectionId, config.database || "", config.db_type === "oracle" ? "schemas-v2" : "schemas", config.show_system_schemas === true ? "show-system" : "hide-system");
     }
-    // v3 includes per-database compatibilityMode used by openGauss A-mode capabilities.
-    return schemaCacheKey(connectionId, "databases-v3");
+    // v4 includes per-database compatibilityMode used by openGauss A-mode
+    // capabilities, and keys the "show system databases" flag: MySQL-family
+    // connections lift the frontend database blacklist with it, so a cached
+    // (filtered) child list must not be served after the setting changes.
+    return schemaCacheKey(connectionId, "databases-v4", config.show_system_schemas === true ? "show-system" : "hide-system");
   }
 
   async function hydrateTreeNodeFromCache(node: TreeNode | null, cacheKey: string | null): Promise<boolean> {
@@ -5542,6 +5553,26 @@ export const useConnectionStore = defineStore("connection", () => {
     };
     await persistConnections(nextConnections);
     connections.value = nextConnections;
+    rebuildTreeNodes();
+  }
+
+  async function updateSidebarPreferencesAfterSchemaRename(connectionId: string, database: string, oldName: string, newName: string) {
+    const index = connections.value.findIndex((connection) => connection.id === connectionId);
+    const config = connections.value[index];
+    if (!config) return;
+    const visibleSchemas = config.visible_schemas?.[database];
+    const renamedVisibleSchemas = visibleSchemas?.includes(oldName) ? [...new Set(visibleSchemas.map((name) => (name === oldName ? newName : name)))] : undefined;
+    const updateDefaultSchema = config.default_schema === oldName && resolveDefaultDatabase(config, []) === database;
+    if (!renamedVisibleSchemas && !updateDefaultSchema) return;
+
+    const updated = [...connections.value];
+    updated[index] = {
+      ...config,
+      default_schema: updateDefaultSchema ? newName : config.default_schema,
+      visible_schemas: renamedVisibleSchemas ? { ...config.visible_schemas, [database]: renamedVisibleSchemas } : config.visible_schemas,
+    };
+    await persistConnections(updated);
+    connections.value = updated;
     rebuildTreeNodes();
   }
 
@@ -6712,8 +6743,10 @@ export const useConnectionStore = defineStore("connection", () => {
               setChildren(targetNode, children);
               await savePersistedConnectionTreeChildren(cacheKey, targetNode.children || children);
             } else {
-              // v3 persists per-database compatibilityMode for openGauss A-mode features.
-              const cacheKey = schemaCacheKey(connectionId, "databases-v3");
+              // v4 persists per-database compatibilityMode for openGauss A-mode
+              // features and keys the "show system databases" flag so toggling it
+              // re-fetches instead of replaying the filtered cache.
+              const cacheKey = schemaCacheKey(connectionId, "databases-v4", config?.show_system_schemas === true ? "show-system" : "hide-system");
               if (!options?.force) {
                 const cached = await loadPersistedTreeChildren(node, cacheKey, load);
                 if (cached.hit) {
@@ -11771,6 +11804,7 @@ export const useConnectionStore = defineStore("connection", () => {
             ...existing,
             label: node.label,
             comment: node.comment,
+            sidebarColor: node.sidebarColor,
             searchAliases: node.searchAliases,
             pinned: node.pinned,
             children: withSavedSqlRoot(node.connectionId!, existing.children || [], existing),
@@ -12545,6 +12579,7 @@ export const useConnectionStore = defineStore("connection", () => {
     clearVisibleDatabases,
     ensureVisibleDatabase,
     setVisibleSchemas,
+    updateSidebarPreferencesAfterSchemaRename,
     clearVisibleSchemas,
     recordPrimaryVisibleObjectNames,
     getSidebarVisibleFilterSummary,
@@ -12720,6 +12755,10 @@ export const useConnectionStore = defineStore("connection", () => {
     },
     renameConnectionGroup(groupId: string, name: string) {
       updateLayoutAndRebuild(renameGroupOp(sidebarLayout.value, groupId, name));
+    },
+    setConnectionGroupColor(groupId: string, color: string) {
+      const layout = sidebarLayout.value;
+      updateLayoutAndRebuild({ ...layout, groups: layout.groups.map((group) => (group.id === groupId ? { ...group, color: color || undefined } : group)) });
     },
     async deleteConnectionGroup(groupId: string) {
       await removeConnectionGroups([groupId]);

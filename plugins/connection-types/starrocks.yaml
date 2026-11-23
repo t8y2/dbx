@@ -11,6 +11,8 @@ singleConnectionPool: false
 metadataConnectionScoped: true
 skipTcpProbe: false
 defaultPort: 9030
+traits:
+  showSystemDatabases: true
 supportLevel: operate
 capabilities:
   queryExecution: true

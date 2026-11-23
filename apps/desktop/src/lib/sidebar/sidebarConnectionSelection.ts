@@ -38,6 +38,10 @@ export function selectedConnectionGroupDeleteTargets(currentNode: TreeNode, sele
   return [currentNode];
 }
 
+export function selectedConnectionTestTargets(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionTreeNode[] {
+  return selectedConnectionActionTargets(currentNode, selectedNodes);
+}
+
 export function selectedConnectionDisconnectTargets(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionTreeNode[] {
   return selectedConnectionActionTargets(currentNode, selectedNodes);
 }

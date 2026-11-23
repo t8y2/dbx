@@ -18,6 +18,7 @@ const props = defineProps<{
   identity: string;
   /** 后端返回的值本身不完整（大值预览闸门）时不解码残缺 bytes。 */
   incomplete?: boolean;
+  hideTrigger?: boolean;
 }>();
 
 const { t } = useI18n();
@@ -57,7 +58,7 @@ async function copyResult() {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogTrigger as-child>
+    <DialogTrigger v-if="!hideTrigger" as-child>
       <Button variant="outline" size="sm" class="h-6 px-2 text-xs" @mousedown.prevent>{{ t("grid.binaryTextPreview") }}</Button>
     </DialogTrigger>
     <DialogContent class="flex max-h-[85vh] flex-col overflow-y-auto sm:max-w-2xl">

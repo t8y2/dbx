@@ -11000,12 +11000,7 @@ mod tests {
         .unwrap();
         drop(file);
 
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO `order.items` (`id`) VALUES (1);
-
-"
-        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "INSERT INTO `order.items` (`id`) VALUES (1);\n");
     }
 
     #[test]
@@ -11065,12 +11060,7 @@ mod tests {
         .unwrap();
         drop(file);
 
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO \"app\".\"users\" (\"id\") VALUES (1);
-
-"
-        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "INSERT INTO \"app\".\"users\" (\"id\") VALUES (1);\n");
     }
 
     #[test]
@@ -11099,12 +11089,7 @@ mod tests {
         .unwrap();
         drop(file);
 
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');
-
-"
-        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');\n");
     }
 
     #[test]
@@ -11320,6 +11305,23 @@ mod tests {
             let containing_parts = sql_parts.iter().filter(|(_, contents)| contents.contains(unit)).count();
             assert_eq!(containing_parts, 1, "unit must appear whole in exactly one part: {unit:?}");
         }
+    }
+
+    #[test]
+    fn postgres_spool_readers_keep_table_groups_without_leaking_the_boundary_marker() {
+        let first = "CREATE TABLE sales.orders (id int);\nINSERT INTO sales.orders VALUES (1);\n";
+        let second = "CREATE TABLE archive.orders (id int);\nINSERT INTO archive.orders VALUES (2);\n";
+        let spool = format!("{first}{}\n\n{second}", super::DATABASE_EXPORT_TABLE_BOUNDARY_MARKER);
+        let expected = format!("{first}\n{second}");
+
+        let mut output = Vec::new();
+        combine_schema_sql_export(&mut std::io::Cursor::new(&spool), &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), expected);
+
+        let mut output = Vec::new();
+        super::copy_postgres_export_phase(&mut std::io::Cursor::new(&spool), &mut output, "table-boundary-unit")
+            .unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), expected);
     }
 
     #[test]

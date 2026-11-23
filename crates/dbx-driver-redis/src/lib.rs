@@ -4146,15 +4146,28 @@ pub async fn get_stream_entries_page<C>(
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
+    get_stream_entries_page_with_order(con, key, cursor, false).await
+}
+
+pub async fn get_stream_entries_page_with_order<C>(
+    con: &mut C,
+    key: &[u8],
+    cursor: Option<&str>,
+    newest_first: bool,
+) -> Result<RedisStreamPage, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
     let cursor = cursor.filter(|value| !value.is_empty());
-    let start = cursor.unwrap_or("-");
-    // XRANGE starts inclusively. Fetch a duplicate candidate and a lookahead
-    // row so this works with Redis 5 and does not skip records after trimming.
+    let (command, first_bound, last_bound) =
+        if newest_first { ("XREVRANGE", cursor.unwrap_or("+"), "-") } else { ("XRANGE", cursor.unwrap_or("-"), "+") };
+    // Both commands include the cursor. Fetch room for that record and one
+    // lookahead, even when the cursor was trimmed between requests.
     let requested_count = stream_entry_page_request_count(cursor);
-    let raw: RedisRawValue = redis::cmd("XRANGE")
+    let raw: RedisRawValue = redis::cmd(command)
         .arg(key)
-        .arg(start)
-        .arg("+")
+        .arg(first_bound)
+        .arg(last_bound)
         .arg("COUNT")
         .arg(requested_count)
         .query_async(con)

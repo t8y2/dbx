@@ -122,16 +122,23 @@ export function useQueryEditorExecution(options: QueryEditorExecutionOptions) {
     }
     // The execution shortcut keeps executing the configured target (cursor/all) directly:
     // it stays keyboard-driven and never pops the picker, which is reserved for click entry points.
-    if (options.bypassPicker || options.forceExecuteAll || !settingsStore.editorSettings.showExecutionTargetPicker || !hasMultipleExecutionTargets(doc, props.databaseType, parameterOptions)) {
+    // A nested query at the cursor (#15213) also opens the picker when it is
+    // enabled: one statement can now mean several executable depths, and the
+    // configured "current" target alone no longer describes them all.
+    const hasNestedCandidates = candidates.some((item) => item.kind === "nested");
+    if (options.bypassPicker || options.forceExecuteAll || !settingsStore.editorSettings.showExecutionTargetPicker || (!hasMultipleExecutionTargets(doc, props.databaseType, parameterOptions) && !hasNestedCandidates)) {
       emitExecutionRequest(sqlExecutionSnapshotForRange(currentView, candidate), options.openInNewResultTab);
       return true;
     }
     closePicker();
     pickerCandidates.value = candidates;
-    pickerActiveIndex.value = 0;
+    // Keep the configured execution target selected when nested fragments are
+    // offered. A nested query may depend on the enclosing statement's scope.
+    const defaultIndex = hasNestedCandidates ? Math.max(0, candidates.indexOf(candidate)) : 0;
+    pickerActiveIndex.value = defaultIndex;
     pickerAnchor.value = executionPickerAnchor(currentView, cursorPos, candidates.length);
     pickerVisible.value = true;
-    setPreviewRange({ from: candidates[0].from, to: candidates[0].to });
+    setPreviewRange({ from: candidates[defaultIndex].from, to: candidates[defaultIndex].to });
     return true;
   }
 

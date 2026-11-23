@@ -531,6 +531,10 @@ export function buildDropSchemaSql(options: SchemaNameSqlOptions): Promise<strin
   return api.buildDropSchemaSql(options);
 }
 
+export function buildRenamePostgresSchemaSql(oldName: string, newName: string): string {
+  return `ALTER SCHEMA ${quotePostgresIdentifier(oldName)} RENAME TO ${quotePostgresIdentifier(newName)};`;
+}
+
 export function damengDropSchemaExecutionSchema(username: string | null | undefined, targetSchema: string): string | null {
   const executionSchema = username?.trim();
   const normalizedTargetSchema = targetSchema.trim().toUpperCase();

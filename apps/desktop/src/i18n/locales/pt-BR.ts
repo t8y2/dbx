@@ -3949,6 +3949,12 @@ export default withEnglishFallback({
     disabled: "Desativado",
     back: "Voltar",
     actions: "Ações",
+    collapse: "Recolher",
+    expand: "Expandir",
+    failed: "Falhou",
+    noMatches: "Nenhuma correspondência",
+    processing: "Processando...",
+    default: "Padrão",
   },
   dateTimePicker: {
     inputPlaceholder: "AAAA-MM-DD HH:mm:ss",

@@ -3551,6 +3551,8 @@ export default withEnglishFallback({
     clearElasticsearchTextSearch: "清除索引搜尋",
     filterBuilderNoMatchingColumns: "沒有匹配的欄位",
     copyExtractorSmart: "智慧複製",
+    copyExtractorSingleColumnFormat: "智慧複製的單欄格式",
+    copyExtractorUseSmartDefaults: "沿用智慧複製預設格式",
     copyExtractorRaw: "原文（單欄）",
     copyExtractorRawHint: "將選取單欄的各列以換行串接，保留原有 Tab、換行及引號。",
     copyExtractorWithHeaders: "{format}（含表頭）",

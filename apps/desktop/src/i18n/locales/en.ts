@@ -3177,6 +3177,8 @@ export default {
     noFilteredRowsDescription: "Adjust the search text or row status filter.",
     copy: "Copy",
     copyExtractorSmart: "Smart Copy",
+    copyExtractorSingleColumnFormat: "Single-column format",
+    copyExtractorUseSmartDefaults: "Use Smart Copy defaults",
     copyExtractorRaw: "Original Text (Single Column)",
     copyExtractorRawHint: "Join the selected column’s rows with a newline, preserving tabs, line breaks, and quotes.",
     copyExtractorWithHeaders: "{format} with Headers",

@@ -58,6 +58,7 @@ const transferPrefillDatabase = ref("");
 const transferPrefillCatalog = ref("");
 const transferPrefillSchema = ref("");
 const transferPrefillTables = ref<string[]>([]);
+const transferPrefillViews = ref<string[]>([]);
 const transferPrefillTargetConnectionId = ref("");
 const transferPrefillTargetDatabase = ref("");
 const transferPrefillTargetSchema = ref("");
@@ -126,6 +127,7 @@ function clearTransferPrefill() {
   transferPrefillCatalog.value = "";
   transferPrefillSchema.value = "";
   transferPrefillTables.value = [];
+  transferPrefillViews.value = [];
   transferPrefillTargetConnectionId.value = "";
   transferPrefillTargetDatabase.value = "";
   transferPrefillTargetSchema.value = "";
@@ -185,6 +187,7 @@ export function useDialogSources() {
           transferPrefillCatalog.value = v.catalog ?? "";
           transferPrefillSchema.value = v.schema ?? "";
           transferPrefillTables.value = v.tables ?? [];
+          transferPrefillViews.value = v.views ?? [];
           transferPrefillTargetConnectionId.value = v.targetConnectionId ?? "";
           transferPrefillTargetDatabase.value = v.targetDatabase ?? "";
           transferPrefillTargetSchema.value = v.targetSchema ?? "";
@@ -677,6 +680,7 @@ export function useDialogSources() {
     transferPrefillCatalog,
     transferPrefillSchema,
     transferPrefillTables,
+    transferPrefillViews,
     transferPrefillTargetConnectionId,
     transferPrefillTargetDatabase,
     transferPrefillTargetSchema,

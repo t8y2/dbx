@@ -278,6 +278,10 @@ export function isReopenClosedTabShortcut(event: ShortcutLikeEvent, shortcuts?: 
   return matchesShortcut(event, actionShortcut("reopenClosedTab", shortcuts));
 }
 
+export function isOpenRecentTablesShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("openRecentTables", shortcuts));
+}
+
 export function isCloseOtherTabsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
   return matchesShortcut(event, actionShortcut("closeOtherTabs", shortcuts), platform);
 }

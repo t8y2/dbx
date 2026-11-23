@@ -2615,6 +2615,8 @@ export default withEnglishFallback({
       allStatements: "All SQL",
       currentCommand: "Current command",
       allCommands: "All commands",
+      nestedStatement: "Consulta en la posición del cursor",
+      nestedStatementLevel: "Consulta en la posición del cursor (nivel {level})",
     },
     statementExecutionRunning: "{count} sentencias en ejecución",
     statementExecutionSucceeded: "{count} sentencias exitosas",

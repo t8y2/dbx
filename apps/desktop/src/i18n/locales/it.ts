@@ -2525,6 +2525,8 @@ export default withEnglishFallback({
       allStatements: "All SQL",
       currentCommand: "Current command",
       allCommands: "All commands",
+      nestedStatement: "Query al cursore",
+      nestedStatementLevel: "Query al cursore (livello {level})",
     },
     statementExecutionRunning: "{count} istruzioni in esecuzione",
     statementExecutionSucceeded: "{count} istruzioni eseguite con successo",

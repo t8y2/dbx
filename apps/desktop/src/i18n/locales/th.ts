@@ -2704,6 +2704,8 @@ export default withEnglishFallback({
       allStatements: "SQL ทั้งหมด",
       currentCommand: "คำสั่งปัจจุบัน",
       allCommands: "คำสั่งทั้งหมด",
+      nestedStatement: "คิวรี ณ ตำแหน่งเคอร์เซอร์",
+      nestedStatementLevel: "คิวรี ณ ตำแหน่งเคอร์เซอร์ (ระดับ {level})",
     },
     snippetQuickAdd: {
       prefixUnique: "คีย์ทริกเกอร์ต้องไม่ซ้ำกัน",

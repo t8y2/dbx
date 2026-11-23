@@ -2542,6 +2542,8 @@ export default withEnglishFallback({
       allStatements: "All SQL",
       currentCommand: "Current command",
       allCommands: "All commands",
+      nestedStatement: "カーソル位置のクエリ",
+      nestedStatementLevel: "カーソル位置のクエリ（第 {level} 層）",
     },
     selectConnectionRequired: "先に接続を選択してください",
     selectDatabaseRequired: "先にデータベースを選択してください",

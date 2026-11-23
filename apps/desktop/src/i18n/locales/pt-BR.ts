@@ -2524,6 +2524,8 @@ export default withEnglishFallback({
       allStatements: "All SQL",
       currentCommand: "Current command",
       allCommands: "All commands",
+      nestedStatement: "Consulta no cursor",
+      nestedStatementLevel: "Consulta no cursor (nível {level})",
     },
     statementExecutionRunning: "{count} instrução(ões) em execução",
     statementExecutionSucceeded: "{count} instrução(ões) executada(s) com sucesso",

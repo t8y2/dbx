@@ -2471,6 +2471,8 @@ export default withEnglishFallback({
       allStatements: "전체 SQL",
       currentCommand: "현재 명령",
       allCommands: "전체 명령",
+      nestedStatement: "커서 위치 쿼리",
+      nestedStatementLevel: "커서 위치 쿼리(레벨 {level})",
     },
     previewChanges: "변경 사항 미리 보기",
     previewChangesComment: "변경 미리 보기(드라이 런): {operation} 문",

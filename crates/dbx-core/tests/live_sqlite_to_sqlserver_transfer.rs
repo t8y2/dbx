@@ -17,6 +17,7 @@ use std::time::Duration;
 
 fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
     ConnectionConfig {
+        environment: None,
         oracle_oci_nls_lang: None,
         oracle_oci_tns_admin: None,
         docs_notes_path: None,

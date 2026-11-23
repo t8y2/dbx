@@ -44,6 +44,7 @@ fn required_env(name: &str) -> String {
 
 fn live_connection_config(id: &str, database: &str) -> ConnectionConfig {
     ConnectionConfig {
+        environment: None,
         id: id.to_string(),
         name: id.to_string(),
         note: String::new(),

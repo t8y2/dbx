@@ -153,6 +153,7 @@ watch(
 
 <template>
   <section data-grid-text-filter-workbench class="relative flex shrink-0 flex-col border-b bg-muted/10 text-foreground" :style="panelStyle">
+    <slot name="filter-group-controls" />
     <div
       ref="rulesScrollerRef"
       data-filter-rules-scroll

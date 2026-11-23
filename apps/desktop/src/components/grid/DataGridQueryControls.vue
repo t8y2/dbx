@@ -282,6 +282,8 @@ onUnmounted(onResizeEnd);
               <Button variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="emit('clearFilters')"><Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }}</Button>
             </div>
 
+            <slot name="filter-group-controls" />
+
             <div v-if="structuredFilterSummaries.length" class="space-y-1.5 rounded-md border border-sky-500/30 bg-sky-500/5 px-2 py-1.5">
               <div class="flex items-center gap-2 text-xs font-medium text-sky-600 dark:text-sky-400">
                 <Filter class="h-3.5 w-3.5 shrink-0" /><span class="truncate">{{ t("grid.structuredFiltersActive", { count: structuredFilterSummaries.length }) }}</span>

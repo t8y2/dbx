@@ -97,6 +97,7 @@ import { formatDataGridColumnMetadataForCopy } from "@/lib/dataGrid/dataGridColu
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import DataGridFilterModeOrderDialog from "@/components/grid/DataGridFilterModeOrderDialog.vue";
+import DataGridFilterGroupControls from "@/components/grid/DataGridFilterGroupControls.vue";
 import DataGridFilterWorkbench from "@/components/grid/DataGridFilterWorkbench.vue";
 import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWorkbench.vue";
 import DataGridSortWorkbench from "@/components/grid/DataGridSortWorkbench.vue";
@@ -1535,6 +1536,23 @@ function invalidateConditionalBulkEditMatchCountPreview() {
 watch([conditionalBulkEditConditionSource, conditionalBulkEditCurrentWhereInput, conditionalBulkEditWhereInput, conditionalBulkEditRules], invalidateConditionalBulkEditMatchCountPreview, { deep: true });
 
 const structuredFilterRules = filterBuilder.rules;
+// Group drafts belong to this filter scope. The applied SQL stays independent
+// so inspecting or editing another group does not silently change the result.
+const activeFilterGroupNumber = ref(1);
+const inactiveFilterGroupRules = shallowRef(new Map<number, StructuredFilterRule[]>());
+const filterGroupNumbers = computed(() => [activeFilterGroupNumber.value, ...inactiveFilterGroupRules.value.keys()].sort((a, b) => a - b));
+const allFilterRulesDisabled = computed(() => structuredFilterRules.value.every((rule) => rule.disabled));
+const filterGroupControlBindings = computed(() => ({
+  groupNumbers: filterGroupNumbers.value,
+  activeGroup: activeFilterGroupNumber.value,
+  hasRules: structuredFilterRules.value.some((rule) => !!rule.columnName),
+  allDisabled: allFilterRulesDisabled.value,
+  disabled: !structuredFilterHydrationReady.value || applyingOnlyStructuredFilter.value || isApplyingWhere.value,
+  onAddGroup: addStructuredFilterGroup,
+  onSelectGroup: selectStructuredFilterGroup,
+  onDeleteGroup: deleteStructuredFilterGroup,
+  onToggleAll: toggleAllStructuredFilterRules,
+}));
 const filterBuilderOpen = filterBuilder.open;
 const filterWorkbenchRef = ref<{ focusRuleValue: (ruleId: string) => void }>();
 const filterBuilderColumnSearch = filterBuilder.columnSearch;
@@ -2013,6 +2031,8 @@ function persistStructuredFilterState() {
 }
 
 function loadStructuredFilterStateForScope() {
+  activeFilterGroupNumber.value = 1;
+  inactiveFilterGroupRules.value = new Map();
   const requestId = ++structuredFilterHydrationRequestId;
   structuredFilterHydrationReady.value = false;
   const cached = cachedStructuredFilterState();
@@ -2050,6 +2070,37 @@ function loadStructuredFilterStateForScope() {
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
   markConditionInputsApplied();
   structuredFilterHydrationReady.value = true;
+}
+
+function switchStructuredFilterGroup(number: number, rules: StructuredFilterRule[], discardActive = false) {
+  closeFilterValueSuggestions();
+  const groups = new Map(inactiveFilterGroupRules.value);
+  if (!discardActive) groups.set(activeFilterGroupNumber.value, cloneDataGridStructuredFilterRules(structuredFilterRules.value));
+  groups.delete(number);
+  inactiveFilterGroupRules.value = groups;
+  activeFilterGroupNumber.value = number;
+  structuredFilterRules.value = cloneDataGridStructuredFilterRules(rules);
+  ensureStructuredFilterRule();
+}
+
+function addStructuredFilterGroup() {
+  switchStructuredFilterGroup(Math.max(...filterGroupNumbers.value) + 1, []);
+}
+
+function selectStructuredFilterGroup(number: number) {
+  const rules = inactiveFilterGroupRules.value.get(number);
+  if (rules) switchStructuredFilterGroup(number, rules);
+}
+
+function deleteStructuredFilterGroup() {
+  const next = inactiveFilterGroupRules.value.entries().next();
+  if (!next.done) switchStructuredFilterGroup(next.value[0], next.value[1], true);
+}
+
+function toggleAllStructuredFilterRules() {
+  closeFilterValueSuggestions();
+  const disabled = !allFilterRulesDisabled.value;
+  structuredFilterRules.value = structuredFilterRules.value.map((rule) => ({ ...rule, disabled }));
 }
 
 function ensureStructuredFilterRule() {
@@ -16184,7 +16235,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
                   @apply-value-suggestions="applyFilterValueSuggestions"
                   @custom-mode-order="openFilterModeOrderDialog"
-                />
+                >
+                  <template #filter-group-controls><DataGridFilterGroupControls v-bind="filterGroupControlBindings" /></template>
+                </DataGridQueryControls>
                 <div class="flex shrink-0 items-center border-r px-1">
                   <Tooltip>
                     <TooltipTrigger as-child>
@@ -16332,7 +16385,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
           @apply-value-suggestions="applyFilterValueSuggestions"
           @custom-mode-order="openFilterModeOrderDialog"
-        />
+        >
+          <template #filter-group-controls><DataGridFilterGroupControls v-bind="filterGroupControlBindings" /></template>
+        </DataGridFilterWorkbench>
         <DataGridTextFilterWorkbench
           v-if="canUseWhereSearch && filterEditorView === 'text' && filterBuilderOpen"
           :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
@@ -16370,7 +16425,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
           @apply-value-suggestions="applyFilterValueSuggestions"
           @custom-mode-order="openFilterModeOrderDialog"
-        />
+        >
+          <template #filter-group-controls><DataGridFilterGroupControls v-bind="filterGroupControlBindings" /></template>
+        </DataGridTextFilterWorkbench>
         <DataGridSortWorkbench
           v-if="canUseWhereSearch && dataGridOrderByVisible && filterEditorView === 'conditions' && sortBuilderOpen"
           :sql-preview="sortSqlPreview"

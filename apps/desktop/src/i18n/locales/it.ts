@@ -10924,6 +10924,7 @@ export default withEnglishFallback({
     completionAutoActivationDelayDescription:
       "Ritardo con cui vengono mostrati i candidati di completamento dopo l'input, predefinito 500 millisecondi; aumentando il valore si evita che il completamento compaia frequentemente durante la digitazione continua e interferisca con l'editing; 0 indica comparsa immediata.",
     tabWrapMaxRows: "Numero massimo di righe per l'affiancamento delle schede",
+    shortcutGoToLastEditLocation: "Vai all'ultima posizione di modifica",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

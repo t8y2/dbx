@@ -12881,6 +12881,7 @@ export default withEnglishFallback({
     completionAutoActivationDelay: "ดีเลย์การเปิดใช้งานการเติมข้อความอัตโนมัติ (มิลลิวินาที)",
     completionAutoActivationDelayDescription: "ระยะเวลาหน่วงหลังการพิมพ์ก่อนที่รายการเติมข้อความอัตโนมัติจะปรากฏ ค่าเริ่มต้นคือ 500 มิลลิวินาที การเพิ่มค่านี้ช่วยหลีกเลี่ยงไม่ให้รายการเติมข้อความเด้งขึ้นบ่อยครั้งระหว่างการพิมพ์ต่อเนื่องจนรบกวนการแก้ไข โดย 0 หมายถึงแสดงทันที",
     tabWrapMaxRows: "จำนวนแถวสูงสุดสำหรับการเรียงแท็บ",
+    shortcutGoToLastEditLocation: "ไปยังตำแหน่งที่แก้ไขล่าสุด",
   },
   driverStore: {
     jreDirRemoveFailed: "ลบไดเรกทอรี JRE เก่าไม่สำเร็จ: {path} (ข้อผิดพลาดเดิม: {error})",

@@ -5235,9 +5235,9 @@ pub async fn fetch_postgres_partition_tree(
         .collect())
 }
 
-/// Batched sibling of get_columns, fetching every relation through at most
-/// two OID-scoped catalog queries. The compatibility tier avoids PostgreSQL
-/// 12+ catalog fields so PostgreSQL 10-compatible servers remain bounded.
+/// Batched sibling of get_columns, fetching every relation through a bounded
+/// sequence of OID-scoped catalog queries. The compatibility tier avoids
+/// PostgreSQL 12+ catalog fields so PostgreSQL 10-compatible servers remain supported.
 pub async fn get_columns_for_relations(
     pool: &Pool,
     relations: &[(i64, String, String)],
@@ -5270,10 +5270,11 @@ async fn get_columns_for_relations_with_sql(
     Ok(result)
 }
 
-fn postgres_columns_for_relations_query_tiers() -> [&'static str; 3] {
+fn postgres_columns_for_relations_query_tiers() -> [&'static str; 4] {
     [
         postgres_columns_for_relations_sql(),
         postgres_columns_for_relations_compat_sql(),
+        postgres_columns_for_relations_information_schema_with_comments_sql(),
         postgres_columns_for_relations_information_schema_sql(),
     ]
 }
@@ -5431,8 +5432,10 @@ fn postgres_columns_for_relations_compat_sql() -> &'static str {
 // 42703), and referencing it failed the whole tier (#15130). Enumerated types
 // therefore degrade to the generic `USER-DEFINED` label in this last-resort
 // tier instead of aborting the column listing.
-fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
-    "SELECT c.oid::bigint AS relid, ic.column_name AS column_name, \
+macro_rules! postgres_columns_for_relations_information_schema_sql {
+    ($comment:literal) => {
+        concat!(
+            "SELECT c.oid::bigint AS relid, ic.column_name AS column_name, \
              ic.data_type AS full_type, \
              ic.is_nullable = 'YES' AS is_nullable, \
              ic.column_default AS column_default, \
@@ -5448,8 +5451,9 @@ fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
                  AND tc.table_schema = ic.table_schema \
                  AND tc.table_name = ic.table_name \
                  AND kcu.column_name = ic.column_name \
-             ) AS is_pk, \
-             NULL::text AS column_comment, \
+             ) AS is_pk, ",
+            $comment,
+            " AS column_comment, \
              NULL::text AS column_extra, \
              ic.numeric_precision::int AS numeric_precision, \
              ic.numeric_scale::int AS numeric_scale, \
@@ -5461,6 +5465,20 @@ fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
              WHERE ic.table_catalog = current_database() \
              AND c.oid = ANY($1::bigint[]) \
              ORDER BY c.oid, ic.ordinal_position"
+        )
+    };
+}
+
+fn postgres_columns_for_relations_information_schema_with_comments_sql() -> &'static str {
+    postgres_columns_for_relations_information_schema_sql!(
+        "(SELECT d.description FROM pg_catalog.pg_description d \
+          WHERE d.classoid = c.tableoid AND d.objoid = c.oid \
+            AND d.objsubid = ic.ordinal_position)"
+    )
+}
+
+fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
+    postgres_columns_for_relations_information_schema_sql!("NULL::text")
 }
 
 /// Same field layout as `column_info_from_row`, offset by one leading `relid`
@@ -15468,9 +15486,9 @@ mod tests {
     #[test]
     fn postgres_partition_batch_metadata_uses_bounded_compat_tiers() {
         let column_tiers = postgres_columns_for_relations_query_tiers();
-        // Two `pg_attribute` tiers plus the information-schema last resort
-        // (#8728); still bounded, and a normal server stops at the first tier.
-        assert_eq!(column_tiers.len(), 3);
+        // Two `pg_attribute` tiers, a comment-preserving information-schema
+        // tier, and the final information-schema last resort (#8728).
+        assert_eq!(column_tiers.len(), 4);
         assert!(column_tiers.iter().all(|sql| sql.contains("c.oid = ANY($1::bigint[])")));
         assert!(column_tiers[0].contains("a.attgenerated"));
         assert!(!column_tiers[0].contains("information_schema.columns"));
@@ -15480,7 +15498,11 @@ mod tests {
         assert!(!column_tiers[1].contains("LEFT JOIN LATERAL"));
         assert!(!column_tiers[1].contains("information_schema.columns"));
         assert!(column_tiers[2].contains("information_schema.columns"));
+        assert!(column_tiers[2].contains("pg_catalog.pg_description"));
         assert!(!column_tiers[2].contains("pg_attribute"));
+        assert!(column_tiers[3].contains("information_schema.columns"));
+        assert!(!column_tiers[3].contains("pg_catalog.pg_description"));
+        assert!(!column_tiers[3].contains("pg_attribute"));
 
         let index_tiers = postgres_indexes_for_relations_query_tiers();
         assert_eq!(index_tiers.len(), 2);
@@ -15568,12 +15590,16 @@ mod tests {
     /// #8728: the batched (partition-tree) column path used to be the only
     /// metadata path without a catalog fallback, so a server that answers the
     /// `pg_attribute` tiers with zero rows for an existing relation still
-    /// reported no columns. It now carries the same information-schema last
-    /// resort as the single-relation path.
+    /// reported no columns. It now carries the same information-schema tiers
+    /// as the single-relation path, including the comment-preserving tier.
     #[test]
     fn postgres_batched_column_metadata_has_information_schema_fallback() {
         let tiers = postgres_columns_for_relations_query_tiers();
-        assert_eq!(tiers.len(), 3);
+        assert_eq!(tiers.len(), 4);
+
+        let comments_sql = postgres_columns_for_relations_information_schema_with_comments_sql();
+        assert!(comments_sql.contains("pg_catalog.pg_description"));
+        assert!(!comments_sql.contains("NULL::text AS column_comment"));
 
         let sql = postgres_columns_for_relations_information_schema_sql();
         assert!(sql.contains("information_schema.columns"));

@@ -56,6 +56,7 @@ import TableStructurePeekDialog from "./TableStructurePeekDialog.vue";
 import type { TableStructurePeekInsertKind } from "./TableStructurePeekDialog.vue";
 import type { ColumnInfo } from "@/types/database";
 import { createColumnReferencePayload, tableReferenceInsertText } from "@/lib/editor/queryEditorTableDrop";
+import { cutQueryEditorLine } from "@/lib/editor/queryEditorCutLine";
 import { clearRememberedFocusedQueryEditorView, focusedQueryEditorView, queryEditorInsertContext, registerQueryEditorInsertContext, rememberFocusedQueryEditorView, unregisterQueryEditorInsertContext } from "@/lib/editor/focusedQueryEditorView";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { structurePeekPanelId, structurePeekZIndexesByOrder } from "@/lib/editor/structurePeekPanel";
@@ -1619,6 +1620,14 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.joinLines, joinQueryEditorLines),
         ...binding(shortcuts.duplicateLine, (view) => codeMirrorRuntime.codeMirrorCopyLineDown?.(view) ?? false),
         ...binding(shortcuts.deleteLine, (view) => codeMirrorRuntime.codeMirrorDeleteLine?.(view) ?? false),
+        // Line-wise cut (Shift+Delete / Ctrl+X with an empty selection) cannot
+        // remove the last line's break natively, so empty lines pile up at the
+        // bottom of the editor; our variant joins with the previous line and
+        // returns false everywhere else. Deliberately no preventDefault here:
+        // a preventDefault binding swallows the key even when its command
+        // declines (runHandlers flags it prevented), killing the native cut.
+        { key: "Shift-Delete", run: cutQueryEditorLine },
+        { key: "Mod-x", run: cutQueryEditorLine },
         ...binding(shortcuts.moveLineUp, (view) => codeMirrorRuntime.codeMirrorMoveLineUp?.(view) ?? false),
         ...binding(shortcuts.moveLineDown, (view) => codeMirrorRuntime.codeMirrorMoveLineDown?.(view) ?? false),
         ...binding(shortcuts.scrollLineUp, (view) => scrollEditorLine(view, "up")),

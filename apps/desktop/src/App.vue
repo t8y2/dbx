@@ -2,6 +2,7 @@
 import { blockingDesktopAiRunsForUpdate } from "@/lib/ai/desktopAiRunRegistry";
 import { setupUpdatePreparation, prepareUpdateWithDraftRecovery, isUpdatePreparationActive, UpdatePreparationError } from "@/lib/app/updatePreparation";
 import { describeConfigUpdateBlock, type UpdateBlockingConfigState, type UpdateConfigTranslator } from "@/lib/app/updatePreparationSurfaces";
+import { settleUpdateWork, type UpdateSettleFailure } from "@/lib/app/updateBlockerSettle";
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent, provide } from "vue";
 import { MCP_CALL_HISTORY_OPEN_EVENT, type McpCallHistoryRequest } from "@/lib/mcp/mcpCallHistory";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
@@ -439,8 +440,14 @@ async function initializeUpdatePreparation() {
     translate: (key) => t(key),
     assertSafe() {
       if (!updateWindowReady) throw new UpdatePreparationError(t("updates.preparationNotReady"), "not_ready");
-      if (trackedUpdateTaskCount.value > 0 || blockingDesktopAiRunsForUpdate().length > 0 || queryStore.tabs.some((tab) => tab.isCancelling || tab.isExplaining || tab.txnSessionId)) {
+      if (trackedUpdateTaskCount.value > 0 || queryStore.tabs.some((tab) => tab.isCancelling || tab.isExplaining || tab.txnSessionId)) {
         throw new UpdatePreparationError(t("updates.preparationTasks"), "tasks");
+      }
+      // Confirming settles queries, tasks and transactions; an AI run is not
+      // stop-able that way, so it stays a plain block instead of a destructive
+      // prompt that could never succeed.
+      if (blockingDesktopAiRunsForUpdate().length > 0) {
+        throw new UpdatePreparationError(t("updates.preparationAiRuns"), "ai_runs");
       }
       if (queryStore.tabs.some((tab) => (tab.pendingDataChangeCount ?? 0) > 0 || tab.hasPendingDataEditorDraft)) {
         throw new UpdatePreparationError(t("updates.preparationDrafts"), "drafts");
@@ -1749,26 +1756,39 @@ async function consumePendingComponentUpdatesAfterRestart() {
   reportComponentUpdateResult(await runPendingComponentUpdatePlan(pending, componentUpdates));
 }
 
+/** How long the confirmation waits for cancelled work to actually stop. */
+const UPDATE_SETTLE_TIMEOUT_MS = 10_000;
+
+function describeSettleFailure(failure: UpdateSettleFailure): string {
+  return failure.error ? t("updates.settleItemFailed", { target: failure.label, error: failure.error }) : t("updates.settleItemRunning", { target: failure.label });
+}
+
 async function settleUpdateBlockers() {
   // Reaching here means the user confirmed the preparation block, which states
   // that running queries are cancelled and open transactions are rolled back.
-  // Settle them in the order the guard checks them, then let preparation run.
-  // Everything below is collected synchronously before the first await, so no
-  // copy of the reactive arrays is needed.
-  for (const task of backgroundTasks.value) {
-    if (task.status === "Running" || task.status === "Writing" || (task.kind === "table-copy" && task.canCancel)) {
-      void cancelBackgroundTask(task.exportId);
-    }
-  }
-  const cancels: Promise<unknown>[] = [];
-  const rollbacks: Promise<unknown>[] = [];
-  for (const tab of queryStore.tabs) {
-    if (tab.isExecuting) cancels.push(queryStore.cancelTabExecution(tab.id).catch(() => undefined));
-    if (tab.explainExecutionId) cancels.push(queryStore.cancelTabExplain(tab.id).catch(() => undefined));
-    if (tab.txnSessionId) rollbacks.push(queryStore.rollbackTransaction(tab.id).catch(() => undefined));
-  }
-  await Promise.allSettled(cancels);
-  await Promise.allSettled(rollbacks);
+  // The host waits for each cancellation to take effect and rolls back only the
+  // transactions still open afterwards; anything it cannot stop is reported, so
+  // the install stays blocked instead of killing work nobody agreed to lose.
+  const failures = await settleUpdateWork(
+    {
+      // Read live state on every step: work started after the prompt appeared
+      // must be settled too.
+      snapshot: () => ({
+        tasks: backgroundTasks.value
+          .filter((task) => task.status === "Queued" || task.status === "Unknown" || task.status === "PreparingSnapshot" || task.status === "Running" || task.status === "Writing" || task.status === "Cancelling")
+          .map((task) => ({ id: task.exportId, label: task.tableName || task.kind })),
+        executions: queryStore.tabs.filter((tab) => tab.isExecuting || tab.isCancelling).map((tab) => ({ id: tab.id, label: tab.title })),
+        explains: queryStore.tabs.filter((tab) => tab.isExplaining || Boolean(tab.explainExecutionId)).map((tab) => ({ id: tab.id, label: tab.title })),
+        transactions: queryStore.tabs.filter((tab) => Boolean(tab.txnSessionId)).map((tab) => ({ id: tab.id, label: tab.title })),
+      }),
+      cancelTask: (id) => cancelBackgroundTask(id),
+      cancelExecution: (id) => queryStore.cancelTabExecution(id),
+      cancelExplain: (id) => queryStore.cancelTabExplain(id),
+      rollbackTransaction: (id) => queryStore.rollbackTransaction(id),
+    },
+    { timeoutMs: UPDATE_SETTLE_TIMEOUT_MS },
+  );
+  if (failures.length) throw new UpdatePreparationError(failures.map(describeSettleFailure).join("; "), "settle_failed");
 }
 
 async function installDownloadedUpdateWithComponentUpdates() {

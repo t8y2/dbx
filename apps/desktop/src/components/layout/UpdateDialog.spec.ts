@@ -980,4 +980,13 @@ describe("UpdateDialog blocked preparation confirmation", () => {
 
     expect(document.body.querySelector("[data-update-blocked-confirm]")).toBeNull();
   });
+
+  it("hides the install actions while the confirmation is open", async () => {
+    // The panel owns the decision: a second "Restart & Update" would just raise
+    // the same block again.
+    await mountDialog(0, { updateDownloaded: true }, undefined, { blockedUpdateMessage: "2 tasks are running" });
+
+    expect(buttonWithText("Restart & Update")).toBeUndefined();
+    expect(buttonWithText("Close all and continue")).toBeDefined();
+  });
 });

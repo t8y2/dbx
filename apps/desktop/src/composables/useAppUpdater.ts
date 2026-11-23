@@ -593,7 +593,11 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       // Running queries/tasks and open transactions are preconditions the user
       // can clear by confirming, so offer that instead of a dead-end message.
       // Anything else (an open dialog, unsaved drafts) still reports an error.
-      if (!installed && isUpdatePreparationError(error) && error.code === "tasks") {
+      // Only the first attempt offers the confirmation: once the user confirmed,
+      // a "tasks" block that comes back means work appeared or survived the
+      // cleanup. Asking again would repeat a destructive prompt that did not
+      // clear the block, so keep the install blocked and say why instead.
+      if (!installed && !force && isUpdatePreparationError(error) && error.code === "tasks") {
         blockedPreparation.value = { code: error.code, message, restartOnly };
         return;
       }

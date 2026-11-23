@@ -386,6 +386,36 @@ describe("silent update lifecycle", () => {
     expect(updater.updateCheckFailed.value).toBe(true);
     expect(updater.updateCheckMessage.value).toContain("close the DDL dialog");
   });
+  it("a cleanup that fails keeps the install blocked and keeps the reason", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const prepare = vi.fn().mockRejectedValueOnce(new UpdatePreparationError("2 tasks running", "tasks")).mockRejectedValueOnce(new UpdatePreparationError("orders could not be stopped: backend offline", "settle_failed"));
+    const updater = mount({ prepareForUpdate: prepare });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+    expect(updater.blockedPreparation.value).not.toBeNull();
+
+    await updater.confirmBlockedInstall();
+
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+    expect(updater.blockedPreparation.value).toBeNull();
+    expect(updater.updateCheckFailed.value).toBe(true);
+    expect(updater.updateCheckMessage.value).toContain("orders could not be stopped: backend offline");
+  });
+  it("work that survives the confirmed cleanup re-blocks instead of installing", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const prepare = vi.fn().mockRejectedValueOnce(new UpdatePreparationError("1 task running", "tasks")).mockRejectedValueOnce(new UpdatePreparationError("a new query started", "tasks"));
+    const updater = mount({ prepareForUpdate: prepare });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+
+    await updater.confirmBlockedInstall();
+
+    // No second destructive prompt: the block is reported and nothing installs.
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+    expect(updater.blockedPreparation.value).toBeNull();
+    expect(updater.updateCheckFailed.value).toBe(true);
+    expect(updater.updateCheckMessage.value).toContain("a new query started");
+  });
   it("retries only restart after relaunch fails", async () => {
     mocks.relaunchApp.mockRejectedValueOnce(new Error("restart failed"));
     const updater = mount();

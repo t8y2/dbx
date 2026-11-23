@@ -2500,6 +2500,8 @@ export default withEnglishFallback({
       allStatements: "全部 SQL",
       currentCommand: "目前命令",
       allCommands: "全部命令",
+      nestedStatement: "游標處查詢",
+      nestedStatementLevel: "游標處查詢（第 {level} 層）",
     },
     statementExecutionRunning: "{count} 條陳述式執行中",
     statementExecutionSucceeded: "{count} 條陳述式成功",

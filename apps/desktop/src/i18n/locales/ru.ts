@@ -2547,6 +2547,8 @@ export default withEnglishFallback({
       allStatements: "Весь SQL",
       currentCommand: "Текущая команда",
       allCommands: "Все команды",
+      nestedStatement: "Запрос в позиции курсора",
+      nestedStatementLevel: "Запрос в позиции курсора (уровень {level})",
     },
     snippetQuickAdd: {
       prefixUnique: "Триггерная клавиша должна быть уникальной.",

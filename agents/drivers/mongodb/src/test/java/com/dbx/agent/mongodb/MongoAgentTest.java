@@ -564,6 +564,8 @@ class MongoAgentTest {
         assertEquals("1e400", MongoAgent.parseId("1e400"));
         assertEquals(" 108", MongoAgent.parseId(" 108"));
         assertEquals("customer-42", MongoAgent.parseId("customer-42"));
+        assertEquals(List.of(108L, "108"), MongoAgent.parseIdCandidates("108"));
+        assertEquals(List.of("customer-42"), MongoAgent.parseIdCandidates("customer-42"));
     }
 
     @Test

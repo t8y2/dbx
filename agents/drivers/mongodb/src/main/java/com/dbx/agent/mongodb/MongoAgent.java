@@ -1999,21 +1999,32 @@ public final class MongoAgent {
     }
 
     static Object parseId(String id) {
+        return parseIdCandidates(id).get(0);
+    }
+
+    static List<Object> parseIdCandidates(String id) {
         String stringId = decodeStringDocumentId(id);
         if (stringId != null) {
-            return stringId;
+            return Collections.singletonList(stringId);
         }
         String trimmed = id.trim();
         Object extendedJsonId = parseExtendedJsonId(trimmed);
         if (extendedJsonId != null) {
-            return extendedJsonId;
+            return Collections.singletonList(extendedJsonId);
         }
+
+        List<Object> candidates = new ArrayList<>();
         try {
-            return new ObjectId(id);
+            candidates.add(new ObjectId(id));
         } catch (Exception e) {
-            Object numericId = parseNumericId(id);
-            return numericId != null ? numericId : id;
+            // Fall through to numeric and string candidates.
         }
+        Object numericId = parseNumericId(id);
+        if (numericId != null) {
+            candidates.add(numericId);
+        }
+        candidates.add(id);
+        return candidates;
     }
 
     // The grid sends number _id values as plain text (string IDs carry the marker above).
@@ -2072,10 +2083,16 @@ public final class MongoAgent {
 
         var col = c.getDatabase(database).getCollection(collection);
         Document newDoc = documentForWrite(docJson);
-        var filter = new Document("_id", parseId(id));
-        var result = isUpdateOperatorDocument(newDoc)
-            ? col.updateOne(filter, newDoc)
-            : col.replaceOne(filter, replacementDocument(newDoc));
+        UpdateResult result = null;
+        for (Object parsedId : parseIdCandidates(id)) {
+            var filter = new Document("_id", parsedId);
+            result = isUpdateOperatorDocument(newDoc)
+                ? col.updateOne(filter, newDoc)
+                : col.replaceOne(filter, replacementDocument(newDoc));
+            if (result.getMatchedCount() > 0) {
+                return Collections.singletonMap("modified_count", result.getModifiedCount());
+            }
+        }
         requireMatchedDocument(id, result);
         return Collections.singletonMap("modified_count", result.getModifiedCount());
     }
@@ -2430,7 +2447,7 @@ public final class MongoAgent {
         String database = params.get("database").getAsString();
         String collection = params.get("collection").getAsString();
         JsonElement id = params.get("id");
-        Document filter;
+        var col = c.getDatabase(database).getCollection(collection);
         if (id instanceof JsonObject typedId) {
             if (typedId.size() != 1 || !(typedId.get("bsonDocument") instanceof JsonObject bsonDocument)
                 || bsonDocument.keySet().stream().anyMatch(key -> key.startsWith("$"))) {
@@ -2438,14 +2455,16 @@ public final class MongoAgent {
             }
             // Parse canonical Extended JSON without interpreting shell-like string values.
             Object value = Document.parse("{\"value\":" + bsonDocument + "}").get("value");
-            filter = new Document("_id", new Document("$eq", value));
-        } else {
-            filter = new Document("_id", parseId(id.getAsString()));
+            var result = col.deleteOne(new Document("_id", new Document("$eq", value)));
+            return Collections.singletonMap("deleted_count", result.getDeletedCount());
         }
-
-        var col = c.getDatabase(database).getCollection(collection);
-        var result = col.deleteOne(filter);
-        return Collections.singletonMap("deleted_count", result.getDeletedCount());
+        for (Object parsedId : parseIdCandidates(id.getAsString())) {
+            var result = col.deleteOne(new Document("_id", parsedId));
+            if (result.getDeletedCount() > 0) {
+                return Collections.singletonMap("deleted_count", result.getDeletedCount());
+            }
+        }
+        return Collections.singletonMap("deleted_count", 0L);
     }
 
     private static Object deleteDocuments(JsonObject params) {

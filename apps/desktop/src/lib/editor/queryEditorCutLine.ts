@@ -29,7 +29,7 @@ export const cutQueryEditorLine: Command = (view) => {
     lines.push(line.text);
     const reachesEnd = line.number === lastLine.number;
     const to = reachesEnd ? line.to : line.to + 1;
-    const previous = changes.at(-1);
+    const previous = changes[changes.length - 1];
     if (previous && lastCutLine === line.number - 1) {
       if (reachesEnd) previous.from = Math.max(0, previous.from - 1);
       previous.to = to;

@@ -348,6 +348,21 @@ describe("QueryEditor component split integration", () => {
     expect(host.querySelector(".cm-editor")).toBe(view.dom);
   });
 
+  it("preselects the configured statement when offering a nested query", async () => {
+    const sql = "SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)";
+    const { editor, host, view, settingsStore, onExecute } = await mountEditor({ modelValue: sql });
+    settingsStore.editorSettings.showExecutionTargetPicker = true;
+    view.dispatch({ selection: { anchor: sql.indexOf("SELECT 1") + 3 } });
+    expect(editor.requestExecute()).toBe(true);
+    await nextTick();
+    const picker = host.querySelector<HTMLElement>('[role="listbox"]')!;
+    const options = picker.querySelectorAll('[role="option"]');
+    expect(options).toHaveLength(2);
+    expect(options[0].getAttribute("aria-selected")).toBe("false");
+    expect(options[1].getAttribute("aria-selected")).toBe("true");
+    expect(onExecute).not.toHaveBeenCalled();
+  });
+
   it.each(["redis", "mongodb", "elasticsearch"] as const)("preserves the non-SQL %s execution path", async (databaseType) => {
     const { editor, props, host, settingsStore, onExecute } = await mountEditor({ databaseType, modelValue: databaseType === "redis" ? "GET key" : "{}" });
     settingsStore.editorSettings.showExecutionTargetPicker = true;

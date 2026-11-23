@@ -132,10 +132,13 @@ export function useQueryEditorExecution(options: QueryEditorExecutionOptions) {
     }
     closePicker();
     pickerCandidates.value = candidates;
-    pickerActiveIndex.value = 0;
+    // Keep the configured execution target selected when nested fragments are
+    // offered. A nested query may depend on the enclosing statement's scope.
+    const defaultIndex = hasNestedCandidates ? Math.max(0, candidates.indexOf(candidate)) : 0;
+    pickerActiveIndex.value = defaultIndex;
     pickerAnchor.value = executionPickerAnchor(currentView, cursorPos, candidates.length);
     pickerVisible.value = true;
-    setPreviewRange({ from: candidates[0].from, to: candidates[0].to });
+    setPreviewRange({ from: candidates[defaultIndex].from, to: candidates[defaultIndex].to });
     return true;
   }
 

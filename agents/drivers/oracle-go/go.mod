@@ -5,7 +5,7 @@ go 1.20
 require github.com/sijms/go-ora/v2 v2.9.0
 
 require (
-	github.com/godror/godror v0.51.5
+	github.com/godror/godror v0.52.1-0.20261120194600-bc8b643b56ac
 	golang.org/x/text v0.22.0
 )
 

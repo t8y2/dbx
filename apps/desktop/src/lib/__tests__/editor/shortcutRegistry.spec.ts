@@ -788,6 +788,30 @@ describe("shortcutRegistry editor actions", () => {
     });
   });
 
+  describe("goToLastEditLocation", () => {
+    it("registers an editor-scope definition with a JetBrains-style default", () => {
+      expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "goToLastEditLocation")).toMatchObject({
+        id: "goToLastEditLocation",
+        labelKey: "settings.shortcutGoToLastEditLocation",
+        scope: "editor",
+        defaultShortcut: "Shift+Mod+Backspace",
+      });
+      expect(DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation).toBe("Shift+Mod+Backspace");
+    });
+
+    it("maps the default to a CodeMirror key that no default binding uses", () => {
+      expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation)).toBe("Shift-Mod-Backspace");
+      expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation, "Win32")).toBe("Ctrl+Shift+Backspace");
+      // CodeMirror 默认键位表只占用 Backspace / Mod-Backspace，Shift+Mod+Backspace 为空闲键位。
+      expect(findShortcutConflict("goToLastEditLocation", DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation, DEFAULT_SHORTCUT_SETTINGS, "Win32")).toBeNull();
+      expect(findShortcutConflict("goToLastEditLocation", DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation, DEFAULT_SHORTCUT_SETTINGS, "MacIntel")).toBeNull();
+    });
+
+    it("keeps an explicit clear as unbound", () => {
+      expect(normalizeShortcutSettings({ goToLastEditLocation: "" }, "Win32").goToLastEditLocation).toBe("");
+    });
+  });
+
   describe("resolveCapturedShortcutEdit", () => {
     // #9881：设置面板「应用」点了毫无反应、「应用并关闭」每次都弹未保存确认，
     // 根因就是捕获到的组合被落盘口径改写，草稿和 store 值再也对不上。

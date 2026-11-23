@@ -99,6 +99,7 @@ export type ShortcutActionId =
   | "resetUiZoom"
   | "find"
   | "gotoLine"
+  | "goToLastEditLocation"
   | "replace"
   | "refreshData"
   | "toggleResultsPane"
@@ -782,6 +783,16 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutGotoLine",
     scope: "editor",
     defaultShortcut: gotoLineDefaultShortcut(),
+  },
+  {
+    // JetBrains `Ctrl+Shift+Backspace` / VS Code "Go to Last Edit Location".
+    // Free on every platform: CodeMirror's default keymap binds `Backspace`,
+    // `Mod-Backspace` (macOS: `Alt-Backspace`/`Mod-Backspace`) but not
+    // `Shift-Mod-Backspace`.
+    id: "goToLastEditLocation",
+    labelKey: "settings.shortcutGoToLastEditLocation",
+    scope: "editor",
+    defaultShortcut: "Shift+Mod+Backspace",
   },
   {
     id: "replace",

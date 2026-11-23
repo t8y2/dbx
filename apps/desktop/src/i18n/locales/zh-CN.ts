@@ -11430,6 +11430,7 @@ export default withEnglishFallback({
     shortcutExecuteSqlInNewResultTab: "在新结果标签页中执行 SQL",
     shortcutFind: "查找",
     shortcutGotoLine: "跳转到行",
+    shortcutGoToLastEditLocation: "跳转到上次编辑位置",
     shortcutReplace: "替换",
     shortcutSaveSql: "保存 SQL",
     shortcutAcceptCompletion: "接受补全",

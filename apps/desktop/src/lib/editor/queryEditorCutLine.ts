@@ -20,22 +20,33 @@ export const cutQueryEditorLine: Command = (view) => {
   const lastLine = state.doc.line(state.doc.lines);
   if (!state.selection.ranges.some((range) => state.doc.lineAt(range.from).to === lastLine.to)) return false;
 
-  const seen = new Set<number>();
   const lines: string[] = [];
   const changes: { from: number; to: number }[] = [];
+  let lastCutLine = 0;
   for (const range of state.selection.ranges) {
     const line = state.doc.lineAt(range.from);
-    if (!seen.add(line.number)) continue;
+    if (lastCutLine === line.number) continue;
     lines.push(line.text);
-    if (line.to < state.doc.length) changes.push({ from: line.from, to: line.to + 1 });
-    else if (line.from > 0) changes.push({ from: line.from - 1, to: line.to });
-    else changes.push({ from: line.from, to: line.to });
+    const reachesEnd = line.number === lastLine.number;
+    const to = reachesEnd ? line.to : line.to + 1;
+    const previous = changes.at(-1);
+    if (previous && lastCutLine === line.number - 1) {
+      if (reachesEnd) previous.from = Math.max(0, previous.from - 1);
+      previous.to = to;
+    } else {
+      changes.push({ from: reachesEnd ? line.from - 1 : line.from, to });
+    }
+    lastCutLine = line.number;
   }
-  if (changes.length === 0) return false;
 
-  void copyToClipboard(lines.join(state.lineBreak)).catch(() => {
-    // The line is removed even when the clipboard refuses the write.
-  });
-  view.dispatch(state.update({ changes, scrollIntoView: true, userEvent: "delete.cut" }));
+  void copyToClipboard(lines.join(state.lineBreak)).then(
+    () => {
+      if (view.state !== state) return;
+      view.dispatch(state.update({ changes, scrollIntoView: true, userEvent: "delete.cut" }));
+    },
+    () => {
+      // A cut must leave the text in the document if the clipboard cannot store it.
+    },
+  );
   return true;
 };

@@ -1805,6 +1805,15 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.reopenClosedTab ?? "Shift+Mod+T"),
       onReopen: () => queryStore.reopenClosedTab(),
     }),
+    ...(toolbar?.openRecentTables
+      ? [
+          {
+            label: `${t("tabs.recentTablesTitle")}…`,
+            shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.openRecentTables ?? ""),
+            action: toolbar.openRecentTables,
+          },
+        ]
+      : []),
     createCloseTabMenuItem({
       label: t("contextMenu.closeTab"),
       onClose: () => closeTab(tab),

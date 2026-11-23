@@ -88,6 +88,9 @@ export function keepGuttersAttachedDuringSync(ViewPlugin: typeof import("@codemi
       private guard: GutterSyncGuard | null = null;
       private scrollDOM?: HTMLElement;
       private onScroll?: () => void;
+      private scrolledX = false;
+      /** The `.cm-gutters` element the flag was last applied to; `undefined` until it is applied. */
+      private styledGutters: HTMLElement | null | undefined = undefined;
 
       constructor(view: EditorView) {
         this.guard = attachGutterSyncGuard(view);
@@ -109,7 +112,13 @@ export function keepGuttersAttachedDuringSync(ViewPlugin: typeof import("@codemi
           if (held) releaseGutterSyncGuard(held);
           this.guard = attachGutterSyncGuard(update.view);
         }
-        this.syncScroll();
+        // Only a replaced `.cm-gutters` element (a gutter reconfigure) needs the
+        // flag here. The horizontal offset itself only ever moves through a
+        // `scroll` event — including the clamp after content shrinks — so it is
+        // not re-read: reading `scrollLeft` inside a view update forces a
+        // synchronous layout of the DOM CodeMirror has just invalidated, which
+        // cost a reflow on every selection change of a drag.
+        this.applyScrolledX();
       }
 
       destroy() {
@@ -122,13 +131,26 @@ export function keepGuttersAttachedDuringSync(ViewPlugin: typeof import("@codemi
           gutters?.removeAttribute("data-scrolled-x");
           gutters?.classList.remove("cm-gutters-scrolled-x");
         }
+        this.styledGutters = undefined;
       }
 
       private syncScroll() {
         if (!this.scrollDOM) return;
         const isScrolledX = (this.scrollDOM.scrollLeft ?? 0) > 0;
-        this.scrollDOM.toggleAttribute("data-scrolled-x", isScrolledX);
+        if (isScrolledX !== this.scrolledX) {
+          this.scrolledX = isScrolledX;
+          this.styledGutters = undefined;
+        }
+        this.applyScrolledX();
+      }
+
+      private applyScrolledX() {
+        if (!this.scrollDOM) return;
         const gutters = this.scrollDOM.querySelector<HTMLElement>(".cm-gutters");
+        if (gutters === this.styledGutters) return;
+        this.styledGutters = gutters;
+        const isScrolledX = this.scrolledX;
+        this.scrollDOM.toggleAttribute("data-scrolled-x", isScrolledX);
         if (gutters) {
           gutters.toggleAttribute("data-scrolled-x", isScrolledX);
           gutters.classList.toggle("cm-gutters-scrolled-x", isScrolledX);

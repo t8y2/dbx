@@ -79,6 +79,10 @@
 :root {
   --dbx-dialog-top-z-index: 50;
   --dbx-floating-layer-z-index: 51;
+  --dbx-workspace-scrollbar-size: 10px;
+  --dbx-workspace-scrollbar-inset: 3px;
+  --dbx-workspace-scrollbar-thumb: rgba(24, 24, 27, 0.3);
+  --dbx-workspace-scrollbar-thumb-active: rgba(24, 24, 27, 0.48);
   --data-grid-type-integer-fg: #1d4ed8;
   --data-grid-type-numeric-fg: #0e7490;
   --data-grid-type-string-fg: #166534;
@@ -100,6 +104,19 @@
   --data-grid-type-identifier-fg: #fcd34d;
   --data-grid-type-binary-fg: #fca5a5;
   --data-grid-type-spatial-fg: #6ee7b7;
+}
+
+.dark {
+  --dbx-workspace-scrollbar-thumb: rgba(250, 250, 250, 0.3);
+  --dbx-workspace-scrollbar-thumb-active: rgba(250, 250, 250, 0.48);
+}
+
+@supports (color: color-mix(in oklch, black, transparent)) {
+  :root,
+  .dark {
+    --dbx-workspace-scrollbar-thumb: color-mix(in oklch, var(--foreground) 30%, transparent);
+    --dbx-workspace-scrollbar-thumb-active: color-mix(in oklch, var(--foreground) 48%, transparent);
+  }
 }
 
 /* Reka caches the content's computed z-index on its positioning wrapper.
@@ -1534,6 +1551,31 @@ html.disable-transitions *::after {
   animation-duration: 0s !important;
 }
 
+.app-toolbar,
+.app-toolbar *,
+.app-tab-bar,
+.app-tab-bar *,
+[data-tauri-drag-region]:not([data-tauri-drag-region="false"]) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.app-toolbar input:not(:focus),
+.app-tab-bar input:not(:focus),
+.connection-tree-search input:not(:focus) {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+
+.app-toolbar input:focus,
+.app-toolbar textarea:focus,
+.app-tab-bar input:focus,
+.app-tab-bar textarea:focus,
+.connection-tree-search input:focus {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 body.dbx-table-reference-dragging,
 body.dbx-table-reference-dragging * {
   user-select: none !important;
@@ -1554,6 +1596,18 @@ html.dbx-data-grid-native-selection-blocked [role="textbox"],
 html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
   user-select: text !important;
   -webkit-user-select: text !important;
+}
+
+/* Tab drags cross every content surface, including editable grid exceptions. */
+html:root.dbx-tab-dragging body,
+html:root.dbx-tab-dragging body * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+/* Embedded workbenches must not swallow the source WebView's pointerup. */
+html:root.dbx-tab-dragging iframe {
+  pointer-events: none !important;
 }
 
 @layer base {
@@ -3125,7 +3179,6 @@ html.dbx-bg-active .cm-gutters.cm-gutters-scrolled-x {
   background-color: var(--background-solid, var(--background)) !important;
   box-shadow: 2px 0 8px rgba(0, 0, 0, 0.18);
 }
-
 
 /* Inner workbench panels. One radius step above the old rounded-md (still driven by the
  * Corner style setting) and an opaque border in dark themes: a translucent 1px border on a

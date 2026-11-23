@@ -388,7 +388,7 @@ test("Rust test jobs install pinned nextest and retain separate doctests", () =>
   const pluginRelease = readFileSync(new URL("../workflows/plugin-cli-release.yml", import.meta.url), "utf8");
   const consumers = [job("packages"), job("rust-test"), job("agent-rust"), job("agent-integration"), job("test", pluginDevHost), job("prepare", pluginRelease)];
   for (const content of consumers) {
-    assert.ok(content.includes("uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91"));
+    assert.match(content, /^[\t ]*(?:-[\t ]+)?uses: taiki-e\/install-action@[0-9a-f]{40}(?:\s+#.*)?\s*$/m);
     assert.ok(content.includes("tool: cargo-nextest@0.9.137"));
     assert.doesNotMatch(content, /cargo test (?!.*--doc)/);
     const testCommand = content.indexOf("cargo nextest run") >= 0 ? "cargo nextest run" : content.includes("pnpm test:packages") ? "pnpm test:packages" : content.includes("ci-rust.mjs test") ? "ci-rust.mjs test" : "ci-agent-integration.sh";

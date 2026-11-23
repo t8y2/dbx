@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
-import { EditorState, StateEffect } from "@codemirror/state";
+import { EditorState, StateEffect, type Extension } from "@codemirror/state";
+import { sql } from "@codemirror/lang-sql";
 import { EditorView, ViewPlugin } from "@codemirror/view";
 import { shallowRef } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,7 +21,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function createHarness(doc = "SELECT 1;\nSELECT 2;") {
+function createHarness(doc = "SELECT 1;\nSELECT 2;", extensions: Extension[] = []) {
   const view = shallowRef<EditorView | null>(null);
   const cache = { value: null as ExecutableStatementRangeCache | null };
   const runtime = createQueryEditorCodeMirrorRuntime();
@@ -34,7 +35,7 @@ function createHarness(doc = "SELECT 1;\nSELECT 2;") {
   });
   const parent = document.createElement("div");
   document.body.append(parent);
-  const currentView = new EditorView({ parent, state: EditorState.create({ doc, extensions: [boundaries.createTrackingPlugin(ViewPlugin)] }) });
+  const currentView = new EditorView({ parent, state: EditorState.create({ doc, extensions: [boundaries.createTrackingPlugin(ViewPlugin), ...extensions] }) });
   view.value = currentView;
   cleanups.push(() => {
     currentView.destroy();
@@ -127,6 +128,28 @@ describe("QueryEditor shared statement boundaries", () => {
     expect(boundaries.foldRangeForState(currentView.state, 10)).toEqual({ from: original!.from + 10, to: original!.to + 10 });
     await vi.advanceTimersByTimeAsync(150);
     expect(boundaries.statementBoundariesForState(currentView.state).fresh).toBe(true);
+  });
+
+  it("maps full-feature document folds while typing and recomputes them only after the debounce", async () => {
+    const source = "BEGIN\n  SELECT 1;\n  SELECT 2;\nEND;";
+    const { currentView, boundaries } = createHarness(source, [sql()]);
+    const folding = await import("@/lib/editor/codemirrorSqlBlockFolding");
+    const compute = vi.spyOn(folding, "computeBlockFoldRanges");
+    const original = boundaries.foldRangeForState(currentView.state, 0);
+    expect(original).toEqual({ from: 5, to: source.indexOf("END;") });
+    expect(compute).toHaveBeenCalledTimes(1);
+    // The same tree never pays for a second walk, whichever line asks.
+    boundaries.foldRangeForState(currentView.state, currentView.state.doc.line(2).from);
+    expect(compute).toHaveBeenCalledTimes(1);
+
+    currentView.dispatch({ changes: { from: 0, insert: "-- prefix\n" } });
+    currentView.dispatch({ changes: { from: 0, insert: " " } });
+    expect(boundaries.foldRangeForState(currentView.state, 11)).toEqual({ from: original!.from + 11, to: original!.to + 11 });
+    expect(compute).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(150);
+    expect(boundaries.foldRangeForState(currentView.state, 11)).toEqual({ from: original!.from + 11, to: original!.to + 11 });
+    expect(compute).toHaveBeenCalledTimes(2);
   });
 
   it("never installs a background result for an edited or paused document", async () => {

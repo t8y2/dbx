@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   executeMulti: vi.fn(),
   cancelQuery: vi.fn(),
   extractDataGridSelection: vi.fn(),
+  saveTextFile: vi.fn(),
   copyToClipboard: vi.fn(),
   toast: vi.fn(),
 }));
@@ -29,6 +30,11 @@ vi.mock("@/lib/backend/api", () => ({
 
 vi.mock("@/composables/useToast", () => ({
   useToast: () => ({ toast: mocks.toast }),
+}));
+
+vi.mock("@/lib/export/saveTextFile", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/export/saveTextFile")>()),
+  saveTextFile: mocks.saveTextFile,
 }));
 
 vi.mock("@/lib/common/clipboard", async (importOriginal) => {
@@ -140,7 +146,7 @@ function pasteGridCell(host: HTMLElement, value: string) {
   gridRoot.dispatchEvent(paste);
 }
 
-function mountGrid(initialResult = largeValueResult(), onReload?: () => void, databaseType: DatabaseType = "mysql", tableMeta?: DataGridTableMeta, columnLayoutScopeKey?: string) {
+function mountGrid(initialResult = largeValueResult(), onReload?: () => void, databaseType: DatabaseType = "mysql", tableMeta?: DataGridTableMeta, columnLayoutScopeKey?: string, fullExportResult?: () => Promise<QueryResult>) {
   const result = shallowRef(markRaw(initialResult));
   const onExecuteSql = vi.fn().mockResolvedValue(undefined);
   const pinia = createPinia();
@@ -164,7 +170,8 @@ function mountGrid(initialResult = largeValueResult(), onReload?: () => void, da
                 connectionId: "connection-1",
                 database: "dbx",
                 ...(columnLayoutScopeKey ? { columnLayoutScopeKey } : {}),
-                context: "table-data",
+                context: fullExportResult ? "results" : "table-data",
+                ...(fullExportResult ? { fullExportResult, pageLimit: 100 } : {}),
                 editable: true,
                 tableMeta: tableMeta ?? {
                   tableName: "events",
@@ -420,6 +427,30 @@ describe("DataGrid context menu target lifecycle", () => {
     expect(contextMenuButton("Original Text (Single Column)").disabled).toBe(false);
     expect(contextMenuButton("JSON Array").disabled).toBe(false);
     expect(contextMenuButton("SQL Select").disabled).toBe(false);
+  });
+
+  it.each([true, false])("exports SQL Updates with select-all set to %s", async (selectAll) => {
+    const result = hydratedResult(1, "first");
+    const rows = Array.from({ length: 101 }, (_, index) => [index + 1, `value ${index + 1}`]);
+    result.rows = rows.slice(0, 100);
+    result.has_more = true;
+    const fullExportResult = vi.fn().mockResolvedValue({ ...result, rows, has_more: false });
+    const { host } = mountGrid(result, undefined, "mysql", undefined, undefined, fullExportResult);
+    const output = "UPDATE events SET payload = 'value 1' WHERE id = 1;";
+    mocks.extractDataGridSelection.mockResolvedValueOnce({ text: output, mimeType: "text/sql", fileExtension: "sql", rowCount: selectAll ? 101 : 1, columnCount: 2 });
+    await settle();
+
+    const target = selectAll ? selectAllHeader(host) : gridCell(host);
+    if (selectAll) target.click();
+    openContextMenu(target);
+    await settle();
+    contextMenuButton("Export").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    contextMenuButton("SQL Updates").click();
+
+    await vi.waitFor(() => expect(mocks.saveTextFile).toHaveBeenCalledWith(output, expect.stringMatching(/\.sql$/), "SQL", "sql", expect.anything()));
+    expect(mocks.extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "sql-updates", rows: selectAll ? rows : rows.slice(0, 1) }));
+    expect(fullExportResult).toHaveBeenCalledTimes(selectAll ? 1 : 0);
   });
 
   it("keeps unsupported extractor exports disabled for a whole-column selection", async () => {

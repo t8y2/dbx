@@ -170,6 +170,8 @@ export interface BuildTableStructureChangeSqlOptions {
   driverProfile?: string | null;
   schema?: string;
   tableName: string;
+  /** Object kind used by dialects with distinct table/view comment syntax. */
+  tableType?: "table" | "view" | "materialized_view";
   columns: EditableStructureColumn[];
   indexes: EditableStructureIndex[];
   foreignKeys?: EditableStructureForeignKey[];

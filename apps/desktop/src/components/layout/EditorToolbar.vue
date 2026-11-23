@@ -437,6 +437,12 @@ const showTxnActions = computed(() => {
   if (props.stickyProvenReadOnlyState) return isTransactionActive.value && props.txnPossiblyDirty === true;
   return isTransactionActive.value;
 });
+const canCommit = computed(() => supportsTransaction.value && showTxnActions.value && !props.activeTab.isExecuting && !props.activeTab.isCancelling && !props.activeTab.isExplaining && props.activeTab.txnStatus !== "ending" && props.activeTab.txnStatus !== "opening");
+function commitFromToolbar() {
+  if (!canCommit.value) return false;
+  emit("commit");
+  return true;
+}
 const transactionTooltip = computed(() => {
   if (hasOpenAutoCommitTransaction.value) return t("settings.keepExplicitTransactionInAutoCommitDescription");
   if (props.activeConnection?.db_type === "sqlserver" && isManualTransactionMode.value) {
@@ -640,6 +646,7 @@ const databasePickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null
 const schemaPickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null);
 
 defineExpose({
+  commitFromToolbar,
   openConnectionPicker: () => connectionPickerRef.value?.openDropdown() ?? false,
   openDatabasePicker: () => databasePickerRef.value?.openDropdown() ?? false,
   openSchemaPicker: () => schemaPickerRef.value?.openDropdown() ?? false,
@@ -1038,9 +1045,7 @@ defineExpose({
               <span class="inline-flex items-center gap-px leading-none" aria-hidden="true">
                 <span class="text-[11px] font-bold">Tx:</span>
                 <span class="inline-flex h-3 min-w-3 items-center justify-center rounded-[3px] border border-current px-px text-[8px] font-extrabold leading-none">{{ transactionModeBadge }}</span>
-                <!-- Auto-commit tab with an uncommitted explicit transaction:
-                     the commit/rollback actions next to the badge act on it. -->
-                <span v-if="hasOpenAutoCommitTransaction" data-toolbar-open-transaction-dot class="ml-px h-1.5 w-1.5 rounded-full bg-current" />
+                <span v-if="showTxnActions" data-toolbar-open-transaction-dot class="ml-px h-1.5 w-1.5 rounded-full bg-current" />
               </span>
             </Button>
           </TooltipTrigger>
@@ -1049,14 +1054,7 @@ defineExpose({
         <!-- Commit button (only when a transaction action is warranted) -->
         <Tooltip v-if="showTxnActions">
           <TooltipTrigger as-child>
-            <Button
-              variant="ghost"
-              size="icon"
-              class="h-6 w-6 text-green-600 hover:bg-green-500/10 hover:text-green-700 dark:text-green-300 dark:hover:text-green-200"
-              :disabled="activeTab.isExecuting || activeTab.txnStatus === 'ending' || activeTab.txnStatus === 'opening'"
-              :aria-label="t('toolbar.commit')"
-              @click="emit('commit')"
-            >
+            <Button variant="ghost" size="icon" class="h-6 w-6 text-green-600 hover:bg-green-500/10 hover:text-green-700 dark:text-green-300 dark:hover:text-green-200" :disabled="!canCommit" :aria-label="t('toolbar.commit')" @click="commitFromToolbar">
               <Check class="h-3.5 w-3.5" />
             </Button>
           </TooltipTrigger>

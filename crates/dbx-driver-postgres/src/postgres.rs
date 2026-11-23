@@ -34,7 +34,9 @@ use tokio_util::sync::CancellationToken;
 use super::file_validator::validate_file_path;
 use crate::execution::{await_stream_with_progress_timeout, DbOperationBudget, StreamProgressClock};
 use crate::models::connection::DatabaseType;
-use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_sequence};
+use crate::sql::{
+    contains_ascii_case_insensitive, starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_sequence,
+};
 use crate::types::{
     ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
     CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
@@ -1235,6 +1237,26 @@ fn pg_text_fallback_value(value: &str, col_type: Option<PgColType>) -> (serde_js
     (value, srid)
 }
 
+/// The binary numeric decoder emits a leading zero for values below one, but
+/// PostgreSQL's text protocol prints them as `.7`. Servers that only answer
+/// with text results (TBase/GaussDB) and queries forced onto the text protocol
+/// by another column would otherwise show a different string for the same
+/// value. Only add the missing zero; never touch signs, exponents or other
+/// numeric spellings.
+fn normalize_pg_numeric_text(value: &str) -> String {
+    let unsigned = value.strip_prefix('-').or_else(|| value.strip_prefix('+')).unwrap_or(value);
+    if unsigned.starts_with('.') && unsigned.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
+        let sign_len = value.len() - unsigned.len();
+        let mut normalized = String::with_capacity(value.len() + 1);
+        normalized.push_str(&value[..sign_len]);
+        normalized.push('0');
+        normalized.push_str(unsigned);
+        normalized
+    } else {
+        value.to_string()
+    }
+}
+
 fn pg_text_fallback_value_with_spatial(
     value: &str,
     col_type: Option<PgColType>,
@@ -1254,6 +1276,7 @@ fn pg_text_fallback_value_with_spatial(
             Some(parsed) => (serde_json::Value::Bool(parsed), None, false),
             None => (serde_json::Value::String(value.to_string()), None, false),
         },
+        Some(PgColType::Numeric) => (serde_json::Value::String(normalize_pg_numeric_text(value)), None, false),
         Some(_) => (serde_json::Value::String(value.to_string()), None, false),
         None => decode_pg_text_wkb(value)
             .map(|geometry| (serde_json::Value::String(geometry.wkt), geometry.srid, true))
@@ -1443,19 +1466,15 @@ fn is_recognizable_wkt(value: &str) -> bool {
     })
 }
 
-/// Serialize a pgvector `vector` component with f32 shortest round-trip decimal text.
-///
-/// Casting through `f64` (or fixed fractional rounding) either expands binary noise or
-/// truncates remaining single-precision digits; formatting via `f32` display keeps the
-/// full float4 value that pgvector stores.
-fn pg_vector_element_number(v: f32) -> serde_json::Value {
+/// Preserve the shortest decimal representation that round-trips to the stored float4.
+fn pg_float4_number(v: f32) -> serde_json::Value {
     v.to_string().parse().map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
 }
 
 fn pg_vector_value_to_json(row: &impl ValueRow, idx: usize) -> serde_json::Value {
     if let Ok(PgRawBytes(raw)) = row.try_get::<_, PgRawBytes>(idx) {
         if let Some(floats) = decode_pgvector_bytes(&raw) {
-            return serde_json::Value::Array(floats.into_iter().map(pg_vector_element_number).collect());
+            return serde_json::Value::Array(floats.into_iter().map(pg_float4_number).collect());
         }
     }
     serde_json::Value::Null
@@ -1475,13 +1494,7 @@ fn pg_fallback_value_to_json(row: &impl ValueRow, idx: usize) -> serde_json::Val
                 serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
             })
         })
-        .or_else(|_| {
-            row.try_get::<_, f32>(idx).map(|v| {
-                serde_json::Number::from_f64((v as f64 * 1_000_000.0).round() / 1_000_000.0)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null)
-            })
-        })
+        .or_else(|_| row.try_get::<_, f32>(idx).map(pg_float4_number))
         .or_else(|_| row.try_get::<_, bool>(idx).map(serde_json::Value::Bool))
         .or_else(|_| row.try_get::<_, uuid::Uuid>(idx).map(|v| serde_json::Value::String(v.to_string())))
         .or_else(|e| pg_temporal_to_json_value(row, idx).ok_or(e))
@@ -5412,9 +5425,15 @@ fn postgres_columns_for_relations_compat_sql() -> &'static str {
 // `CAST(... AS int)`: GaussDB parses the shorthand but rejects the ANSI form
 // with `syntax error at or near "int"`, which made `getColumns` fail outright
 // there (#14613).
+//
+// `full_type` is a plain `data_type` here: GaussDB's `information_schema.columns`
+// has no `udt_name` column at all (`Column c.udt_name does not exist`, SQLSTATE
+// 42703), and referencing it failed the whole tier (#15130). Enumerated types
+// therefore degrade to the generic `USER-DEFINED` label in this last-resort
+// tier instead of aborting the column listing.
 fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
     "SELECT c.oid::bigint AS relid, ic.column_name AS column_name, \
-             CASE WHEN ic.data_type = 'USER-DEFINED' THEN ic.udt_name ELSE ic.data_type END AS full_type, \
+             ic.data_type AS full_type, \
              ic.is_nullable = 'YES' AS is_nullable, \
              ic.column_default AS column_default, \
              EXISTS ( \
@@ -6822,6 +6841,17 @@ pub fn redshift_procedure_source_sql(schema: &str, name: &str, signature: Option
 /// and array companion types are excluded via `typelem = 0`. The type branch
 /// has no usable timestamp/stat columns, so created_at/updated_at are always
 /// NULL. Column order must match the relation and routine branches.
+///
+/// `signature` is built with `concat()` rather than the `||` operator, for the
+/// same reason as the relation/index name probes (#13873): PostgreSQL-compatible
+/// kernels running with `pipes_as_concat` off (openGauss B/MySQL mode, and this
+/// KingbaseES V8R6 instance) do not treat `||` as text concatenation, so the
+/// `x || CASE ... END` expression was inferred as `boolean` and the `UNION ALL`
+/// with the `NULL::text` branches failed with
+/// `UNION types text and boolean cannot be matched` (#15128). The call stays
+/// the nested two-argument form rather than variadic `concat(a, b, c)` for the
+/// same reason as #13873/#14875: an Oracle-compatible GaussDB A mode exposes
+/// only the two-argument Oracle CONCAT. `concat()` always returns `text`.
 fn list_object_custom_types_sql() -> &'static str {
     "SELECT t.typname AS object_name, \
        'TYPE' AS object_type, \
@@ -6830,7 +6860,7 @@ fn list_object_custom_types_sql() -> &'static str {
        NULL::text AS updated_at, \
        NULL::text AS parent_schema, \
        NULL::text AS parent_name, \
-       (t.typtype::text || ':' || CASE \
+       concat(concat(t.typtype::text, ':'), CASE \
          WHEN t.typtype = 'c' THEN CASE WHEN EXISTS ( \
            SELECT 1 FROM pg_catalog.pg_attribute a \
            WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped \
@@ -6839,7 +6869,7 @@ fn list_object_custom_types_sql() -> &'static str {
            SELECT 1 FROM pg_catalog.pg_enum e WHERE e.enumtypid = t.oid \
          ) THEN '1' ELSE '0' END \
          ELSE '0' \
-       END) AS signature, \
+       END)::text AS signature, \
        5 AS sort_order \
      FROM pg_catalog.pg_type t \
      JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
@@ -7011,7 +7041,12 @@ async fn list_objects_rows(
         // cannot serve); skip the round-trip instead of executing empty SQL.
         return Ok(Vec::new());
     }
-    postgres_query_cached(client, &sql, &[&schema]).await.map_err(|e| e.to_string())
+    // Keep the server's own message (and SQLSTATE) in the error we surface:
+    // `tokio_postgres::Error`'s Display is the bare "db error" for DbError, which
+    // left the object page showing only `db error; timestamp fallback failed: db
+    // error` instead of e.g. `UNION types text and boolean cannot be matched`
+    // (#15128). No cursor marker here — this SQL is not the user's statement.
+    postgres_query_cached(client, &sql, &[&schema]).await.map_err(pg_error_to_string_plain)
 }
 
 pub async fn list_objects(
@@ -8521,8 +8556,13 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
 // servers where the `pg_attribute` tiers yield nothing. Casts the precision,
 // scale and length with `::int` because GaussDB rejects `CAST(... AS int)`
 // with `syntax error at or near "int"` (#14613).
+//
+// `full_type` is a plain `data_type` because GaussDB's `information_schema.columns`
+// has no `udt_name` column (`Column c.udt_name does not exist`, SQLSTATE 42703),
+// which used to fail this tier outright (#15130); user-defined types fall back to
+// the generic `USER-DEFINED` label rather than taking the listing down with them.
 const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
-             CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS full_type, \
+             c.data_type AS full_type, \
              c.is_nullable = 'YES' AS is_nullable, \
              c.column_default, \
              EXISTS ( \
@@ -9201,6 +9241,14 @@ pub fn postgres_statement_returns_rows(sql: &str) -> bool {
     // rows with `RETURNING`. The prefix alone cannot decide, so parse it and
     // keep the row-returning assumption whenever parsing does not say otherwise.
     let leads_with_cte = starts_with_executable_sql_keyword(sql, &["WITH"]);
+
+    // INSERT/UPDATE/DELETE only return rows through RETURNING. Skip the full
+    // parse of statements without it, such as large multi-row INSERT batches.
+    if starts_with_executable_sql_keyword(sql, &["INSERT", "UPDATE", "DELETE"])
+        && !contains_ascii_case_insensitive(sql, "returning")
+    {
+        return false;
+    }
 
     let Ok(statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
         return leads_with_cte;
@@ -10087,8 +10135,14 @@ async fn execute_query_with_max_rows_inner(
                 .await
         }
     } else {
-        let affected =
-            if force_unnamed { client.execute_typed(sql, &[]).await } else { client.execute(sql, &[]).await };
+        // Grid writes have no bind parameters. Sending Parse and Bind together
+        // keeps the statement on one backend when a transaction pool releases
+        // its server connection between protocol round trips.
+        let affected = if force_unnamed || starts_with_executable_sql_keyword(sql, &["INSERT", "UPDATE", "DELETE"]) {
+            client.execute_typed(sql, &[]).await
+        } else {
+            client.execute(sql, &[]).await
+        };
         affected.map_err(pg_error_to_string).map(|affected| QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -12967,6 +13021,8 @@ mod tests {
             "INSERT INTO users (id) VALUES (1) RETURNING id",
             "UPDATE users SET name = 'Ada' RETURNING id, name",
             "DELETE FROM users WHERE id = 1 RETURNING id",
+            "insert into users (id) values (1) returning id",
+            "-- audit\nUpdate users SET name = 'Ada' Returning id",
             "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name RETURNING target.id",
             "WITH removed AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM removed",
         ] {
@@ -13163,6 +13219,40 @@ mod tests {
         assert_eq!(pg_text_fallback_value("maybe", Some(PgColType::Bool)), (serde_json::json!("maybe"), None));
         // Without a classified column type nothing is coerced.
         assert_eq!(pg_text_fallback_value("f", None), (serde_json::json!("f"), None));
+    }
+
+    #[test]
+    fn postgres_text_fallback_adds_leading_zero_to_fractional_numeric() {
+        // The binary decoder already emits these with a leading zero; text
+        // results from TBase/GaussDB must agree (issue #15198).
+        for (text, expected) in [(".70000000", "0.70000000"), ("-.7", "-0.7"), ("+.7", "+0.7"), (".0", "0.0")] {
+            assert_eq!(pg_text_fallback_value(text, Some(PgColType::Numeric)), (serde_json::json!(expected), None));
+        }
+    }
+
+    #[test]
+    fn postgres_text_fallback_preserves_other_numeric_text() {
+        // Values that already carry an integer digit, special values, and
+        // exponent notation must pass through byte-for-byte.
+        for text in [
+            "0.00",
+            "-0.0012300",
+            "12345.6789",
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            "1e-3",
+            ".",
+            "-.",
+            "",
+            "not a number",
+            ".中",
+        ] {
+            assert_eq!(pg_text_fallback_value(text, Some(PgColType::Numeric)), (serde_json::json!(text), None));
+        }
+        // Without a classified type nothing is reinterpreted, so an ordinary
+        // text column containing ".7" is left alone.
+        assert_eq!(pg_text_fallback_value(".7", None), (serde_json::json!(".7"), None));
     }
 
     #[test]
@@ -14208,6 +14298,17 @@ mod tests {
         assert_eq!(decode_tsvector_bytes(&raw).as_deref(), Some("'back\\\\slash':3B 'o''clock':1,2A"));
     }
 
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL database"]
+    async fn scalar_real_query_preserves_precision() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect PostgreSQL");
+        let result = execute_query(&pool, "SELECT 0.0000001::real, 1.2345678::real, 0.1::real").await.unwrap();
+
+        let values: Vec<_> = result.rows[0].iter().map(serde_json::Value::as_f64).collect();
+        assert_eq!(values, [Some(0.0000001), Some(1.2345678), Some(0.1)]);
+    }
+
     fn encode_pgvector_bytes(values: &[f32]) -> Vec<u8> {
         let dims = u16::try_from(values.len()).expect("dim fits u16");
         let mut raw = Vec::with_capacity(4 + values.len() * 4);
@@ -14227,11 +14328,11 @@ mod tests {
     }
 
     #[test]
-    fn pgvector_element_number_round_trips_full_f32_precision() {
+    fn pg_float4_number_round_trips_full_f32_precision() {
         let values = [0.1f32, 0.12345679f32, 1.2345679e-5f32, -0.00012345679f32, 1.2345678f32, 1e20f32];
 
         for value in values {
-            let json = pg_vector_element_number(value);
+            let json = pg_float4_number(value);
             let text = json.to_string();
             let restored: f32 = text.parse().expect("json number parses as f32");
             let rounded_six = ((value as f64 * 1_000_000.0).round() / 1_000_000.0) as f32;
@@ -14249,7 +14350,7 @@ mod tests {
     fn pgvector_binary_to_json_preserves_component_precision() {
         let values = [0.12345679f32, 1.2345679e-5f32, -2.5f32];
         let decoded = decode_pgvector_bytes(&encode_pgvector_bytes(&values)).expect("decode vector");
-        let json = serde_json::Value::Array(decoded.into_iter().map(pg_vector_element_number).collect());
+        let json = serde_json::Value::Array(decoded.into_iter().map(pg_float4_number).collect());
         let arr = json.as_array().expect("vector json array");
 
         assert_eq!(arr.len(), values.len());
@@ -16821,7 +16922,7 @@ mod tests {
         assert!(sql.contains("t.typrelid = 0 OR c.relkind = 'c'"));
         assert!(sql.contains("FROM pg_catalog.pg_attribute a"));
         assert!(sql.contains("FROM pg_catalog.pg_enum e"));
-        assert!(sql.contains("END) AS signature"));
+        assert!(sql.contains("END)::text AS signature"));
         assert!(sql.contains("'TYPE' AS object_type"));
         assert!(sql.contains("5 AS sort_order"));
         assert!(sql.contains("n.nspname = $1"));
@@ -16911,8 +17012,21 @@ mod tests {
         assert!(sql.contains("NULL::text AS updated_at"));
         assert!(sql.contains("NULL::text AS parent_schema"));
         assert!(sql.contains("NULL::text AS parent_name"));
-        assert!(sql.contains("t.typtype::text || ':'"));
-        assert!(sql.contains("END) AS signature"));
+        assert!(sql.contains("concat(concat(t.typtype::text, ':'), CASE"));
+        assert!(sql.contains("END)::text AS signature"));
+    }
+
+    /// KingbaseES V8R6 resolves `x || CASE ... END` as a logical OR over boolean
+    /// operands, so `signature` was inferred as `boolean` and the `UNION ALL`
+    /// against the `NULL::text` branches failed with
+    /// `UNION types text and boolean cannot be matched` (#15128). The signature
+    /// must be built with `concat()` and explicitly cast back to `text`.
+    #[test]
+    fn list_objects_sql_custom_types_signature_avoids_the_boolean_or_reading() {
+        let sql = list_objects_sql(true, true, false, true, false, false, true, false);
+        assert!(!sql.contains("|| ':'"), "the `||` concatenation is read as boolean OR on Kingbase: {sql}");
+        assert!(sql.contains("concat(concat(t.typtype::text, ':'), CASE"), "{sql}");
+        assert!(sql.contains("END)::text AS signature"), "{sql}");
     }
 
     #[test]
@@ -17019,12 +17133,17 @@ mod tests {
     /// Column order is asserted as well: `column_info_from_row_offset` decodes
     /// these rows positionally, so the cast spelling may change but the order
     /// and count must not.
+    ///
+    /// `udt_name` is also asserted absent: GaussDB's `information_schema.columns`
+    /// omits it, and selecting it failed the tier with SQLSTATE 42703 (#15130).
     #[test]
     fn information_schema_columns_sql_avoids_cast_to_int_for_gaussdb() {
         for sql in [POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL, postgres_columns_for_relations_information_schema_sql()] {
             let lowered = sql.to_lowercase();
             assert!(!lowered.contains("cast("), "ANSI CAST is a syntax error on GaussDB here: {sql}");
             assert!(!lowered.contains(" as int"), "CAST(... AS int) is a syntax error on GaussDB: {sql}");
+            assert!(!lowered.contains("udt_name"), "udt_name is missing on GaussDB (SQLSTATE 42703): {sql}");
+            assert!(lowered.contains("as full_type"), "full_type column must stay in place: {sql}");
             let precision = sql.find("AS numeric_precision").expect("numeric_precision column");
             let scale = sql.find("AS numeric_scale").expect("numeric_scale column");
             let length = sql.find("AS character_maximum_length").expect("character_maximum_length column");

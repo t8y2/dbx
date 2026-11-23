@@ -59,6 +59,8 @@ export type ShortcutActionId =
   | "deleteCurrentRow"
   | "focusWhere"
   | "goToColumn"
+  | "selectNextGridColumn"
+  | "selectPreviousGridColumn"
   | "goToFirstPage"
   | "goToPreviousPage"
   | "goToNextPage"
@@ -118,7 +120,13 @@ export type ShortcutActionId =
   | "createSidebarTable"
   | "createSidebarDatabase"
   | "sendSelectionToAi"
-  | "sqlIntentionActions";
+  | "sqlIntentionActions"
+  | "commitTransaction"
+  | "copyResultColumn1"
+  | "copyResultColumn2"
+  | "copyResultColumn3"
+  | "copyResultColumn4"
+  | "copyResultColumn5";
 
 export type ShortcutScope = "global" | "debug" | "editor" | "grid" | "search" | "sidebar";
 
@@ -532,6 +540,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "",
   },
   {
+    id: "selectNextGridColumn",
+    labelKey: "settings.shortcutSelectNextGridColumn",
+    scope: "grid",
+    defaultShortcut: "",
+  },
+  {
+    id: "selectPreviousGridColumn",
+    labelKey: "settings.shortcutSelectPreviousGridColumn",
+    scope: "grid",
+    defaultShortcut: "",
+  },
+  {
     id: "goToFirstPage",
     labelKey: "settings.shortcutGoToFirstPage",
     scope: "grid",
@@ -774,6 +794,42 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutRefreshData",
     scope: "global",
     defaultShortcut: "F5",
+  },
+  {
+    id: "commitTransaction",
+    labelKey: "settings.shortcutCommitTransaction",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn1",
+    labelKey: "settings.shortcutCopyResultColumn1",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn2",
+    labelKey: "settings.shortcutCopyResultColumn2",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn3",
+    labelKey: "settings.shortcutCopyResultColumn3",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn4",
+    labelKey: "settings.shortcutCopyResultColumn4",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn5",
+    labelKey: "settings.shortcutCopyResultColumn5",
+    scope: "global",
+    defaultShortcut: "",
   },
   {
     id: "toggleResultsPane",

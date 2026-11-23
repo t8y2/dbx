@@ -15,6 +15,7 @@ import {
   MATCH_ALL_VISIBLE_DATABASE_PATTERN,
   normalizeVisibleDatabaseSelection,
   parseVisibleDatabasePatternsInput,
+  visibleNameMatchesSearch,
 } from "@/lib/database/visibleDatabases";
 import { initialVisibleDatabaseDialogSelection, resolveVisibleDatabaseSaveAction, visibleDatabaseFilterShowsNothing, visibleDatabasePatternMatches, visibleDatabasePatternsWithoutMatchAll } from "./visibleDatabasesDialogState";
 import * as api from "@/lib/backend/api";
@@ -52,15 +53,16 @@ const searchPlaceholderKey = computed(() => (isSchemaFilterMode.value ? "visible
 const emptySelectionKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.emptySelection" : "visibleDatabases.emptySelection"));
 const loadFailedKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.loadFailed" : "visibleDatabases.loadFailed"));
 const showSystemObjectsKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.showSystemSchemas" : "visibleDatabases.showSystemDatabases"));
+const searchHintKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.searchWildcardHint" : "visibleDatabases.searchWildcardHint"));
+const searchMatchCountKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.searchMatchCount" : "visibleDatabases.searchMatchCount"));
 const defaultObjectNames = computed(() => {
   if (isSchemaFilterMode.value) return filterSchemaNamesForVisiblePicker(objectNames.value, connection.value);
   return filterDatabaseNamesForVisiblePicker(objectNames.value, connection.value);
 });
 const listedObjectNames = computed(() => (showSystemDatabases.value ? objectNames.value : defaultObjectNames.value));
 const filteredObjectNames = computed(() => {
-  const query = searchText.value.trim().toLowerCase();
-  if (!query) return listedObjectNames.value;
-  return listedObjectNames.value.filter((name) => name.toLowerCase().includes(query));
+  const query = searchText.value;
+  return listedObjectNames.value.filter((name) => visibleNameMatchesSearch(name, query));
 });
 const parsedPatterns = computed(() => parseVisibleDatabasePatternsInput(patternInput.value));
 const patternMatchCount = computed(() => {
@@ -216,8 +218,11 @@ async function saveSelection() {
 
       <div class="flex items-center gap-2 rounded-md border bg-background px-2">
         <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
-        <Input v-model="searchText" :placeholder="t(searchPlaceholderKey)" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoading || !!errorMessage" />
+        <Input v-model="searchText" data-visible-database-search :placeholder="t(searchPlaceholderKey)" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoading || !!errorMessage" />
       </div>
+      <p class="px-1 text-xs text-muted-foreground" data-visible-search-hint>
+        {{ t(searchHintKey) }}<template v-if="isSearching"> · {{ t(searchMatchCountKey, { count: filteredObjectNames.length }) }}</template>
+      </p>
 
       <!-- 通配符模式：与勾选取并集，命中的库（含之后新建的）始终显示（#7164） -->
       <div v-if="!isSchemaFilterMode" class="space-y-1">

@@ -1560,7 +1560,7 @@ async function scanNextPage(requestId = searchRequestId, operationId?: number, i
   return true;
 }
 
-async function loadKeys() {
+async function loadKeys({ refillExpandedGroups = false } = {}) {
   if (!redisBrowserIsActive) return;
   // Consume a deferred reload only once an active load actually starts; a
   // connection check may finish after KeepAlive has paused the browser again.
@@ -1613,6 +1613,7 @@ async function loadKeys() {
     }
   }
   if (succeeded && requestId === searchRequestId) {
+    if (refillExpandedGroups) void refillRefreshedGroupSubtrees(requestId);
     void maybeAutoLoadMoreRedisKeys();
   }
   // Rows that were listed without inline metadata still need their type and
@@ -2140,7 +2141,7 @@ function mergeScannedKeys(newKeys: RedisKeyInfo[]) {
   });
 }
 
-async function fillGroupSubtree(group: RedisKeyTreeGroupNode, requestId = searchRequestId) {
+async function fillGroupSubtree(group: RedisKeyTreeGroupNode, requestId = searchRequestId, iterationBudget = { remaining: SUBTREE_FILL_MAX_SCAN_ITERATIONS }) {
   if (hasDefaultKeyScope.value) return;
   if (subtreeFilledGroupIds.has(group.id)) return;
   if (subtreeFillOperations.has(group.id)) return;
@@ -2151,14 +2152,13 @@ async function fillGroupSubtree(group: RedisKeyTreeGroupNode, requestId = search
   const pattern = redisGroupSubtreePattern(group.pathSegments, redisKeySeparator.value);
   let cursor = resumeCursor;
   let mergedNewKeys = 0;
-  let iterationsLeft = SUBTREE_FILL_MAX_SCAN_ITERATIONS;
   try {
-    while (requestId === searchRequestId && subtreeFillOperations.get(group.id) === operationId && expandedGroupIds.value.has(group.id) && !isFetchingAll.value && iterationsLeft > 0) {
+    while (requestId === searchRequestId && subtreeFillOperations.get(group.id) === operationId && expandedGroupIds.value.has(group.id) && !isFetchingAll.value && iterationBudget.remaining > 0) {
       if (flatKeys.value.length >= redisInfiniteScrollMaxKeys.value) break;
       if (mergedNewKeys >= SUBTREE_FILL_MAX_NEW_KEYS) break;
-      const iterations = Math.min(SUBTREE_SCAN_ITERATIONS_PER_CALL, iterationsLeft);
+      const iterations = Math.min(SUBTREE_SCAN_ITERATIONS_PER_CALL, iterationBudget.remaining);
+      iterationBudget.remaining -= iterations;
       const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, pattern, redisScanPageSize.value, iterations, true);
-      iterationsLeft -= iterations;
       if (requestId !== searchRequestId || subtreeFillOperations.get(group.id) !== operationId) return;
       const newKeys = collectUniqueRedisKeys(result.keys, loadedKeyRaws);
       mergeScannedKeys(newKeys);
@@ -2193,6 +2193,22 @@ async function fillGroupSubtree(group: RedisKeyTreeGroupNode, requestId = search
       }
       subtreeFillOperations.delete(group.id);
     }
+  }
+}
+
+async function refillRefreshedGroupSubtrees(requestId: number) {
+  if (hasDefaultKeyScope.value || !shouldFillGroupSubtree()) return;
+
+  // The first page restores expansion without calling toggleGroup. Refill those
+  // groups with one shared scan budget, and let Load more resume unfinished work.
+  const restoredGroupIds = [...expandedGroupIds.value];
+  const budget = { remaining: SUBTREE_FILL_MAX_SCAN_ITERATIONS };
+  for (const id of restoredGroupIds) subtreePendingGroupCursors.set(id, 0);
+  for (const id of restoredGroupIds) {
+    if (requestId !== searchRequestId || !shouldFillGroupSubtree() || budget.remaining === 0) break;
+    if (!expandedGroupIds.value.has(id)) continue;
+    const group = treeIndex?.groupById.get(id);
+    if (group) await fillGroupSubtree(group, requestId, budget);
   }
 }
 
@@ -4049,7 +4065,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   ><Clock class="redis-expiry-icon w-3 h-3 mr-1" /><span class="redis-expiry-label">{{ t("redis.batchExpiry") }}</span></Button
                 >
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 text-xs text-destructive" :disabled="selectionBusy" data-redis-batch-delete @click="requestBatchDelete"><Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }}</Button>
-                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="mutatingKeys || loading || loadingMore || isFetchingAll" @click="loadKeys">
+                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="mutatingKeys || loading || loadingMore || isFetchingAll" :aria-label="t('common.refresh')" @click="loadKeys({ refillExpandedGroups: true })">
                   <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
                   <RefreshCw v-else class="h-3 w-3" />
                 </Button>

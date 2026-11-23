@@ -1,4 +1,5 @@
 import type { ConnectionConfig, DatabaseStorageInfo, ObjectStatistics, TreeNode } from "@/types/database";
+import { databaseVGroupMembers } from "@/lib/table/tableVGroup";
 
 const sidebarTableStorageTypes = new Set<ConnectionConfig["db_type"]>(["mysql", "postgres", "sqlserver", "oracle", "clickhouse", "dameng", "gaussdb", "kingbase", "gbase", "doris", "starrocks"]);
 
@@ -13,14 +14,14 @@ export function supportsSidebarTableStorage(connection: ConnectionConfig | undef
 
 export function sidebarDatabaseNames(nodes: readonly TreeNode[] | undefined): string[] {
   if (!nodes) return [];
-  return nodes.flatMap((node) => (node.type === "database" && !node.catalog && node.database ? [node.database] : []));
+  return databaseVGroupMembers(nodes).flatMap((node) => (node.type === "database" && !node.catalog && node.database ? [node.database] : []));
 }
 
 export function applySidebarDatabaseStorage(nodes: readonly TreeNode[] | undefined, storage: readonly DatabaseStorageInfo[]): boolean {
   if (!nodes?.length || !storage.length) return false;
   const byName = new Map(storage.map((item) => [item.name, item.size_bytes] as const));
   let changed = false;
-  for (const node of nodes) {
+  for (const node of databaseVGroupMembers(nodes)) {
     if (node.type !== "database" || node.catalog || !node.database || !byName.has(node.database)) continue;
     const sizeBytes = byName.get(node.database) ?? null;
     if (node.sizeBytes === sizeBytes) continue;

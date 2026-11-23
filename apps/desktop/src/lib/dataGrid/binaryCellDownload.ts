@@ -58,6 +58,27 @@ export function binaryCellBytesToHexValue(bytes: Uint8Array): string {
   return hex;
 }
 
+export const BINARY_COLUMN_FORMATS = ["binary-hex", "binary-text", "binary-uuid", "binary-uuid-swapped"] as const;
+export type BinaryColumnFormat = (typeof BINARY_COLUMN_FORMATS)[number];
+
+export function isBinaryColumnFormat(value: unknown): value is BinaryColumnFormat {
+  return BINARY_COLUMN_FORMATS.some((format) => format === value);
+}
+
+export function formatBinaryColumnValue(value: CellValue, format: BinaryColumnFormat): string | undefined {
+  const bytes = parseBinaryCellBytes(value, "binary");
+  if (!bytes) return undefined;
+  const hex = binaryCellBytesToHexValue(bytes);
+  if (format === "binary-hex") return hex;
+  if (format === "binary-text") return printableUtf8Text(bytes) ?? hex;
+  if (bytes.length !== 16) return hex;
+  if (format === "binary-uuid") return decodeBinaryUuidText(hex, "uuid") ?? hex;
+  // MySQL UUID_TO_BIN(uuid, 1) stores the time fields high, middle, low.
+  const swapped = hex.slice(2);
+  const standard = swapped.slice(8, 16) + swapped.slice(4, 8) + swapped.slice(0, 4) + swapped.slice(16);
+  return decodeBinaryUuidText(`0x${standard}`, "uuid") ?? hex;
+}
+
 function openBinaryCellFileInBrowser(): Promise<Uint8Array | undefined> {
   return new Promise((resolve, reject) => {
     const input = document.createElement("input");

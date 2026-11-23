@@ -2011,7 +2011,24 @@ public final class MongoAgent {
         try {
             return new ObjectId(id);
         } catch (Exception e) {
-            return id;
+            Object numericId = parseNumericId(id);
+            return numericId != null ? numericId : id;
+        }
+    }
+
+    // The grid sends number _id values as plain text (string IDs carry the marker above).
+    // MongoDB equality matches across numeric BSON types, so a Long also finds an int32 _id.
+    private static Object parseNumericId(String id) {
+        try {
+            return Long.parseLong(id);
+        } catch (NumberFormatException e) {
+            // not an integer; try a decimal below
+        }
+        try {
+            double value = new BigDecimal(id).doubleValue();
+            return Double.isFinite(value) ? value : null;
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 

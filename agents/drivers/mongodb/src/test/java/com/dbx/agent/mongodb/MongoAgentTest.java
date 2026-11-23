@@ -555,6 +555,18 @@ class MongoAgentTest {
     }
 
     @Test
+    void parsesPlainNumericDocumentIdsAsNumbers() {
+        // The grid sends number _id values as plain text; string IDs carry the string-id marker.
+        assertEquals(108L, MongoAgent.parseId("108"));
+        assertEquals(-7L, MongoAgent.parseId("-7"));
+        assertEquals(1.5, MongoAgent.parseId("1.5"));
+        assertEquals(new ObjectId("123456789012345678901234"), MongoAgent.parseId("123456789012345678901234"));
+        assertEquals("1e400", MongoAgent.parseId("1e400"));
+        assertEquals(" 108", MongoAgent.parseId(" 108"));
+        assertEquals("customer-42", MongoAgent.parseId("customer-42"));
+    }
+
+    @Test
     void documentUpdateDistinguishesNoMatchFromUnchangedValue() {
         MongoAgent.requireMatchedDocument(
             "{\"$oid\":\"507f1f77bcf86cd799439011\"}",

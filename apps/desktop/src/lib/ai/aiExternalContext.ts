@@ -1,5 +1,6 @@
 import type { AiAction } from "@/lib/ai/ai";
-import { AI_SELECTION_CONTEXT_MAX_CHARS, truncateTextAttachmentContent, type AiSelectionContextInput } from "@/lib/ai/aiAttachments";
+import { AI_QUERY_RESULT_PREVIEW_LIMITS, resolveAiContextLimits } from "@/lib/ai/aiContextLimits";
+import { truncateTextAttachmentContent, type AiSelectionContextInput } from "@/lib/ai/aiAttachments";
 import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 import type { QueryTab } from "@/types/database";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
@@ -11,33 +12,40 @@ export function queryErrorSelection(tab: Pick<QueryTab, "title" | "result" | "re
   return sql?.trim() ? { source: "query-error", label: tab?.title, content: sql } : undefined;
 }
 
+/**
+ * Resolved budgets for the result preview. Resolution is module-scope because
+ * Phase 1 has no overrides; a future setting source should resolve once where
+ * the request is built and pass the values down rather than re-resolving per
+ * cell here.
+ */
+const AI_CONTEXT_LIMITS = resolveAiContextLimits();
 /** Rows/value caps keep the preview useful instead of dumping a whole result page. */
-const QUERY_RESULT_MAX_ROWS = 30;
-const QUERY_RESULT_MAX_VALUE_CHARS = 200;
-const QUERY_RESULT_MAX_SQL_CHARS = 4000;
+const QUERY_RESULT_MAX_ROWS = AI_CONTEXT_LIMITS.queryResultMaxRows;
+const QUERY_RESULT_MAX_VALUE_CHARS = AI_QUERY_RESULT_PREVIEW_LIMITS.maxValueChars;
+const QUERY_RESULT_MAX_SQL_CHARS = AI_QUERY_RESULT_PREVIEW_LIMITS.maxSqlChars;
 /**
  * Headroom below the selection budget applied by `createSelectionContext`
  * (12 000 chars): the footer names the omitted rows, and a selection the model
  * only sees a hard-truncated prefix of is worse than a smaller honest preview.
  */
-const QUERY_RESULT_BUDGET_CHARS = AI_SELECTION_CONTEXT_MAX_CHARS - 400;
+const QUERY_RESULT_BUDGET_CHARS = AI_CONTEXT_LIMITS.queryResultBudgetChars;
 /**
  * The header is composed of unbounded input (column names/types), so each
  * section is bounded on its own. Without this a very wide table or one long
  * column name could exceed the whole budget, leaving zero rows and pushing the
  * truncation footer past the downstream hard truncation.
  */
-const QUERY_RESULT_MAX_COLUMN_CHARS = 200;
-const QUERY_RESULT_COLUMN_BUDGET_CHARS = 2000;
+const QUERY_RESULT_MAX_COLUMN_CHARS = AI_QUERY_RESULT_PREVIEW_LIMITS.maxColumnChars;
+const QUERY_RESULT_COLUMN_BUDGET_CHARS = AI_QUERY_RESULT_PREVIEW_LIMITS.columnBudgetChars;
 /** One wide row must still be sendable, so it is clipped instead of dropped. */
-const QUERY_RESULT_MAX_LINE_CHARS = 1200;
+const QUERY_RESULT_MAX_LINE_CHARS = AI_QUERY_RESULT_PREVIEW_LIMITS.maxLineChars;
 /**
  * Column section entries may be up to 200 chars, which inside a row line would
  * still consume most of the line before the `=`: one pathological label would
  * then clip the line inside the name and leave the model with no cell value at
  * all. Row-line labels get their own, smaller cap.
  */
-const QUERY_RESULT_MAX_ROW_LABEL_CHARS = 100;
+const QUERY_RESULT_MAX_ROW_LABEL_CHARS = AI_QUERY_RESULT_PREVIEW_LIMITS.maxRowLabelChars;
 /** Marks a row line that stopped before every column was written out. */
 const QUERY_RESULT_CLIP_MARKER = ", …";
 /**
@@ -45,7 +53,7 @@ const QUERY_RESULT_CLIP_MARKER = ", …";
  * `(Result truncated: N more ...)` footer, so those are never the parts the
  * budget pushes out.
  */
-const QUERY_RESULT_RESERVED_TAIL_CHARS = 200;
+const QUERY_RESULT_RESERVED_TAIL_CHARS = AI_QUERY_RESULT_PREVIEW_LIMITS.reservedTailChars;
 
 function previewCellValue(value: unknown): string {
   const raw = JSON.stringify(value ?? null);

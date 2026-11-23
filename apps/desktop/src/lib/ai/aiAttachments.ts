@@ -1,12 +1,15 @@
 import type { AiCsvFileContext, AiSelectionContext, AiSelectionSource, AiTextAttachmentEncoding, AiTextAttachmentResolvedEncoding } from "@/lib/ai/ai";
+import { AI_CONTEXT_DEFAULTS } from "@/lib/ai/aiContextLimits";
 
-export const AI_TEXT_ATTACHMENT_MAX_BYTES = 48 * 1024;
-export const AI_TEXT_ATTACHMENT_MAX_CHARS = 12_000;
-export const AI_TEXT_ATTACHMENT_MAX_COUNT = 8;
-export const AI_TEXT_ATTACHMENT_MAX_TOTAL_CHARS = 32_000;
-export const AI_IMAGE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
-export const AI_IMAGE_ATTACHMENT_MAX_COUNT = 4;
-export const AI_IMAGE_ATTACHMENT_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
+// Re-exported from the shared policy so existing importers keep working while
+// the values live in one place.
+export const AI_TEXT_ATTACHMENT_MAX_BYTES = AI_CONTEXT_DEFAULTS.textAttachmentMaxBytes;
+export const AI_TEXT_ATTACHMENT_MAX_CHARS = AI_CONTEXT_DEFAULTS.textAttachmentMaxChars;
+export const AI_TEXT_ATTACHMENT_MAX_COUNT = AI_CONTEXT_DEFAULTS.textAttachmentMaxCount;
+export const AI_TEXT_ATTACHMENT_MAX_TOTAL_CHARS = AI_CONTEXT_DEFAULTS.textAttachmentMaxTotalChars;
+export const AI_IMAGE_ATTACHMENT_MAX_BYTES = AI_CONTEXT_DEFAULTS.imageAttachmentMaxBytes;
+export const AI_IMAGE_ATTACHMENT_MAX_COUNT = AI_CONTEXT_DEFAULTS.imageAttachmentMaxCount;
+export const AI_IMAGE_ATTACHMENT_MAX_TOTAL_BYTES = AI_CONTEXT_DEFAULTS.imageAttachmentMaxTotalBytes;
 
 /**
  * Per-item budget for a context selection (editor SQL today, #10058 R5).
@@ -15,15 +18,15 @@ export const AI_IMAGE_ATTACHMENT_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
  * this cap would enter every request whole. It mirrors the single-text-file
  * budget above rather than the total, because a selection is one item.
  */
-export const AI_SELECTION_CONTEXT_MAX_CHARS = 12_000;
+export const AI_SELECTION_CONTEXT_MAX_CHARS = AI_CONTEXT_DEFAULTS.selectionMaxChars;
 
 /**
  * Aggregate budget for staged selections: repeated "send to AI" gestures must
  * not stack unbounded context chips into one request, mirroring the text
  * attachment budgets above.
  */
-export const AI_SELECTION_CONTEXT_MAX_COUNT = 8;
-export const AI_SELECTION_CONTEXT_MAX_TOTAL_CHARS = 32_000;
+export const AI_SELECTION_CONTEXT_MAX_COUNT = AI_CONTEXT_DEFAULTS.selectionMaxCount;
+export const AI_SELECTION_CONTEXT_MAX_TOTAL_CHARS = AI_CONTEXT_DEFAULTS.selectionTotalChars;
 
 export const AI_TEXT_ATTACHMENT_EXTENSIONS = new Set(["csv", "md", "markdown", "txt", "text", "json", "yaml", "yml", "xml", "log", "tsv"]);
 export const AI_IMAGE_ATTACHMENT_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);

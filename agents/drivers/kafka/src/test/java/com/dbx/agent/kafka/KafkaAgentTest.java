@@ -1671,6 +1671,61 @@ class KafkaAgentTest {
     }
 
     @Test
+    void collectPeekedMessagesNewestFirstPrefersNewestMatchesWhenTheBatchStartsAtTheWindowLeftEdge() {
+        // 回归 #14571：真实 Kafka 只能正向 poll。窗口不足一批（500 条）时首批从窗口左端读起，
+        // 旧实现按到达顺序填满配额，会把分区里最旧的命中当作"最新 N 条"返回。
+        TopicPartition older = new TopicPartition("events", 0);
+        TopicPartition newer = new TopicPartition("events", 1);
+        Map<TopicPartition, Long> positions = new HashMap<>();
+        positions.put(older, 0L);
+        positions.put(newer, 0L);
+        KafkaAgent.PeekCollectionState collection =
+            new KafkaAgent.PeekCollectionState(List.of(older, newer), 5, 5);
+        long windowEnd = 20L;
+        int recordsPerPoll = 5;
+
+        KafkaAgent.PeekRecordPoller poller = timeout -> {
+            Map<TopicPartition, List<ConsumerRecord<String, byte[]>>> batch = new HashMap<>();
+            for (TopicPartition partition : List.of(older, newer)) {
+                long start = positions.get(partition);
+                if (start >= windowEnd) {
+                    continue;
+                }
+                List<ConsumerRecord<String, byte[]>> records = new ArrayList<>();
+                // offset 升序返回，模拟单分区正向消费；分区 0 的事件时间整体更早。
+                for (long offset = start; offset < Math.min(windowEnd, start + recordsPerPoll); offset++) {
+                    long timestamp = partition == older ? 100L + offset : 1_000L + offset;
+                    records.add(searchRecord(partition, offset, timestamp));
+                }
+                batch.put(partition, records);
+                positions.put(partition, Math.min(windowEnd, start + recordsPerPoll));
+            }
+            return batch.isEmpty() ? ConsumerRecords.empty() : new ConsumerRecords<>(batch);
+        };
+
+        KafkaAgent.collectPeekedMessagesNewestFirst(
+            poller,
+            positions::get,
+            (partition, offset) -> {
+                throw new AssertionError("window fits in one reverse batch; no seek expected");
+            },
+            record -> true,
+            List.of(older, newer),
+            Map.of(older, 0L, newer, 0L),
+            Map.of(older, windowEnd, newer, windowEnd),
+            collection,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        List<Map<String, Object>> results = KafkaAgent.limitSearchPeekedMessages(collection.messages, 5);
+        // 应为分区 1 最新的 5 条（时间戳 1019..1015），而不是分区 0/1 最旧的命中。
+        assertEquals(List.of(1_019L, 1_018L, 1_017L, 1_016L, 1_015L), results.stream()
+            .map(message -> message.get("timestamp")).toList());
+    }
+
+    @Test
     void collectPeekedMessagesNewestFirstKeepsScanningOtherPartitionsPastTheQuota() {
         // 分区 0 先凑满配额，但分区 1 尚未扫到 cutoff 以下，必须继续回扫，
         // 否则会漏掉分区 1 里更旧的命中（更旧的记录仍可能挤进结果集）。

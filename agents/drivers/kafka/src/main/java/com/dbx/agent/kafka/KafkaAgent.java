@@ -2236,6 +2236,7 @@ public final class KafkaAgent {
                 ? Duration.ofNanos(remainingNs)
                 : pollTimeout;
             ConsumerRecords<String, byte[]> records = poller.poll(timeout);
+            List<Map<String, Object>> pollMatches = new ArrayList<>();
             for (ConsumerRecord<String, byte[]> record : records) {
                 if (collection.scannedRecords >= maxScanRecords) {
                     collection.scanBudgetReached = true;
@@ -2248,6 +2249,15 @@ public final class KafkaAgent {
                 oldestScannedTimestamps.merge(
                     partition, record.timestamp(), (left, right) -> Math.min(left, right)
                 );
+                if (collection.globalLimit > 0) {
+                    // 主题内搜索：Kafka 只能正向消费，同一批 poll 的记录按 offset 升序到达。
+                    // 若按到达顺序计入配额，小分区（窗口不足一批）会先被最旧的命中填满，
+                    // 与"返回最新 N 条"的语义相反。故按批次收齐命中，再按事件时间取最新。
+                    if (recordFilter.include(record)) {
+                        pollMatches.add(peekedMessageFromRecord(record));
+                    }
+                    continue;
+                }
                 int remaining = collection.remainingByPartition.getOrDefault(partition, 0);
                 if (remaining <= 0 || !recordFilter.include(record)) {
                     continue;
@@ -2256,10 +2266,23 @@ public final class KafkaAgent {
                 collection.remainingByPartition.put(partition, remaining - 1);
                 // 不在此处因配额凑满而返回：同一批 poll 里后续分区的记录尚未检查。
             }
+            if (!pollMatches.isEmpty()) {
+                mergeNewestSearchMatches(collection, pollMatches);
+            }
             // Seek backward only after the current batch is fully consumed; seeking earlier
             // would drop buffered records that poll has not returned yet.
+            Long searchCutoff = collection.globalLimit > 0
+                ? searchCutoffTimestamp(collection.messages, collection.globalLimit)
+                : null;
             for (TopicPartition partition : partitions) {
-                if (collection.remainingByPartition.getOrDefault(partition, 0) <= 0) {
+                if (collection.globalLimit > 0) {
+                    // 搜索模式下配额不再是停止条件：该分区已扫到 cutoff 以下才算收敛，
+                    // 否则继续回扫去寻找更旧的命中。
+                    long oldestScanned = oldestScannedTimestamps.getOrDefault(partition, Long.MAX_VALUE);
+                    if (searchCutoff != null && oldestScanned <= searchCutoff) {
+                        continue;
+                    }
+                } else if (collection.remainingByPartition.getOrDefault(partition, 0) <= 0) {
                     continue;
                 }
                 long floor = windowStartOffsets.getOrDefault(partition, 0L);
@@ -2367,6 +2390,23 @@ public final class KafkaAgent {
             }
         }
         return true;
+    }
+
+    /**
+     * 把一批 poll 里命中的记录并入搜索结果，并只保留最新的 {@code globalLimit} 条。
+     * 搜索配额在收集阶段不裁剪顺序，最终按事件时间取最新，避免正向消费时最旧命中占满配额。
+     */
+    static void mergeNewestSearchMatches(
+        PeekCollectionState collection,
+        List<Map<String, Object>> incoming
+    ) {
+        List<Map<String, Object>> messages = collection.messages;
+        messages.addAll(incoming);
+        if (messages.size() <= collection.globalLimit) {
+            return;
+        }
+        sortPeekedMessages(messages, PeekStartPosition.LATEST);
+        messages.subList(collection.globalLimit, messages.size()).clear();
     }
 
     /**

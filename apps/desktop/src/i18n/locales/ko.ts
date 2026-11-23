@@ -6399,6 +6399,16 @@ export default withEnglishFallback({
     packageProcedureAtLine: "프로시저 {name}, {line}번째 줄",
     selectedObjects: "{count}개 개체가 선택되었습니다",
     dropPackageBodyHint: "패키지 사양을 삭제하면 기존 패키지 본문도 삭제됩니다.",
+    compileErrorsTitle: "컴파일 오류({count})",
+    compileErrorGoTo: "{line}행 {column}열로 이동",
+    compileErrorFixWithAi: "AI로 수정",
+    compileErrorCopy: "오류 정보 복사",
+    sourceSaveStage: {
+      validating: "소스 코드 검증 중",
+      preparing: "저장 준비 중",
+      executing: "DDL 실행 중",
+      verifying: "다시 읽어 검증 중",
+    },
   },
   postgresForeignTable: {
     tableKind: "테이블 유형",

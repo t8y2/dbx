@@ -6124,6 +6124,16 @@ export default withEnglishFallback({
     packageProcedureAtLine: "Procedimento {name}, linha {line}",
     selectedObjects: "{count} objetos selecionados",
     dropPackageBodyHint: "Ao excluir a especificação do pacote, o corpo do pacote existente também será excluído.",
+    compileErrorsTitle: "Erros de compilação ({count})",
+    compileErrorGoTo: "Ir para linha {line}, coluna {column}",
+    compileErrorFixWithAi: "Corrigir com IA",
+    compileErrorCopy: "Copiar mensagem de erro",
+    sourceSaveStage: {
+      validating: "Validando código-fonte",
+      preparing: "Preparando para salvar",
+      executing: "Enviando DDL",
+      verifying: "Verificando leitura de retorno",
+    },
   },
   postgresForeignTable: {
     tableKind: "Tipo de tabela",

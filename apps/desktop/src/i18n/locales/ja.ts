@@ -6178,6 +6178,16 @@ export default withEnglishFallback({
     packageProcedureAtLine: "プロシージャ {name}、{line} 行目",
     selectedObjects: "{count} 個のオブジェクトを選択しました",
     dropPackageBodyHint: "パッケージ仕様部を削除すると、既存のパッケージ本体も削除されます。",
+    compileErrorsTitle: "コンパイルエラー（{count}）",
+    compileErrorGoTo: "{line} 行 {column} 列へ移動",
+    compileErrorFixWithAi: "AI で修正",
+    compileErrorCopy: "エラー情報をコピー",
+    sourceSaveStage: {
+      validating: "ソースコードを検証中",
+      preparing: "保存の準備中",
+      executing: "DDL を送信中",
+      verifying: "読み戻して検証中",
+    },
   },
   postgresForeignTable: {
     tableKind: "テーブルの種類",

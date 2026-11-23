@@ -131,7 +131,7 @@ import type { ShortcutActionId } from "@/lib/editor/shortcutRegistry";
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
 
 import { createInsertValueHintsExtension, requestInsertValueHintsRefresh, supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
-import { createSqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
+import { createSqlBlockFoldService, sqlBeginEndMatching } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
 import { createSqlUnknownObjectHighlights, refreshSqlUnknownObjectHighlights } from "@/lib/editor/codemirrorSqlUnknownObjectHighlights";
 import { shouldParseQueryEditorSyntax, shouldUseQueryEditorLargeDocumentMode, shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
@@ -2424,6 +2424,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         initializedRuntime.codeMirrorTheme.of(theme),
         initializedRuntime.closeBracketsComp.of(closeBracketsExtension(initialSettings.autoCloseBrackets)),
         bracketMatching(),
+        sqlBeginEndMatching,
         // Fix: intercept quote characters to prevent closeBrackets from
         // producing triple quotes ('''). When the cursor is immediately
         // before an auto-inserted closing quote, just skip past it.

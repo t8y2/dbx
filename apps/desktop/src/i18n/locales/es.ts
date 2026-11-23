@@ -1189,6 +1189,9 @@ export default withEnglishFallback({
     blockedRetryTitle: "Hay que finalizar estas operaciones antes de reiniciar",
     blockedRetryConsequence: "Tras la confirmación, se cancelarán las consultas en ejecución, se terminarán las tareas en segundo plano y se revertirán las transacciones no confirmadas; los cambios no confirmados de las transacciones se perderán.",
     blockedRetryAccept: "Cerrar todo y continuar",
+    settleItemFailed: "No se pudo detener {target}: {error}",
+    settleItemRunning: "{target} sigue en ejecución.",
+    preparationAiRuns: "Una conversación de IA sigue en ejecución. Espera a que termine o deténla antes de actualizar.",
   },
   pluginDock: {
     close: "Cerrar terminal",

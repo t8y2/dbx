@@ -1261,6 +1261,9 @@ export default withEnglishFallback({
     blockedRetryTitle: "จำเป็นต้องสิ้นสุดการดำเนินการเหล่านี้ก่อนรีสตาร์ท",
     blockedRetryConsequence: "เมื่อยืนยันแล้ว ระบบจะยกเลิกคิวรีที่กำลังดำเนินการ ยุติงานเบื้องหลัง และย้อนกลับธุรกรรมที่ยังไม่ได้คอมมิต; การแก้ไขที่ยังไม่ได้คอมมิตในธุรกรรมจะสูญหาย",
     blockedRetryAccept: "ปิดทั้งหมดและดำเนินการต่อ",
+    settleItemFailed: "ไม่สามารถหยุด {target} ได้: {error}",
+    settleItemRunning: "{target} ยังคงทำงานอยู่",
+    preparationAiRuns: "บทสนทนา AI ยังคงทำงานอยู่ โปรดรอให้เสร็จหรือหยุดก่อนอัปเดต",
   },
   pluginDock: {
     close: "ปิด Terminal",

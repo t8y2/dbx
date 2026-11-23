@@ -1345,6 +1345,13 @@ export default withEnglishFallback({
     displayModeConnection: "По подключениям",
   },
   connection: {
+    batchTestConnections: "Проверить подключения ({count})",
+    batchTestTitle: "Проверка подключений",
+    batchTestProgress: "Проверено подключений: {completed} из {total}",
+    batchTestPending: "Ожидание",
+    batchTestSkipped: "Не проверено",
+    batchTestFailed: "Ошибка проверки",
+    batchTestStop: "Остановить оставшиеся проверки",
     groupPath: "Путь группы",
     mysqlDataCharsetWriteBlocked: "Режим совместимости кодировки данных принудительно разрешает только чтение. Запись и временная разблокировка недоступны.",
     mysqlDataCharsetUnsupported: "dataCharset поддерживается только нативным профилем MySQL, но не MariaDB, TiDB и другими профилями.",

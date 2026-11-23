@@ -1363,6 +1363,13 @@ export default withEnglishFallback({
     displayModeConnection: "接続別にグループ化",
   },
   connection: {
+    batchTestConnections: "接続をテスト（{count}）",
+    batchTestTitle: "接続を一括テスト",
+    batchTestProgress: "{total} 件中 {completed} 件をテストしました",
+    batchTestPending: "待機中",
+    batchTestSkipped: "未テスト",
+    batchTestFailed: "テスト失敗",
+    batchTestStop: "残りのテストを停止",
     groupPath: "グループパス",
     mysqlDataCharsetWriteBlocked: "データ文字セット互換モードでは読み取り専用が強制されます。書き込みや一時的なロック解除はできません。",
     mysqlDataCharsetUnsupported: "dataCharset はネイティブ MySQL プロファイル専用です。MariaDB、TiDB、その他のデータベースプロファイルには対応していません。",

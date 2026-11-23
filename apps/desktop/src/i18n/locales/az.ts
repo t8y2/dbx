@@ -668,6 +668,13 @@ export default withEnglishFallback({
   },
 
   connection: {
+    batchTestConnections: "Bağlantıları yoxla ({count})",
+    batchTestTitle: "Bağlantıları yoxla",
+    batchTestProgress: "{total} bağlantıdan {completed} yoxlanılıb",
+    batchTestPending: "Gözləyir",
+    batchTestSkipped: "Yoxlanılmayıb",
+    batchTestFailed: "Yoxlama uğursuz oldu",
+    batchTestStop: "Qalan yoxlamaları dayandır",
     groupPath: "Qrup yolu",
     mysqlDataCharsetWriteBlocked: "Məlumat kodlaması uyğunluq rejimi yalnız oxuma girişini məcburi edir. Yazma və müvəqqəti kilid açma mümkün deyil.",
     mysqlDataCharsetUnsupported: "dataCharset yalnız yerli MySQL profili üçün dəstəklənir; MariaDB, TiDB və digər profillər üçün deyil.",

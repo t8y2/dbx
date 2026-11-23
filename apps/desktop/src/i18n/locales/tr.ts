@@ -668,6 +668,13 @@ export default withEnglishFallback({
   },
 
   connection: {
+    batchTestConnections: "Bağlantıları test et ({count})",
+    batchTestTitle: "Bağlantıları test et",
+    batchTestProgress: "{total} bağlantının {completed} tanesi test edildi",
+    batchTestPending: "Bekliyor",
+    batchTestSkipped: "Test edilmedi",
+    batchTestFailed: "Test başarısız",
+    batchTestStop: "Kalan testleri durdur",
     groupPath: "Grup yolu",
     mysqlDataCharsetWriteBlocked: "Veri karakter kümesi uyumluluk modu salt okunur erişimi zorunlu kılar. Yazma ve geçici kilit açma kullanılamaz.",
     mysqlDataCharsetUnsupported: "dataCharset yalnızca yerel MySQL profilinde desteklenir; MariaDB, TiDB veya diğer profillerde desteklenmez.",

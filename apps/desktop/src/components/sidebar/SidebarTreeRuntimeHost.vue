@@ -270,7 +270,7 @@ import {
   type TableClipboardTableContext,
 } from "@/lib/table/tableClipboard";
 import { selectedSidebarBatchTargets, selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes } from "@/lib/sidebar/sidebarTreeSelection";
-import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionEditTarget, selectedConnectionMoveTargets } from "@/lib/sidebar/sidebarConnectionSelection";
+import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionEditTarget, selectedConnectionMoveTargets, selectedConnectionTestTargets } from "@/lib/sidebar/sidebarConnectionSelection";
 import { connectionSupportsDatabaseUserAdmin, resolveDatabaseUserAdminProviderForConnection, type DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
 import { authorizationPlanSql, authorizationPlanStatus, buildCreateDatabaseAuthorizationPlan, executeAuthorizationPlan, type AuthorizationPlan, type AuthorizationStepResult } from "@/lib/database/databaseAuthorizationPlan";
 import { connectionSupportsProcessList } from "@/lib/database/processListDrivers";
@@ -511,6 +511,7 @@ const props = defineProps<{
   highlighted?: boolean;
 }>();
 
+const SidebarBatchConnectionTestDialog = defineAsyncComponent(() => import("./SidebarBatchConnectionTestDialog.vue"));
 const ModelGenerateDialog = defineAsyncComponent(() => import("@/components/generate/ModelGenerateDialog.vue"));
 const OracleTableGrantsDialog = defineAsyncComponent(() => import("@/components/objects/OracleTableGrantsDialog.vue"));
 const modelGenerationTarget = shallowRef<TreeNode | null>(null);
@@ -7796,6 +7797,21 @@ interface SidebarMenuFactoryContext {
 
 type SidebarMenuFactory = (context: SidebarMenuFactoryContext) => boolean;
 
+const batchTestConnectionIds = ref<string[]>([]);
+
+function addBatchConnectionTestItem(items: ContextMenuItem[], ids: readonly string[]) {
+  const targets = [...new Set(ids)].filter((id) => connectionStore.getConfig(id));
+  if (targets.length < 2) return;
+  items.push({
+    sidebarActionId: "connection.batchTestConnections",
+    label: t("connection.batchTestConnections", { count: targets.length }),
+    action: () => {
+      if (!batchTestConnectionIds.value.length) batchTestConnectionIds.value = targets;
+    },
+    icon: Activity,
+  });
+}
+
 function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
   // 2. Connection
@@ -7817,6 +7833,10 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     } else if (!isConnected.value) {
       items.push({ sidebarActionId: "contextMenu.openConnection", label: t("contextMenu.openConnection"), action: toggle, icon: Plug });
     }
+    addBatchConnectionTestItem(
+      items,
+      selectedConnectionTestTargets(node, selectedTreeNodesInVisibleOrder()).map((target) => target.connectionId),
+    );
     if (node.connectionId && supportsPlDebugRoutine(currentDatabaseType())) {
       items.push({ sidebarActionId: "plDebug.recovery", label: t("plDebug.recovery.title"), action: () => openPlDebugRecovery(node.connectionId!), icon: RefreshCw });
     }
@@ -8018,6 +8038,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       disabled: !canDisconnectConnectionGroup(),
       shortcut: shortcutDisconnectConnection.value,
     });
+    addBatchConnectionTestItem(items, connectionStore.connectionIdsInGroups([node.id]));
     items.push({ label: "", separator: true });
     items.push({
       label: t("connectionGroup.renameGroup"),
@@ -9709,6 +9730,7 @@ defineExpose({
     :close-on-confirm="false"
     @confirm="cloneDialog.confirm"
   />
+  <SidebarBatchConnectionTestDialog v-if="batchTestConnectionIds.length" :connection-ids="batchTestConnectionIds" @close="batchTestConnectionIds = []" />
   <ModelGenerateDialog v-if="modelGenerationTarget" :key="modelGenerationTarget.id" :target="modelGenerationTarget" @close="modelGenerationTarget = null" />
   <SqlTemplateInsertRowsDialog v-model:open="insertTemplateRowsOpen" @confirm="confirmInsertTemplateRows" />
   <OracleTableGrantsDialog v-if="oracleTableGrantsTarget" :target="oracleTableGrantsTarget" @close="oracleTableGrantsTarget = null" />

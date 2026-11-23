@@ -1351,6 +1351,13 @@ export default withEnglishFallback({
   },
 
   connection: {
+    batchTestConnections: "測試連線（{count}）",
+    batchTestTitle: "批次測試連線",
+    batchTestProgress: "已測試 {completed} / {total} 個連線",
+    batchTestPending: "等待測試",
+    batchTestSkipped: "未測試",
+    batchTestFailed: "測試失敗",
+    batchTestStop: "停止後續測試",
     groupPath: "群組路徑",
     mysqlDataCharsetWriteBlocked: "資料字元集相容模式強制唯讀，無法執行寫入，也不能暫時解鎖。",
     mysqlDataCharsetUnsupported: "dataCharset 僅支援原生 MySQL 設定，不支援 MariaDB、TiDB 或其他資料庫設定。",

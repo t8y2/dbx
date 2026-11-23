@@ -1582,6 +1582,13 @@ export default {
   },
 
   connection: {
+    batchTestConnections: "Test connections ({count})",
+    batchTestTitle: "Test connections",
+    batchTestProgress: "Tested {completed} of {total} connections",
+    batchTestPending: "Waiting",
+    batchTestSkipped: "Not tested",
+    batchTestFailed: "Test failed",
+    batchTestStop: "Stop remaining tests",
     groupPath: "Group path",
     parameterEditor: {
       title: "Connection parameters",

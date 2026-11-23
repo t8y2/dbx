@@ -6183,6 +6183,16 @@ export default withEnglishFallback({
     packageProcedureAtLine: "Procedura {name}, riga {line}",
     selectedObjects: "{count} oggetti selezionati",
     dropPackageBodyHint: "Quando si elimina la specifica del package, viene eliminato anche il corpo del package esistente.",
+    compileErrorsTitle: "Errori di compilazione ({count})",
+    compileErrorGoTo: "Vai alla riga {line}, colonna {column}",
+    compileErrorFixWithAi: "Correggi con AI",
+    compileErrorCopy: "Copia messaggio di errore",
+    sourceSaveStage: {
+      validating: "Verifica del codice sorgente in corso",
+      preparing: "Preparazione del salvataggio in corso",
+      executing: "Invio del DDL in corso",
+      verifying: "Verifica di rilettura in corso",
+    },
   },
   postgresForeignTable: {
     tableKind: "Tipo di tabella",

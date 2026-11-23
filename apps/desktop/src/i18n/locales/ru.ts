@@ -6945,6 +6945,16 @@ export default withEnglishFallback({
     packageProcedureAtLine: "Процедура {name}, строка {line}",
     selectedObjects: "Выбрано объектов: {count}",
     dropPackageBodyHint: "При удалении спецификации пакета также будет удалено существующее тело пакета.",
+    compileErrorsTitle: "Ошибки компиляции ({count})",
+    compileErrorGoTo: "Перейти к строке {line}, столбцу {column}",
+    compileErrorFixWithAi: "Исправить с помощью ИИ",
+    compileErrorCopy: "Копировать информацию об ошибке",
+    sourceSaveStage: {
+      validating: "Проверка исходного кода",
+      preparing: "Подготовка к сохранению",
+      executing: "Отправка DDL",
+      verifying: "Проверка обратным чтением",
+    },
   },
   postgresForeignTable: {
     tableKind: "Тип таблицы",

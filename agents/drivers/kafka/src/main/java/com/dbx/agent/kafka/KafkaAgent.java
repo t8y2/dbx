@@ -2190,7 +2190,7 @@ public final class KafkaAgent {
         return collection.messages;
     }
 
-    private static boolean collectPeekedMessagesNewestFirst(
+    static boolean collectPeekedMessagesNewestFirst(
         PeekRecordPoller poller,
         PeekBatchPositionReader positionReader,
         PeekBatchSeeker seeker,
@@ -2211,12 +2211,19 @@ public final class KafkaAgent {
             batchStarts.put(partition, Math.max(floor, windowEnd - REVERSE_PEEK_BATCH_RECORDS));
             batchEnds.put(partition, windowEnd);
         }
+        Map<TopicPartition, Long> oldestScannedTimestamps = new HashMap<>();
         while (System.nanoTime() < deadlineNs) {
-            if (collection.globalQuotaSatisfied()) {
-                // 全局配额命中即视为未扫完：窗口里可能还有更多命中。
-                return false;
-            }
-            if (allReversePeekPartitionsExhausted(
+            // 主题内搜索要保证"扫描约束内最新的 count 条"，配额凑满并不等于结果收敛：
+            // 还需等各分区都回扫到 cutoff 以下，否则会漏掉尚未检查分区里更新的命中。
+            // 配额已满说明窗口里可能还有更旧的命中，按未扫完上报。
+            if (collection.globalLimit > 0) {
+                if (allSearchPartitionsSettled(
+                    partitions, collection, windowStartOffsets, batchStarts, batchEnds,
+                    oldestScannedTimestamps, positionReader
+                )) {
+                    return !collection.globalQuotaSatisfied();
+                }
+            } else if (allReversePeekPartitionsExhausted(
                 partitions, collection, windowStartOffsets, batchStarts, batchEnds, positionReader
             )) {
                 return true;
@@ -2236,15 +2243,18 @@ public final class KafkaAgent {
                 }
                 collection.scannedRecords++;
                 TopicPartition partition = new TopicPartition(record.topic(), record.partition());
+                // 无论是否命中、配额是否已满，都记录该分区已扫到的最老事件时间，
+                // 它是判断"该分区是否已回扫越过 cutoff"的唯一依据。
+                oldestScannedTimestamps.merge(
+                    partition, record.timestamp(), (left, right) -> Math.min(left, right)
+                );
                 int remaining = collection.remainingByPartition.getOrDefault(partition, 0);
                 if (remaining <= 0 || !recordFilter.include(record)) {
                     continue;
                 }
                 collection.messages.add(peekedMessageFromRecord(record));
                 collection.remainingByPartition.put(partition, remaining - 1);
-                if (collection.globalQuotaSatisfied()) {
-                    return false;
-                }
+                // 不在此处因配额凑满而返回：同一批 poll 里后续分区的记录尚未检查。
             }
             // Seek backward only after the current batch is fully consumed; seeking earlier
             // would drop buffered records that poll has not returned yet.
@@ -2263,11 +2273,16 @@ public final class KafkaAgent {
                 seeker.seek(partition, previousStart);
             }
         }
-        boolean exhausted = allReversePeekPartitionsExhausted(
-            partitions, collection, windowStartOffsets, batchStarts, batchEnds, positionReader
-        );
-        collection.timeBudgetReached = !exhausted;
-        return exhausted;
+        boolean settled = collection.globalLimit > 0
+            ? allSearchPartitionsSettled(
+                partitions, collection, windowStartOffsets, batchStarts, batchEnds,
+                oldestScannedTimestamps, positionReader
+            )
+            : allReversePeekPartitionsExhausted(
+                partitions, collection, windowStartOffsets, batchStarts, batchEnds, positionReader
+            );
+        collection.timeBudgetReached = !settled;
+        return settled && !collection.globalQuotaSatisfied();
     }
 
     /**
@@ -2295,6 +2310,79 @@ public final class KafkaAgent {
             }
         }
         return true;
+    }
+
+    /**
+     * 主题内搜索的收敛判定：只有当每个分区都"不会再产出更新的命中"时才算扫描完成。
+     *
+     * <p>判据依赖分区内 offset 顺序与事件时间单调这一前提（与最终结果按事件时间排序的
+     * 假设一致）。分区满足以下任一条件即视为已收敛：
+     * <ul>
+     *   <li>该分区配额已用尽；</li>
+     *   <li>当前批次已抽干且批次已回退到窗口左端（窗口内所有记录都看过）；</li>
+     *   <li>当前批次已抽干，且该分区已扫到的最老事件时间不新于 cutoff。</li>
+     * </ul>
+     * cutoff 是已收集结果中第 {@code globalLimit} 新的命中时间：更旧的记录不可能挤进
+     * 结果集，继续回扫没有意义。
+     */
+    static boolean allSearchPartitionsSettled(
+        List<TopicPartition> partitions,
+        PeekCollectionState collection,
+        Map<TopicPartition, Long> windowStartOffsets,
+        Map<TopicPartition, Long> batchStarts,
+        Map<TopicPartition, Long> batchEnds,
+        Map<TopicPartition, Long> oldestScannedTimestamps,
+        PeekBatchPositionReader positionReader
+    ) {
+        Long cutoff = null;
+        boolean cutoffComputed = false;
+        for (TopicPartition partition : partitions) {
+            if (collection.remainingByPartition.getOrDefault(partition, 0) <= 0) {
+                continue;
+            }
+            long floor = windowStartOffsets.getOrDefault(partition, 0L);
+            long batchEnd = batchEnds.getOrDefault(partition, 0L);
+            long position = positionReader.position(partition);
+            if (batchStarts.getOrDefault(partition, floor) <= floor && position >= batchEnd) {
+                // 已回扫到窗口左端且当前批次抽干，该分区不再有未检查记录。
+                continue;
+            }
+            if (position < batchEnd) {
+                // 当前批次尚未抽干：poll 缓冲里可能还有记录没返回。
+                return false;
+            }
+            if (!cutoffComputed) {
+                // 只有真的需要比较时才排序一次，避免每个分区重复计算。
+                cutoff = searchCutoffTimestamp(collection.messages, collection.globalLimit);
+                cutoffComputed = true;
+            }
+            if (cutoff == null) {
+                // 结果还没填满配额，任何"更旧"都可能被选中，不能提前停。
+                return false;
+            }
+            long oldest = oldestScannedTimestamps.getOrDefault(partition, Long.MAX_VALUE);
+            if (oldest > cutoff) {
+                // 还没扫到 cutoff 以下，该分区仍可能贡献更旧的命中。
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 已收集结果中第 {@code limit} 新的事件时间，作为"是否还需要继续回扫"的截止线。
+     * 结果不足 {@code limit} 条时返回 {@code null}，表示还需要继续扫描。
+     */
+    static Long searchCutoffTimestamp(List<Map<String, Object>> messages, int limit) {
+        if (limit <= 0 || messages.size() < limit) {
+            return null;
+        }
+        return messages.stream()
+            .map(message -> (Long) message.get("timestamp"))
+            .sorted(Comparator.reverseOrder())
+            .skip(limit - 1L)
+            .findFirst()
+            .orElse(null);
     }
 
     /**
@@ -2534,32 +2622,33 @@ public final class KafkaAgent {
         void seek(TopicPartition partition, long offset);
     }
 
-    private static final class PeekCollectionState {
-        private final List<Map<String, Object>> messages = new ArrayList<>();
-        private final Map<TopicPartition, Integer> remainingByPartition = new HashMap<>();
+    /** 包级可见，便于测试直接构造带全局配额的搜索收集状态。 */
+    static final class PeekCollectionState {
+        final List<Map<String, Object>> messages = new ArrayList<>();
+        final Map<TopicPartition, Integer> remainingByPartition = new HashMap<>();
         /** 大于 0 时表示所有分区共享的命中上限（主题内搜索使用）。 */
-        private final int globalLimit;
-        private int scannedRecords;
-        private boolean incomplete;
-        private boolean scanBudgetReached;
-        private boolean timeBudgetReached;
+        final int globalLimit;
+        int scannedRecords;
+        boolean incomplete;
+        boolean scanBudgetReached;
+        boolean timeBudgetReached;
 
-        private PeekCollectionState(List<TopicPartition> partitions, int messagesPerPartition) {
+        PeekCollectionState(List<TopicPartition> partitions, int messagesPerPartition) {
             this(partitions, messagesPerPartition, 0);
         }
 
-        private PeekCollectionState(List<TopicPartition> partitions, int messagesPerPartition, int globalLimit) {
+        PeekCollectionState(List<TopicPartition> partitions, int messagesPerPartition, int globalLimit) {
             for (TopicPartition partition : partitions) {
                 remainingByPartition.put(partition, messagesPerPartition);
             }
             this.globalLimit = globalLimit;
         }
 
-        private boolean allPartitionQuotasSatisfied() {
+        boolean allPartitionQuotasSatisfied() {
             return remainingByPartition.values().stream().allMatch(remaining -> remaining <= 0);
         }
 
-        private boolean globalQuotaSatisfied() {
+        boolean globalQuotaSatisfied() {
             return globalLimit > 0 && messages.size() >= globalLimit;
         }
     }

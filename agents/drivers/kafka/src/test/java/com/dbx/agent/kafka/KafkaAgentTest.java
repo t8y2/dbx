@@ -67,6 +67,7 @@ import org.apache.kafka.common.TopicPartitionInfo;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.internals.KafkaFutureImpl;
+import org.apache.kafka.common.record.TimestampType;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
@@ -1628,6 +1629,162 @@ class KafkaAgentTest {
         );
 
         assertEquals(2, messages.size());
+    }
+
+    @Test
+    void collectPeekedMessagesNewestFirstKeepsNewerMatchesFromLaterPartitionsInTheSamePoll() {
+        // 回归 #14571：旧实现在 poll 循环里配额凑满就 return，
+        // 同一批 poll 里排在较旧分区之后的更新命中从未被检查。
+        TopicPartition older = new TopicPartition("events", 0);
+        TopicPartition newer = new TopicPartition("events", 1);
+        AtomicInteger polls = new AtomicInteger();
+        KafkaAgent.PeekCollectionState collection =
+            new KafkaAgent.PeekCollectionState(List.of(older, newer), 2, 2);
+
+        KafkaAgent.collectPeekedMessagesNewestFirst(
+            timeout -> {
+                polls.incrementAndGet();
+                return new ConsumerRecords<>(Map.of(
+                    older, List.of(searchRecord(older, 400L, 100L), searchRecord(older, 401L, 150L)),
+                    newer, List.of(searchRecord(newer, 400L, 900L), searchRecord(newer, 401L, 950L))
+                ));
+            },
+            partition -> 600L,
+            (partition, offset) -> {
+                throw new AssertionError("both quotas were met in the first poll");
+            },
+            record -> true,
+            List.of(older, newer),
+            Map.of(older, 0L, newer, 0L),
+            Map.of(older, 600L, newer, 600L),
+            collection,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(1, polls.get());
+        // 旧实现只返回分区 0 的 2 条；新实现必须把分区 1 的更新命中带回并裁到最新 2 条。
+        List<Map<String, Object>> results = KafkaAgent.limitSearchPeekedMessages(collection.messages, 2);
+        assertEquals(List.of(950L, 900L), results.stream()
+            .map(message -> message.get("timestamp")).toList());
+    }
+
+    @Test
+    void collectPeekedMessagesNewestFirstKeepsScanningOtherPartitionsPastTheQuota() {
+        // 分区 0 先凑满配额，但分区 1 尚未扫到 cutoff 以下，必须继续回扫，
+        // 否则会漏掉分区 1 里更旧的命中（更旧的记录仍可能挤进结果集）。
+        TopicPartition older = new TopicPartition("events", 0);
+        TopicPartition newer = new TopicPartition("events", 1);
+        AtomicInteger polls = new AtomicInteger();
+        Map<TopicPartition, Long> positions = new HashMap<>();
+        positions.put(older, 600L);
+        positions.put(newer, 600L);
+
+        KafkaAgent.PeekCollectionState collection =
+            new KafkaAgent.PeekCollectionState(List.of(older, newer), 2, 2);
+        boolean complete = KafkaAgent.collectPeekedMessagesNewestFirst(
+            timeout -> {
+                if (polls.getAndIncrement() == 0) {
+                    positions.put(older, 600L);
+                    positions.put(newer, 600L);
+                    return new ConsumerRecords<>(Map.of(
+                        older, List.of(searchRecord(older, 400L, 900L), searchRecord(older, 401L, 800L)),
+                        newer, List.of(searchRecord(newer, 400L, 1_000L))
+                    ));
+                }
+                // 回扫到分区 1 的下一批后抽干：最老时间 700 已低于 cutoff 900。
+                positions.put(newer, 100L);
+                return new ConsumerRecords<>(Map.of(
+                    newer, List.of(searchRecord(newer, 10L, 700L))
+                ));
+            },
+            positions::get,
+            (partition, offset) -> {
+                assertEquals(newer, partition);
+                assertEquals(0L, offset);
+                positions.put(partition, offset);
+            },
+            record -> true,
+            List.of(older, newer),
+            Map.of(older, 0L, newer, 0L),
+            Map.of(older, 600L, newer, 600L),
+            collection,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        collection.incomplete = !complete;
+        assertEquals(2, polls.get());
+        List<Map<String, Object>> results = KafkaAgent.limitSearchPeekedMessages(collection.messages, 2);
+        assertEquals(List.of(1_000L, 900L), results.stream()
+            .map(message -> message.get("timestamp")).toList());
+        // 结果达到上限且仍有更旧命中未返回：界面应显示 resultLimit 截断提示。
+        assertEquals("resultLimit", KafkaAgent.searchTruncatedReason(
+            collection.messages.size(), 2, collection.incomplete, collection.scanBudgetReached
+        ));
+    }
+
+    @Test
+    void collectPeekedMessagesNewestFirstDoesNotReportTruncationWhenTheWindowIsFullyScanned() {
+        // 窗口内记录少于配额时扫到左端即完成，不应误报截断。
+        TopicPartition first = new TopicPartition("events", 0);
+        TopicPartition second = new TopicPartition("events", 1);
+        Map<TopicPartition, Long> positions = new HashMap<>();
+        positions.put(first, 0L);
+        positions.put(second, 0L);
+        KafkaAgent.PeekCollectionState collection =
+            new KafkaAgent.PeekCollectionState(List.of(first, second), 5, 5);
+
+        boolean complete = KafkaAgent.collectPeekedMessagesNewestFirst(
+            timeout -> {
+                positions.put(first, 1L);
+                positions.put(second, 1L);
+                return new ConsumerRecords<>(Map.of(
+                    first, List.of(searchRecord(first, 0L, 10L)),
+                    second, List.of(searchRecord(second, 0L, 20L))
+                ));
+            },
+            positions::get,
+            (partition, offset) -> {
+                throw new AssertionError("the window was fully scanned; no seek expected");
+            },
+            record -> true,
+            List.of(first, second),
+            Map.of(first, 0L, second, 0L),
+            Map.of(first, 1L, second, 1L),
+            collection,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        collection.incomplete = !complete;
+        assertEquals(2, collection.messages.size());
+        assertNull(KafkaAgent.searchTruncatedReason(
+            collection.messages.size(), 5, collection.incomplete, collection.scanBudgetReached
+        ));
+    }
+
+    /** 带显式事件时间的记录，用于构造跨分区时间乱序的回归场景。 */
+    private static ConsumerRecord<String, byte[]> searchRecord(
+        TopicPartition partition,
+        long offset,
+        long timestamp
+    ) {
+        return new ConsumerRecord<>(
+            partition.topic(),
+            partition.partition(),
+            offset,
+            timestamp,
+            TimestampType.CREATE_TIME,
+            -1L,
+            -1,
+            -1,
+            "k",
+            "v".getBytes(StandardCharsets.UTF_8)
+        );
     }
 
     @Test

@@ -2844,6 +2844,8 @@ export default {
     executionPicker: {
       title: "Execution Target",
       currentStatement: "Current SQL",
+      nestedStatement: "Query at cursor",
+      nestedStatementLevel: "Query at cursor (level {level})",
       allStatements: "All SQL",
       currentCommand: "Current command",
       allCommands: "All commands",

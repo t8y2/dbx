@@ -2774,6 +2774,8 @@ export default withEnglishFallback({
     executionPicker: {
       title: "执行目标",
       currentStatement: "当前 SQL",
+      nestedStatement: "光标处查询",
+      nestedStatementLevel: "光标处查询（第 {level} 层）",
       allStatements: "全部 SQL",
       currentCommand: "当前命令",
       allCommands: "全部命令",

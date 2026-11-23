@@ -3851,6 +3851,12 @@ export default withEnglishFallback({
     pasteRowsTruncated: "Вставлено строк: {applied}, не вставлено строк: {dropped}: текущий результат не поддерживает добавление строк или доступно недостаточно строк для добавления.",
     pasteCellText: "Вставить текст в эту ячейку",
     pasteCellTextFailed: "Не удалось вставить текст в ячейку: {message}",
+    filterGroup: "Группа условий",
+    filterGroupNumber: "Группа {number}",
+    addFilterGroup: "Добавить группу условий",
+    deleteFilterGroup: "Удалить группу условий",
+    enableAllFilterRules: "Включить все условия",
+    disableAllFilterRules: "Отключить все условия",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

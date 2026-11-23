@@ -4028,6 +4028,12 @@ export default withEnglishFallback({
     pasteRowsTruncated: "วางแล้ว {applied} แถว และอีก {dropped} แถวไม่ได้วาง: ผลลัพธ์ปัจจุบันไม่รองรับการเพิ่มแถว หรือจำนวนแถวที่เพิ่มได้ไม่เพียงพอ",
     pasteCellText: "วางข้อความลงในเซลล์นี้",
     pasteCellTextFailed: "ไม่สามารถวางข้อความลงในเซลล์: {message}",
+    filterGroup: "กลุ่มเงื่อนไข",
+    filterGroupNumber: "กลุ่ม {number}",
+    addFilterGroup: "เพิ่มกลุ่มเงื่อนไข",
+    deleteFilterGroup: "ลบกลุ่มเงื่อนไข",
+    enableAllFilterRules: "เปิดใช้งานเงื่อนไขทั้งหมด",
+    disableAllFilterRules: "ปิดใช้งานเงื่อนไขทั้งหมด",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",

@@ -3766,6 +3766,12 @@ export default withEnglishFallback({
     pasteRowsTruncated: "Sono state incollate {applied} righe, mentre {dropped} righe non sono state incollate: il risultato corrente non supporta l'aggiunta di righe oppure il numero di righe aggiungibili non è sufficiente.",
     pasteCellText: "Incolla il testo in questa cella",
     pasteCellTextFailed: "Impossibile incollare il testo nella cella: {message}",
+    filterGroup: "Gruppo di condizioni",
+    filterGroupNumber: "Gruppo {number}",
+    addFilterGroup: "Aggiungi gruppo di condizioni",
+    deleteFilterGroup: "Elimina gruppo di condizioni",
+    enableAllFilterRules: "Abilita tutte le condizioni",
+    disableAllFilterRules: "Disabilita tutte le condizioni",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

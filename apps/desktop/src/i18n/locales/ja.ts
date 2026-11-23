@@ -3788,6 +3788,12 @@ export default withEnglishFallback({
     pasteRowsTruncated: "{applied} 行を貼り付けました。残りの {dropped} 行は貼り付けられませんでした：現在の結果は行の追加をサポートしていないか、追加できる行数が不足しています。",
     pasteCellText: "このセルにテキストを貼り付け",
     pasteCellTextFailed: "セルにテキストを貼り付けできません：{message}",
+    filterGroup: "条件グループ",
+    filterGroupNumber: "グループ {number}",
+    addFilterGroup: "条件グループを追加",
+    deleteFilterGroup: "条件グループを削除",
+    enableAllFilterRules: "すべての条件を有効化",
+    disableAllFilterRules: "すべての条件を無効化",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

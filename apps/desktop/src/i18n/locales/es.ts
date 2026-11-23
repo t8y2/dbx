@@ -3904,6 +3904,12 @@ export default withEnglishFallback({
     pasteRowsTruncated: "Se pegaron {applied} filas y {dropped} filas no se pegaron: el resultado actual no admite agregar filas o no hay suficientes filas disponibles para agregar.",
     pasteCellText: "Pegar texto en esta celda",
     pasteCellTextFailed: "No se puede pegar texto en la celda: {message}",
+    filterGroup: "Grupo de condiciones",
+    filterGroupNumber: "Grupo {number}",
+    addFilterGroup: "Añadir grupo de condiciones",
+    deleteFilterGroup: "Eliminar grupo de condiciones",
+    enableAllFilterRules: "Activar todas las condiciones",
+    disableAllFilterRules: "Desactivar todas las condiciones",
   },
   exportProgress: {
     recoveryTitle: "¿Eliminar la exportación cuyo final no se ha confirmado?",

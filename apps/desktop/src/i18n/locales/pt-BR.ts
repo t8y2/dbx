@@ -3764,6 +3764,12 @@ export default withEnglishFallback({
     pasteRowsTruncated: "Foram coladas {applied} linhas; {dropped} linhas não foram coladas: o resultado atual não permite adicionar linhas, ou a quantidade de linhas que podem ser adicionadas é insuficiente.",
     pasteCellText: "Colar texto nesta célula",
     pasteCellTextFailed: "Não foi possível colar o texto na célula: {message}",
+    filterGroup: "Grupo de condições",
+    filterGroupNumber: "Grupo {number}",
+    addFilterGroup: "Adicionar grupo de condições",
+    deleteFilterGroup: "Excluir grupo de condições",
+    enableAllFilterRules: "Ativar todas as condições",
+    disableAllFilterRules: "Desativar todas as condições",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",

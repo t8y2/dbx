@@ -2823,6 +2823,10 @@ export default withEnglishFallback({
     settingsSaveFailed: "บันทึกการตั้งค่าแท็บไม่สำเร็จ: {message}",
     ungroupedTabs: "ไม่ได้จัดกลุ่ม",
     pluginTabs: "ปลั๊กอิน",
+    recentTablesTitle: "ตารางที่เปิดล่าสุด",
+    recentTablesSearch: "ค้นหาตารางที่เปิดล่าสุด",
+    recentTableOpen: "เปิดแล้ว",
+    recentTableClosed: "ปิดล่าสุด",
   },
   databaseBrowser: {
     search: "ค้นหาฐานข้อมูล...",

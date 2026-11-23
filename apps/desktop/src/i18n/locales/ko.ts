@@ -2583,6 +2583,10 @@ export default withEnglishFallback({
     settingsSaveFailed: "탭 설정을 저장하지 못했습니다: {message}",
     ungroupedTabs: "그룹 없음",
     pluginTabs: "플러그인",
+    recentTablesTitle: "최근에 연 테이블",
+    recentTablesSearch: "최근에 연 테이블 검색",
+    recentTableOpen: "열림",
+    recentTableClosed: "최근에 닫음",
   },
   databaseBrowser: {
     search: "데이터베이스 검색...",

@@ -153,12 +153,11 @@ function selectHistoryEntry(name: string, entry: SqlParameterInput) {
 // Enter in any parameter field submits the form -> Execute. Initial focus
 // goes to the first parameter input, not the header's "Clear values" button.
 function focusFirstParameterInputOnOpen(event: Event) {
+  const input = formRef.value?.querySelector<HTMLInputElement>("input[data-form-type='other']:not(:disabled)");
+  if (!input) return;
   event.preventDefault();
-  const input = formRef.value?.querySelector<HTMLInputElement>("input[data-form-type='other']");
-  if (input) {
-    input.focus();
-    input.select();
-  }
+  input.focus();
+  input.select();
 }
 
 function execute() {

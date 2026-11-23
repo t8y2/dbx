@@ -375,4 +375,11 @@ describe("SqlParameterDialog enter-to-execute", () => {
     await mountDialog();
     expect(document.activeElement).toBe(parameterInputs()[0]);
   });
+
+  it("skips a disabled NULL parameter when choosing the initial focus", async () => {
+    await mountDialog({ ...MIXED_VALUES, text_value: { kind: "null", value: "" } });
+    const [first, second] = parameterInputs();
+    expect(first.disabled).toBe(true);
+    expect(document.activeElement).toBe(second);
+  });
 });

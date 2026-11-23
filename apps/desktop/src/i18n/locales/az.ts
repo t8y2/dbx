@@ -7153,6 +7153,11 @@ export default withEnglishFallback({
     completedWithErrors: "İcra tamamlandı: {succeeded} uğurlu, {failed} uğursuz",
   },
   sqlFileTree: {
+    changeConnectionForFiles: "Məlumat mənbəyini təyin et ({count} fayl)",
+    changeConnectionForFilesDescription: "Seçilmiş yerli SQL faylları növbəti dəfə açılanda istifadə olunacaq bağlantını və standart verilənlər bazasını seçin.",
+    changeConnectionCloseFiles: "Seçilmiş açıq faylları əvvəlcə bağlayın.",
+    changeConnectionLimit: "Məlumat mənbəyini bir dəfəyə ən çox {count} fayl üçün təyin edə bilərsiniz.",
+    changeConnectionSaveFailed: "Faylların məlumat mənbəyini saxlamaq mümkün olmadı.",
     searchIncompleteHelp: "Bu axtarışın natamam olmasının səbəbləri:",
     searchSkippedTooLarge: "32 MiB-dan böyükdür: {count} fayl ötürüldü.",
     searchSkippedUnreadable: "Oxumaq mümkün olmadı (silinmiş ola bilər və ya giriş icazəsi yoxdur): {count} fayl və ya qovluq.",

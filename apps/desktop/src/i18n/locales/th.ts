@@ -10270,6 +10270,11 @@ export default withEnglishFallback({
     newDatabaseFailed: "ไม่สามารถสร้างฐานข้อมูล: {message}",
   },
   sqlFileTree: {
+    changeConnectionForFiles: "ตั้งค่าแหล่งข้อมูล ({count} ไฟล์)",
+    changeConnectionForFilesDescription: "เลือกการเชื่อมต่อและฐานข้อมูลเริ่มต้นสำหรับการเปิดไฟล์ SQL ในเครื่องที่เลือกครั้งถัดไป",
+    changeConnectionCloseFiles: "ปิดไฟล์ที่เลือกซึ่งเปิดอยู่ก่อน",
+    changeConnectionLimit: "ตั้งค่าแหล่งข้อมูลได้ครั้งละไม่เกิน {count} ไฟล์",
+    changeConnectionSaveFailed: "บันทึกแหล่งข้อมูลของไฟล์ไม่สำเร็จ",
     searchIncompleteHelp: "เหตุผลที่ผลการค้นหาครั้งนี้ไม่ครบถ้วน:",
     searchSkippedTooLarge: "ขนาดเกิน 32 MiB: ข้าม {count} ไฟล์",
     searchSkippedUnreadable: "อ่านไม่ได้ (อาจถูกลบหรือไม่มีสิทธิ์เข้าถึง): {count} ไฟล์หรือโฟลเดอร์",

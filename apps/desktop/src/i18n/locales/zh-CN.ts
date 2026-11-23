@@ -9694,6 +9694,11 @@ export default withEnglishFallback({
     completedWithErrors: "执行完成：成功 {succeeded} 条，失败 {failed} 条",
   },
   sqlFileTree: {
+    changeConnectionForFiles: "设置数据源（{count} 个文件）",
+    changeConnectionForFilesDescription: "为所选本地 SQL 文件设置下次打开时使用的连接和默认数据库。",
+    changeConnectionCloseFiles: "请先关闭已打开的所选文件。",
+    changeConnectionLimit: "一次最多可设置 {count} 个文件。",
+    changeConnectionSaveFailed: "保存文件数据源失败。",
     displayMode: "展示方式",
     displayModeFolder: "按文件夹结构",
     displayModeConnection: "按连接分组",

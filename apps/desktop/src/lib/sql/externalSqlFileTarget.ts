@@ -60,21 +60,28 @@ function loadExternalSqlFileTargets(): StoredExternalSqlFileTarget[] {
   }
 }
 
-function saveExternalSqlFileTargets(targets: StoredExternalSqlFileTarget[]) {
+function saveExternalSqlFileTargets(targets: StoredExternalSqlFileTarget[]): boolean {
   try {
     localStorage.setItem(EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY, JSON.stringify(targets));
-  } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function rememberExternalSqlFileTarget(path: string, target: ExternalSqlFileTarget) {
-  const normalizedPath = normalizeExternalSqlPath(path);
-  if (!normalizedPath) return;
-  const remaining = loadExternalSqlFileTargets().filter((item) => item.path !== normalizedPath);
-  if (!target.connectionId) {
-    saveExternalSqlFileTargets(remaining);
-    return;
-  }
-  saveExternalSqlFileTargets([{ path: normalizedPath, ...target, updatedAt: Date.now() }, ...remaining].slice(0, MAX_EXTERNAL_SQL_FILE_TARGETS));
+  rememberExternalSqlFileTargets([path], target);
+}
+
+export function rememberExternalSqlFileTargets(paths: readonly string[], target: ExternalSqlFileTarget): boolean {
+  const normalizedPaths = new Set(paths.map(normalizeExternalSqlPath).filter(Boolean));
+  if (normalizedPaths.size === 0) return true;
+  if (target.connectionId && normalizedPaths.size > MAX_EXTERNAL_SQL_FILE_TARGETS) return false;
+  const remaining = loadExternalSqlFileTargets().filter((item) => !normalizedPaths.has(item.path));
+  if (!target.connectionId) return saveExternalSqlFileTargets(remaining);
+  const updatedAt = Date.now();
+  const updated = [...normalizedPaths].map((path) => ({ path, ...target, updatedAt }));
+  return saveExternalSqlFileTargets([...updated, ...remaining].slice(0, MAX_EXTERNAL_SQL_FILE_TARGETS));
 }
 
 export function moveExternalSqlFileTarget(previousPath: string, nextPath: string) {

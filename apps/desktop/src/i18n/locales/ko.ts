@@ -8477,6 +8477,11 @@ export default withEnglishFallback({
     newDatabaseFailed: "데이터베이스를 생성할 수 없습니다: {message}",
   },
   sqlFileTree: {
+    changeConnectionForFiles: "데이터 소스 설정 (파일 {count}개)",
+    changeConnectionForFilesDescription: "선택한 로컬 SQL 파일을 다음에 열 때 사용할 연결과 기본 데이터베이스를 설정합니다.",
+    changeConnectionCloseFiles: "선택한 파일 중 이미 열려 있는 파일을 먼저 닫으세요.",
+    changeConnectionLimit: "한 번에 최대 {count}개 파일의 데이터 소스를 설정할 수 있습니다.",
+    changeConnectionSaveFailed: "파일의 데이터 소스를 저장하지 못했습니다.",
     searchIncompleteHelp: "이번 검색 결과가 완전하지 않은 이유:",
     searchSkippedTooLarge: "32 MiB 초과로 건너뜀: 파일 {count}개.",
     searchSkippedUnreadable: "읽을 수 없음(삭제되었거나 접근 권한이 없을 수 있음): 파일 또는 폴더 {count}개.",

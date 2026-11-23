@@ -11781,6 +11781,11 @@ export default withEnglishFallback({
     actionSuccess: "已完成對「{name}」的{action}。",
   },
   sqlFileTree: {
+    changeConnectionForFiles: "設定資料來源（{count} 個檔案）",
+    changeConnectionForFilesDescription: "為所選的本機 SQL 檔案設定下次開啟時使用的連線和預設資料庫。",
+    changeConnectionCloseFiles: "請先關閉已開啟的所選檔案。",
+    changeConnectionLimit: "一次最多可設定 {count} 個檔案。",
+    changeConnectionSaveFailed: "無法儲存檔案的資料來源。",
     searchIncompleteHelp: "本次搜尋結果不完整的原因：",
     searchSkippedTooLarge: "超過 32 MiB，已略過：{count} 個檔案。",
     searchSkippedUnreadable: "無法讀取（可能已刪除或無存取權限）：{count} 個檔案或目錄。",

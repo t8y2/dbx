@@ -11830,6 +11830,11 @@ export default withEnglishFallback({
     actionSuccess: "「{name}」の{action}が完了しました。",
   },
   sqlFileTree: {
+    changeConnectionForFiles: "データソースを設定（{count} ファイル）",
+    changeConnectionForFilesDescription: "選択したローカル SQL ファイルを次回開くときに使用する接続とその既定のデータベースを設定します。",
+    changeConnectionCloseFiles: "選択したファイルのうち、開いているものを先に閉じてください。",
+    changeConnectionLimit: "一度に最大 {count} ファイルまで設定できます。",
+    changeConnectionSaveFailed: "ファイルのデータソースを保存できませんでした。",
     searchIncompleteHelp: "今回の検索結果が不完全な理由：",
     searchSkippedTooLarge: "32 MiB を超えるためスキップ：{count} ファイル。",
     searchSkippedUnreadable: "読み取り不可（削除済み、またはアクセス権限がない可能性）：{count} ファイルまたはフォルダー。",

@@ -11807,6 +11807,11 @@ export default withEnglishFallback({
     actionSuccess: '{action} completato per "{name}".',
   },
   sqlFileTree: {
+    changeConnectionForFiles: "Imposta origine dati ({count} file)",
+    changeConnectionForFilesDescription: "Scegli la connessione e il relativo database predefinito da usare alla prossima apertura dei file SQL locali selezionati.",
+    changeConnectionCloseFiles: "Chiudi i file selezionati che sono già aperti.",
+    changeConnectionLimit: "Puoi impostare l’origine dati per un massimo di {count} file alla volta.",
+    changeConnectionSaveFailed: "Impossibile salvare l’origine dati dei file.",
     searchIncompleteHelp: "Perché questa ricerca è incompleta:",
     searchSkippedTooLarge: "Oltre 32 MiB: {count} file ignorati.",
     searchSkippedUnreadable: "Lettura non riuscita (forse rimossi o senza permessi): {count} file o cartelle.",

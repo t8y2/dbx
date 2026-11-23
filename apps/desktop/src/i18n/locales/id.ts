@@ -7852,6 +7852,11 @@ export default withEnglishFallback({
     completedWithErrors: "Eksekusi selesai: {succeeded} berhasil, {failed} gagal",
   },
   sqlFileTree: {
+    changeConnectionForFiles: "Tetapkan sumber data ({count} file)",
+    changeConnectionForFilesDescription: "Pilih koneksi dan basis data bawaannya untuk digunakan saat file SQL lokal yang dipilih dibuka kembali.",
+    changeConnectionCloseFiles: "Tutup file terpilih yang sedang terbuka.",
+    changeConnectionLimit: "Anda dapat menetapkan sumber data untuk maksimal {count} file sekaligus.",
+    changeConnectionSaveFailed: "Sumber data file tidak dapat disimpan.",
     searchIncompleteHelp: "Alasan hasil pencarian ini tidak lengkap:",
     searchSkippedTooLarge: "Lebih besar dari 32 MiB: {count} file dilewati.",
     searchSkippedUnreadable: "Tidak dapat dibaca (mungkin dihapus atau akses ditolak): {count} file atau folder.",

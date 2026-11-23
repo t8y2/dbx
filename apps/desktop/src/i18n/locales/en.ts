@@ -9732,6 +9732,11 @@ export default {
     completedWithErrors: "Execution completed: {succeeded} succeeded, {failed} failed",
   },
   sqlFileTree: {
+    changeConnectionForFiles: "Set data source ({count} files)",
+    changeConnectionForFilesDescription: "Choose the connection and its default database to use the next time the selected local SQL files open.",
+    changeConnectionCloseFiles: "Close any selected files that are already open.",
+    changeConnectionLimit: "You can set the data source for up to {count} files at once.",
+    changeConnectionSaveFailed: "Could not save the data source for the files.",
     displayMode: "Display mode",
     displayModeFolder: "Folder structure",
     displayModeConnection: "Group by connection",

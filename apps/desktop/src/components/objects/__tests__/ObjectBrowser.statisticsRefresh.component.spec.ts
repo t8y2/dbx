@@ -450,6 +450,35 @@ describe("MySQL table charset and collation columns", () => {
     expect(host.querySelector('[data-object-column-resize="collation"]')).toBeNull();
   });
 
+  it("merges statistics into the object list using the exact space-padded MySQL table identifier", async () => {
+    mocks.listObjects.mockResolvedValue([{ name: " orders ", object_type: "TABLE", schema: "pgdemo" }]);
+    mocks.listObjectStatistics.mockResolvedValue([
+      {
+        name: " orders ",
+        schema: "pgdemo",
+        estimated_rows: 7,
+        total_bytes: 4096,
+        engine: "InnoDB",
+        collation: "utf8mb4_bin",
+      },
+    ]);
+
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+
+    await vi.waitFor(() =>
+      expect(getCachedObjectBrowserRows(mysqlScope)?.[0]).toMatchObject({
+        name: " orders ",
+        displayName: "orders",
+        estimatedRows: 7,
+        totalBytes: 4096,
+        engine: "InnoDB",
+        characterSet: "utf8mb4",
+        collation: "utf8mb4_bin",
+      }),
+    );
+    expect(host.textContent).toContain("utf8mb4_bin");
+  });
+
   it("sorts tables by charset in both directions while keeping missing values last", async () => {
     const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
     await vi.waitFor(() => expect(host.textContent).toContain("latin1_swedish_ci"));

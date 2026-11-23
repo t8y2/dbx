@@ -51,6 +51,11 @@ export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalByt
 export type ObjectBrowserSortDirection = "asc" | "desc";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 
+// MySQL-family identifiers may contain leading/trailing spaces inside quotes,
+// so those rows must carry the exact metadata name. Other dialects keep the
+// historical normalized name; schema-index identities already opt in via type.
+const EXACT_TABLE_IDENTIFIER_DATABASE_TYPES: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb"]);
+
 export type ObjectBrowserPinnedTreeNodeContext = {
   connectionId: string;
   database: string;
@@ -211,11 +216,12 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
     }
     const type = normalizeObjectBrowserType(object.object_type);
     if (!type) return [];
-    // Table-like identifiers are DDL targets. MySQL allows leading/trailing
-    // spaces inside quoted names, so the row keeps the driver-reported name and
-    // only the display text is normalized; trimming here would make
-    // `ALTER TABLE` address a different table (#14905).
-    const preserveIdentifier = type === "TABLE" || type === "VIEW" || type === "MATERIALIZED_VIEW";
+    // Table-like identifiers are DDL targets. MySQL-family databases allow
+    // leading/trailing spaces inside quoted names, so only those rows keep the
+    // driver-reported name and normalize the display text; trimming would make
+    // `ALTER TABLE` address a different table (#14905). Other dialects keep
+    // their normalized name, preserving the pre-fix behavior.
+    const preserveIdentifier = (type === "TABLE" || type === "VIEW" || type === "MATERIALIZED_VIEW") && !!options.databaseType && EXACT_TABLE_IDENTIFIER_DATABASE_TYPES.has(options.databaseType);
     const postgresSequenceIdentity = type === "SEQUENCE" && options.databaseType === "postgres" ? { name: object.name, schema: object.schema ?? options.rowSchema } : undefined;
     const name = type === "INDEX" || preserveIdentifier ? object.name : normalizeDatabaseObjectName(object.name);
     if (!name.trim() && !postgresSequenceIdentity?.name) return [];

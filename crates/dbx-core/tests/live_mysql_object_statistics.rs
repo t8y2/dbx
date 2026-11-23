@@ -101,3 +101,90 @@ async fn live_mysql_object_statistics_refresh_after_writes() {
     assert_eq!(refreshed, Some(7), "the cached row count must be refreshed after the inserts");
     cleanup.expect("drop the live statistics fixture table");
 }
+
+/// The object list keeps MySQL identifiers verbatim (a leading space is legal
+/// inside backticks). Statistics must use the exact same key or the browser
+/// loses the row count, engine, charset and collation for the table (#14905).
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_MYSQL_HOST/PORT/USER/PASSWORD/DATABASE pointing at a writable MySQL 8 server"]
+async fn live_mysql_object_statistics_match_space_padded_object_list() {
+    let database = std::env::var("DBX_LIVE_MYSQL_DATABASE").expect("DBX_LIVE_MYSQL_DATABASE");
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-object-statistics-padded-{suffix}");
+    // MySQL forbids a trailing space in a table name, but a leading space is
+    // significant inside backticks and is enough to catch key normalization.
+    let table = format!(" dbx_stats_padded_{}", &suffix[..12]);
+    let dir = std::env::temp_dir().join(format!("dbx-live-mysql-object-statistics-padded-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    state.configs.write().await.insert(connection_id.clone(), live_mysql_config(&connection_id, &database));
+
+    execute_sql_statement(&state, &connection_id, &database, &format!("DROP TABLE IF EXISTS `{table}`"), None, None)
+        .await
+        .expect("clean the live padded statistics fixture table");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE TABLE `{table}` (id INT PRIMARY KEY AUTO_INCREMENT, label VARCHAR(32) NOT NULL)"),
+        None,
+        None,
+    )
+    .await
+    .expect("create the live padded statistics fixture table");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("INSERT INTO `{table}` (id, label) VALUES (1, 'row-1')"),
+        None,
+        None,
+    )
+    .await
+    .expect("insert the live padded statistics fixture row");
+
+    let object_types = vec!["TABLE".to_string()];
+    let objects = dbx_core::schema::list_objects_core(
+        &state,
+        &connection_id,
+        &database,
+        "",
+        None,
+        None,
+        None,
+        Some(&object_types),
+        None,
+    )
+    .await
+    .expect("object list for a live MySQL schema");
+    let object_names = objects.iter().map(|object| object.name.clone()).collect::<Vec<_>>();
+    let statistics = dbx_core::schema::list_object_statistics_core(&state, &connection_id, &database, "")
+        .await
+        .expect("object statistics for a live MySQL schema");
+    let matching_statistics = statistics
+        .iter()
+        .find(|entry| entry.name == table)
+        .map(|entry| (entry.schema.clone(), entry.estimated_rows, entry.engine.clone(), entry.collation.clone()));
+    let cleanup = execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("DROP TABLE IF EXISTS `{table}`"),
+        None,
+        None,
+    )
+    .await;
+
+    assert!(object_names.contains(&table), "the object list must keep the exact MySQL table identifier");
+    let (schema, estimated_rows, engine, collation) =
+        matching_statistics.expect("statistics must use the exact object-list table name");
+    assert_eq!(schema.as_deref(), Some(database.as_str()));
+    assert_eq!(estimated_rows, Some(1));
+    assert!(engine.is_some_and(|value| !value.trim().is_empty()), "engine must be reported for the matched table");
+    assert!(
+        collation.is_some_and(|value| !value.trim().is_empty()),
+        "collation must be reported for the matched table"
+    );
+    cleanup.expect("drop the live padded statistics fixture table");
+}

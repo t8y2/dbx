@@ -292,7 +292,7 @@ test("object browser rows sort estimated rows and table size with empty values l
 });
 
 test("object browser formats statistics for compact table cells", () => {
-  assert.equal(formatObjectBrowserCount(1234567), "1,234,567");
+  assert.equal(formatObjectBrowserCount(1234567), (1234567).toLocaleString());
   assert.equal(formatObjectBrowserBytes(1536), "1.50 KB");
   assert.equal(formatObjectBrowserBytes(null), "");
 });

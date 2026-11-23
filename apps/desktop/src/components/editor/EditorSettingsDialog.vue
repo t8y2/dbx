@@ -7631,6 +7631,8 @@ function aiEnterEditMode(configId?: string) {
   syncAiEditState();
   aiConfigListMode.value = "edit";
   aiEditConfigId.value = configId || null;
+  // 进入编辑即丢弃该行的列表测试结果：编辑期间结果必然过时，保存后需重测（#15467 评审）。
+  if (configId) aiClearListTestState(configId);
 
   if (configId) {
     const config = settingsStore.aiConfigs.find((c) => c.id === configId);
@@ -7779,6 +7781,8 @@ async function aiSaveConfig() {
   try {
     if (aiEditConfigId.value) {
       await settingsStore.updateAiConfigItem(aiEditConfigId.value, config);
+      // 保存即改变配置内容，旧测试结果不再描述当前配置（#15467 评审）。
+      aiClearListTestState(aiEditConfigId.value);
     } else {
       await settingsStore.createAiConfig(config);
     }
@@ -8032,28 +8036,57 @@ async function copyAiTestError() {
 
 // #15393: per-config test from the AI config list. Reuses the same backend
 // probe as the edit-mode footer button, keyed by config id so each row keeps
-// its own status while a test is in flight.
+// its own status while a test is in flight. Each result keeps the snapshot it
+// was tested against: once the saved config changes (edited, replaced, or
+// deleted), the stale result is dropped instead of describing a config that
+// no longer exists (review on #15467), matching the edit-mode
+// isAiConnectionTestConfigCurrent guard.
 interface AiListTestState {
   status: "testing" | "success" | "error";
   latencyMs: number | null;
   error: string;
+  testedConfig: AiConfigItem;
 }
 const aiListTestStates = ref<Record<string, AiListTestState>>({});
 
+function aiListTestConfigCurrent(tested: AiConfigItem): boolean {
+  const current = settingsStore.aiConfigs.find((candidate) => candidate.id === tested.id);
+  return current !== undefined && isAiConnectionTestConfigCurrent(tested, current);
+}
+
+const aiListTestVisibleStates = computed(() => {
+  const visible: Record<string, AiListTestState> = {};
+  for (const config of settingsStore.aiConfigs) {
+    const state = aiListTestStates.value[config.id];
+    if (state && aiListTestConfigCurrent(state.testedConfig)) visible[config.id] = state;
+  }
+  return visible;
+});
+
 function aiListTestErrorTitle(configId: string): string {
-  const error = aiListTestStates.value[configId]?.error ?? "";
+  const error = aiListTestVisibleStates.value[configId]?.error ?? "";
   const presentation = aiTestErrorPresentationOf(error);
   return [presentation.summary, presentation.detail].filter(Boolean).join(" ");
 }
 
 async function aiTestConfigFromList(config: AiConfigItem) {
   if (aiListTestStates.value[config.id]?.status === "testing") return;
-  aiListTestStates.value[config.id] = { status: "testing", latencyMs: null, error: "" };
+  aiListTestStates.value[config.id] = { status: "testing", latencyMs: null, error: "", testedConfig: { ...config } };
+  const stillCurrent = () => aiListTestConfigCurrent(config);
   try {
     const result = await aiTestConnection(config);
-    aiListTestStates.value[config.id] = { status: "success", latencyMs: result.latencyMs ?? null, error: "" };
+    if (!stillCurrent()) {
+      // 配置在测试期间被编辑/删除：结果描述的不是当前配置，直接丢弃。
+      delete aiListTestStates.value[config.id];
+      return;
+    }
+    aiListTestStates.value[config.id] = { status: "success", latencyMs: result.latencyMs ?? null, error: "", testedConfig: { ...config } };
   } catch (e) {
-    aiListTestStates.value[config.id] = { status: "error", latencyMs: null, error: translateBackendError(t, e) };
+    if (!stillCurrent()) {
+      delete aiListTestStates.value[config.id];
+      return;
+    }
+    aiListTestStates.value[config.id] = { status: "error", latencyMs: null, error: translateBackendError(t, e), testedConfig: { ...config } };
   }
 }
 
@@ -12663,16 +12696,16 @@ LIMIT 100;</pre>
                       </div>
                     </div>
                     <div class="flex items-center gap-1">
-                      <Button type="button" size="sm" variant="ghost" :disabled="aiListTestStates[config.id]?.status === 'testing'" @click="aiTestConfigFromList(config)">
-                        <Loader2 v-if="aiListTestStates[config.id]?.status === 'testing'" class="mr-1 h-3 w-3 animate-spin" />
+                      <Button type="button" size="sm" variant="ghost" :disabled="aiListTestVisibleStates[config.id]?.status === 'testing'" @click="aiTestConfigFromList(config)">
+                        <Loader2 v-if="aiListTestVisibleStates[config.id]?.status === 'testing'" class="mr-1 h-3 w-3 animate-spin" />
                         {{ t("connection.test") }}
                       </Button>
-                      <span v-if="aiListTestStates[config.id]?.status === 'success'" class="shrink-0 text-xs text-green-500">
+                      <span v-if="aiListTestVisibleStates[config.id]?.status === 'success'" class="shrink-0 text-xs text-green-500">
                         {{ t("connection.testSuccess") }}
-                        <span v-if="aiListTestStates[config.id]?.latencyMs != null" class="text-green-500/70">{{ aiListTestStates[config.id]?.latencyMs }}ms</span>
+                        <span v-if="aiListTestVisibleStates[config.id]?.latencyMs != null" class="text-green-500/70">{{ aiListTestVisibleStates[config.id]?.latencyMs }}ms</span>
                       </span>
-                      <span v-else-if="aiListTestStates[config.id]?.status === 'error'" class="max-w-[16rem] truncate text-xs text-destructive" :title="aiListTestErrorTitle(config.id)">
-                        {{ aiListTestStates[config.id]?.error }}
+                      <span v-else-if="aiListTestVisibleStates[config.id]?.status === 'error'" class="max-w-[16rem] truncate text-xs text-destructive" :title="aiListTestErrorTitle(config.id)">
+                        {{ aiListTestVisibleStates[config.id]?.error }}
                       </span>
                       <Button v-if="!config.isDefault" type="button" size="sm" variant="ghost" @click="aiSetDefaultConfig(config.id)">
                         {{ t("ai.setDefault") }}

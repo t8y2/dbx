@@ -17,6 +17,9 @@ const backend = vi.hoisted(() => ({
   testResult: null as AiTestConnectionResult | null,
   testError: null as Error | null,
   testCalls: [] as unknown[],
+  // hold 为 true 时挂起探测请求，由测试手动放行（模拟响应晚于配置编辑）。
+  hold: false,
+  release: null as ((result: AiTestConnectionResult) => void) | null,
 }));
 
 vi.mock("@/lib/backend/api", async (importOriginal) => {
@@ -39,9 +42,17 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     loadMaxRetries: async () => 3,
     aiTestConnection: async (config: unknown) => {
       backend.testCalls.push(config);
+      if (backend.hold) {
+        return await new Promise<AiTestConnectionResult>((resolve) => {
+          backend.release = resolve;
+        });
+      }
       if (backend.testError) throw backend.testError;
       return backend.testResult;
     },
+    saveAiConfigItem: async () => undefined,
+    createAiConfigItem: async () => undefined,
+    deleteAiConfigItem: async () => undefined,
     webdavSyncSecretsStatus: async () => ({}),
     snippetSavedTokenStatus: async () => ({}),
     snippetSyncSettings: async () => ({}),
@@ -78,6 +89,8 @@ beforeEach(() => {
   backend.testResult = null;
   backend.testError = null;
   backend.testCalls = [];
+  backend.hold = false;
+  backend.release = null;
   localStorage.clear();
 });
 
@@ -88,7 +101,7 @@ afterEach(() => {
   app = undefined;
 });
 
-async function mountAiSettings() {
+async function mountAiSettings(): Promise<ReturnType<typeof useSettingsStore>> {
   const pinia = createPinia();
   setActivePinia(pinia);
   const store = useSettingsStore();
@@ -122,6 +135,7 @@ async function mountAiSettings() {
   await settle();
   dialogProps.open = true;
   await settle();
+  return store;
 }
 
 describe("EditorSettingsDialog AI config list test", () => {
@@ -156,6 +170,49 @@ describe("EditorSettingsDialog AI config list test", () => {
     const errorSpan = [...row.querySelectorAll("span")].find((span) => span.textContent?.includes("[auth] invalid api key"));
     expect(errorSpan?.getAttribute("title")).toContain("invalid api key");
     // 失败后重试入口仍在且不再处于 testing 态
+    expect(button!.disabled).toBe(false);
+  });
+
+  // #15467 评审：编辑过的配置不能再显示旧的成功结果。
+  it("drops the stale success once the saved config is edited", async () => {
+    backend.testResult = { success: true, message: "ok", latencyMs: 123, modelUsed: "test-model" };
+    const store = await mountAiSettings();
+
+    const button = rowTestButton();
+    button!.click();
+    await settle();
+    expect(button!.closest("div")!.textContent).toContain("连接成功");
+
+    await store.updateAiConfigItem(fixtureConfig.id, { ...fixtureConfig, endpoint: "https://changed.example/v1" });
+    await settle();
+
+    expect(button!.closest("div")!.textContent).not.toContain("连接成功");
+    expect(button!.closest("div")!.textContent).not.toContain("123ms");
+    // 按钮恢复可用，可对新配置重测
+    expect(button!.disabled).toBe(false);
+  });
+
+  // #15467 评审：响应晚于配置编辑的在飞请求，结果必须丢弃。
+  it("discards an in-flight result when the config changes before the response", async () => {
+    backend.hold = true;
+    const store = await mountAiSettings();
+
+    const button = rowTestButton();
+    button!.click();
+    await settle();
+    // 请求已发出且按钮处于 testing 态
+    expect(backend.testCalls).toHaveLength(1);
+    expect(button!.disabled).toBe(true);
+
+    await store.updateAiConfigItem(fixtureConfig.id, { ...fixtureConfig, model: "changed-model" });
+    await settle();
+
+    backend.release!({ success: true, message: "ok", latencyMs: 456, modelUsed: "test-model" });
+    await settle();
+
+    const row = button!.closest("div")!;
+    expect(row.textContent).not.toContain("连接成功");
+    expect(row.textContent).not.toContain("456ms");
     expect(button!.disabled).toBe(false);
   });
 });

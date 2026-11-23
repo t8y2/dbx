@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { markRowIdLocatorSupported, markRowIdLocatorUnsupported, resetRowIdLocatorStateForTests, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
+import { isPostgresTupleLocatorRejection, markRowIdLocatorSupported, markRowIdLocatorUnsupported, resetRowIdLocatorStateForTests, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import type { QueryResult } from "@/types/database";
 
 const locatorSql = `SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS "__DBX_ROWID", * FROM "public"."events" LIMIT 200;`;
@@ -43,5 +43,26 @@ describe("tableRowIdSupport", () => {
     markRowIdLocatorUnsupported("conn-1");
     expect(rowIdLocatorUnsupported("conn-1")).toBe(true);
     expect(rowIdLocatorUnsupported("conn-2")).toBe(false);
+  });
+});
+
+describe("isPostgresTupleLocatorRejection", () => {
+  it("matches explicit system-column rejections from PostgreSQL-compatible engines", () => {
+    // Exact wording reported by Crunchy bridge for external tables (#15071).
+    expect(isPostgresTupleLocatorRejection('System column "xmin" is not supported for crunchy_lake_analytics table "dim_zip3"')).toBe(true);
+    expect(isPostgresTupleLocatorRejection("System column tableoid is not supported for foreign table ft_events")).toBe(true);
+    expect(isPostgresTupleLocatorRejection("ERROR: System column 'ctid' is not supported for iceberg DIM_ZIP3")).toBe(true);
+  });
+
+  it("matches Hologres-style query-translation failures for locator variables", () => {
+    expect(isPostgresTupleLocatorRejection("ERROR: Variable tableoid can't be found in query translation")).toBe(true);
+    expect(isPostgresTupleLocatorRejection("ERROR: Variable ctid can't be found in query translation")).toBe(true);
+  });
+
+  it("does not match permission failures, transport errors, or ordinary column errors", () => {
+    expect(isPostgresTupleLocatorRejection("permission denied for table events")).toBe(false);
+    expect(isPostgresTupleLocatorRejection("error trying to connect: tcp connect error: Connection refused")).toBe(false);
+    expect(isPostgresTupleLocatorRejection('column "xmin" does not exist')).toBe(false);
+    expect(isPostgresTupleLocatorRejection("")).toBe(false);
   });
 });

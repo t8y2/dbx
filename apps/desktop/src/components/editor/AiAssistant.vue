@@ -178,7 +178,7 @@ import { isAiConfigModelCandidate, isCliProvider } from "@/lib/ai/aiConfigCandid
 import { deleteConversationWithCancellation, stopAiGenerationWithFallback } from "@/lib/ai/aiConversationLifecycle";
 import { AiGenerationGuard } from "@/lib/ai/aiGenerationGuard";
 import { applyStatusEvent, createGenerationStatus, createStatusTicker, liveAnnouncementText, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, type AiGenerationStatus } from "@/lib/ai/aiGenerationStatus";
-import { supportsBackgroundAiRuns } from "@/lib/ai/aiRuntimeStrategy";
+import { resolveAiRuntimeStrategy, supportsBackgroundAiRuns } from "@/lib/ai/aiRuntimeStrategy";
 import {
   acquireDesktopAiRunSlot,
   activeDesktopAiRuns,
@@ -319,7 +319,8 @@ const { openTableTarget } = useNavigationTargets({
 const { toast } = useToast();
 const { isDark } = useTheme();
 const supportsCliProviders = isTauriRuntime();
-const backgroundAiRunsEnabled = supportsBackgroundAiRuns();
+const aiRuntimeStrategy = resolveAiRuntimeStrategy();
+const backgroundAiRunsEnabled = supportsBackgroundAiRuns(aiRuntimeStrategy);
 
 type AiMessageMention =
   | {
@@ -705,12 +706,14 @@ const aiContextTarget = computed<AiContextTarget>(() => aiContextTargetFor(conve
 function restoreInitialConversation() {
   if (!assistantViewMounted || initialConversationRestored || !initialConversationStateLoaded || !settings.isAiConfigLoaded) return;
   initialConversationRestored = true;
+  // A new detached editor starts its own chat instead of implicitly adopting
+  // a conversation that may still be running in the main window.
   // Pinned conversations sort to index 0, so "restore last" must ask for the
   // newest one explicitly — otherwise pinning an old chat would hijack startup
   // (#14226).
-  const lastConversation = mostRecentConversation(conversations.value);
-  if (settings.restoreLastConversation && lastConversation) {
-    selectConversation(lastConversation);
+  if (aiRuntimeStrategy !== "desktop-cancel-on-close" && settings.restoreLastConversation) {
+    const lastConversation = mostRecentConversation(conversations.value);
+    if (lastConversation) selectConversation(lastConversation);
   }
 }
 watch(
@@ -6907,7 +6910,14 @@ function focusSearch(): boolean {
   return true;
 }
 
-defineExpose({ openPluginConversation, openExternalContext, triggerAction, clearContextReferences, selectConversationById, focusSearch, reportAiSqlAction });
+async function prepareForWindowClose() {
+  if (backgroundAiRunsEnabled) return;
+  flushAssistantDeltas();
+  if (isGenerating.value) abandonInFlightRequest();
+  await persistConversation();
+}
+
+defineExpose({ openPluginConversation, openExternalContext, triggerAction, clearContextReferences, selectConversationById, focusSearch, reportAiSqlAction, prepareForWindowClose });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;
@@ -8493,7 +8503,7 @@ async function openExternalUrl(url: string) {
   background: var(--muted);
   padding: 0.125rem 0.375rem;
   font-size: var(--dbx-ai-inline-code-font-size, 11px);
-  font-family: ui-monospace, monospace;
+  font-family: var(--dbx-ai-content-font-family, ui-monospace, monospace);
 }
 .ai-markdown :deep(pre) {
   background: var(--muted);
@@ -8505,6 +8515,7 @@ async function openExternalUrl(url: string) {
 .ai-markdown :deep(pre code) {
   background: none;
   padding: 0;
+  font-family: ui-monospace, monospace;
 }
 .ai-markdown :deep(table) {
   border-collapse: collapse;

@@ -3,10 +3,12 @@ import * as api from "@/lib/backend/api";
 import { exactOracleTriggerMetadata } from "@/lib/database/oracleTriggerIdentity";
 import { oracleTriggerSourceBinding, oracleTriggerSourceScopeMatches, type OracleTriggerDatabaseType, type PreparedOracleTriggerSql } from "@/lib/database/oracleTriggerSql";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
+import { formatSqlForDisplay, MAX_SQL_FORMAT_CHARS } from "@/lib/sql/sqlFormatter";
+import type { SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 
 export type GetObjectSourceFn = (connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string, relationName?: string, options?: MetadataReadOptions) => Promise<ObjectSource>;
 
-export type BuildEditableObjectSourceFn = (input: { databaseType: DatabaseType; objectType: ObjectSourceKind; schema?: string; name: string; source: string }) => Promise<string>;
+export type BuildEditableObjectSourceFn = (input: { databaseType: DatabaseType; objectType: ObjectSourceKind; schema?: string; name: string; source: string; identifierQuote?: string }) => Promise<string>;
 
 export type OracleTriggerSourceInspection = { complete: boolean; prepared?: PreparedOracleTriggerSql; error?: string };
 
@@ -110,9 +112,13 @@ export async function loadEditableObjectSourceForEditor(
     name: string;
     objectType: ObjectSourceKind;
     databaseType: DatabaseType;
+    sqlFormatter?: Partial<SqlFormatterSettings>;
     signature?: string;
     relationName?: string;
     metadataReadOptions?: MetadataReadOptions;
+    /** Quote character reported by the connected server, for types whose quote is not fixed by
+     * the database type alone (GaussDB M/B/MYSQL mode reports a backtick). */
+    identifierQuote?: string;
   },
 ): Promise<{ raw: ObjectSource; editableSource: string; objectType: ObjectSourceKind; triggerSource?: OracleTriggerSourceInspection }> {
   const { source: raw, objectType: resolvedType } = await loadObjectSourceWithRoutineFallback(getObjectSource, options.connectionId, options.database, options.schema, options.name, options.objectType, options.signature, options.relationName, options.metadataReadOptions);
@@ -121,17 +127,33 @@ export async function loadEditableObjectSourceForEditor(
     return { raw, objectType: resolvedType, ...(await inspectExactOracleTriggerSource(raw, options.schema, options.name)) };
   }
 
-  const editableSource = await buildEditableObjectSource({
+  const preparedSource = await buildEditableObjectSource({
     databaseType: options.databaseType,
     objectType: resolvedType,
     schema: options.schema,
     name: options.name,
     source: raw.source,
+    identifierQuote: options.identifierQuote,
   });
+  let editableSource = preparedSource.trim() ? preparedSource : raw.source;
+  if (options.databaseType === "mysql" && resolvedType === "VIEW" && editableSource.length <= MAX_SQL_FORMAT_CHARS) {
+    // Keep SHOW CREATE VIEW's ALGORITHM/DEFINER header intact. Formatting the
+    // query separately avoids treating those MySQL clauses as query columns.
+    const tokens = tokenizeSqlSemantic(editableSource, "mysql");
+    const viewIndex = tokens.findIndex((token) => token.kind === "word" && token.normalized === "view" && token.depth === 0);
+    const separator = viewIndex < 0 ? undefined : tokens.slice(viewIndex + 1).find((token) => token.kind === "word" && token.normalized === "as" && token.depth === 0);
+    if (separator) {
+      const query = editableSource.slice(separator.span.end).trimStart();
+      const formatted = await formatSqlForDisplay(query, "mysql", options.sqlFormatter);
+      if (formatted !== query) editableSource = `${editableSource.slice(0, separator.span.end).trimEnd()}\n${formatted}`;
+    } else {
+      editableSource = await formatSqlForDisplay(editableSource, "mysql", options.sqlFormatter);
+    }
+  }
 
   return {
     raw,
-    editableSource: editableSource.trim() ? editableSource : raw.source,
+    editableSource,
     objectType: resolvedType,
   };
 }

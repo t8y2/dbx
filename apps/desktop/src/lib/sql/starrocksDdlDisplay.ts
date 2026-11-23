@@ -1,5 +1,7 @@
 import { tokenizeSqlSemantic } from "./semantic/tokens";
 import type { SqlSemanticToken } from "./semantic/types";
+import { formatSqlForDisplay, MAX_SQL_FORMAT_CHARS } from "./sqlFormatter";
+import type { SqlFormatterSettings } from "./sqlFormatterConfig";
 
 const TYPES = new Set([
   "boolean",
@@ -32,6 +34,22 @@ const TYPES = new Set([
   "percentile",
 ]);
 const ATTRIBUTES = new Set(["null", "not", "default", "comment", "key", "auto_increment", "as", "generated", "sum", "min", "max", "replace", "replace_if_not_null", "hll_union", "bitmap_union", "percentile_union"]);
+
+/** Preserve the view declaration while formatting only its MySQL-compatible query. */
+export async function formatStarRocksViewForDisplay(sql: string, settings: Partial<SqlFormatterSettings>): Promise<string> {
+  if (sql.length > MAX_SQL_FORMAT_CHARS) return sql;
+  const tokens = tokenizeSqlSemantic(sql, "mysql");
+  if (tokens.some((token) => token.closed === false)) return sql;
+  const topLevel = tokens.filter((token) => token.depth === 0 && token.kind !== "comment");
+  let viewIndex = 1;
+  if (topLevel[1]?.normalized === "or" && topLevel[2]?.normalized === "replace") viewIndex = 3;
+  if (topLevel[0]?.normalized !== "create" || topLevel[viewIndex]?.normalized !== "view") return sql;
+  const separator = topLevel.slice(viewIndex + 1).find((token) => token.kind === "word" && token.normalized === "as");
+  if (!separator) return sql;
+  const query = sql.slice(separator.span.end).trimStart();
+  const formatted = await formatSqlForDisplay(query, "mysql", settings);
+  return formatted === query ? sql : `${sql.slice(0, separator.span.end).trimEnd()}\n${formatted}`;
+}
 
 function inline(tokens: SqlSemanticToken[]): string {
   let text = "";

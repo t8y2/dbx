@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { sidebarTreeIconSize } from "@/lib/sidebar/connectionBadge";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { parse } from "vue/compiler-sfc";
@@ -33,6 +34,7 @@ function measure(nodes: TreeNode[], mode: string, alignedWidths = new Map<string
   const context = { font: "", measureText: (text: string) => ({ width: text.length * 7 }) };
   execute(`${statement("sidebarTreeLeadingWidthItems")}\n${statement("measureSidebarTreeLeadingWidth")}\n${statement("sidebarTreeNaturalWidthItems")}\n${statement("measureSidebarTreeContentWidth")}\nmeasureSidebarTreeContentWidth();`, {
     computed,
+    sidebarTreeIconSize,
     flatNodes: ref(nodes.map((node) => ({ node, depth: 3 }))),
     settingsStore: { editorSettings: { sidebarAllowHorizontalScroll: true, sidebarObjectInfoMode: mode, sidebarIndent: 16, sidebarShowConnectionNotes: true } },
     store: { getConfig: () => undefined, isTreeNodePinned: () => false, isDefaultDatabase: () => false, isDefaultSchema: () => false },
@@ -87,6 +89,7 @@ describe("ConnectionTree horizontal scrolling", () => {
     const index: TreeNode = { id: "index", type: "elasticsearch-index", label: "logs", searchAliases: ["long_search_alias"], comment: "index comment" };
     const run = execute(`${statement("sidebarTreeLeadingWidthItems")}\n${statement("measureSidebarTreeLeadingWidth")}\n${statement("measureSidebarCommentLabelWidths")}\nreturn measureSidebarCommentLabelWidths;`, {
       computed,
+      sidebarTreeIconSize,
       flatNodes: ref([
         { id: schema.id, depth: 0, node: schema },
         { id: index.id, depth: 1, node: index },

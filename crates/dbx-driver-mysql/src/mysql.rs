@@ -23,7 +23,10 @@ use crate::models::connection::{
     is_mysql_jdbc_tls_param, mysql_jdbc_tls_mode, ConnectionConfig, DatabaseConnectionInfo, DatabaseType,
     MysqlJdbcTlsMode,
 };
-use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database};
+use crate::sql::{
+    contains_ascii_case_insensitive, starts_with_executable_sql_keyword,
+    starts_with_executable_sql_keyword_for_database,
+};
 use crate::types::{
     is_opaque_aggregate_state_type, ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate,
     CompletionAssistantCandidateKind, CompletionAssistantMatchMode, CompletionAssistantObjectKind,
@@ -54,6 +57,7 @@ pub struct MySqlPool {
     /// pool at creation time so that metadata, DDL, connection-info, cancel and
     /// streaming paths do not fall back to a compile-time constant (#12908).
     checkout_timeout: Duration,
+    stateless_http_tunnel: bool,
 }
 
 impl MySqlPool {
@@ -78,6 +82,7 @@ impl MySqlPool {
             data_charset: None,
             checkout_verifications: Default::default(),
             checkout_timeout: checkout_timeout.max(Duration::from_secs(1)),
+            stateless_http_tunnel: false,
         }
     }
 
@@ -91,7 +96,16 @@ impl MySqlPool {
     /// session state (temporary tables, user variables, selected catalog)
     /// survives across executions in the same tab.
     pub fn is_client_session_pool(&self) -> bool {
-        self.max_connections == 1
+        self.max_connections == 1 && !self.stateless_http_tunnel
+    }
+
+    /// Navicat PHP tunnels open a new MySQL session for every HTTP request.
+    pub fn is_stateless_http_tunnel(&self) -> bool {
+        self.stateless_http_tunnel
+    }
+
+    pub fn set_stateless_http_tunnel(&mut self) {
+        self.stateless_http_tunnel = true;
     }
 
     pub fn data_charset(&self) -> Option<MySqlDataCharset> {
@@ -106,7 +120,6 @@ impl MySqlPool {
     /// generation. Pool options are not an identity: a reconnect creates a new
     /// pool with identical options, and a late health probe for the old pool
     /// must not be allowed to remove that replacement from routing.
-    #[cfg(any(test, feature = "test-support"))]
     pub fn is_same_pool(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.inner.metrics(), &other.inner.metrics())
     }
@@ -2583,6 +2596,13 @@ pub async fn apply_catalog_database_context(
     Ok(())
 }
 
+/// Selects a database without resetting the connection or committing a transaction.
+pub async fn select_session_database(conn: &mut mysql_async::Conn, database: &str) -> Result<(), String> {
+    conn.query_drop(format!("USE {}", quote_identifier(database)))
+        .await
+        .map_err(|error| format!("Failed to select query database: {error}"))
+}
+
 fn should_enable_explicit_timestamp_defaults(sql: &str) -> bool {
     if !starts_with_executable_sql_keyword(sql, &["CREATE", "ALTER"]) {
         return false;
@@ -2695,6 +2715,22 @@ fn mysql_connection_session_variable_assignments(url: &str) -> Vec<String> {
     };
 
     split_mysql_session_variables(&value)
+}
+
+/// Initialize native MySQL sessions in auto-commit mode unless the connection
+/// URL explicitly configures it. Apply this only during connection setup/reset,
+/// never on checkout: changing it on a live session could commit a transaction.
+pub fn default_autocommit_setup_query(url: &str) -> Option<&'static str> {
+    let configured = mysql_connection_session_variable_assignments(url).into_iter().any(|assignment| {
+        let Some((name, _)) = assignment.split_once('=') else {
+            return false;
+        };
+        let name = name.trim().trim_end_matches(':').trim().to_ascii_lowercase();
+        let name = name.strip_prefix("@@").unwrap_or(&name);
+        let name = name.strip_prefix("session.").or_else(|| name.strip_prefix("local.")).unwrap_or(name);
+        name.trim_matches('`') == "autocommit"
+    });
+    (!configured).then_some("SET SESSION autocommit = 1")
 }
 
 /// Detects an explicit `group_concat_max_len` assignment in the connection URL.
@@ -4656,7 +4692,7 @@ fn list_tables_objects_sql(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> String {
-    list_tables_objects_sql_with_loading(database, object_types, limit, offset, false)
+    list_tables_objects_sql_with_loading(database, object_types, limit, offset, false, false)
 }
 
 fn list_tables_objects_sql_with_loading(
@@ -4665,11 +4701,14 @@ fn list_tables_objects_sql_with_loading(
     limit: Option<usize>,
     offset: Option<usize>,
     lightweight: bool,
+    comment_in_lightweight: bool,
 ) -> String {
-    let details = if lightweight {
-        "NULL AS object_comment, NULL AS created_at, NULL AS updated_at"
-    } else {
-        "TABLE_COMMENT AS object_comment, CREATE_TIME AS created_at, UPDATE_TIME AS updated_at"
+    let details = match (lightweight, comment_in_lightweight) {
+        // MySQL 8+ resolves TABLE_COMMENT from the data dictionary, so the light
+        // browser load keeps comments while still skipping the heavy stat columns (#14382).
+        (true, true) => "TABLE_COMMENT AS object_comment, NULL AS created_at, NULL AS updated_at",
+        (true, false) => "NULL AS object_comment, NULL AS created_at, NULL AS updated_at",
+        (false, _) => "TABLE_COMMENT AS object_comment, CREATE_TIME AS created_at, UPDATE_TIME AS updated_at",
     };
     let wants_tables = requested_object_type(object_types, "TABLE");
     let wants_views = requested_object_type(object_types, "VIEW");
@@ -4974,6 +5013,7 @@ pub async fn list_objects(
 }
 
 /// Explicit browser mode; existing metadata consumers retain the full legacy API.
+#[allow(clippy::too_many_arguments)]
 pub async fn list_objects_for_browser(
     pool: &MySqlPool,
     database: &str,
@@ -4981,13 +5021,21 @@ pub async fn list_objects_for_browser(
     limit: Option<usize>,
     offset: Option<usize>,
     lightweight: bool,
+    comment_in_lightweight: bool,
     budget: Duration,
 ) -> Result<PagedObjectList, String> {
     let paging_applied = limit.is_some() && object_query_supports_paging(object_types);
     let (query_limit, query_offset) = if paging_applied { (limit, offset) } else { (None, None) };
     let mut objects = Vec::new();
     if wants_table_objects(object_types) {
-        let sql = list_tables_objects_sql_with_loading(database, object_types, query_limit, query_offset, lightweight);
+        let sql = list_tables_objects_sql_with_loading(
+            database,
+            object_types,
+            query_limit,
+            query_offset,
+            lightweight,
+            comment_in_lightweight,
+        );
         match browser_metadata_rows_with_budget(pool, &sql, false, budget).await {
             Ok(rows) if !rows.is_empty() => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
             Err(error) if error.contains("timed out") => return Err(error),
@@ -6764,7 +6812,7 @@ pub async fn stream_query_rows(
     mut on_row: impl FnMut(&[serde_json::Value]) -> Result<(), String>,
 ) -> Result<u64, String> {
     let mut conn = get_conn_with_health_check(pool).await?;
-    stream_query_result_on_conn_with_data_charset(
+    let result = stream_query_result_on_conn_with_data_charset(
         &mut conn,
         sql,
         bare,
@@ -6780,7 +6828,33 @@ pub async fn stream_query_rows(
             Ok(())
         },
     )
-    .await
+    .await;
+    if stream_may_leave_unread_rows(&result, max_rows) {
+        // A connection returned to the pool with an unread result set is cleaned up by
+        // reading every remaining row. On a large table over a slow link that outlasts the
+        // budget for closing the export session, so the export fails with an unconfirmed
+        // close instead of its own outcome (#14796). Stop the query on the server and
+        // drop the connection instead of recycling it.
+        if let Err(error) = abandon_streaming_conn(conn, pool.checkout_timeout()).await {
+            log::warn!("[db:stream:abandon] {error}");
+        }
+    }
+    result
+}
+
+/// Whether the server may still be sending rows that the stream did not read: the
+/// stream failed (a row, sink or cancellation error) or stopped at `max_rows`.
+fn stream_may_leave_unread_rows(result: &Result<u64, String>, max_rows: Option<usize>) -> bool {
+    match result {
+        Err(_) => true,
+        Ok(rows) => max_rows.is_some_and(|limit| u64::try_from(limit).is_ok_and(|limit| *rows >= limit)),
+    }
+}
+
+async fn abandon_streaming_conn(conn: mysql_async::Conn, timeout: Duration) -> Result<(), String> {
+    let result = kill_query_with_opts(conn.opts().clone(), conn.id(), timeout).await;
+    let _ = tokio::time::timeout(timeout, conn.disconnect()).await;
+    result
 }
 
 pub async fn stream_query_result_on_conn(
@@ -7770,6 +7844,12 @@ async fn mysql_add_column_if_not_exists_fallback(
 /// Route it through the existing query path; MySQL servers that do not support
 /// the syntax still return their normal SQL syntax error.
 fn mysql_statement_returns_rows(sql: &str) -> bool {
+    // Every non-SELECT statement reaches this check, including multi-megabyte
+    // INSERTs from SQL dumps. Only parse the statements that can contain a
+    // RETURNING clause at all.
+    if !contains_ascii_case_insensitive(sql, "returning") {
+        return false;
+    }
     let Ok(statements) = Parser::parse_sql(&MySqlDialect {}, sql) else {
         return false;
     };
@@ -8181,6 +8261,17 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 #[cfg(test)]
 mod tests {
     #[test]
+    fn stateless_http_pool_does_not_claim_a_persistent_client_session() {
+        let mut pool = super::MySqlPool::new("mysql://root@127.0.0.1:3306", 1);
+        assert!(pool.is_client_session_pool());
+        assert!(!pool.is_stateless_http_tunnel());
+        pool.set_stateless_http_tunnel();
+        assert!(!pool.is_client_session_pool());
+        assert!(pool.clone().is_stateless_http_tunnel());
+        assert!(super::MySqlPool::new("mysql://root@127.0.0.1:3306", 1).is_client_session_pool());
+    }
+
+    #[test]
     fn product_version_uses_starrocks_function_only_for_starrocks() {
         assert_eq!(super::database_product_version_query("StarRocks", None), "SELECT current_version()");
         assert_eq!(
@@ -8574,6 +8665,20 @@ mod tests {
         assert!(pool.checkout_verifications().is_some());
         let _ = tokio::time::timeout(Duration::from_secs(1), raw.disconnect()).await;
         let _ = tokio::time::timeout(Duration::from_secs(1), pool.disconnect()).await;
+    }
+
+    #[test]
+    fn stream_abandons_connection_when_rows_may_remain_unread() {
+        assert!(stream_may_leave_unread_rows(&Err("Export cancelled".to_string()), None));
+        assert!(stream_may_leave_unread_rows(&Err("write failed".to_string()), Some(10)));
+        assert!(stream_may_leave_unread_rows(&Ok(10), Some(10)));
+    }
+
+    #[test]
+    fn stream_recycles_connection_after_reading_every_row() {
+        assert!(!stream_may_leave_unread_rows(&Ok(262_144), None));
+        assert!(!stream_may_leave_unread_rows(&Ok(0), None));
+        assert!(!stream_may_leave_unread_rows(&Ok(3), Some(10)));
     }
 
     #[tokio::test]
@@ -8995,7 +9100,11 @@ mod tests {
 
         assert!(is_result_set_query("INSERT INTO users (id) VALUES (1) RETURNING id", dialect));
         assert!(is_result_set_query("DELETE FROM users WHERE id = 1 RETURNING id", dialect));
+        assert!(is_result_set_query("insert into users (id) values (1) returning id", dialect));
+        assert!(is_result_set_query("REPLACE INTO users (id) VALUES (1) Returning id", dialect));
         assert!(!is_result_set_query("UPDATE users SET name = 'Ada'", dialect));
+        assert!(!is_result_set_query("INSERT INTO users (id) VALUES (1)", dialect));
+        assert!(!is_result_set_query("INSERT INTO notes (body) VALUES ('returning soon')", dialect));
     }
 
     #[test]
@@ -9232,7 +9341,7 @@ mod tests {
     #[test]
     fn mysql_browser_queries_separate_names_from_details_and_capacity() {
         let types = vec!["VIEW".to_string()];
-        let light = list_tables_objects_sql_with_loading("app's", Some(&types), Some(7), Some(14), true);
+        let light = list_tables_objects_sql_with_loading("app's", Some(&types), Some(7), Some(14), true, false);
         for heavy in ["TABLE_COMMENT", "CREATE_TIME", "UPDATE_TIME", "DATA_LENGTH", "INDEX_LENGTH"] {
             assert!(!light.contains(heavy), "unexpected heavy field: {heavy}");
         }
@@ -9250,6 +9359,17 @@ mod tests {
         assert!(!capacity.contains("JOIN"));
     }
 
+    #[test]
+    fn mysql_browser_lightweight_keeps_dictionary_comments_on_mysql8() {
+        let types = vec!["TABLE".to_string(), "VIEW".to_string()];
+        let light = list_tables_objects_sql_with_loading("app's", Some(&types), Some(7), Some(14), true, true);
+        assert!(light.contains("TABLE_COMMENT AS object_comment"), "comment stays in the light list: {light}");
+        assert!(light.contains("NULL AS created_at, NULL AS updated_at"), "stat columns stay lazy: {light}");
+        for heavy in ["CREATE_TIME", "UPDATE_TIME", "DATA_LENGTH", "INDEX_LENGTH"] {
+            assert!(!light.contains(heavy), "unexpected heavy field: {heavy}");
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires isolated fixture via DBX_LIVE_MYSQL_METADATA_URL"]
     async fn live_mysql_browser_metadata_loading_and_cancellation() {
@@ -9261,7 +9381,7 @@ mod tests {
         let types = vec!["TABLE".to_string(), "VIEW".to_string()];
         let start = Instant::now();
         let light =
-            list_objects_for_browser(&pool, &database, Some(&types), None, None, true, BROWSER_METADATA_TIMEOUT)
+            list_objects_for_browser(&pool, &database, Some(&types), None, None, true, false, BROWSER_METADATA_TIMEOUT)
                 .await
                 .unwrap();
         eprintln!("light objects={} elapsed_ms={}", light.objects.len(), start.elapsed().as_millis());
@@ -9271,20 +9391,49 @@ mod tests {
             .iter()
             .all(|object| object.comment.is_none() && object.created_at.is_none() && object.updated_at.is_none()));
         let start = Instant::now();
-        let full =
-            list_objects_for_browser(&pool, &database, Some(&types), None, None, false, BROWSER_METADATA_TIMEOUT)
-                .await
-                .unwrap();
+        let full = list_objects_for_browser(
+            &pool,
+            &database,
+            Some(&types),
+            None,
+            None,
+            false,
+            false,
+            BROWSER_METADATA_TIMEOUT,
+        )
+        .await
+        .unwrap();
         eprintln!("full objects={} elapsed_ms={}", full.objects.len(), start.elapsed().as_millis());
         assert_eq!(
             light.objects.iter().map(|object| (&object.name, &object.object_type)).collect::<Vec<_>>(),
             full.objects.iter().map(|object| (&object.name, &object.object_type)).collect::<Vec<_>>()
         );
         assert!(full.objects.iter().any(|object| object.created_at.is_some()));
-        let page =
-            list_objects_for_browser(&pool, &database, Some(&types), Some(7), Some(14), true, BROWSER_METADATA_TIMEOUT)
+        let light_with_comment =
+            list_objects_for_browser(&pool, &database, Some(&types), None, None, true, true, BROWSER_METADATA_TIMEOUT)
                 .await
                 .unwrap();
+        assert_eq!(
+            light_with_comment.objects.iter().map(|object| &object.name).collect::<Vec<_>>(),
+            light.objects.iter().map(|object| &object.name).collect::<Vec<_>>()
+        );
+        assert!(light_with_comment.objects.iter().all(|object| object.created_at.is_none()));
+        assert_eq!(
+            light_with_comment.objects.iter().map(|object| &object.comment).collect::<Vec<_>>(),
+            full.objects.iter().map(|object| &object.comment).collect::<Vec<_>>()
+        );
+        let page = list_objects_for_browser(
+            &pool,
+            &database,
+            Some(&types),
+            Some(7),
+            Some(14),
+            true,
+            false,
+            BROWSER_METADATA_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert!(page.paging_applied);
         assert_eq!(
             page.objects.iter().map(|object| &object.name).collect::<Vec<_>>(),
@@ -12322,6 +12471,37 @@ mod tests {
                 "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)",
             ]
         );
+    }
+
+    #[test]
+    fn mysql_default_autocommit_respects_explicit_session_configuration() {
+        for assignment in [
+            "autocommit=0",
+            "autocommit:=0",
+            "AUTOCOMMIT=OFF",
+            "@@autocommit=0",
+            "@@SESSION.autocommit=0",
+            "@@local.autocommit=0",
+            "`autocommit`=0",
+            "sql_mode='STRICT_ALL_TABLES',autocommit=1",
+        ] {
+            let value = percent_encoding::utf8_percent_encode(assignment, percent_encoding::NON_ALPHANUMERIC);
+            let url = format!("mysql://host/db?sessionVariables={value}");
+            assert_eq!(default_autocommit_setup_query(&url), None, "{assignment}");
+        }
+    }
+
+    #[test]
+    fn mysql_default_autocommit_ignores_user_and_global_variables() {
+        for url in [
+            "mysql://host/db",
+            "mysql://host/db?sessionVariables=",
+            "mysql://host/db?sessionVariables=%40autocommit%3D0",
+            "mysql://host/db?sessionVariables=%40%40global.autocommit%3D0",
+            "mysql://host/db?sessionVariables=sql_mode%3D%27autocommit%3D0%27",
+        ] {
+            assert_eq!(default_autocommit_setup_query(url), Some("SET SESSION autocommit = 1"), "{url}");
+        }
     }
 
     #[test]

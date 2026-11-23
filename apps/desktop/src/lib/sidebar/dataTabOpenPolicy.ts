@@ -42,9 +42,13 @@ function dataTabCatalog(tab: DataTabLike): string {
   return tab.tableMeta?.catalog || tab.catalog || "";
 }
 
-function isSameTable(tab: DataTabLike, target: DataTabTarget): boolean {
+export function isSameTable(tab: DataTabLike, target: DataTabTarget): boolean {
   const tabSchema = tab.schema || (target.schema ? tab.tableMeta?.schema : undefined) || "";
   return isSameDatabase(tab, target) && dataTabCatalog(tab) === (target.catalog || "") && tabSchema === (target.schema || "") && (tab.tableMeta?.tableName || tab.title) === target.tableName;
+}
+
+export function isSameHBaseTable(tab: Pick<QueryTab, "mode" | "connectionId" | "database" | "sql" | "title">, target: Pick<DataTabTarget, "connectionId" | "database" | "tableName">): boolean {
+  return tab.mode === "hbase" && tab.connectionId === target.connectionId && tab.database === target.database && (tab.sql || tab.title) === target.tableName;
 }
 
 function canReuseActiveTableTab(tab: DataTabLike | undefined, target: DataTabTarget, mode: "data" | "mongo"): boolean {

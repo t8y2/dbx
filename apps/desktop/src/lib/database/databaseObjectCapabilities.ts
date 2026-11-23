@@ -221,6 +221,15 @@ export function isOracleFamilyTypeSource(dbType: DatabaseType | undefined, objec
   return supportsOracleFamilyTypeManagement(dbType) && (objectType === "TYPE" || objectType === "TYPE_BODY");
 }
 
+/**
+ * 触发器源码 tab 可以写回数据库的方言：MySQL 系的保存语句由后端生成
+ * DROP+CREATE（MySQL 没有 CREATE OR REPLACE TRIGGER），Oracle 系走专门的
+ * 触发器源码动作；其它方言的保存语义尚未适配，源码 tab 保持只读（#14489）。
+ */
+export function isTriggerSourceSaveSupported(dbType: DatabaseType | undefined): boolean {
+  return dbType === "mysql" || dbType === "goldendb" || dbType === "oracle" || dbType === "oceanbase-oracle" || dbType === "dameng";
+}
+
 export type CustomTypeCapabilities = {
   details: boolean;
   members: boolean;

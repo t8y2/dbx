@@ -1560,6 +1560,11 @@ fn should_discard_agent_pool_after_error(err: &str) -> bool {
 }
 
 pub fn pool_error_action(db_type: Option<DatabaseType>, err: &str) -> PoolErrorAction {
+    // The guard already refused the statement before using a replacement
+    // session. Do not replay it or remove a newer valid pool generation.
+    if err.contains("MYSQL_CLIENT_SESSION_LOST") {
+        return PoolErrorAction::Keep;
+    }
     if db_type.is_some_and(|db_type| database_capabilities::is_agent_type(&db_type)) {
         return if should_discard_agent_pool_after_error(err) {
             // Agent user operations are never replayed from an error hint because
@@ -1859,6 +1864,44 @@ fn oceanbase_mysql_session_timeout_sql(config: Option<&ConnectionConfig>, timeou
     crate::db::oceanbase_mysql::query_timeout_sql(config, timeout_secs)
 }
 
+// Keep do_execute_typed's future shallow, as with MySQL transaction settlement.
+fn apply_mysql_client_session_context<'a>(
+    state: &'a AppState,
+    pool_key: &'a str,
+    pool: &'a db::mysql::MySqlPool,
+    conn: &'a mut mysql_async::Conn,
+    database: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+        if pool.is_stateless_http_tunnel() {
+            // COM_INIT_DB updates the bridge's per-client request database;
+            // there is no physical MySQL session to pin or restore here.
+            if !database.is_empty() {
+                db::mysql::select_session_database(conn, database).await?;
+            }
+            return Ok(());
+        }
+        if !pool.is_client_session_pool() {
+            return Ok(());
+        }
+        let is_logical_session = {
+            let configs = state.configs.read().await;
+            crate::connection::config_for_pool_key(pool_key, &configs).is_some_and(|config| {
+                config.db_type == DatabaseType::Mysql
+                    && db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()).is_none()
+                    && pool_key.starts_with(&format!("{}:session:", config.id))
+                    && !pool_key.ends_with(":role:metadata")
+            })
+        };
+        if is_logical_session && state.mysql_client_session_database_change(pool_key, pool, conn.id(), database).await?
+        {
+            db::mysql::select_session_database(conn, database).await?;
+            state.record_mysql_client_session_database(pool_key, pool, database).await;
+        }
+        Ok(())
+    })
+}
+
 async fn apply_oceanbase_mysql_session_timeout(
     state: &AppState,
     pool_key: &str,
@@ -1984,6 +2027,7 @@ async fn do_execute_typed(
                 Err(err) => return Err(err.into()),
             };
             let connection_id = conn.id();
+            apply_mysql_client_session_context(state, pool_key, &p, &mut conn, database.unwrap_or_default()).await?;
             if let Some(ref execution_id) = options.execution_id {
                 let kill_opts = conn.opts().clone();
                 // The interrupt runs after the user asked to cancel; give the
@@ -2070,6 +2114,7 @@ async fn do_execute_typed(
                         );
                         let _ = tokio::time::timeout(Duration::from_secs(5), conn.disconnect()).await;
                         state.remove_pool_by_key(pool_key).await;
+                        return Err(format!("MYSQL_CLIENT_SESSION_LOST: The MySQL session state could not be verified. The transaction outcome may be unknown: {error}").into());
                     }
                 }
             }
@@ -3341,6 +3386,13 @@ fn postgres_drop_database_admin_database(target_database: &str) -> &'static str 
 }
 
 fn parse_drop_database_target(sql: &str) -> Option<String> {
+    // Every PostgreSQL statement passes through here; only parse the ones
+    // that can be a DROP DATABASE.
+    if !crate::sql::contains_ascii_case_insensitive(sql, "drop")
+        || !crate::sql::contains_ascii_case_insensitive(sql, "database")
+    {
+        return None;
+    }
     let dialect = PostgreSqlDialect {};
     let statements = Parser::parse_sql(&dialect, sql).ok()?;
     let [Statement::Drop { object_type, names, .. }] = statements.as_slice() else {
@@ -4458,7 +4510,7 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
         statements: &[String],
         on_result: &mut (dyn FnMut(usize, &db::QueryResult) + Send),
     ) -> db::mysql::MySqlNonResultBatchOutcome {
-        let sql = statements.join(";\n");
+        let sql = mysql_non_result_batch_sql(statements);
         let mut completed_results = Vec::with_capacity(statements.len());
         let mut record_result = |statement_index: usize, result: &db::QueryResult| {
             completed_results.push(result.clone());
@@ -4479,6 +4531,17 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
 
 const MYSQL_MULTI_STATEMENT_BATCH_MAX_STATEMENTS: usize = 50;
 const MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Separates the statements of one pipelined MySQL packet.
+///
+/// The splitter keeps a trailing `--` or `#` comment as part of the statement
+/// it follows, so the `;` must start a new line. Otherwise it lands inside that
+/// comment and the server reads the next statement as a continuation (#14735).
+const MYSQL_NON_RESULT_BATCH_SEPARATOR: &str = "\n;\n";
+
+fn mysql_non_result_batch_sql(statements: &[String]) -> String {
+    statements.join(MYSQL_NON_RESULT_BATCH_SEPARATOR)
+}
 
 fn mysql_batch_pool_error_action(db_type: Option<DatabaseType>, error: &str) -> PoolErrorAction {
     if error == QUERY_CANCELED {
@@ -4519,7 +4582,7 @@ fn mysql_non_result_batch_end(
         {
             break;
         }
-        let next_len = byte_len.saturating_add(statement.len()).saturating_add(2);
+        let next_len = byte_len.saturating_add(statement.len()).saturating_add(MYSQL_NON_RESULT_BATCH_SEPARATOR.len());
         if end > start && next_len > max_bytes {
             break;
         }
@@ -4712,9 +4775,8 @@ fn decide_mysql_auto_commit_transaction(
     explicit_start_in_batch: bool,
     status: Option<db::mysql::MySqlSessionStatus>,
 ) -> MysqlAutoCommitDecision {
-    // A session or batch that turned auto-commit off opens its transactions
-    // implicitly, so the server status is the only signal for those.
-    let explicit_transaction = explicit_start_in_batch || status.is_some_and(|status| !status.autocommit);
+    // IN_TRANS also reports an explicit transaction while autocommit is on.
+    // Do not require a textual opener in the current batch to preserve it.
     let transaction_open = match status {
         Some(status) => status.in_transaction,
         // No usable status packet (the last statement ended with an ERR packet
@@ -4724,13 +4786,14 @@ fn decide_mysql_auto_commit_transaction(
     if !transaction_open {
         return MysqlAutoCommitDecision { preserve: false, rollback: MysqlAutoCommitRollback::None };
     }
-    if already_preserved || (allow_preserve && explicit_transaction) {
+    if already_preserved || allow_preserve {
         return MysqlAutoCommitDecision { preserve: true, rollback: MysqlAutoCommitRollback::None };
     }
-    // Distinguish who opened it: only a batch with its own `BEGIN` /
-    // `START TRANSACTION` is a user transaction; `autocommit = 0` opens
-    // transactions implicitly for every statement.
-    let rollback = if explicit_start_in_batch {
+    // An open transaction with autocommit on is explicit, including one
+    // started by a procedure or executable comment. With autocommit off,
+    // ordinary statements can open transactions implicitly instead.
+    let rollback = if explicit_start_in_batch || status.is_some_and(|status| status.in_transaction && status.autocommit)
+    {
         MysqlAutoCommitRollback::Explicit
     } else if status.is_some_and(|status| !status.autocommit) {
         MysqlAutoCommitRollback::SessionAutocommit
@@ -4802,10 +4865,14 @@ async fn settle_mysql_auto_commit_transaction(
 ) -> Result<MysqlAutoCommitTransaction, String> {
     let already_preserved = state.has_preserved_explicit_transaction(pool_key).await;
     let mut status = db::mysql::session_status_from_last_ok(conn);
-    if status.is_none() && (allow_preserve || already_preserved) {
+    if (!status_is_final || status.is_none()) && (allow_preserve || already_preserved) {
         // Only pay for the extra round trip when the answer can change the
         // outcome: without the opt-in the historical cleanup runs regardless.
-        status = db::mysql::ping_session_status_on_conn(conn).await.ok();
+        status = Some(
+            db::mysql::ping_session_status_on_conn(conn)
+                .await
+                .map_err(|error| format!("Unable to verify MySQL transaction state: {error:?}"))?,
+        );
     }
     let decision =
         decide_mysql_auto_commit_transaction(allow_preserve, already_preserved, explicit_start_in_batch, status);
@@ -4871,6 +4938,7 @@ async fn execute_multi_mysql(
         }
     };
     let checkout_ms = checkout_started_at.elapsed().as_millis();
+    apply_mysql_client_session_context(state, pool_key, pool, &mut conn, database).await?;
     apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
     let catalog_started_at = std::time::Instant::now();
     wait_for_result_opt(
@@ -4982,7 +5050,7 @@ async fn execute_multi_mysql(
                 log::warn!("[query][mysql-batch] trace_id={} open_txn_rollback_failed error={}", trace_id, error);
                 let _ = tokio::time::timeout(Duration::from_secs(5), conn.disconnect()).await;
                 state.remove_pool_by_key(pool_key).await;
-                return Ok(results);
+                return Err(format!("MYSQL_CLIENT_SESSION_LOST: The MySQL session state could not be verified. The transaction outcome may be unknown: {error}"));
             }
         }
     }
@@ -5191,11 +5259,8 @@ pub async fn execute_statements(
     timeout_secs: Option<u64>,
 ) -> Result<db::QueryResult, String> {
     let db_type = connection_database_type(state, connection_id).await;
-    let invalidate = statements.iter().any(|sql| crate::object_cache::sql_may_change_object_metadata(sql, db_type));
     let result = execute_statements_inner(state, connection_id, database, statements, schema, timeout_secs).await;
-    if invalidate {
-        crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
-    }
+    crate::object_cache::invalidate_for_statements(&state.storage, connection_id, statements, db_type).await;
     result
 }
 
@@ -5241,10 +5306,7 @@ pub async fn execute_statements_with_transaction_option(
         )
         .await
         .map_err(|error| error.into_legacy_string())?;
-        let invalidate = statements.iter().any(|sql| crate::object_cache::sql_may_change_object_metadata(sql, db_type));
-        if invalidate {
-            crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
-        }
+        crate::object_cache::invalidate_for_statements(&state.storage, connection_id, statements, db_type).await;
         return Ok(result);
     }
     execute_statements(state, connection_id, database, statements, schema, timeout_secs).await
@@ -5795,9 +5857,13 @@ pub async fn execute_statements_in_transaction(
     schema: Option<&str>,
     catalog: Option<&str>,
 ) -> Result<db::QueryResult, String> {
-    execute_statements_in_transaction_typed(state, connection_id, database, statements, schema, catalog, None)
-        .await
-        .map_err(QueryExecutionError::into_legacy_string)
+    let result =
+        execute_statements_in_transaction_typed(state, connection_id, database, statements, schema, catalog, None)
+            .await
+            .map_err(QueryExecutionError::into_legacy_string)?;
+    let db_type = connection_database_type(state, connection_id).await;
+    crate::object_cache::invalidate_for_statements(&state.storage, connection_id, statements, db_type).await;
+    Ok(result)
 }
 
 /// Execute multiple SQL statements transactionally while retaining typed failures.
@@ -6561,20 +6627,45 @@ fn postgres_transaction_begin_sql(consistent_snapshot: bool) -> &'static str {
     }
 }
 
-fn mysql_transaction_begin_sql_candidates(consistent_snapshot: bool) -> &'static [&'static str] {
-    if consistent_snapshot {
+fn mysql_transaction_begin_sql_candidates(
+    consistent_snapshot: bool,
+    catalog_dialect: Option<db::mysql::MySqlCatalogDialect>,
+) -> &'static [&'static str] {
+    if !consistent_snapshot {
+        return &["START TRANSACTION"];
+    }
+    // Doris parses BEGIN with its own ANTLR grammar. `WITH CONSISTENT SNAPSHOT`
+    // is accepted, but neither the `, READ ONLY` clause nor a standalone
+    // `READ ONLY` / `READ WRITE` is, so the plain MySQL forms always fail with
+    // ER_UNKNOWN_ERROR 1105 (`mismatched input ',' ...`, `mismatched input
+    // 'READ' ...`). Verified against Doris 4.0.7
+    // (`doris-4.0.7-rc02-35854e7e92a`, server version 5.7.99). Doris opens
+    // repeatable-read transactions by default, so the short form still gives a
+    // database export the consistent snapshot it needs; `START TRANSACTION` is
+    // kept only as a last-resort fallback.
+    if matches!(catalog_dialect, Some(db::mysql::MySqlCatalogDialect::Doris)) {
+        &["START TRANSACTION WITH CONSISTENT SNAPSHOT", "START TRANSACTION"]
+    } else {
         &[
             "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
             "START TRANSACTION WITH CONSISTENT SNAPSHOT",
             "START TRANSACTION",
         ]
-    } else {
-        &["START TRANSACTION"]
     }
 }
 
-fn mysql_transaction_isolation_sql(consistent_snapshot: bool) -> Option<&'static str> {
-    consistent_snapshot.then_some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+fn mysql_transaction_isolation_sql(
+    consistent_snapshot: bool,
+    catalog_dialect: Option<db::mysql::MySqlCatalogDialect>,
+) -> Option<&'static str> {
+    // Doris rejects `SET TRANSACTION ISOLATION LEVEL ...` with the same parser
+    // error class and silently no-ops `SET TRANSACTION READ ONLY`, while its
+    // transactions already start at REPEATABLE-READ, so the pre-BEGIN statement
+    // is both useless and fatal there.
+    if !consistent_snapshot || matches!(catalog_dialect, Some(db::mysql::MySqlCatalogDialect::Doris)) {
+        return None;
+    }
+    Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
 }
 
 fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
@@ -6585,9 +6676,24 @@ fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
         // diagnostic instead of MySQL's ER_PARSE_ERROR (1064).  Only treat
         // diagnostics that clearly identify a syntax/parser failure as
         // retryable; generic 1105 errors may indicate a real server failure.
+        //
+        // Two Doris grammar flavours are in the wild, so match both:
+        //   - older/rewritten: `Syntax error in line 1: ... ^ Encountered: X Expected: Y`
+        //   - Doris 4.x (raw ANTLR): `mismatched input ',' expecting {<EOF>, ';'}(line 1, pos 42)`
         mysql_async::Error::Server(server_error) if server_error.code == 1105 => {
             let message = server_error.message.to_ascii_lowercase();
-            message.contains("syntax error") && (message.contains("encountered:") || message.contains("expected"))
+            let classic_parser_diagnostic =
+                message.contains("syntax error") && (message.contains("encountered:") || message.contains("expected"));
+            let antlr_parser_diagnostic = message.contains("mismatched input")
+                || message.contains("extraneous input")
+                || message.contains("no viable alternative")
+                || message.contains("token recognition error");
+            // `errCode = 2` is Doris' internal ANALYSIS_ERROR code; the parser
+            // diagnostics above are the discriminator, this is a secondary guard
+            // so an unrelated 1105 failure carrying the same marker stays fatal.
+            let doris_analysis_error = message.contains("errcode = 2");
+            classic_parser_diagnostic
+                || (antlr_parser_diagnostic && (doris_analysis_error || message.contains("expecting")))
         }
         // PolarDB-X exposes parser failures such as PXC-4500 / ERR_PARSER
         // through the generic MySQL protocol ERR_HANDLE_DATA code (3009).
@@ -6718,11 +6824,11 @@ async fn begin_transaction_session(
         TxnPoolHandle::Mysql(mysql_pool) => {
             let mut conn = mysql_pool.get_conn().await.map_err(|e| format!("Failed to get MySQL connection: {e}"))?;
             db::mysql::apply_catalog_database_context(&mut conn, mysql_catalog_dialect, catalog, database).await?;
-            if let Some(isolation_sql) = mysql_transaction_isolation_sql(consistent_snapshot) {
+            if let Some(isolation_sql) = mysql_transaction_isolation_sql(consistent_snapshot, mysql_catalog_dialect) {
                 conn.query_drop(isolation_sql).await.map_err(|e| format!("SET TRANSACTION failed: {e}"))?;
             }
             let mut syntax_errors = Vec::new();
-            for begin_sql in mysql_transaction_begin_sql_candidates(consistent_snapshot) {
+            for begin_sql in mysql_transaction_begin_sql_candidates(consistent_snapshot, mysql_catalog_dialect) {
                 match conn.query_drop(*begin_sql).await {
                     Ok(()) => {
                         syntax_errors.clear();
@@ -8065,6 +8171,51 @@ mod tests {
     use crate::query_cancel::RunningTaskMetadata;
     use std::sync::atomic::Ordering;
     use tokio::time::timeout;
+
+    #[tokio::test]
+    #[ignore = "requires DBX_NAVICAT_MYSQL_SOCKET for an isolated MySQL instance"]
+    async fn stateless_mysql_context_survives_pool_replacement_on_first_execution() {
+        use mysql_async::prelude::Queryable;
+        let socket = std::env::var("DBX_NAVICAT_MYSQL_SOCKET").unwrap();
+        let opts = mysql_async::OptsBuilder::default().socket(Some(socket)).user(Some("root"));
+        let mut conn = mysql_async::Conn::new(opts).await.unwrap();
+        let database = format!("dbx_context_{}", uuid::Uuid::new_v4().simple());
+        conn.query_drop(format!("CREATE DATABASE `{database}`")).await.unwrap();
+        let dir = std::env::temp_dir().join(format!("dbx-navicat-context-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = AppState::new(crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap());
+        let key = "conn:session:tab-1";
+        let mut config = test_connection_config(DatabaseType::Mysql);
+        config.id = "conn".into();
+        state.configs.write().await.insert(config.id.clone(), config);
+        let old = db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306", 1);
+        state
+            .update_connection_pools(|pools| {
+                pools.insert(key.into(), PoolKind::Mysql(old.clone(), crate::connection::MysqlMode::Normal))
+            })
+            .await;
+        state.mysql_client_session_database_change(key, &old, 1, "").await.unwrap();
+        let mut pool = db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306", 1);
+        pool.set_stateless_http_tunnel();
+        state
+            .update_connection_pools(|pools| {
+                pools.insert(key.into(), PoolKind::Mysql(pool.clone(), crate::connection::MysqlMode::Normal))
+            })
+            .await;
+        // First execution after replacement must apply database context, not
+        // consume the query with a false persistent-session-loss error.
+        apply_mysql_client_session_context(&state, key, &pool, &mut conn, &database).await.unwrap();
+        assert_eq!(conn.query_first::<String, _>("SELECT DATABASE()").await.unwrap(), Some(database.clone()));
+        apply_mysql_client_session_context(&state, key, &pool, &mut conn, "information_schema").await.unwrap();
+        assert_eq!(
+            conn.query_first::<String, _>("SELECT DATABASE()").await.unwrap(),
+            Some("information_schema".into())
+        );
+        conn.query_drop(format!("DROP DATABASE `{database}`")).await.unwrap();
+        conn.disconnect().await.unwrap();
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn deferred_cells_reach_all_multi_result_success_constructors_once() {
@@ -10036,6 +10187,35 @@ for line in sys.stdin:
         for key in keys {
             assert!(state.storage.load_schema_cache(key).await.unwrap().is_none(), "stale cache: {key}");
         }
+        for key in keys {
+            state.storage.save_schema_cache(key, &serde_json::json!({"old": true})).await.unwrap();
+        }
+        execute_statements_in_transaction(
+            &state,
+            connection_id,
+            "",
+            &["INSERT INTO users VALUES (1)".into()],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        for key in keys {
+            assert!(state.storage.load_schema_cache(key).await.unwrap().is_some(), "DML evicted cache: {key}");
+        }
+        execute_statements_in_transaction(
+            &state,
+            connection_id,
+            "",
+            &["ALTER TABLE users ADD COLUMN added INTEGER".into(), "SELECT 1".into()],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        for key in keys {
+            assert!(state.storage.load_schema_cache(key).await.unwrap().is_none(), "stale cache after commit: {key}");
+        }
         assert!(state.storage.load_schema_cache(unrelated).await.unwrap().is_some());
     }
 
@@ -10566,6 +10746,22 @@ for line in sys.stdin:
             ]
         );
         assert_eq!(error_action, Some(PoolErrorAction::Keep));
+    }
+
+    #[test]
+    fn mysql_non_result_batch_keeps_separators_out_of_trailing_line_comments() {
+        let statements = vec![
+            "INSERT INTO t (id) SELECT 1 FROM t WHERE 1 = 0   -- trailing comment".to_string(),
+            "UPDATE t SET id = 2 # hash comment".to_string(),
+            "DELETE FROM t".to_string(),
+        ];
+
+        assert_eq!(
+            mysql_non_result_batch_sql(&statements),
+            "INSERT INTO t (id) SELECT 1 FROM t WHERE 1 = 0   -- trailing comment\n;\n\
+             UPDATE t SET id = 2 # hash comment\n;\n\
+             DELETE FROM t"
+        );
     }
 
     #[tokio::test]
@@ -13029,6 +13225,8 @@ done
         assert_eq!(parse_drop_database_target("DROP TABLE vaultwarden;"), None);
         assert_eq!(parse_drop_database_target("DROP DATABASE vaultwarden; SELECT 1;"), None);
         assert_eq!(parse_drop_database_target("DROP DATABASE 123bad;"), None);
+        assert_eq!(parse_drop_database_target("INSERT INTO events (id) VALUES (1);"), None);
+        assert_eq!(parse_drop_database_target("INSERT INTO notes (body) VALUES ('drop database later');"), None);
     }
 
     #[test]
@@ -14714,12 +14912,15 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn mysql_auto_commit_rolls_back_a_leftover_transaction_without_reporting_it() {
-        // No opener in the batch and auto-commit still on: this is a leftover
-        // transaction (cancelled or aborted batch), not a user transaction.
+    fn mysql_auto_commit_preserves_a_server_reported_transaction_with_autocommit_on() {
+        // A procedure or executable comment can start a real transaction even
+        // when no top-level opener was classified. IN_TRANS is authoritative.
         let decision = decide_mysql_auto_commit_transaction(true, false, false, Some(mysql_status(true, true)));
-        assert!(!decision.preserve);
+        assert!(decision.preserve);
         assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
+        let default = decide_mysql_auto_commit_transaction(false, false, false, Some(mysql_status(true, true)));
+        assert!(!default.preserve);
+        assert_eq!(default.rollback, MysqlAutoCommitRollback::Explicit);
     }
 
     #[test]
@@ -14772,17 +14973,37 @@ for line in sys.stdin:
     #[test]
     fn database_backup_transactions_request_consistent_snapshots() {
         assert_eq!(postgres_transaction_begin_sql(true), "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
-        assert_eq!(mysql_transaction_isolation_sql(true), Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"));
         assert_eq!(
-            mysql_transaction_begin_sql_candidates(true),
+            mysql_transaction_isolation_sql(true, None),
+            Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        );
+        assert_eq!(
+            mysql_transaction_begin_sql_candidates(true, None),
             [
                 "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
                 "START TRANSACTION WITH CONSISTENT SNAPSHOT",
                 "START TRANSACTION",
             ]
         );
-        assert_eq!(mysql_transaction_isolation_sql(false), None);
-        assert_eq!(mysql_transaction_begin_sql_candidates(false), ["START TRANSACTION"]);
+        assert_eq!(mysql_transaction_isolation_sql(false, None), None);
+        assert_eq!(mysql_transaction_begin_sql_candidates(false, None), ["START TRANSACTION"]);
+    }
+
+    /// Doris 4.x rejects `WITH CONSISTENT SNAPSHOT, READ ONLY` and a standalone
+    /// `READ ONLY` clause with ER_UNKNOWN_ERROR 1105, and it no-ops
+    /// `SET TRANSACTION READ ONLY`, so a Doris backup must never send the
+    /// MySQL-only statements first (they used to abort every database export
+    /// with `START TRANSACTION failed: ... mismatched input ','`).
+    #[test]
+    fn doris_backup_transactions_use_doris_compatible_begin() {
+        let doris = Some(db::mysql::MySqlCatalogDialect::Doris);
+        assert_eq!(
+            mysql_transaction_begin_sql_candidates(true, doris),
+            ["START TRANSACTION WITH CONSISTENT SNAPSHOT", "START TRANSACTION"]
+        );
+        assert_eq!(mysql_transaction_isolation_sql(true, doris), None);
+        // Manual (non-snapshot) transactions are unaffected.
+        assert_eq!(mysql_transaction_begin_sql_candidates(false, doris), ["START TRANSACTION"]);
     }
 
     #[test]
@@ -14817,6 +15038,38 @@ for line in sys.stdin:
 
         assert!(mysql_error_is_syntax_error(&doris_syntax_error));
         assert!(!mysql_error_is_syntax_error(&generic_unknown_error));
+    }
+
+    /// Real Doris 4.0.7 payload captured from `START TRANSACTION WITH
+    /// CONSISTENT SNAPSHOT, READ ONLY`: raw ANTLR diagnostics wrapped in the
+    /// `errCode = 2` ANALYSIS_ERROR envelope, with no "syntax error" wording,
+    /// which the older heuristic never matched.
+    #[test]
+    fn mysql_backup_transaction_falls_back_for_doris4_antlr_parser_errors() {
+        let server_error = |message: &str| {
+            mysql_async::Error::Server(mysql_async::ServerError {
+                code: 1105,
+                message: message.to_string(),
+                state: "HY000".to_string(),
+            })
+        };
+        let doris4_comma =
+            server_error("errCode = 2, detailMessage = \nmismatched input ',' expecting {<EOF>, ';'}(line 1, pos 42)");
+        let doris4_read = server_error(
+            "errCode = 2, detailMessage = \nmismatched input 'READ' expecting {<EOF>, ';'}(line 1, pos 18)",
+        );
+        let doris_extraneous = server_error(
+            "errCode = 2, detailMessage = \nextraneous input 'WORK' expecting {<EOF>, ';'}(line 1, pos 6)",
+        );
+        // Real server failures must stay fatal instead of being retried.
+        let unknown_database = server_error("errCode = 2, detailMessage = Unknown database 'missing_db'");
+        let missing_table = server_error("errCode = 2, detailMessage = Table does not exist");
+
+        assert!(mysql_error_is_syntax_error(&doris4_comma));
+        assert!(mysql_error_is_syntax_error(&doris4_read));
+        assert!(mysql_error_is_syntax_error(&doris_extraneous));
+        assert!(!mysql_error_is_syntax_error(&unknown_database));
+        assert!(!mysql_error_is_syntax_error(&missing_table));
     }
 
     #[test]

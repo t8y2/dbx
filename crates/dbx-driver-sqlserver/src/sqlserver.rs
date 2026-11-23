@@ -337,6 +337,28 @@ fn sqlserver_uses_named_instance_resolution(endpoint: &SqlServerEndpoint<'_>, po
     endpoint.instance_name.is_some() && (port == 0 || (port == SQLSERVER_DEFAULT_PORT && !port_explicit))
 }
 
+fn sqlserver_host_with_url_instance<'a>(
+    host: &'a str,
+    port: u16,
+    port_explicit: bool,
+    url_params: Option<&str>,
+) -> Result<Cow<'a, str>, String> {
+    use dbx_types::models::connection::{normalize_sqlserver_host_port, sqlserver_url_instance_name};
+
+    if port_explicit || !matches!(port, 0 | SQLSERVER_DEFAULT_PORT) || host.contains('\\') || url_params.is_none() {
+        return Ok(Cow::Borrowed(host));
+    }
+    let (normalized_host, embedded_port) = normalize_sqlserver_host_port(host);
+    if normalized_host.is_empty() || embedded_port.is_some() {
+        return Ok(Cow::Borrowed(host));
+    }
+
+    Ok(match sqlserver_url_instance_name(url_params)? {
+        Some(instance) => Cow::Owned(format!(r"{normalized_host}\{instance}")),
+        None => Cow::Borrowed(host),
+    })
+}
+
 fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(MAX_ROWS).max(1)
 }
@@ -368,6 +390,14 @@ pub async fn connect_with_port_explicit(
     url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
+    let host = sqlserver_host_with_url_instance(host, port, port_explicit, url_params)?;
+    let host = host.as_ref();
+    if let Some(verification) = sqlserver_certificate_verification(url_params)? {
+        // A verified connection must never fall back to an unverified or unencrypted transport.
+        let encryption = tiberius::EncryptionLevel::Required;
+        return try_connect(host, port, port_explicit, user, pass, database, encryption, Some(&verification), timeout)
+            .await;
+    }
     if sqlserver_native_encryption_disabled(url_params) {
         let skipped = "encryption was disabled by encrypt=false / sqlserverEncryption=disabled".to_string();
         return try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
@@ -375,9 +405,8 @@ pub async fn connect_with_port_explicit(
             .map_err(|fallback_errors| sqlserver_connect_failure_message(&skipped, &fallback_errors));
     }
 
-    match try_connect(host, port, port_explicit, user, pass, database, tiberius::EncryptionLevel::Required, timeout)
-        .await
-    {
+    let encryption = tiberius::EncryptionLevel::Required;
+    match try_connect(host, port, port_explicit, user, pass, database, encryption, None, timeout).await {
         Ok(client) => Ok(client),
         Err(encrypted_error) => {
             try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
@@ -481,7 +510,7 @@ async fn try_connect_legacy_sqlserver_encryption(
 ) -> Result<SqlServerClient, Vec<(&'static str, String)>> {
     let mut errors = Vec::new();
     for (label, encryption) in SQLSERVER_LEGACY_ENCRYPTION_FALLBACKS {
-        match try_connect(host, port, port_explicit, user, pass, database, encryption, timeout).await {
+        match try_connect(host, port, port_explicit, user, pass, database, encryption, None, timeout).await {
             Ok(client) => return Ok(client),
             Err(error) => errors.push((label, error)),
         }
@@ -508,6 +537,42 @@ fn is_sqlserver_tls_handshake_error(error: &str) -> bool {
     error.contains("tls") && (error.contains("handshake") || error.contains("eof") || error.contains("performing i/o"))
 }
 
+/// Server certificate verification requested with `trustServerCertificate=false`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqlServerCertificateVerification {
+    /// CA certificate (`.pem`, `.crt` or `.der`) from `sslrootcert`; system roots when absent.
+    ca_file: Option<String>,
+    /// Name from `hostNameInCertificate`, used instead of the connection host for the TLS check.
+    host_name: Option<String>,
+}
+
+fn sqlserver_certificate_verification(
+    url_params: Option<&str>,
+) -> Result<Option<SqlServerCertificateVerification>, String> {
+    use dbx_types::models::connection::sqlserver_url_param;
+
+    let Some(trust) = sqlserver_url_param(url_params, "trustServerCertificate")? else {
+        return Ok(None);
+    };
+    match trust.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "1" => return Ok(None),
+        "false" | "no" | "0" => {}
+        _ => return Err("Invalid SQL Server trustServerCertificate URL parameter: expected true or false".into()),
+    }
+    if sqlserver_native_encryption_disabled(url_params) {
+        return Err("trustServerCertificate=false cannot be combined with encrypt=false".into());
+    }
+    let non_empty = |value: Option<String>| value.map(|value| value.trim().to_owned()).filter(|v| !v.is_empty());
+    let ca_file = non_empty(sqlserver_url_param(url_params, "sslrootcert")?);
+    let host_name = non_empty(sqlserver_url_param(url_params, "hostNameInCertificate")?);
+    if let Some(name) = &host_name {
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+            return Err("Invalid SQL Server hostNameInCertificate URL parameter".into());
+        }
+    }
+    Ok(Some(SqlServerCertificateVerification { ca_file, host_name }))
+}
+
 async fn try_connect(
     host: &str,
     port: u16,
@@ -516,6 +581,7 @@ async fn try_connect(
     pass: &str,
     database: Option<&str>,
     encryption: tiberius::EncryptionLevel,
+    verification: Option<&SqlServerCertificateVerification>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
     let deadline = tokio::time::Instant::now() + timeout;
@@ -539,7 +605,25 @@ async fn try_connect(
         if let Some(db) = database {
             config.database(db);
         }
-        config.trust_cert();
+        // The TCP address is taken before `hostNameInCertificate` replaces the host used for the TLS check.
+        let addr = config.get_addr();
+        match verification {
+            Some(verification) => {
+                if let Some(ca_file) = &verification.ca_file {
+                    config.trust_cert_ca(ca_file);
+                }
+                // Routed connections are checked against the host the server redirected to.
+                if let Some(host_name) = verification.host_name.as_deref().filter(|_| redirects == 0) {
+                    if uses_named_instance_resolution {
+                        return Err("hostNameInCertificate cannot be used with a named instance resolved through \
+                                    SQL Server Browser; set the instance port explicitly"
+                            .into());
+                    }
+                    config.host(host_name);
+                }
+            }
+            None => config.trust_cert(),
+        }
         config.encryption(encryption);
 
         let remaining_connect = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -559,7 +643,7 @@ async fn try_connect(
                     }
                 })?
         } else {
-            tokio::time::timeout(remaining_connect, TcpStream::connect(config.get_addr()))
+            tokio::time::timeout(remaining_connect, TcpStream::connect(addr))
                 .await
                 .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
                 .map_err(|e| {
@@ -2756,10 +2840,16 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
         && object_kinds.iter().any(crate::types::CompletionAssistantObjectKind::is_table_like)
     {
         let object_like = sqlserver_completion_object_search_clause(request, &like_pattern);
+        // NOTE: Any session that creates a temp table inside an open transaction
+        // keeps its tempdb catalog rows locked until it commits. A READ COMMITTED
+        // scan of `tempdb.sys.all_objects` waits on those rows with no timeout,
+        // holding the only SQL Server metadata connection, so every later
+        // metadata request fails with the pool-busy error. Completion only needs
+        // candidate names, so dirty catalog reads are acceptable here.
         queries.push(format!(
             "SELECT TOP ({limit}) o.name, s.name AS schema_name, 'TABLE' AS object_type, CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, CAST(NULL AS NVARCHAR(MAX)) AS object_comment, CAST(NULL AS NVARCHAR(128)) AS data_type \
-             FROM tempdb.sys.all_objects o \
-             JOIN tempdb.sys.schemas s ON s.schema_id = o.schema_id \
+             FROM tempdb.sys.all_objects o WITH (NOLOCK) \
+             JOIN tempdb.sys.schemas s WITH (NOLOCK) ON s.schema_id = o.schema_id \
              WHERE o.type = 'U' {object_like}"
         ));
         return format!("SELECT * FROM ({}) AS dbx_completion ORDER BY name", queries.remove(0));
@@ -2819,7 +2909,17 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
         ));
     }
     if object_kinds.iter().any(|kind| matches!(kind, crate::types::CompletionAssistantObjectKind::Column)) {
-        let column_like = like_clause.replace("name_expr", "c.name");
+        // The shared object-search clause matches `o.name`/`ep.value`, which do
+        // not exist in the sys.columns query, so the column branch builds its
+        // own predicate and repeats the comment match against MS_Description
+        // when the caller asked for comment search (#15007).
+        let column_like = if like_pattern == "%" {
+            String::new()
+        } else if request.search_in_comments {
+            format!(" AND (LOWER(c.name) LIKE LOWER('{like_pattern}') ESCAPE '\\' OR LOWER(COALESCE(ep.value, '')) LIKE LOWER('{like_pattern}') ESCAPE '\\') ")
+        } else {
+            format!(" AND LOWER(c.name) LIKE LOWER('{like_pattern}') ESCAPE '\\' ")
+        };
         let parent_table_filter = request
             .parent_name
             .as_deref()
@@ -2828,10 +2928,11 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
             .unwrap_or_default();
         let object_visibility = sqlserver_visible_object_predicate();
         queries.push(format!(
-            "SELECT TOP ({limit}) c.name, s.name AS schema_name, 'COLUMN' AS object_type, s.name AS parent_schema, o.name AS parent_name, CAST(NULL AS NVARCHAR(MAX)) AS object_comment, TYPE_NAME(c.user_type_id) AS data_type \
+            "SELECT TOP ({limit}) c.name, s.name AS schema_name, 'COLUMN' AS object_type, s.name AS parent_schema, o.name AS parent_name, ep.value AS object_comment, TYPE_NAME(c.user_type_id) AS data_type \
              FROM sys.columns c \
              JOIN sys.objects o ON o.object_id = c.object_id \
              JOIN sys.schemas s ON s.schema_id = o.schema_id \
+             OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep \
              WHERE o.type IN ('U','V') AND {object_visibility} {schema_filter} {parent_table_filter} {column_like} ORDER BY c.column_id"
         ));
     }
@@ -3118,7 +3219,63 @@ pub async fn list_object_statistics(
 }
 
 pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
-    Ok(get_column_metadata(client, schema, table).await?.into_iter().map(|metadata| metadata.column).collect())
+    let mut metadata = get_column_metadata(client, schema, table).await?;
+    // A synonym has no columns of its own. The synonym lookup only runs when the
+    // name has no columns, so ordinary tables and views pay no extra round trip.
+    if metadata.is_empty() {
+        if let Some(target) = resolve_synonym_target(client, schema, table).await? {
+            metadata = get_column_metadata(client, &target.schema, &target.name).await?;
+        }
+    }
+    Ok(metadata.into_iter().map(|metadata| metadata.column).collect())
+}
+
+/// The table or view a synonym stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlServerSynonymTarget {
+    pub schema: String,
+    pub name: String,
+    pub is_view: bool,
+}
+
+fn sqlserver_synonym_target_sql() -> &'static str {
+    // Only a base object in the current database can be read with the local catalog
+    // views, so synonyms that name another database or a linked server resolve to nothing.
+    "SELECT OBJECT_SCHEMA_NAME(o.object_id) AS target_schema, o.name AS target_name, o.type AS target_type \
+     FROM sys.synonyms sn \
+     JOIN sys.schemas s ON s.schema_id = sn.schema_id \
+     JOIN sys.objects o ON o.object_id = OBJECT_ID(sn.base_object_name) \
+     WHERE s.name = COALESCE(NULLIF(@P1, N''), SCHEMA_NAME()) \
+       AND sn.name = @P2 \
+       AND PARSENAME(sn.base_object_name, 4) IS NULL \
+       AND (PARSENAME(sn.base_object_name, 3) IS NULL OR PARSENAME(sn.base_object_name, 3) = DB_NAME()) \
+       AND o.type IN ('U', 'V')"
+}
+
+/// Resolves `schema.name` to the table or view behind it when it is a synonym.
+///
+/// Returns `None` for a name that is not a synonym, and for a synonym whose base object is
+/// missing, is not a table or view, or lives in another database or on a linked server.
+pub async fn resolve_synonym_target(
+    client: &mut SqlServerClient,
+    schema: &str,
+    name: &str,
+) -> Result<Option<SqlServerSynonymTarget>, String> {
+    let schema = schema.trim();
+    let rows = client
+        .query(sqlserver_synonym_target_sql(), &[&schema, &name])
+        .await
+        .map_err(|error| error.to_string())?
+        .into_first_result()
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(row) = rows.first() else { return Ok(None) };
+    let (Some(schema), Some(name)) = (row.get::<&str, _>(0), row.get::<&str, _>(1)) else { return Ok(None) };
+    Ok(Some(SqlServerSynonymTarget {
+        schema: schema.to_string(),
+        name: name.to_string(),
+        is_view: row.get::<&str, _>(2).is_some_and(|object_type| object_type.trim() == "V"),
+    }))
 }
 
 pub async fn get_column_metadata(
@@ -4670,11 +4827,11 @@ mod tests {
         sqlserver_probe_explicit_alias, sqlserver_query_messages, sqlserver_query_transport_for_engine_edition,
         sqlserver_query_transport_for_request, sqlserver_referential_action, sqlserver_schema_name_predicate,
         sqlserver_spatial_marker, sqlserver_split_name_list, sqlserver_supports_session_database_switch,
-        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_temporal_metadata_sql,
-        sqlserver_triggers_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
-        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn,
-        SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL,
-        SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_synonym_target_sql, sqlserver_table_comment_sql, sqlserver_table_objects_sql,
+        sqlserver_temporal_metadata_sql, sqlserver_triggers_sql, sqlserver_visible_object_predicate,
+        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerProbeOutputNameOverride,
+        SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet, SqlServerSpatialColumn,
+        SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -5124,6 +5281,90 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_host_with_url_instance_appends_instance_from_url_params() {
+        use std::borrow::Cow;
+
+        let host = "db.example.com";
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=SQLEXPRESS")),
+            Ok(Cow::Owned(r"db.example.com\SQLEXPRESS".to_string()))
+        );
+        // Semicolon-separated and case-insensitive keys, percent-encoded value.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 1433, false, Some(";InstanceName=SQL%45XPR%45SS")),
+            Ok(Cow::Owned(r"db.example.com\SQLEXPRESS".to_string()))
+        );
+        // Braced values keep whitespace and separators literally.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName={SQL EXPR}")),
+            Ok(Cow::Owned(r"db.example.com\SQL EXPR".to_string()))
+        );
+        // Duplicate keys: the last occurrence wins.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=OLD;instanceName=NEW")),
+            Ok(Cow::Owned(r"db.example.com\NEW".to_string()))
+        );
+        // No instanceName property leaves the host untouched.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("encrypt=true;applicationName=dbx")),
+            Ok(Cow::Borrowed(host))
+        );
+        // Empty instanceName is treated as absent.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=")),
+            Ok(Cow::Borrowed(host))
+        );
+        // Explicit port, non-default port, inline instance, or missing params all skip URL lookup.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 1433, true, Some("instanceName=SQLEXPRESS")),
+            Ok(Cow::Borrowed(host))
+        );
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 40030, false, Some("instanceName=SQLEXPRESS")),
+            Ok(Cow::Borrowed(host))
+        );
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(
+                r"db.example.com\INLINE",
+                0,
+                false,
+                Some("instanceName=SQLEXPRESS")
+            ),
+            Ok(Cow::Borrowed(r"db.example.com\INLINE"))
+        );
+        assert_eq!(super::sqlserver_host_with_url_instance(host, 0, false, None), Ok(Cow::Borrowed(host)));
+    }
+
+    #[test]
+    fn sqlserver_host_with_url_instance_validates_parsed_names() {
+        let host = "db.example.com";
+        // Host-embedded ports keep the host as-is instead of using the URL instance.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance("db.example.com,1433", 0, false, Some("instanceName=SQLEXPRESS")),
+            Ok(Cow::Borrowed("db.example.com,1433"))
+        );
+        // Names carrying host/port separators are rejected.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some(r"instanceName=BAD\NAME")),
+            Err("Invalid SQL Server instanceName URL parameter".to_string())
+        );
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=BAD:NAME")),
+            Err("Invalid SQL Server instanceName URL parameter".to_string())
+        );
+        // Control characters are rejected.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=BAD\u{0007}NAME")),
+            Err("Invalid SQL Server instanceName URL parameter".to_string())
+        );
+        // Undecodable percent sequences are rejected.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=%FF%FE")),
+            Err("Invalid SQL Server instanceName URL parameter".to_string())
+        );
+    }
+
+    #[test]
     fn sqlserver_connect_uses_named_instance_resolution() {
         let source = include_str!("sqlserver.rs");
         let try_connect = source.split("\nasync fn try_connect(").nth(1).unwrap();
@@ -5140,6 +5381,62 @@ mod tests {
         assert!(super::sqlserver_native_encryption_disabled(Some("?sqlserverEncryption=false&applicationName=dbx")));
         assert!(super::sqlserver_native_encryption_disabled(Some("applicationName=dbx;encrypt=false")));
         assert!(super::sqlserver_native_encryption_disabled(Some("?Encrypt=0&applicationName=dbx")));
+    }
+
+    #[test]
+    fn sqlserver_certificate_verification_is_opt_in() {
+        use super::{sqlserver_certificate_verification, SqlServerCertificateVerification};
+
+        assert_eq!(sqlserver_certificate_verification(None), Ok(None));
+        assert_eq!(sqlserver_certificate_verification(Some("encrypt=true")), Ok(None));
+        assert_eq!(sqlserver_certificate_verification(Some("trustServerCertificate=true")), Ok(None));
+        assert_eq!(
+            sqlserver_certificate_verification(Some("encrypt=true;trustServerCertificate=false")),
+            Ok(Some(SqlServerCertificateVerification { ca_file: None, host_name: None }))
+        );
+        // Desktop paths may contain spaces or separators: percent-encoded and brace-quoted values both work.
+        assert_eq!(
+            sqlserver_certificate_verification(Some(
+                "TrustServerCertificate=no&sslrootcert=C%3A%5Ccerts%5Cmy%20ca.pem&hostNameInCertificate=db.example.com"
+            )),
+            Ok(Some(SqlServerCertificateVerification {
+                ca_file: Some(r"C:\certs\my ca.pem".into()),
+                host_name: Some("db.example.com".into()),
+            }))
+        );
+        assert_eq!(
+            sqlserver_certificate_verification(Some("trustServerCertificate=false;sslrootcert={/certs/a;b.crt}")),
+            Ok(Some(SqlServerCertificateVerification { ca_file: Some("/certs/a;b.crt".into()), host_name: None }))
+        );
+    }
+
+    #[test]
+    fn sqlserver_certificate_verification_rejects_contradictions() {
+        use super::sqlserver_certificate_verification;
+
+        assert!(sqlserver_certificate_verification(Some("trustServerCertificate=maybe")).is_err());
+        assert!(sqlserver_certificate_verification(Some("trustServerCertificate=false;encrypt=false")).is_err());
+        assert!(sqlserver_certificate_verification(Some(
+            "trustServerCertificate=false&hostNameInCertificate=db.example.com%2Fx"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn sqlserver_verified_connections_do_not_fall_back() {
+        let source = include_str!("sqlserver.rs");
+        let connect = source.split("pub async fn connect_with_port_explicit(").nth(1).unwrap();
+        let connect = connect.split("const SQLSERVER_LEGACY_TLS_HINT").next().unwrap();
+        let verified = connect.split("sqlserver_certificate_verification(url_params)?").nth(1).unwrap();
+        let verified = verified.split("if sqlserver_native_encryption_disabled").next().unwrap();
+        assert!(verified.contains("Some(&verification)"));
+        assert!(!verified.contains("try_connect_legacy_sqlserver_encryption"));
+
+        let try_connect = source.split("\nasync fn try_connect(").nth(1).unwrap();
+        let try_connect = try_connect.split("fn row_to_json").next().unwrap();
+        let addr = try_connect.find("let addr = config.get_addr();").unwrap();
+        assert!(addr < try_connect.find("config.host(host_name)").unwrap());
+        assert!(try_connect.contains("TcpStream::connect(addr)"));
     }
 
     #[test]
@@ -5429,6 +5726,7 @@ mod tests {
             "password",
             None,
             tiberius::EncryptionLevel::NotSupported,
+            None,
             Duration::from_secs(3),
         )
         .await;
@@ -5490,6 +5788,7 @@ mod tests {
             "password",
             None,
             tiberius::EncryptionLevel::NotSupported,
+            None,
             Duration::from_secs(3),
         )
         .await;
@@ -5532,6 +5831,7 @@ mod tests {
             "password",
             None,
             tiberius::EncryptionLevel::NotSupported,
+            None,
             Duration::from_secs(3),
         )
         .await;
@@ -5933,6 +6233,19 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_synonym_target_sql_reads_only_local_tables_and_views() {
+        let sql = sqlserver_synonym_target_sql();
+
+        assert!(sql.contains("FROM sys.synonyms sn"));
+        assert!(sql.contains("OBJECT_ID(sn.base_object_name)"));
+        assert!(sql.contains("COALESCE(NULLIF(@P1, N''), SCHEMA_NAME())"));
+        assert!(sql.contains("sn.name = @P2"));
+        assert!(sql.contains("PARSENAME(sn.base_object_name, 4) IS NULL"));
+        assert!(sql.contains("PARSENAME(sn.base_object_name, 3) = DB_NAME()"));
+        assert!(sql.contains("o.type IN ('U', 'V')"));
+    }
+
+    #[test]
     fn sqlserver_columns_sql_reads_computed_column_definitions() {
         let sql = sqlserver_columns_sql("dbo", "orders");
 
@@ -6322,9 +6635,37 @@ mod tests {
         assert!(sql.contains("FROM sys.columns c"));
         assert!(sql.contains("o.name = 'Users'"));
         assert!(sql.contains("LOWER(c.name) LIKE LOWER('%id%') ESCAPE '\\'"));
-        assert!(sql.contains("CAST(NULL AS NVARCHAR(MAX)) AS object_comment"));
+        assert!(sql.contains("ep.value AS object_comment"));
+        assert!(sql.contains("ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id"));
+        assert!(sql.contains("ep.name = N'MS_Description'"));
         assert!(sql.contains("ORDER BY c.column_id"));
         assert!(!sql.contains("AS dbx_completion ORDER BY name"));
+    }
+
+    #[test]
+    fn sqlserver_completion_assistant_column_search_can_match_comments() {
+        let request = CompletionAssistantRequest {
+            connection_id: "c1".to_string(),
+            database: "app".to_string(),
+            schema: Some("dbo".to_string()),
+            object_kinds: vec![CompletionAssistantObjectKind::Column],
+            mask: "order".to_string(),
+            case_sensitive: false,
+            global_search: false,
+            max_results: Some(50),
+            search_in_comments: true,
+            search_in_definitions: false,
+            parent_schema: Some("dbo".to_string()),
+            parent_name: Some("Users".to_string()),
+            match_mode: Some(CompletionAssistantMatchMode::Contains),
+        };
+
+        let sql = sqlserver_completion_assistant_sql(&request, 50);
+
+        // The comment predicate references the OUTER APPLY alias, so it must be
+        // valid inside the column query too (it previously had no ep source).
+        assert!(sql.contains("LOWER(COALESCE(ep.value, '')) LIKE LOWER('%order%') ESCAPE '\\'"));
+        assert!(sql.contains("OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep"));
     }
 
     #[test]
@@ -6372,7 +6713,8 @@ mod tests {
 
         let sql = sqlserver_completion_assistant_sql(&request, 100);
 
-        assert!(sql.contains("FROM tempdb.sys.all_objects o"));
+        assert!(sql.contains("FROM tempdb.sys.all_objects o WITH (NOLOCK)"));
+        assert!(sql.contains("JOIN tempdb.sys.schemas s WITH (NOLOCK)"));
         assert!(sql.contains("o.type = 'U'"));
         assert!(sql.contains("LOWER(o.name) LIKE LOWER('#Temp%') ESCAPE '\\'"));
         assert!(sql.contains("CAST(NULL AS NVARCHAR(128)) AS parent_schema"));

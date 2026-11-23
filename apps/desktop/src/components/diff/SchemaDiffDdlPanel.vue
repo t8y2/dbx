@@ -49,6 +49,7 @@ const props = defineProps<{
   targetDbType?: string;
   deploySql: string;
   deploySqlAll: string;
+  charsetSyncDisabled?: boolean;
   rollbackForwardSql?: string;
   compatibilityWarnings?: CompatibilityWarning[];
   rollbackSql?: string;
@@ -520,6 +521,7 @@ function copyTargetDdl() {
 
     <!-- Deploy Script -->
     <div v-else-if="activeTab === 'script'" class="flex-1 flex flex-col overflow-hidden">
+      <p v-if="charsetSyncDisabled && deploySqlMode !== 'rollback'" class="border-b px-3 py-2 text-xs text-muted-foreground">{{ t("schemaDiff.options.charsetSyncDisabled") }}</p>
       <div class="flex items-center justify-between px-3 py-1.5 border-b shrink-0">
         <span class="text-xs text-muted-foreground">{{ t("diff.deployScriptDesc") }}</span>
         <div class="flex gap-1">
@@ -593,6 +595,7 @@ function copyTargetDdl() {
 
     <!-- Deploy Script All -->
     <div v-else-if="activeTab === 'scriptAll'" class="flex-1 flex flex-col overflow-hidden">
+      <p v-if="charsetSyncDisabled && deploySqlMode !== 'rollback'" class="border-b px-3 py-2 text-xs text-muted-foreground">{{ t("schemaDiff.options.charsetSyncDisabled") }}</p>
       <div class="flex items-center justify-between px-3 py-1.5 border-b shrink-0">
         <span class="text-xs text-muted-foreground">{{ t("diff.deployScriptAllDesc") }}</span>
         <div class="flex gap-1">

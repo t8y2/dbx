@@ -298,6 +298,19 @@ final class NativeLegacyJobTest {
     }
 
     @Test
+    void connectionValidationLeavesThePreparedTransactionToItsOwner() throws Exception {
+        open("native");
+        result(call("prepareLegacyJob", prepare("native", "op")));
+        Physical physical = PHYSICAL.getFirst();
+        List<String> before = List.copyOf(physical.events);
+        assertTrue(result(call("validateConnection", params("native"))).path("valid").asBoolean());
+        assertEquals(before, physical.events);
+        assertFalse(physical.closed);
+        JsonNode committed = result(call("commitLegacyJob", finish("native", "op", physical.id)));
+        assertEquals("committed", committed.path("phase").asText());
+    }
+
+    @Test
     void endpointChangesDoNotRedirectAnAlreadyPreparedOperation() throws Exception {
         open("native");
         result(call("prepareLegacyJob", prepare("native", "op")));

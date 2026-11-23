@@ -238,6 +238,42 @@ fn embedded_h2_jdbc_url_scope_preserves_native_and_other_vendor_defaults() {
     assert!(!is_embedded_h2_jdbc(&config));
 }
 
+#[test]
+fn embedded_derby_jdbc_url_scope_shares_file_databases_only() {
+    let mut config = super::tests::mysql_config(None);
+    config.db_type = DatabaseType::Jdbc;
+    for url in [
+        "jdbc:derby:/path/to/derby-db",
+        "jdbc:derby:./example",
+        "jdbc:derby:directory:/data/example",
+        "jdbc:derby:/data/example;create=true",
+        "jdbc:derby:classpath:/read/only",
+    ] {
+        config.connection_string = Some(url.into());
+        assert!(is_embedded_derby_jdbc(&config), "{url}");
+        assert!(uses_shared_embedded_jdbc_runtime(&config), "{url}");
+    }
+    for url in [
+        "jdbc:derby://localhost:1527/example",
+        "jdbc:derby:memory:example",
+        "jdbc:derby:memory:",
+        "jdbc:derby:",
+        "jdbc:h2:file:/data/example",
+        "jdbc:postgresql://host/db",
+    ] {
+        config.connection_string = Some(url.into());
+        assert!(!is_embedded_derby_jdbc(&config), "{url}");
+    }
+    // H2 keeps its own matcher, but both land in the shared-runtime path.
+    config.connection_string = Some("jdbc:derby://localhost:1527/example".into());
+    assert!(!uses_shared_embedded_jdbc_runtime(&config));
+    config.connection_string = Some("jdbc:h2:file:/data/example".into());
+    assert!(uses_shared_embedded_jdbc_runtime(&config));
+    config.db_type = DatabaseType::H2;
+    config.connection_string = Some("jdbc:derby:/path/to/derby-db".into());
+    assert!(!uses_shared_embedded_jdbc_runtime(&config));
+}
+
 #[tokio::test]
 async fn embedded_h2_jdbc_rejects_old_plugins_and_preserves_selected_driver_runtime() {
     let (state, directory) = fixture().await;

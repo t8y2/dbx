@@ -290,6 +290,7 @@ vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: f
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/lib/sql/sqlHighlighter", () => ({ createShikiSqlHighlighter: vi.fn(async () => (sql: string) => sql) }));
 vi.mock("@/lib/sql/sqlFormatter", () => ({
+  MAX_SQL_FORMAT_CHARS: 1_000_000,
   formatSqlForDisplay: vi.fn(async (sql: string) => sql),
   sqlFormatDialectForDbType: vi.fn(() => "mysql"),
 }));

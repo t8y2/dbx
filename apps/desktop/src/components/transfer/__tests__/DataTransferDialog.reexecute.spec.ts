@@ -309,6 +309,72 @@ describe("DataTransferDialog Re-execution (#13621 / P1 review)", () => {
     expect(startArg.tables).toEqual(["orders"]);
   });
 
+  it("keeps an explicit target table name when a finished transfer is re-executed (#14870)", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.startDataTransferTask(
+      {
+        transferId: "task-initial-renamed",
+        sourceConnectionId: sourceConnection.id,
+        sourceDatabase: "postgres",
+        sourceSchema: "public",
+        targetConnectionId: targetConnection.id,
+        targetDatabase: "tenant",
+        targetSchema: "public",
+        tables: ["orders"],
+        createTable: true,
+        content: "structureAndData",
+        objects: [{ objectType: "TABLE", names: ["orders"] }],
+        mode: "append",
+        targetTableNameCase: "preserve",
+        targetTableNames: { orders: "base_orders_archive" },
+        quoteTargetColumnNames: true,
+        batchSize: 500,
+        dropTargetBeforeCreate: false,
+        dropTargetConfirmed: false,
+      },
+      "postgres → tenant",
+    );
+    tracker.updateDataTransferTask(task.exportId, {
+      transferId: task.exportId,
+      table: "orders",
+      tableIndex: 1,
+      totalTables: 1,
+      rowsTransferred: 10,
+      totalRows: 10,
+      status: "done",
+      terminal: true,
+      error: null,
+    });
+    await nextTick();
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const state = reactive({ open: true, taskId: task.exportId as string | null });
+    const app = createApp({
+      render: () =>
+        h(TooltipProvider, {}, () =>
+          h(DataTransferDialog, {
+            open: state.open,
+            taskId: state.taskId,
+            "onUpdate:open": (v: boolean) => (state.open = v),
+            "onUpdate:taskId": (v: string | null) => (state.taskId = v),
+          }),
+        ),
+    });
+    apps.push(app);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    findButton((text) => text.includes("Re-execute"))!.click();
+    await vi.waitFor(() => expect(calls.preview).toHaveBeenCalled());
+    expect((calls.preview.mock.calls[0][0] as TransferRequest).targetTableNames).toEqual({ orders: "base_orders_archive" });
+
+    findButton((text) => text === "Start Transfer" || text === "Start")!.click();
+    await vi.waitFor(() => expect(calls.start).toHaveBeenCalledTimes(2));
+    expect((calls.start.mock.calls[1][0] as TransferRequest).targetTableNames).toEqual({ orders: "base_orders_archive" });
+  });
+
   it("re-executes rebuild transfer: displays SQL preview, danger warning, and only sets dropTargetConfirmed on acceptance", async () => {
     const tracker = useExportTracker();
     const task = tracker.startDataTransferTask(

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onScopeDispose, ref } from "vue";
-import { GitBranch, Gauge, Loader2, PlugZap, Upload } from "@lucide/vue";
+import { Archive, GitBranch, Gauge, Loader2, PlugZap } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -102,7 +102,7 @@ void refreshInstalledPlugins();
         @click="emit('exportArchive')"
       >
         <Loader2 v-if="archiveExporting" class="block h-3.5 w-3.5 self-center animate-spin" />
-        <Upload v-else class="block h-3.5 w-3.5 self-center" />
+        <Archive v-else class="block h-3.5 w-3.5 self-center" />
         <span v-if="!compact" class="inline-flex h-4 items-center leading-none">{{ t("tabs.exportResultArchive") }}</span>
       </Button>
     </LightTooltip>

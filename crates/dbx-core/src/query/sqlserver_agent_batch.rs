@@ -15,6 +15,26 @@ pub(super) fn requires_complete_results(sql: &str, options: &QueryExecutionOptio
     !matches!(Parser::parse_sql(&MsSqlDialect {}, sql).as_deref(), Ok([Statement::Query(_)]))
 }
 
+/// Agents released before `returnAllResults` existed ignore the flag and
+/// reply with the first result set as a single object instead of a list.
+fn batch_results(value: serde_json::Value) -> Result<Vec<db::QueryResult>, AgentCallError> {
+    let message = if value.is_object() {
+        "The installed sqlserver-legacy driver is too old to return every result of a batch. \
+         Update it in the Driver Manager and run the query again."
+            .to_string()
+    } else {
+        match serde_json::from_value(value) {
+            Ok(results) => return Ok(results),
+            Err(error) => format!("Failed to deserialize agent result: {error}"),
+        }
+    };
+    Err(AgentCallError::ContractViolation {
+        rpc_code: None,
+        message,
+        reason: crate::db::agent_driver::ContractViolationReason::InvalidResult,
+    })
+}
+
 pub(super) async fn execute(
     state: &AppState,
     pool_key: &str,
@@ -58,13 +78,14 @@ pub(super) async fn execute(
             None => client.lock().await,
         };
         let lock_ms = lock_started.elapsed().as_secs_f64() * 1000.0;
-        let results: Vec<db::QueryResult> = locked
+        let results: serde_json::Value = locked
             .execute_query_typed_with_timeout_and_cancel(
                 params,
                 resolve_query_timeout(options.timeout_secs),
                 cancel_token.clone(),
             )
             .await?;
+        let results = batch_results(results)?;
         Ok(results
             .into_iter()
             .map(|mut result| {
@@ -103,5 +124,25 @@ mod tests {
         assert!(requires_complete_results("SELECT 1", &QueryExecutionOptions::default()));
         let fetch = QueryExecutionOptions { result_session_id: Some("cursor".into()), ..options };
         assert!(!requires_complete_results("SELECT 1; SELECT 2;", &fetch));
+    }
+
+    #[test]
+    fn sqlserver_agent_batch_reports_outdated_agent_single_result() {
+        let single = serde_json::json!({"columns": ["n"], "rows": [[1]], "affected_rows": 0, "execution_time_ms": 1});
+        let all = batch_results(serde_json::json!([single.clone(), single.clone()])).unwrap();
+        assert_eq!(all.len(), 2);
+
+        match batch_results(single) {
+            Err(AgentCallError::ContractViolation { message, .. }) => {
+                assert!(message.contains("Driver Manager"), "{message}");
+            }
+            other => panic!("expected an outdated driver error, got {:?}", other.map(|results| results.len())),
+        }
+        match batch_results(serde_json::json!("unexpected")) {
+            Err(AgentCallError::ContractViolation { message, .. }) => {
+                assert!(message.starts_with("Failed to deserialize agent result"), "{message}");
+            }
+            other => panic!("expected a deserialize error, got {:?}", other.map(|results| results.len())),
+        }
     }
 }

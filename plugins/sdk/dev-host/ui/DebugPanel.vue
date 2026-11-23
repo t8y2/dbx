@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, ref, watch } from "vue";
-import { ArrowDownToLine, Trash2, X } from "lucide-vue-next";
+import { ArrowDownToLine, Trash2, X } from "@lucide/vue";
 import { translate } from "./i18n.js";
 const props = defineProps({ entries: { type: Array, default: () => [] }, locale: { type: String, default: "zh-CN" } });
 const t = (text) => translate(props.locale, text);

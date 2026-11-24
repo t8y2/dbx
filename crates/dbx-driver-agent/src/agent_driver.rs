@@ -4176,54 +4176,34 @@ fn agent_jar_path_matches_key(jar_path: &str, key: &str) -> bool {
 /// Placeholder that replaces credential values in diagnostic output.
 const REDACTED_LAUNCH_VALUE: &str = "***";
 
-/// Option names whose values are credentials and must not reach logs or errors.
+/// Options whose inline value is structural and never user data.
 ///
-/// The agent launch is assembled from `DBX_AGENT_JAVA_OPTS`, per-connection
-/// `agent_java_options` and, for custom launches, an arbitrary
-/// `agent-launch.json` argument list, so keystore passwords, tokens and API keys
-/// can end up in the command line.
-const SENSITIVE_LAUNCH_OPTION_MARKERS: &[&str] = &[
-    "password",
-    "passwd",
-    "pwd",
-    "secret",
-    "token",
-    "credential",
-    "apikey",
-    "api_key",
-    "api-key",
-    "accesskey",
-    "access_key",
-    "access-key",
-    "privatekey",
-    "private_key",
-    "private-key",
-    "passphrase",
-    "keystore",
-    "truststore",
-];
+/// `--add-opens` values are `java.base/...=ALL-UNNAMED` package lists that DBX
+/// composes itself, so keeping them readable costs nothing and keeps "is one
+/// `--add-opens` missing?" answerable from the log alone.
+const STRUCTURAL_LAUNCH_OPTIONS: &[&str] = &["--add-opens"];
 
 /// Renders a launch for the debug log and for startup errors.
 ///
 /// What makes the report actionable is which program, which jar and which
-/// working directory were used, so those stay verbatim, arguments are quoted
-/// when they contain whitespace, and credential values are replaced with
-/// [`REDACTED_LAUNCH_VALUE`].
+/// working directory were used, so those stay verbatim. Every other argument
+/// keeps its option name but loses its value: the launch is assembled from
+/// `DBX_AGENT_JAVA_OPTS`, per-connection `agent_java_options` and, for custom
+/// launches, an arbitrary `agent-launch.json` argument list, so any value — an
+/// inline `-Dservice.key=…`, a separated `--key …`, or a JDBC URL carrying the
+/// password — may be a credential, and no list of credential-like names can
+/// enumerate them all.
 fn launch_display(launch: &AgentLaunchSpec) -> String {
     let mut rendered = Vec::with_capacity(launch.args.len() + 2);
     rendered.push(quote_launch_argument(&launch.program.to_string_lossy()));
-    let mut redact_next_argument = false;
-    for argument in &launch.args {
-        if redact_next_argument {
-            rendered.push(quote_launch_argument(REDACTED_LAUNCH_VALUE));
-            redact_next_argument = false;
-            continue;
-        }
-        // `--api-key secret` carries the value in the next argument; only flags
-        // without an inline `=` value need the following token masked.
-        redact_next_argument =
-            !argument.contains('=') && launch_option_name(argument).is_some_and(is_sensitive_launch_option);
-        rendered.push(quote_launch_argument(&redact_launch_argument(argument)));
+    let jar_argument = launch_jar_argument_index(&launch.args);
+    for (index, argument) in launch.args.iter().enumerate() {
+        let rendered_argument = if Some(index) == jar_argument || keeps_its_launch_value(argument) {
+            argument.clone()
+        } else {
+            redact_launch_argument(argument)
+        };
+        rendered.push(quote_launch_argument(&rendered_argument));
     }
     let command = rendered.join(" ");
     match &launch.working_dir {
@@ -4234,37 +4214,48 @@ fn launch_display(launch: &AgentLaunchSpec) -> String {
     }
 }
 
+/// Index of the jar path, which is the argument right after `-jar`.
+fn launch_jar_argument_index(args: &[String]) -> Option<usize> {
+    let jar_flag = args.iter().position(|argument| argument == "-jar")?;
+    let jar_index = jar_flag + 1;
+    (jar_index < args.len()).then_some(jar_index)
+}
+
+fn keeps_its_launch_value(argument: &str) -> bool {
+    STRUCTURAL_LAUNCH_OPTIONS.iter().any(|option| argument.starts_with(option))
+}
+
+/// Keeps the option name and drops the value.
 fn redact_launch_argument(argument: &str) -> String {
     let Some((name, _value)) = argument.split_once('=') else {
-        return argument.to_string();
+        // A bare option either takes no value or takes it in a separate argument;
+        // that value is masked on its own iteration because it does not start
+        // with `-`.
+        return if argument.starts_with('-') { argument.to_string() } else { REDACTED_LAUNCH_VALUE.to_string() };
     };
-    match launch_option_name(name) {
-        Some(option) if is_sensitive_launch_option(option) => format!("{name}={REDACTED_LAUNCH_VALUE}"),
-        _ => argument.to_string(),
-    }
+    format!("{name}={REDACTED_LAUNCH_VALUE}")
 }
 
-/// Returns the option name of a JVM/agent flag, without its leading dashes.
-fn launch_option_name(flag: &str) -> Option<&str> {
-    if let Some(name) = flag.strip_prefix("--") {
-        Some(name)
-    } else if let Some(name) = flag.strip_prefix("-D") {
-        Some(name)
-    } else {
-        flag.strip_prefix('-')
-    }
-}
-
-fn is_sensitive_launch_option(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    SENSITIVE_LAUNCH_OPTION_MARKERS.iter().any(|marker| name.contains(marker))
-}
-
+/// Quotes an argument and escapes control characters so one diagnostic is one line.
 fn quote_launch_argument(value: &str) -> String {
-    if !value.is_empty() && !value.chars().any(|character| character.is_whitespace() || character == '"') {
-        return value.to_string();
+    let escaped: String = value
+        .chars()
+        .map(|character| match character {
+            '"' => "\\\"".to_string(),
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            character if character.is_control() => format!("\\u{{{:x}}}", character as u32),
+            character => character.to_string(),
+        })
+        .collect();
+    let needs_quotes = value.is_empty()
+        || value.chars().any(|character| character.is_whitespace() || character.is_control() || character == '"');
+    if needs_quotes {
+        format!("\"{escaped}\"")
+    } else {
+        escaped
     }
-    format!("\"{}\"", value.replace('"', "\\\""))
 }
 
 fn spawn_agent_process(launch: &AgentLaunchSpec) -> Result<Child, String> {

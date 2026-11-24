@@ -1174,9 +1174,46 @@ public final class DbxJdbcPlugin {
                     // Optional mode facts must not make ordinary JDBC metadata unavailable.
                 }
             }
+            applyGaussdbProductVersion(connection, info);
             return info;
         } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
             return MAPPER.createObjectNode();
+        }
+    }
+
+    /**
+     * JDBC {@link DatabaseMetaData} reports the PostgreSQL-compatibility layer
+     * version for GaussDB; the real product version lives in {@code pg_settings}.
+     * Surface {@code product_version} (with the {@code hotpatch_version} appended
+     * when the server runs one) instead of the compatibility-layer string.
+     */
+    private static void applyGaussdbProductVersion(Connection connection, ObjectNode info) {
+        if (!info.path("productName").asText().toLowerCase(Locale.ROOT).contains("gaussdb")) {
+            return;
+        }
+        String serverVersion = gaussdbSettingValue(connection, "product_version");
+        if (serverVersion == null) {
+            // Keep the JDBC-reported product version when the setting is absent.
+            return;
+        }
+        String hotpatchVersion = gaussdbSettingValue(connection, "hotpatch_version");
+        info.put("productVersion", hotpatchVersion == null ? serverVersion : serverVersion + " (" + hotpatchVersion + ")");
+    }
+
+    private static String gaussdbSettingValue(Connection connection, String name) {
+        try (Statement statement = connection.createStatement()) {
+            statement.setQueryTimeout(5);
+            try (ResultSet rows = statement.executeQuery("SELECT setting FROM pg_settings WHERE name = '" + name + "'")) {
+                if (rows.next()) {
+                    String value = rows.getString(1);
+                    if (value != null && !value.trim().isEmpty()) {
+                        return value.trim();
+                    }
+                }
+            }
+            return null;
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return null;
         }
     }
 

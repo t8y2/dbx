@@ -82,6 +82,41 @@ pub async fn execute_query(
     let cancel_token = registered_query.as_ref().map(|query| query.token());
 
     let messages = query_messages_callback(&app, execution_id.as_deref());
+    let options = dbx_core::query::QueryExecutionOptions {
+        max_rows,
+        fetch_size,
+        page_size,
+        row_offset,
+        catalog,
+        result_session_id,
+        client_session_id,
+        timeout_secs,
+        execution_id,
+        execution_mode: execution_mode.unwrap_or_default(),
+        ..Default::default()
+    };
+    // A write with an explicit limit stops waiting at the deadline but is never
+    // cancelled: the caller could not tell whether the rows landed.
+    let decision = dbx_core::query::connection_statement_timeout(&state, &connection_id, &sql, timeout_secs).await;
+    if let (Some(wait), false) = (decision.client_wait(), decision.cancels_on_timeout()) {
+        let detached = dbx_core::query::spawn_detached_statement(
+            state.inner().clone(),
+            connection_id,
+            database,
+            sql,
+            schema,
+            cancel_token,
+            options,
+            registered_query,
+            messages,
+        );
+        return match tokio::time::timeout(wait, detached).await {
+            Ok(Ok(result)) => result.map_err(dbx_core::query::QueryExecutionError::into_backend_error),
+            Ok(Err(_)) => Err(BackendError::from_sql_detail("Statement task stopped unexpectedly")),
+            Err(_) => Err(BackendError::from_timeout_detail(&dbx_core::query::detached_write_timeout_message(wait))),
+        };
+    }
+
     let result = dbx_core::query::query_messages::with_query_messages(
         messages,
         dbx_core::query::execute_sql_statement_with_options_typed(
@@ -91,19 +126,7 @@ pub async fn execute_query(
             &sql,
             schema.as_deref(),
             cancel_token,
-            dbx_core::query::QueryExecutionOptions {
-                max_rows,
-                fetch_size,
-                page_size,
-                row_offset,
-                catalog,
-                result_session_id,
-                client_session_id,
-                timeout_secs,
-                execution_id,
-                execution_mode: execution_mode.unwrap_or_default(),
-                ..Default::default()
-            },
+            options,
         ),
     )
     .await;

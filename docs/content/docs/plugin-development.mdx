@@ -694,7 +694,37 @@ const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
 | `onDrop(fn)`                               | Files dropped onto this workbench arrive as read handles. A dropped folder is expanded into the regular files it contains (dotfiles and dot-directories like `.git` are skipped); each expanded file carries `relativePath` — its '/'-separated path starting with the dropped folder's own name (`folder/nested/a.csv`) — so the plugin can rebuild the dragged structure and tell same-named files under different dropped roots apart. Listeners receive `(files, { dropId, truncated, position })`: `dropId` groups this drop's entries (cancellation and progress bookkeeping), `truncated` is `true` when the 2000-file or 8-depth expansion cap cut the delivery short, and `position` provides the CSS coordinates `{ x, y }` relative to the iframe viewport. |
 | `onDragState(fn)`                          | Whether an OS drag is currently over this workbench; drive drop overlays or element hover targets with it. The listener signature is `(active, position)`: `active` is boolean, and `position` provides the CSS coordinates `{ x, y }` relative to the iframe viewport (or `undefined` when leaving or ending). |
 
-Desktop and web hosts differ in what the namespace can do — gate on the additive `capabilities.fileTransfer` flags (`pick`, `beginSave`, `read`, `drop`, `folderExpansion`) instead of probing calls. On desktop, `pick` / `beginSave` use native dialogs and `onDrop` receives OS drops; dropped entries are opened lazily and streamed in chunks, so very large folders and multi-gigabyte files never exhaust handles or memory, and picking more files than the shared handle registry holds downgrades them to lazily-opened entries instead of dropping any. On the web host, `pick` falls back to a browser file input, `beginSave` buffers in memory and downloads through the browser, `onDrop` / `onDragState` never fire (`drop`/`folderExpansion` are `false` there), and handles carry no `relativePath`. `onDrop` only fires for drops that land inside this plugin's workbench area; drops elsewhere keep the host's own behavior.
+Desktop and web hosts differ in what the namespace can do — gate on the additive `capabilities.fileTransfer` flags (`pick`, `beginSave`, `read`, `drop`, `folderExpansion`, `folder`) instead of probing calls. On desktop, `pick` / `beginSave` use native dialogs and `onDrop` receives OS drops; dropped entries are opened lazily and streamed in chunks, so very large folders and multi-gigabyte files never exhaust handles or memory, and picking more files than the shared handle registry holds downgrades them to lazily-opened entries instead of dropping any. On the web host, `pick` falls back to a browser file input, `beginSave` buffers in memory and downloads through the browser, `onDrop` / `onDragState` never fire (`drop`/`folderExpansion`/`folder` are `false` there), and handles carry no `relativePath`. `onDrop` only fires for drops that land inside this plugin's workbench area; drops elsewhere keep the host's own behavior.
+
+#### Folder handles
+
+Plugins that manage a project folder rather than a single file — an ER-model editor keeping many `.erm` files in one directory, for instance — need repeated reads and writes without a dialog on every save. `pickFolder` grants a session-scoped directory handle after one native consent:
+
+```js
+const ft = window.dbxPlugin.fileTransfer;
+if (!ft?.capabilities?.folder) {
+  // Web host: fall back to pick/beginSave or a sidecar.
+}
+
+const picked = await ft.pickFolder();          // { folderHandleId, name }, or null when cancelled
+const { folderHandleId } = picked;
+const { entries, truncated } = await ft.folderList(folderHandleId, { extensions: ["erm"] });
+const text = await ft.folderReadText(folderHandleId, "db/core.erm");
+await ft.folderWriteText(folderHandleId, "db/core.erm", edited); // overwrite in place
+await ft.folderWriteText(folderHandleId, "db/core.sql", ddl);    // parent dirs are created
+await ft.closeFolderHandle(folderHandleId);
+```
+
+| API                                                | Purpose                                                                                                                                                                                                                                                   |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pickFolder({ readOnly? })`                        | Native folder dialog; resolves `{ folderHandleId, name }`, or `null` when the user cancels. The grant lasts for the session. `readOnly: true` rejects later writes.                                                                                        |
+| `folderList(folderHandleId, { subPath?, extensions? })` | Recursively lists entries as `{ name, relativePath, kind, size?, modifiedAt? }` plus `truncated`. Dot-entries, symlinks and special files are skipped; `extensions` matches case-insensitively; listings cap at 2000 entries and depth 8.                  |
+| `folderReadText(folderHandleId, relativePath)`     | Reads a file as UTF-8 text.                                                                                                                                                                                                                               |
+| `folderWriteText(folderHandleId, relativePath, content, { create? })` | Writes UTF-8 text, creating missing parent directories. Resolves the final absolute path for display only — keep addressing the file through the handle.                                                                                    |
+| `folderWriteBinary(folderHandleId, relativePath, dataBase64, { create? })` | Writes raw base64 bytes (PNG/XLSX exports) under the same containment rules.                                                                                                                                                       |
+| `closeFolderHandle(folderHandleId)`                | Releases the grant. Uninstalling the plugin sweeps any remaining handles.                                                                                                                                                                                 |
+
+The absolute path never reaches the renderer. The grant lives in the Rust-side registry keyed by an opaque uuid owned by the calling plugin, and every relative path is validated lexically (no absolute paths, no `..` components) then canonicalized so symlinks cannot escape the folder. This is additive to the single-file handle model: `pick` / `beginSave` / `onDrop` keep their existing one-shot semantics.
 
 ### Persistent UI State
 

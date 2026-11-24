@@ -135,6 +135,16 @@ export interface PluginFileHandleMeta {
   relativePath?: string;
 }
 
+/** One entry inside a granted directory handle (returned by pickFolder). */
+export interface FolderEntry {
+  name: string;
+  /** '/'-separated path relative to the folder root. */
+  relativePath: string;
+  kind: "file" | "directory";
+  size?: number;
+  modifiedAt?: number;
+}
+
 export interface PluginDragPosition {
   x: number;
   y: number;
@@ -314,6 +324,18 @@ export interface PluginHostBridgeApi {
   finishFileSave?(pluginId: string, handleId: string): Promise<void>;
   /** Close any file handle, discarding unsaved state. */
   closeFileHandle?(pluginId: string, handleId: string): Promise<void>;
+  /** Native folder-picker dialog; resolves a directory handle the plugin can later enumerate/read/write silently. Null means the user cancelled. */
+  pickFolder?(pluginId: string, options?: { readOnly?: boolean }): Promise<{ folderHandleId: string; name: string } | null>;
+  /** Recursively list entries under a granted folder handle, optionally filtering by extension. */
+  folderList?(pluginId: string, folderHandleId: string, options?: { subPath?: string; extensions?: string[] }): Promise<{ entries: FolderEntry[]; truncated: boolean }>;
+  /** Read a file inside a granted folder handle as UTF-8 text. */
+  folderReadText?(pluginId: string, folderHandleId: string, relativePath: string): Promise<string>;
+  /** Write a UTF-8 text file inside a granted folder handle; parent dirs created. Host returns final absolute path as a display convenience only. */
+  folderWriteText?(pluginId: string, folderHandleId: string, relativePath: string, content: string, options?: { create?: boolean }): Promise<string>;
+  /** Write raw base64 bytes (PNG/XLSX) inside a granted folder handle. */
+  folderWriteBinary?(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, options?: { create?: boolean }): Promise<string>;
+  /** Close a directory handle, releasing the grant. */
+  closeFolderHandle?(pluginId: string, folderHandleId: string): Promise<void>;
   /** Whether this host receives OS file drops on the plugin's behalf (desktop only). */
   receiveOsDrops?: boolean;
   /** Persistent per-plugin key-value storage for sandboxed UIs; resolves null when the key is unset. */
@@ -550,6 +572,10 @@ export class PluginHostBridge {
           // OS drops (and their folder expansion) are desktop-only.
           drop: !!this.api.receiveOsDrops,
           folderExpansion: !!this.api.receiveOsDrops,
+          // Folder-handle API: desktop-only (native folder picker), mirrors
+          // the file-handle model with a persistent session-level grant.
+          folder: !!this.api.pickFolder && !!this.api.folderList && !!this.api.folderReadText && !!this.api.folderWriteText,
+          folderBinary: !!this.api.folderWriteBinary,
         },
         [PLUGIN_CONNECTIONS_CAPABILITY]: !!this.api.listConnections || !!this.api.listAllConnections,
         [PLUGIN_CONNECTION_EDIT_CAPABILITY]: !!this.api.connectionEditor && this.hasPermission(PLUGIN_CONNECTION_EDIT_PERMISSION),
@@ -1033,6 +1059,40 @@ export class PluginHostBridge {
       const input = requireRecord(params, "host.closeFileHandle params");
       if (!this.api.closeFileHandle) throw new Error("Host file handling is unavailable");
       await this.api.closeFileHandle(this.plugin.manifest.id, requireHandleId(input.handleId));
+      return null;
+    }
+    if (method === "host.pickFolder") {
+      if (!this.api.pickFolder) throw new Error("Host folder picking is unavailable");
+      const input = params && typeof params === "object" ? (params as Record<string, unknown>) : {};
+      return this.api.pickFolder(this.plugin.manifest.id, { readOnly: input.readOnly === true });
+    }
+    if (method === "host.folderList") {
+      const input = requireRecord(params, "host.folderList params");
+      if (!this.api.folderList) throw new Error("Host folder enumeration is unavailable");
+      return this.api.folderList(this.plugin.manifest.id, requireHandleId(input.folderHandleId), {
+        subPath: typeof input.subPath === "string" ? input.subPath : undefined,
+        extensions: Array.isArray(input.extensions) ? input.extensions.map(String) : undefined,
+      });
+    }
+    if (method === "host.folderReadText") {
+      const input = requireRecord(params, "host.folderReadText params");
+      if (!this.api.folderReadText) throw new Error("Host folder reading is unavailable");
+      return this.api.folderReadText(this.plugin.manifest.id, requireHandleId(input.folderHandleId), requireString(input.relativePath));
+    }
+    if (method === "host.folderWriteText") {
+      const input = requireRecord(params, "host.folderWriteText params");
+      if (!this.api.folderWriteText) throw new Error("Host folder writing is unavailable");
+      return this.api.folderWriteText(this.plugin.manifest.id, requireHandleId(input.folderHandleId), requireString(input.relativePath), requireString(input.content), { create: input.create !== false });
+    }
+    if (method === "host.folderWriteBinary") {
+      const input = requireRecord(params, "host.folderWriteBinary params");
+      if (!this.api.folderWriteBinary) throw new Error("Host folder writing is unavailable");
+      return this.api.folderWriteBinary(this.plugin.manifest.id, requireHandleId(input.folderHandleId), requireString(input.relativePath), requireBase64(input.dataBase64), { create: input.create !== false });
+    }
+    if (method === "host.closeFolderHandle") {
+      const input = requireRecord(params, "host.closeFolderHandle params");
+      if (!this.api.closeFolderHandle) throw new Error("Host folder handle is unavailable");
+      await this.api.closeFolderHandle(this.plugin.manifest.id, requireHandleId(input.folderHandleId));
       return null;
     }
     if (method === "host.storageGet") {
@@ -1619,6 +1679,14 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         },
         finish: (handleId) => request('host.finishFileSave', { handleId }),
         cancel: (handleId) => request('host.closeFileHandle', { handleId }),
+        // Folder-handle API：desktop-only（native folder picker），
+        // mirrors the file-handle model with a session-level grant.
+        pickFolder: (options) => request('host.pickFolder', options || {}),
+        folderList: (folderHandleId, options) => request('host.folderList', { folderHandleId, ...(options || {}) }),
+        folderReadText: (folderHandleId, relativePath) => request('host.folderReadText', { folderHandleId, relativePath }),
+        folderWriteText: (folderHandleId, relativePath, content, options) => request('host.folderWriteText', { folderHandleId, relativePath, content, create: options?.create !== false }),
+        folderWriteBinary: (folderHandleId, relativePath, dataBase64, options) => request('host.folderWriteBinary', { folderHandleId, relativePath, dataBase64, create: options?.create !== false }),
+        closeFolderHandle: (folderHandleId) => request('host.closeFolderHandle', { folderHandleId }),
         onDragState: (listener) => { listeners.dragstate.add(listener); return () => listeners.dragstate.delete(listener); },
         onDrop: (listener) => { listeners.filedrop.add(listener); return () => listeners.filedrop.delete(listener); },
       }),
@@ -1883,6 +1951,11 @@ function clampPluginPlanTimeout(value: unknown): number {
 
 function requireHandleId(value: unknown): string {
   if (typeof value !== "string" || !value || value.length > 128) throw new Error("handleId is invalid");
+  return value;
+}
+
+function requireString(value: unknown, label = "string"): string {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
   return value;
 }
 

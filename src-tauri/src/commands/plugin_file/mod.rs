@@ -26,6 +26,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use serde::Serialize;
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -109,6 +110,11 @@ pub struct PluginFileState {
     /// Grants expire (see `GRANT_TTL`): a drop authorizes the immediate open
     /// flow, not a renderer claim at any future time.
     dropped_paths: Mutex<HashMap<String, Vec<DroppedGrant>>>,
+    /// Session-scoped directory handles opened via `plugin_file_pick_folder`:
+    /// one opaque handle per native dialog consent, owner-gated, granting the
+    /// plugin silent list/read/write within the canonical root without ever
+    /// exposing the absolute path to the renderer.
+    pub(super) folders: Mutex<HashMap<String, folder::OpenFolder>>,
 }
 
 impl PluginFileState {
@@ -248,9 +254,15 @@ fn guess_content_type(path: &Path) -> String {
 }
 
 mod drop;
+mod folder;
 mod registry;
 
 use drop::open_dropped_plugin_files;
+pub(crate) use folder::close_all_plugin_folders;
+use folder::{
+    close_folder, folder_list, folder_read_text, folder_write_bytes, folder_write_text, open_folder, FolderHandleMeta,
+    FolderListResult,
+};
 pub use registry::close_all_plugin_files;
 use registry::{
     close_plugin_file, open_plugin_file, open_read_handle_or_lazy, read_plugin_file_chunk, write_plugin_file_chunk,
@@ -401,6 +413,137 @@ pub async fn plugin_file_close(app: tauri::AppHandle, plugin_id: String, handle_
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<PluginFileState>();
         close_plugin_file(state.inner(), &plugin_id, &handle_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Directory handle commands. These mirror the single-file handle model: the
+// path enters the registry only through Rust-anchored native dialog consent
+// (pick_folder), the renderer only ever sees an opaque folder_handle_id, and
+// every subsequent list/read/write is owner-gated with a canonicalize-based
+// escape check. Directory handles are session-scoped — no TTL — so the plugin
+// can silently reload its project tree and auto-save edits without another
+// dialog.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Opens the native folder picker and returns a directory handle for exactly
+/// the folder the user selected. The renderer provides nothing beyond its
+/// plugin id; the consent is anchored inside this Rust-side dialog.
+#[tauri::command]
+pub async fn plugin_file_pick_folder(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    read_only: Option<bool>,
+) -> Result<Option<FolderHandleMeta>, String> {
+    if plugin_id.trim().is_empty() {
+        return Err("plugin id is required".to_string());
+    }
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |path| {
+        let _ = sender.send(path);
+    });
+    let chosen = receiver.await.map_err(|error| error.to_string())?;
+    let Some(chosen) = chosen else { return Ok(None) };
+    let path = chosen.into_path().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<PluginFileState>();
+        open_folder(state.inner(), &plugin_id, &path, read_only == Some(true))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map(Some)
+}
+
+#[tauri::command]
+pub async fn plugin_file_folder_list(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    folder_handle_id: String,
+    sub_path: Option<String>,
+    extensions: Option<Vec<String>>,
+) -> Result<FolderListResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<PluginFileState>();
+        folder_list(state.inner(), &plugin_id, &folder_handle_id, sub_path.as_deref(), extensions.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn plugin_file_folder_read_text(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    folder_handle_id: String,
+    relative_path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<PluginFileState>();
+        folder_read_text(state.inner(), &plugin_id, &folder_handle_id, &relative_path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn plugin_file_folder_write_text(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    folder_handle_id: String,
+    relative_path: String,
+    content: String,
+    create: Option<bool>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<PluginFileState>();
+        folder_write_text(
+            state.inner(),
+            &plugin_id,
+            &folder_handle_id,
+            &relative_path,
+            &content,
+            create.unwrap_or(true),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn plugin_file_folder_write_binary(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    folder_handle_id: String,
+    relative_path: String,
+    data_base64: String,
+    create: Option<bool>,
+) -> Result<String, String> {
+    // Same payload ceiling as chunked file writes: base64 inflates by ~4/3.
+    if data_base64.len() > MAX_CHUNK_BYTES * 4 / 3 + 4 {
+        return Err("binary payload exceeds the folder write limit".to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|error| format!("invalid base64 payload: {error}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<PluginFileState>();
+        folder_write_bytes(state.inner(), &plugin_id, &folder_handle_id, &relative_path, &bytes, create.unwrap_or(true))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn plugin_file_folder_close(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    folder_handle_id: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<PluginFileState>();
+        close_folder(state.inner(), &plugin_id, &folder_handle_id)
     })
     .await
     .map_err(|error| error.to_string())?

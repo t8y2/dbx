@@ -288,6 +288,7 @@ pub async fn uninstall_plugin(
     // (Before this point an Err return must leave a still-installed plugin's
     // workbenches fully functional.)
     crate::commands::plugin_file::close_all_plugin_files(&file_state, &plugin_id);
+    crate::commands::plugin_file::close_all_plugin_folders(&file_state, &plugin_id);
     // A reinstall must ask for AI tool access and data grants again.
     if let Err(error) = state.storage.forget_plugin_permissions(&plugin_id).await {
         log::warn!("Failed to clear permissions of uninstalled plugin {plugin_id}: {error}");
@@ -318,6 +319,7 @@ pub async fn stop_plugin(
     // The plugin's workbenches are going away with its runtime; without this
     // sweep, handles it never closed would pin the shared registry quota.
     crate::commands::plugin_file::close_all_plugin_files(&file_state, &plugin_id);
+    crate::commands::plugin_file::close_all_plugin_folders(&file_state, &plugin_id);
     state.plugin_host.stop(&plugin_id).await?;
     Ok(())
 }

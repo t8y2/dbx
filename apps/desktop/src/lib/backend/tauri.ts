@@ -3355,6 +3355,35 @@ export async function closePluginLocalFile(pluginId: string, handleId: string): 
   return invoke("plugin_file_close", { pluginId, handleId });
 }
 
+export async function pickPluginLocalFolder(pluginId: string, readOnly?: boolean): Promise<{ folderHandleId: string; name: string } | null> {
+  return invoke("plugin_file_pick_folder", { pluginId, readOnly: readOnly === true });
+}
+
+export async function listPluginLocalFolder(pluginId: string, folderHandleId: string, options?: { subPath?: string; extensions?: string[] }): Promise<{ entries: Array<{ name: string; relativePath: string; kind: "file" | "directory"; size?: number; modifiedAt?: number }>; truncated: boolean }> {
+  return invoke("plugin_file_folder_list", {
+    pluginId,
+    folderHandleId,
+    subPath: options?.subPath ?? null,
+    extensions: options?.extensions ?? null,
+  });
+}
+
+export async function readPluginLocalFolderText(pluginId: string, folderHandleId: string, relativePath: string): Promise<string> {
+  return invoke("plugin_file_folder_read_text", { pluginId, folderHandleId, relativePath });
+}
+
+export async function writePluginLocalFolderText(pluginId: string, folderHandleId: string, relativePath: string, content: string, create = true): Promise<string> {
+  return invoke("plugin_file_folder_write_text", { pluginId, folderHandleId, relativePath, content, create });
+}
+
+export async function writePluginLocalFolderBinary(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, create = true): Promise<string> {
+  return invoke("plugin_file_folder_write_binary", { pluginId, folderHandleId, relativePath, dataBase64, create });
+}
+
+export async function closePluginLocalFolder(pluginId: string, folderHandleId: string): Promise<void> {
+  return invoke("plugin_file_folder_close", { pluginId, folderHandleId });
+}
+
 export async function openPluginMedia(pluginId: string, method: string, params: Record<string, unknown>): Promise<string> {
   return invoke("plugin_media_open", { pluginId, method, params });
 }

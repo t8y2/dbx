@@ -6095,6 +6095,30 @@ export async function closePluginLocalFile(_pluginId: string, _handleId: string)
   throw new Error("Plugin local file access is not available in the web backend");
 }
 
+export async function pickPluginLocalFolder(_pluginId: string, _readOnly?: boolean): Promise<{ folderHandleId: string; name: string } | null> {
+  throw new Error("Plugin folder picking is not available in the web backend");
+}
+
+export async function listPluginLocalFolder(_pluginId: string, _folderHandleId: string, _options?: { subPath?: string; extensions?: string[] }): Promise<{ entries: Array<{ name: string; relativePath: string; kind: "file" | "directory"; size?: number; modifiedAt?: number }>; truncated: boolean }> {
+  throw new Error("Plugin folder enumeration is not available in the web backend");
+}
+
+export async function readPluginLocalFolderText(_pluginId: string, _folderHandleId: string, _relativePath: string): Promise<string> {
+  throw new Error("Plugin folder reading is not available in the web backend");
+}
+
+export async function writePluginLocalFolderText(_pluginId: string, _folderHandleId: string, _relativePath: string, _content: string, _create = true): Promise<string> {
+  throw new Error("Plugin folder writing is not available in the web backend");
+}
+
+export async function closePluginLocalFolder(_pluginId: string, _folderHandleId: string): Promise<void> {
+  throw new Error("Plugin folder handle is not available in the web backend");
+}
+
+export async function writePluginLocalFolderBinary(_pluginId: string, _folderHandleId: string, _relativePath: string, _dataBase64: string, _create = true): Promise<string> {
+  throw new Error("Plugin folder writing is not available in the web backend");
+}
+
 export async function openPluginMedia(_pluginId: string, _method: string, _params: Record<string, unknown>): Promise<string> {
   throw new Error("Plugin media URLs are not available in the web backend");
 }

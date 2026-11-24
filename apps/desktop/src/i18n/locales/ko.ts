@@ -984,6 +984,10 @@ export default withEnglishFallback({
     rightToolbarLabels: "오른쪽 도구 모음 텍스트",
     showRightToolbarLabels: "오른쪽 도구 모음 텍스트 표시",
     hideRightToolbarLabels: "오른쪽 도구 모음 텍스트 숨기기",
+    convertSqlToMongo: "SQL을 MongoDB로 변환",
+    convertSqlToMongoHint: "이 SQL은 해당 MongoDB shell에서 실행됩니다. 실행하기 전까지는 아무 작업도 수행되지 않습니다.",
+    openShellInNewTab: "새 Shell 탭에서 열기",
+    replaceWithShell: "편집기 내용을 shell로 바꾸기",
   },
   multiDbExecute: {
     manualTransaction: "수동 트랜잭션",

@@ -34,7 +34,9 @@ import {
   UserRound,
   Copy,
   MessageSquareText,
+  ArrowRightLeft,
 } from "@lucide/vue";
+import MongoSqlConvertDialog from "@/components/editor/MongoSqlConvertDialog.vue";
 import { supportsInsertValueHints } from "@/lib/sql/insertValueHints";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -154,6 +156,26 @@ const mongoQueryLanguage = computed(() => props.activeTab.mongoQueryLanguage ?? 
 
 function setMongoQueryLanguage(language: MongoQueryLanguage) {
   queryStore.setMongoQueryLanguage(props.activeTab.id, language);
+}
+
+// SQL → MongoDB shell preview without running the query.
+const mongoSqlConvertOpen = ref(false);
+const mongoSqlConvertSource = ref("");
+
+function openMongoSqlConvert() {
+  mongoSqlConvertSource.value = props.activeTab.sql ?? "";
+  mongoSqlConvertOpen.value = true;
+}
+
+function openConvertedShellInNewTab(shell: string) {
+  const tab = props.activeTab;
+  queryStore.createTab(tab.connectionId, tab.database, undefined, "query", tab.schema, shell, tab.catalog, { forceNew: true });
+}
+
+function replaceWithConvertedShell(shell: string) {
+  const id = props.activeTab.id;
+  queryStore.updateSql(id, shell);
+  queryStore.setMongoQueryLanguage(id, "shell");
 }
 
 async function copyDatabaseName(database: string) {
@@ -682,6 +704,15 @@ defineExpose({
           {{ t("toolbar.mongoSqlMode") }}
         </button>
       </div>
+      <Tooltip v-if="showMongoSqlToggle && mongoQueryLanguage === 'sql'">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-foreground" :aria-label="t('toolbar.convertSqlToMongo')" :disabled="!(activeTab.sql ?? '').trim()" data-mongo-sql-convert-button @click="openMongoSqlConvert">
+            <ArrowRightLeft class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("toolbar.convertSqlToMongo") }}</TooltipContent>
+      </Tooltip>
+      <MongoSqlConvertDialog v-if="showMongoSqlToggle" v-model:open="mongoSqlConvertOpen" :sql="mongoSqlConvertSource" @open-in-new-tab="openConvertedShellInNewTab" @replace="replaceWithConvertedShell" />
       <Tooltip v-if="showMongoSqlToggle && mongoQueryLanguage === 'sql' && activeTab.mongoGeneratedShell">
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-foreground" :aria-label="t('toolbar.copyMongoShell')" @click="copyGeneratedMongoShell">

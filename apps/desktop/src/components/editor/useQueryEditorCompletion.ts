@@ -37,6 +37,7 @@ import {
   mongoCompletionNeedsIndexes,
   shouldAutoOpenMongoCompletion,
 } from "@/lib/mongo/mongoCompletion";
+import { buildMongoSqlCompletionItems, getMongoSqlCompletionContext, getMongoSqlCompletionResultValidFor, mongoSqlCompletionCollections, shouldAutoOpenMongoSqlCompletion } from "@/lib/mongo/mongoSqlCompletion";
 import { buildSoqlCompletionItems, getSoqlCompletionContext, getSoqlCompletionResultValidFor, resolveSoqlFieldCandidates, resolveSoqlValueField, shouldAutoOpenSoqlCompletion, soqlCompletionNeedsObjects, type SoqlCompletionField, type SoqlCompletionObject } from "@/lib/soql/soqlCompletion";
 import {
   buildSqlServerUseDatabaseCompletionItems,
@@ -768,6 +769,39 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     };
   }
 
+  /** MongoDB SQL mode: SQL keywords, collections and sampled field paths (same caches as the shell mode). */
+  async function provideMongoSqlCompletions(currentState: import("@codemirror/state").EditorState, position: number, explicit: boolean) {
+    const connectionId = props.connectionId;
+    const database = props.database;
+    if (!connectionId) return null;
+    const fullDoc = currentState.doc.toString();
+    if (!explicit && !shouldAutoOpenMongoSqlCompletion(fullDoc, position)) return null;
+    const completionContext = getMongoSqlCompletionContext(fullDoc, position);
+    if (completionContext.mode === "none") return null;
+    const epoch = ++completionEpoch;
+    let collections: string[] = [];
+    const fields = new Map<string, Awaited<ReturnType<typeof connectionStore.listMongoCompletionFields>>>();
+    if (database) {
+      try {
+        if (completionContext.mode === "collection") collections = await connectionStore.listMongoCompletionCollections(connectionId, database);
+        for (const collection of mongoSqlCompletionCollections(completionContext)) {
+          fields.set(collection, await connectionStore.listMongoCompletionFields(connectionId, database, collection));
+        }
+      } catch {
+        // Keywords stay available when the collection cannot be sampled.
+      }
+    }
+    if (epoch !== completionEpoch) return null;
+    const items = buildMongoSqlCompletionItems(completionContext, { collections, fields });
+    if (items.length === 0) return null;
+    return {
+      from: completionContext.from,
+      to: completionContext.to,
+      options: items.map((item) => completionOptionForItem(item)),
+      validFor: getMongoSqlCompletionResultValidFor(),
+    };
+  }
+
   async function provideSoqlCompletions(currentState: import("@codemirror/state").EditorState, position: number, explicit: boolean) {
     if (!props.connectionId) return null;
     const epoch = ++completionEpoch;
@@ -881,7 +915,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (isGraphQueryDatabase(props.databaseType)) return provideGraphCompletions(context, props.databaseType);
     const fullDoc = currentState.doc.toString();
     if (props.databaseType === "mongodb") {
-      if (props.mongoQueryLanguage === "sql") return null;
+      if (props.mongoQueryLanguage === "sql") return provideMongoSqlCompletions(currentState, position, explicit);
       return provideMongoCompletions(currentState, position, explicit);
     }
     if (props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "couchdb") return null;

@@ -3386,11 +3386,11 @@ export async function readPluginLocalFolderText(pluginId: string, folderHandleId
   return invoke("plugin_file_folder_read_text", { pluginId, folderHandleId, relativePath });
 }
 
-export async function writePluginLocalFolderText(pluginId: string, folderHandleId: string, relativePath: string, content: string, create = true): Promise<string> {
+export async function writePluginLocalFolderText(pluginId: string, folderHandleId: string, relativePath: string, content: string, create = true): Promise<void> {
   return invoke("plugin_file_folder_write_text", { pluginId, folderHandleId, relativePath, content, create });
 }
 
-export async function writePluginLocalFolderBinary(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, create = true): Promise<string> {
+export async function writePluginLocalFolderBinary(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, create = true): Promise<void> {
   return invoke("plugin_file_folder_write_binary", { pluginId, folderHandleId, relativePath, dataBase64, create });
 }
 

@@ -116,7 +116,7 @@ pub struct PluginFileState {
     /// one opaque handle per native dialog consent, owner-gated, granting the
     /// plugin silent list/read/write within the canonical root without ever
     /// exposing the absolute path to the renderer.
-    pub(super) folders: Mutex<HashMap<String, folder::OpenFolder>>,
+    pub(crate) folders: Mutex<HashMap<String, folder::OpenFolder>>,
 }
 
 impl PluginFileState {
@@ -552,7 +552,7 @@ pub async fn plugin_file_folder_write_text(
     relative_path: String,
     content: String,
     create: Option<bool>,
-) -> Result<String, String> {
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<PluginFileState>();
         folder_write_text(
@@ -576,7 +576,7 @@ pub async fn plugin_file_folder_write_binary(
     relative_path: String,
     data_base64: String,
     create: Option<bool>,
-) -> Result<String, String> {
+) -> Result<(), String> {
     // Same payload ceiling as chunked file writes: base64 inflates by ~4/3.
     if data_base64.len() > MAX_CHUNK_BYTES * 4 / 3 + 4 {
         return Err("binary payload exceeds the folder write limit".to_string());
@@ -609,7 +609,7 @@ pub async fn plugin_file_folder_close(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use base64::engine::general_purpose::STANDARD as BASE64;
 
     const OWNER: &str = "io.dbx.sample";
     const OTHER: &str = "io.dbx.other";

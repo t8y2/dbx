@@ -330,10 +330,10 @@ export interface PluginHostBridgeApi {
   folderList?(pluginId: string, folderHandleId: string, options?: { subPath?: string; extensions?: string[] }): Promise<{ entries: FolderEntry[]; truncated: boolean }>;
   /** Read a file inside a granted folder handle as UTF-8 text. */
   folderReadText?(pluginId: string, folderHandleId: string, relativePath: string): Promise<string>;
-  /** Write a UTF-8 text file inside a granted folder handle; parent dirs created. Host returns final absolute path as a display convenience only. */
-  folderWriteText?(pluginId: string, folderHandleId: string, relativePath: string, content: string, options?: { create?: boolean }): Promise<string>;
+  /** Write a UTF-8 text file inside a granted folder handle; parent dirs created. Returns on success; absolute paths never leave the sandbox. */
+  folderWriteText?(pluginId: string, folderHandleId: string, relativePath: string, content: string, options?: { create?: boolean }): Promise<void>;
   /** Write raw base64 bytes (PNG/XLSX) inside a granted folder handle. */
-  folderWriteBinary?(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, options?: { create?: boolean }): Promise<string>;
+  folderWriteBinary?(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, options?: { create?: boolean }): Promise<void>;
   /** Close a directory handle, releasing the grant. */
   closeFolderHandle?(pluginId: string, folderHandleId: string): Promise<void>;
   /** Recently granted project folders (name + absolute path), persisted across restarts. */

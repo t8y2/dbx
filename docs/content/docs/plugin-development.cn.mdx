@@ -699,29 +699,29 @@ const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
 
 ```js
 const ft = window.dbxPlugin.fileTransfer;
-if (!ft?.capabilities?.folder) {
-  // Web 宿主：回退到 pick/beginSave 或 sidecar 落盘。
-}
+// 在 Web 宿主上 folder 能力为 false，必须先探测（在 init/ready 之后读取）。
+if (!window.dbxPlugin.capabilities?.fileTransfer?.folder) return;
 
 const picked = await ft.pickFolder();          // { folderHandleId, name }，用户取消时为 null
+if (!picked) return;                            // 用户关闭了对话框
 const { folderHandleId } = picked;
 const { entries, truncated } = await ft.folderList(folderHandleId, { extensions: ["erm"] });
 const text = await ft.folderReadText(folderHandleId, "db/core.erm");
-await ft.folderWriteText(folderHandleId, "db/core.erm", edited); // 原地覆盖
+await ft.folderWriteText(folderHandleId, "db/core.erm", edited); // 原子替换——失败时原文件完好
 await ft.folderWriteText(folderHandleId, "db/core.sql", ddl);    // 自动创建父目录
 await ft.closeFolderHandle(folderHandleId);
 ```
 
 | API                                                | 用途                                                                                                                                                                        |
 | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pickFolder({ readOnly? })`                        | 原生目录对话框；返回 `{ folderHandleId, name }`，用户取消时为 `null`。授权在当前会话内有效；`readOnly: true` 会拒绝后续写入。                                               |
+| `pickFolder({ readOnly? })`                        | 原生目录对话框；返回 `{ folderHandleId, name }`，用户取消时为 `null`。授权在当前会话内有效，插件卸载时清扫残留；`readOnly: true` 会拒绝后续写入。                          |
 | `folderList(folderHandleId, { subPath?, extensions? })` | 递归列出条目 `{ name, relativePath, kind, size?, modifiedAt? }` 及 `truncated`。跳过点开头条目、符号链接与特殊文件；`extensions` 大小写不敏感；上限 2000 条、深度 8 层。      |
 | `folderReadText(folderHandleId, relativePath)`     | 以 UTF-8 文本读取文件。                                                                                                                                                     |
-| `folderWriteText(folderHandleId, relativePath, content, { create? })` | 写入 UTF-8 文本，自动创建缺失的父目录。返回值是最终绝对路径，仅用于展示——后续操作仍应通过句柄寻址。                                                            |
-| `folderWriteBinary(folderHandleId, relativePath, dataBase64, { create? })` | 在同样的路径约束下写入 base64 原始字节（PNG/XLSX 导出）。                                                                                              |
+| `folderWriteText(folderHandleId, relativePath, content, { create? })` | 通过 temp+fsync+rename 原子替换文件内容，失败时原文件保持完好。自动创建缺失的父目录。不返回值；渲染层永远不会获知绝对路径。                                 |
+| `folderWriteBinary(folderHandleId, relativePath, dataBase64, { create? })` | 以同样的原子方式写入 base64 原始字节（PNG/XLSX 导出）。与流式文件写入共享 8 MiB base64 载荷上限。                                              |
 | `closeFolderHandle(folderHandleId)`                | 释放授权。插件卸载时宿主会清扫残留句柄。                                                                                                                                     |
 
-绝对路径不会到达渲染层：授权保存在 Rust 侧注册表中，以调用方插件持有、不可枚举的 uuid 为键；每个相对路径先做词法校验（禁止绝对路径与 `..` 组件），再规范化，确保符号链接无法逃出该目录。这是单文件句柄模型的增量扩展：`pick` / `beginSave` / `onDrop` 保持原有的一次性语义。
+绝对路径不会到达渲染层。授权根目录在 pick 时一次性 canonicalize 并 **冻结**，每次调用前重新校验——如果用户从外面把授权目录换成了符号链接，后续所有读写都会被拒绝。每个相对路径先做词法校验（禁止绝对路径与 `..` 组件），再通过最近已存在祖先进行规范化，确保符号链接无法逃出冻结的根目录。写入使用原子 temp+fsync+rename，失败时原工程文件完好无损。这是单文件句柄模型的增量扩展：`pick` / `beginSave` / `onDrop` 保持原有的一次性语义。
 
 ### 持久化 UI 状态
 

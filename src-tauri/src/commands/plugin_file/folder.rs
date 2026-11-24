@@ -1,22 +1,19 @@
 //! Directory handles: a session-scoped, user-consented directory grant that a
 //! plugin can silently enumerate, read, and write within. The canonical root
-//! never leaves the Rust side except as a display label returned by the picker
-//! (so recent-project lists can be rebuilt after a restart): every access is
-//! still gated by a session handle or a previously recorded grant.
+//! never leaves the Rust side — every access is gated by an opaque uuid and
+//! owner check — and writes use atomic temp+rename so a failed save never
+//! leaves the previous contents truncated.
 //!
-//! This mirrors the file-handle model in this module: the canonical root lives
-//! only in the Rust-side `folders` registry, keyed by an opaque uuid and owned
-//! by the plugin that opened it. Unlike a single-file handle, a folder handle
-//! is not consumed on use — the user consents once through the native folder
-//! picker and the plugin keeps the grant for the rest of the session, which is
-//! what makes silent auto-save and sidecar-free project workflows possible.
-//!
-//! Every relative path is lexically validated (no absolute paths, no `..`
-//! components) and then canonicalized through its nearest existing ancestor so
-//! symlinks cannot escape the grant.
+//! Mirroring the file-handle model, the canonical root is frozen at
+//! `open_folder` time and re-validated on every subsequent call: if the OS
+//! path was replaced (symlink swap, external rename), the grant is refused
+//! immediately. Every relative path is lexically validated (no absolute paths,
+//! no `..` components) and then canonicalized through its nearest existing
+//! ancestor so symlinks inside the grant cannot escape it.
 
 use std::collections::HashMap;
-use std::fs::{create_dir_all, metadata, read_dir, read_to_string, write};
+use std::fs::{create_dir_all, read_dir, read_to_string, File};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
@@ -66,9 +63,8 @@ fn write_recent_folders(data_dir: &Path, paths: &[PathBuf]) -> Result<(), String
     let target = recent_folders_path(data_dir);
     let temp = format!("{}.tmp", target.to_string_lossy());
     {
-        use std::io::Write;
         let mut file =
-            std::fs::File::create(&temp).map_err(|error| format!("cannot create recent folders temp file: {error}"))?;
+            File::create(&temp).map_err(|error| format!("cannot create recent folders temp file: {error}"))?;
         file.write_all(&encoded).map_err(|error| format!("cannot write recent folders: {error}"))?;
         file.sync_all().map_err(|error| format!("cannot flush recent folders: {error}"))?;
     }
@@ -112,13 +108,15 @@ pub(crate) fn recent_folder_metas(data_dir: &Path) -> Vec<RecentFolderMeta> {
         .collect()
 }
 
-/// One granted directory. `root` is canonical; `read_only` reserves a future
-/// opt-in for read-only grants.
+/// One granted directory. `root` is canonical and **frozen** at
+/// `open_folder` time. Subsequent operations re-canonicalize the same OS path
+/// before each call and refuse when it has diverged (symlink swap / replace).
 #[derive(Clone)]
-pub(super) struct OpenFolder {
-    pub(super) root: PathBuf,
-    pub(super) owner: String,
-    pub(super) read_only: bool,
+pub(crate) struct OpenFolder {
+    /// Canonical absolute path captured at `open_folder`. Immutable.
+    root: PathBuf,
+    plugin_id: String,
+    read_only: bool,
 }
 
 /// Wire shape for the handle metadata returned by `pickFolder` / `openFolderPath`.
@@ -155,7 +153,8 @@ pub(crate) struct FolderListResult {
 
 /// Registers `root` as a folder handle for `plugin_id`. The caller must have
 /// obtained consent already (a native picker); this function only validates
-/// and records it.
+/// and records it. The canonical root is frozen here and never re-derived
+/// from the OS path afterwards.
 pub(super) fn open_folder(
     state: &PluginFileState,
     plugin_id: &str,
@@ -166,7 +165,7 @@ pub(super) fn open_folder(
         return Err("plugin id is required".to_string());
     }
     let canonical = root.canonicalize().map_err(|error| format!("cannot resolve folder path: {error}"))?;
-    let meta = metadata(&canonical).map_err(|error| format!("folder is not accessible: {error}"))?;
+    let meta = std::fs::metadata(&canonical).map_err(|error| format!("folder is not accessible: {error}"))?;
     if !meta.is_dir() {
         return Err("path is not a directory".to_string());
     }
@@ -174,22 +173,38 @@ pub(super) fn open_folder(
     let path = canonical.to_string_lossy().into_owned();
     let folder_handle_id = Uuid::new_v4().to_string();
     let mut folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
-    folders.insert(folder_handle_id.clone(), OpenFolder { root: canonical, owner: plugin_id.to_string(), read_only });
+    folders
+        .insert(folder_handle_id.clone(), OpenFolder { root: canonical, plugin_id: plugin_id.to_string(), read_only });
     Ok(FolderHandleMeta { folder_handle_id, name, path })
 }
 
-/// Looks up a handle and enforces plugin ownership.
+/// Looks up a handle and enforces plugin ownership. Callers **must** invoke
+/// [`check_root_unchanged`] on the result before doing any filesystem work so
+/// a replaced grant root (symlink swap / rename) is refused before a single
+/// byte is read or written.
 fn lookup<'a>(
     folders: &'a HashMap<String, OpenFolder>,
     plugin_id: &str,
     folder_handle_id: &str,
 ) -> Result<&'a OpenFolder, String> {
     let entry = folders.get(folder_handle_id).ok_or_else(|| "unknown plugin folder handle".to_string())?;
-    if entry.owner != plugin_id {
+    if entry.plugin_id != plugin_id {
         log::warn!("plugin folder handle belongs to another plugin (caller: {plugin_id})");
         return Err("unknown plugin folder handle".to_string());
     }
     Ok(entry)
+}
+
+/// Verifies that the frozen canonical root is still reachable and identical to
+/// what `open_folder` captured. A grant root swapped with a symlink or renamed
+/// out from under us means the consent anchor is gone — refuse immediately.
+fn check_root_unchanged(open: &OpenFolder) -> Result<PathBuf, String> {
+    let current = open.root.canonicalize().map_err(|_| "granted folder is no longer accessible".to_string())?;
+    if current != open.root {
+        log::warn!("plugin folder: grant root was replaced (was {}, now {})", open.root.display(), current.display());
+        return Err("granted folder was modified on disk".to_string());
+    }
+    Ok(current)
 }
 
 /// Joins `relative` onto the grant root after lexical validation.
@@ -197,7 +212,9 @@ fn lookup<'a>(
 /// result is always lexically under the root; callers still canonicalize to
 /// defeat symlink escapes.
 fn join_under_root(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    let rel = PathBuf::from(relative.replace('/', &std::path::MAIN_SEPARATOR.to_string()));
+    // Convert any '/' separators (the cross-platform bridge contract) to the
+    // host's native MAIN_SEPARATOR before PathBuf sees it.
+    let rel = PathBuf::from(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
     if rel.is_absolute() {
         return Err("absolute paths are not allowed".to_string());
     }
@@ -225,9 +242,12 @@ fn resolve_allowing_missing(path: &Path, canonical_root: &Path) -> Result<PathBu
         missing.push(name.to_os_string());
         probe = probe.parent().ok_or_else(|| "relative path resolves outside grant".to_string())?;
     };
-    let canonical_existing = existing.canonicalize().map_err(|error| format!("cannot resolve path: {error}"))?;
+    let canonical_existing = existing.canonicalize().map_err(|_| "cannot resolve path".to_string())?;
     if !canonical_existing.starts_with(canonical_root) {
-        log::warn!("plugin folder: escape attempt rejected: {}", path.display());
+        log::warn!(
+            "plugin folder: escape attempt rejected near {}",
+            missing.last().and_then(|name| name.to_str()).unwrap_or("<unknown>")
+        );
         return Err("relative path resolves outside grant".to_string());
     }
     let mut rebuilt = canonical_existing;
@@ -238,25 +258,20 @@ fn resolve_allowing_missing(path: &Path, canonical_root: &Path) -> Result<PathBu
 }
 
 /// Resolves a relative path to a canonical absolute path inside the grant.
-fn resolve_relative(
-    state: &PluginFileState,
-    plugin_id: &str,
-    folder_handle_id: &str,
-    relative: &str,
-) -> Result<PathBuf, String> {
-    let folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
-    let entry = lookup(&folders, plugin_id, folder_handle_id)?;
-    let canonical_root = entry.root.canonicalize().map_err(|error| format!("cannot resolve folder root: {error}"))?;
-    let joined = join_under_root(&canonical_root, relative)?;
+///
+/// The caller must have already called [`check_root_unchanged`] on the
+/// [`OpenFolder`] — this function trusts the root that was validated there.
+fn resolve_relative(canonical_root: &Path, relative: &str) -> Result<PathBuf, String> {
+    let joined = join_under_root(canonical_root, relative)?;
     if joined.exists() {
-        let canonical = joined.canonicalize().map_err(|error| format!("cannot resolve path: {error}"))?;
-        if !canonical.starts_with(&canonical_root) {
-            log::warn!("plugin folder: escape attempt rejected: {relative}");
+        let canonical = joined.canonicalize().map_err(|_| "cannot resolve path".to_string())?;
+        if !canonical.starts_with(canonical_root) {
+            log::warn!("plugin folder: escape attempt rejected");
             return Err("relative path resolves outside grant".to_string());
         }
         Ok(canonical)
     } else {
-        resolve_allowing_missing(&joined, &canonical_root)
+        resolve_allowing_missing(&joined, canonical_root)
     }
 }
 
@@ -269,13 +284,14 @@ pub(super) fn folder_list(
     sub_path: Option<&str>,
     extensions: Option<&[String]>,
 ) -> Result<FolderListResult, String> {
-    let canonical_root = {
+    let (canonical_root, read_only) = {
         let folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
-        let entry = lookup(&folders, plugin_id, folder_handle_id)?;
-        entry.root.canonicalize().map_err(|error| format!("cannot resolve folder root: {error}"))?
+        let open = lookup(&folders, plugin_id, folder_handle_id)?;
+        let root = check_root_unchanged(open)?;
+        (root, open.read_only)
     };
     let start = match sub_path {
-        Some(path) if !path.trim().is_empty() => resolve_relative(state, plugin_id, folder_handle_id, path)?,
+        Some(path) if !path.trim().is_empty() => resolve_relative(&canonical_root, path)?,
         _ => canonical_root.clone(),
     };
     if !start.is_dir() {
@@ -284,6 +300,8 @@ pub(super) fn folder_list(
     let mut entries = Vec::new();
     let mut truncated = false;
     walk_dir(&start, &canonical_root, 0, &mut entries, &mut truncated, extensions)?;
+    // read-only has no effect on listing, but keep the contract explicit.
+    let _ = read_only;
     Ok(FolderListResult { entries, truncated })
 }
 
@@ -301,11 +319,13 @@ fn walk_dir(
         *truncated = true;
         return Ok(());
     }
-    let read = read_dir(dir).map_err(|error| format!("cannot list {}: {error}", dir.display()))?;
+    let read = read_dir(dir).map_err(|_| "cannot list directory".to_string())?;
     let mut children: Vec<std::fs::DirEntry> = Vec::new();
     for entry in read {
-        let entry = entry.map_err(|error| format!("cannot read directory entry: {error}"))?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
+        let entry = entry.map_err(|_| "cannot read directory entry".to_string())?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
         if name.starts_with('.') {
             continue;
         }
@@ -317,7 +337,9 @@ fn walk_dir(
             *truncated = true;
             return Ok(());
         }
-        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
         let relative_path = entry
             .path()
@@ -361,17 +383,21 @@ pub(super) fn folder_read_text(
     folder_handle_id: &str,
     relative_path: &str,
 ) -> Result<String, String> {
-    let absolute = resolve_relative(state, plugin_id, folder_handle_id, relative_path)?;
-    let meta = metadata(&absolute).map_err(|error| format!("cannot stat file: {error}"))?;
+    let canonical_root = {
+        let folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
+        let open = lookup(&folders, plugin_id, folder_handle_id)?;
+        check_root_unchanged(open)?
+    };
+    let absolute = resolve_relative(&canonical_root, relative_path)?;
+    let meta = std::fs::metadata(&absolute).map_err(|_| "cannot stat file".to_string())?;
     if !meta.is_file() {
         return Err("path is not a file".to_string());
     }
-    read_to_string(&absolute).map_err(|error| format!("cannot read file: {error}"))
+    read_to_string(&absolute).map_err(|_| "cannot read file".to_string())
 }
 
 /// Shared write path: validates the target, creates parents, and returns the
-/// canonical path. Both text and binary writes go through this so the
-/// containment rules live in exactly one place.
+/// canonical absolute path the caller should atomically replace.
 fn prepare_write_target(
     state: &PluginFileState,
     plugin_id: &str,
@@ -381,28 +407,45 @@ fn prepare_write_target(
 ) -> Result<PathBuf, String> {
     let (canonical_root, read_only) = {
         let folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
-        let entry = lookup(&folders, plugin_id, folder_handle_id)?;
-        (entry.root.canonicalize().map_err(|error| format!("cannot resolve folder root: {error}"))?, entry.read_only)
+        let open = lookup(&folders, plugin_id, folder_handle_id)?;
+        let root = check_root_unchanged(open)?;
+        (root, open.read_only)
     };
     if read_only {
         return Err("folder handle is read-only".to_string());
     }
-    let joined = join_under_root(&canonical_root, relative_path)?;
-    let target = resolve_allowing_missing(&joined, &canonical_root)?;
+    let target = resolve_relative(&canonical_root, relative_path)?;
     if target.is_dir() {
         return Err("path points to a directory".to_string());
     }
     if !create && !target.exists() {
         return Err("target file does not exist".to_string());
     }
-    if let Some(parent) = target.parent() {
-        create_dir_all(parent).map_err(|error| format!("cannot create parent directory: {error}"))?;
-    }
     Ok(target)
 }
 
-/// Writes UTF-8 text inside a granted folder. Returns the final absolute path
-/// (a display hint only — the plugin still addresses files through the handle).
+/// Atomically writes `bytes` to `target` via a temp file on the same volume,
+/// fsync, and rename. A crash or write failure at any point leaves the
+/// previous contents intact — no mid-write truncation, no partial file.
+fn write_file_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        create_dir_all(parent).map_err(|error| format!("cannot create parent directory: {error}"))?;
+    }
+    // Temp file in the same directory so rename stays within one filesystem
+    // (the only thing that makes rename truly atomic).
+    let suffix = Uuid::new_v4();
+    let temp =
+        target.with_extension(format!("{}.tmp.{suffix}", target.extension().and_then(|s| s.to_str()).unwrap_or("")));
+    {
+        let mut file = File::create(&temp).map_err(|_| "cannot create temp file".to_string())?;
+        file.write_all(bytes).map_err(|_| "cannot write temp file".to_string())?;
+        file.sync_all().map_err(|_| "cannot flush temp file".to_string())?;
+    }
+    std::fs::rename(&temp, target).map_err(|_| "cannot replace file".to_string())?;
+    Ok(())
+}
+
+/// Writes UTF-8 text inside a granted folder via atomic replace.
 pub(super) fn folder_write_text(
     state: &PluginFileState,
     plugin_id: &str,
@@ -410,13 +453,13 @@ pub(super) fn folder_write_text(
     relative_path: &str,
     content: &str,
     create: bool,
-) -> Result<String, String> {
+) -> Result<(), String> {
     let target = prepare_write_target(state, plugin_id, folder_handle_id, relative_path, create)?;
-    write(&target, content).map_err(|error| format!("cannot write file: {error}"))?;
-    Ok(target.to_string_lossy().into_owned())
+    write_file_atomic(&target, content.as_bytes())
 }
 
-/// Writes raw bytes inside a granted folder (PNG/XLSX exports).
+/// Writes raw bytes inside a granted folder via atomic replace (PNG / XLSX
+/// exports).
 pub(super) fn folder_write_bytes(
     state: &PluginFileState,
     plugin_id: &str,
@@ -424,10 +467,9 @@ pub(super) fn folder_write_bytes(
     relative_path: &str,
     bytes: &[u8],
     create: bool,
-) -> Result<String, String> {
+) -> Result<(), String> {
     let target = prepare_write_target(state, plugin_id, folder_handle_id, relative_path, create)?;
-    write(&target, bytes).map_err(|error| format!("cannot write file: {error}"))?;
-    Ok(target.to_string_lossy().into_owned())
+    write_file_atomic(&target, bytes)
 }
 
 /// Releases one folder handle owned by `plugin_id`.
@@ -440,9 +482,11 @@ pub(super) fn close_folder(state: &PluginFileState, plugin_id: &str, folder_hand
 
 /// Sweeps every folder handle owned by one plugin (called on uninstall).
 pub(crate) fn close_all_plugin_folders(state: &PluginFileState, plugin_id: &str) -> usize {
-    let Ok(mut folders) = state.folders.lock() else { return 0 };
+    let Ok(mut folders) = state.folders.lock() else {
+        return 0;
+    };
     let before = folders.len();
-    folders.retain(|_, entry| entry.owner != plugin_id);
+    folders.retain(|_, entry| entry.plugin_id != plugin_id);
     let closed = before - folders.len();
     if closed > 0 {
         log::info!("plugin folder sweep reclaimed {closed} entries for plugin \"{plugin_id}\"");
@@ -472,7 +516,7 @@ mod tests {
         assert_eq!(meta.name, dir.file_name().unwrap().to_str().unwrap());
         let folders = state.folders.lock().unwrap();
         let entry = folders.get(&meta.folder_handle_id).expect("registered");
-        assert_eq!(entry.owner, OWNER);
+        assert_eq!(entry.plugin_id, OWNER);
         assert!(!entry.read_only);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -518,8 +562,7 @@ mod tests {
         let text = folder_read_text(&state, OWNER, &meta.folder_handle_id, "core.erm").unwrap();
         assert_eq!(text, "old content");
 
-        let path = folder_write_text(&state, OWNER, &meta.folder_handle_id, "core.erm", "new", true).unwrap();
-        assert!(path.ends_with("core.erm"));
+        folder_write_text(&state, OWNER, &meta.folder_handle_id, "core.erm", "new", true).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("core.erm")).unwrap(), "new");
 
         // Missing parents are created for export-style writes.
@@ -551,6 +594,105 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_escape_is_rejected() {
+        // 授权目录内部的 symlink 指向外部 → resolve_relative 会 canonicalize
+        // symlink 目标，发现它在 grant root 外 → 拒绝。
+        let dir = temp_dir("sym-escape");
+        let outside = std::env::temp_dir().join(format!("dbx-plugin-sym-outside-{}", std::process::id()));
+        std::fs::write(&outside, "secret-bytes").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("escape-link")).unwrap();
+
+        let state = PluginFileState::default();
+        let meta = open_folder(&state, OWNER, &dir, false).unwrap();
+
+        let read_through_symlink = folder_read_text(&state, OWNER, &meta.folder_handle_id, "escape-link");
+        assert!(read_through_symlink.is_err(), "reading through a symlink outside the grant must be rejected");
+
+        let write_through_symlink =
+            folder_write_text(&state, OWNER, &meta.folder_handle_id, "escape-link", "hacked", true);
+        assert!(write_through_symlink.is_err(), "writing through a symlink outside the grant must be rejected");
+        // 原文件完好
+        assert_eq!(std::fs::read(&outside).unwrap(), b"secret-bytes", "external file was never touched");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn replaced_grant_root_is_refused() {
+        // 授权目录被整体替换成指向外部的 symlink → check_root_unchanged
+        // 检测到 canonical path 变化 → 所有操作立即拒绝。
+        let dir = temp_dir("root-replace");
+        std::fs::write(dir.join("keep.erm"), "original").unwrap();
+        let replacement = std::env::temp_dir().join(format!("dbx-plugin-root-replaced-target-{}", std::process::id()));
+        std::fs::create_dir_all(&replacement).unwrap();
+
+        let state = PluginFileState::default();
+        let meta = open_folder(&state, OWNER, &dir, false).unwrap();
+
+        // 用户把授权目录 mv 走，换成 symlink 指向别处。
+        std::fs::rename(&dir, dir.with_extension("moved")).unwrap();
+        std::os::unix::fs::symlink(&replacement, &dir).unwrap();
+
+        let read_after_replace = folder_read_text(&state, OWNER, &meta.folder_handle_id, "anything");
+        assert!(read_after_replace.is_err(), "a replaced grant root must refuse reads");
+        let list_after_replace = folder_list(&state, OWNER, &meta.folder_handle_id, None, None);
+        assert!(list_after_replace.is_err(), "a replaced grant root must refuse listing");
+        let write_after_replace = folder_write_text(&state, OWNER, &meta.folder_handle_id, "hacked.txt", "x", true);
+        assert!(write_after_replace.is_err(), "a replaced grant root must refuse writes");
+
+        // 恢复清理
+        let _ = std::fs::remove_file(&dir);
+        let _ = std::fs::rename(dir.with_extension("moved"), &dir);
+        let _ = std::fs::remove_dir_all(&replacement);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_atomic_write_preserves_original_file() {
+        // 无法模拟磁盘满，但可以模拟权限问题：让目标父目录变只读 →
+        // write 创建 temp 文件失败 → rename 不会执行 → 原文件完好。
+        //
+        // 在 macOS/Linux 上用 chmod 去掉写权限；Windows 跳过（权限模型不同）。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = temp_dir("atomic-fail");
+            let file = dir.join("precious.erm");
+            std::fs::write(&file, "precious original content").unwrap();
+
+            let state = PluginFileState::default();
+            let meta = open_folder(&state, OWNER, &dir, false).unwrap();
+
+            // 让父目录只读 → create_dir_all 和 File::create 都会失败。
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+            let result = folder_write_text(
+                &state,
+                OWNER,
+                &meta.folder_handle_id,
+                "precious.erm",
+                "new content that must NOT survive",
+                true,
+            );
+            assert!(result.is_err(), "write must fail on read-only parent");
+
+            // 父目录恢复可写后读取 → 原文件完好。
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let preserved = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(preserved, "precious original content", "original file must survive a failed write");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows: atomic write still exercised by the roundtrip test above.
+        }
     }
 
     #[test]

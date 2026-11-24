@@ -723,7 +723,6 @@ function createBridge() {
       closeFolderHandle: isTauriRuntime() ? (pluginId, folderHandleId) => tauriFileApi().then(({ closePluginLocalFolder }) => closePluginLocalFolder(pluginId, folderHandleId)) : undefined,
       recentFolders: isTauriRuntime() ? (pluginId) => tauriFileApi().then(({ recentPluginLocalFolders }) => recentPluginLocalFolders(pluginId)) : undefined,
       openFolderPath: isTauriRuntime() ? (pluginId, path) => tauriFileApi().then(({ openPluginLocalFolderByPath }) => openPluginLocalFolderByPath(pluginId, path)) : undefined,
-      folderHandleAvailable: isTauriRuntime(),
       // OS drops (with folder expansion) are a desktop-host capability; the
       // bridge advertises it to plugins through capabilities.fileTransfer.
       receiveOsDrops: isTauriRuntime(),

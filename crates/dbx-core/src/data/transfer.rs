@@ -3362,6 +3362,7 @@ fn generate_postgres_foreign_key_ddl(
     statements
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn restore_postgres_table_schema_objects(
     state: &AppState,
     target_pool_key: &str,
@@ -3370,12 +3371,34 @@ async fn restore_postgres_table_schema_objects(
     target_schema: &str,
     source_indexes: &[db::IndexInfo],
     source_foreign_keys: &[db::ForeignKeyInfo],
+    rebuild: bool,
 ) -> Result<(), String> {
-    let index_if_not_exists = target_supports_if_not_exists_ddl(state, target_pool_key).await;
-    for statement in generate_postgres_index_ddl(source_indexes, target_table, target_schema, index_if_not_exists) {
-        execute_on_pool(state, target_pool_key, &statement)
-            .await
-            .map_err(|e| format!("Failed to create PostgreSQL index for {target_table}: {e}"))?;
+    let index_if_not_exists = !rebuild && target_supports_if_not_exists_ddl(state, target_pool_key).await;
+    for index in source_indexes {
+        let statements =
+            generate_postgres_index_ddl(std::slice::from_ref(index), target_table, target_schema, index_if_not_exists);
+        for (position, statement) in statements.into_iter().enumerate() {
+            if let Err(error) = execute_on_pool(state, target_pool_key, &statement).await {
+                // Native CREATE TABLE may have already created the constraint's
+                // index. Only accept the collision if the target table owns it.
+                if rebuild
+                    && position == 0
+                    && index.constraint_backed
+                    && postgres_duplicate_relation_error(&error, &index.name)
+                    && postgres_target_owns_constraint_index(
+                        state,
+                        target_pool_key,
+                        target_schema,
+                        target_table,
+                        &index.name,
+                    )
+                    .await
+                {
+                    continue;
+                }
+                return Err(format!("Failed to create PostgreSQL index for {target_table}: {error}"));
+            }
+        }
     }
     for statement in generate_postgres_foreign_key_ddl(source_foreign_keys, target_table, source_schema, target_schema)
     {
@@ -8950,6 +8973,100 @@ async fn execute_transfer_create_table_ddl_on_pool(
         .map_err(|error| format!("{original_error}; retry without unsupported MySQL collations failed: {error}"))
 }
 
+/// Only a collision naming the relation in the CREATE TABLE head can be a
+/// concurrent table creation. A constraint or another statement in reused DDL
+/// can also produce PostgreSQL's duplicate-relation error.
+fn postgres_create_table_name_collision(statement: &str, error: &str, table: &str, schema: &str) -> bool {
+    let qualified = qualified_table(table, schema, &DatabaseType::Postgres, None);
+    let statement = statement.trim_start();
+    let is_target_create = ["CREATE TABLE ", "CREATE UNLOGGED TABLE "].iter().any(|prefix| {
+        let Some(head) = statement.get(..prefix.len()) else { return false };
+        if !head.eq_ignore_ascii_case(prefix) {
+            return false;
+        }
+        statement[prefix.len()..]
+            .trim_start()
+            .strip_prefix(&qualified)
+            .is_some_and(|rest| rest.trim_start().starts_with('('))
+    });
+    if !is_target_create {
+        return false;
+    }
+
+    postgres_duplicate_relation_error(error, table)
+}
+
+fn postgres_duplicate_relation_error(error: &str, relation: &str) -> bool {
+    // The driver currently exposes server errors as rendered strings. Compare
+    // the whole relation name, with no assumptions about identifier suffixes.
+    let message = error.lines().next().unwrap_or(error);
+    let message = message.strip_prefix("ERROR: ").or_else(|| message.strip_prefix("错误: ")).unwrap_or(message);
+    [
+        format!("relation \"{relation}\" already exists"),
+        format!("关系 \"{relation}\" 已经存在"),
+        format!("关系 \"{relation}\" 已存在"),
+    ]
+    .iter()
+    .any(|expected| message.strip_prefix(expected).is_some_and(|rest| rest.is_empty() || rest == " (SQLSTATE 42P07)"))
+}
+
+async fn postgres_target_owns_constraint_index(
+    state: &AppState,
+    pool_key: &str,
+    schema: &str,
+    table: &str,
+    index: &str,
+) -> bool {
+    let sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_index i \
+         JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid \
+         JOIN pg_catalog.pg_class t ON t.oid = i.indrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
+         JOIN pg_catalog.pg_constraint c ON c.conindid = i.indexrelid AND c.conrelid = i.indrelid \
+         WHERE n.nspname = COALESCE(NULLIF({}, ''), current_schema()) \
+           AND t.relname = {} AND idx.relname = {} AND c.contype IN ('p', 'u', 'x'))",
+        quote_string_literal(schema),
+        quote_string_literal(table),
+        quote_string_literal(index),
+    );
+    postgres_catalog_exists(state, pool_key, &sql).await
+}
+
+async fn postgres_catalog_exists(state: &AppState, pool_key: &str, sql: &str) -> bool {
+    execute_read_on_pool(state, pool_key, sql).await.is_ok_and(|result| {
+        result.rows.first().and_then(|row| row.first()).and_then(serde_json::Value::as_bool) == Some(true)
+    })
+}
+
+async fn execute_postgres_transfer_create_table(
+    state: &AppState,
+    pool_key: &str,
+    ddl: &str,
+    table: &str,
+    schema: &str,
+    rebuild: bool,
+) -> Result<bool, String> {
+    for statement in transfer_ddl_statements(ddl, &DatabaseType::Postgres) {
+        if let Err(error) = execute_on_pool(state, pool_key, &statement).await {
+            if !rebuild && postgres_create_table_name_collision(&statement, &error, table, schema) {
+                let sql = format!(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+                     JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid \
+                     WHERE n.nspname = COALESCE(NULLIF({}, ''), current_schema()) \
+                       AND c.relname = {} AND c.relkind IN ('r', 'p'))",
+                    quote_string_literal(schema),
+                    quote_string_literal(table),
+                );
+                if postgres_catalog_exists(state, pool_key, &sql).await {
+                    return Ok(false);
+                }
+            }
+            return Err(format!("Failed to create table: {error}"));
+        }
+    }
+    Ok(true)
+}
+
 fn transfer_table_already_exists_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("already exists")
@@ -13310,11 +13427,23 @@ async fn create_transfer_target_table(
     };
     let deferred_fk_alters = prepared.deferred_fk_alters;
     log::info!("[transfer] creating target table: {}", ddl.chars().take(200).collect::<String>());
-    let target_table_created = transfer_create_table_created(
-        execute_transfer_create_table_ddl_on_pool(state, target_pool_key, &ddl, target_db_type, reused_source_ddl)
-            .await,
-        "Failed to create table",
-    )?;
+    let target_table_created = if *target_db_type == DatabaseType::Postgres {
+        execute_postgres_transfer_create_table(
+            state,
+            target_pool_key,
+            &ddl,
+            target_table,
+            &request.target_schema,
+            request.drop_target_before_create,
+        )
+        .await?
+    } else {
+        transfer_create_table_created(
+            execute_transfer_create_table_ddl_on_pool(state, target_pool_key, &ddl, target_db_type, reused_source_ddl)
+                .await,
+            "Failed to create table",
+        )?
+    };
     if target_table_created {
         pending_fk_alters.extend(deferred_fk_alters.into_iter().map(|statement| (target_table.to_string(), statement)));
         let comment_stmts = generate_comment_ddl_with_column_quoting(
@@ -13707,6 +13836,7 @@ where
                 &request.target_schema,
                 &source_indexes,
                 &source_foreign_keys,
+                request.drop_target_before_create,
             )
             .await?;
         }
@@ -14384,6 +14514,7 @@ where
             &request.target_schema,
             &source_indexes,
             &source_foreign_keys,
+            request.drop_target_before_create,
         )
         .await?;
     }

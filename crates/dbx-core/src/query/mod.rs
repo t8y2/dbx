@@ -11,6 +11,7 @@ pub mod pl_debug;
 pub mod plugin_data;
 pub mod plugin_plan;
 pub mod query_cancel;
+pub mod read_only_gate;
 pub mod redis_ops;
 pub mod snapshot_export;
 mod sqlserver_agent_batch;

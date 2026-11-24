@@ -1,5 +1,7 @@
 package com.dbx.agent.db2;
 
+import com.dbx.agent.AbstractJdbcAgent;
+import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.MetadataListConstraints;
@@ -20,18 +22,22 @@ import java.sql.Connection;
 import java.sql.Blob;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
@@ -247,6 +253,93 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void doesNotWeakenCharacterEncoding() throws Exception {
+        Method buildProperties = AbstractJdbcAgent.class.getDeclaredMethod(
+            "buildConnectionProperties", ConnectParams.class);
+        buildProperties.setAccessible(true);
+        Properties properties = (Properties) buildProperties.invoke(new Db2Agent(), new ConnectParams());
+
+        assertNull(properties.getProperty("db2.jcc.charsetDecoderEncoder"));
+        assertNull(System.getProperty("db2.jcc.charsetDecoderEncoder"));
+    }
+
+    @Test
+    void tableListingKeepsRowsWhenCatalogCommentCannotBeDecoded() {
+        Db2Agent agent = new Db2Agent();
+        TestSupport.setPrivateConnection(agent, preparedConnectionReturning(singleRowWithUndecodableColumn(
+            3, row("TABNAME", "KMH2026_GRZCHXKH", "TYPE", "T", "REMARKS", "ignored"))));
+
+        List<TableInfo> tables = agent.listTables("NRCBREPORT_WT");
+
+        assertEquals(1, tables.size());
+        assertEquals("KMH2026_GRZCHXKH", tables.get(0).getName());
+        assertEquals("TABLE", tables.get(0).getTable_type());
+        assertNull(tables.get(0).getComment());
+    }
+
+    @Test
+    void constrainedTableListingKeepsRowsWhenCatalogCommentCannotBeDecoded() {
+        Db2Agent agent = new Db2Agent();
+        TestSupport.setPrivateConnection(agent, preparedConnectionReturning(singleRowWithUndecodableColumn(
+            3, row("TABNAME", "KMH2026_GRZCHXKH", "TYPE", "T", "REMARKS", "ignored"))));
+
+        List<TableInfo> tables = agent.listTables("NRCBREPORT_WT",
+            new MetadataListConstraints(null, 25, null, List.of("TABLE")));
+
+        assertEquals(1, tables.size());
+        assertEquals("KMH2026_GRZCHXKH", tables.get(0).getName());
+        assertNull(tables.get(0).getComment());
+    }
+
+    @Test
+    void constrainedObjectListingKeepsRowsWhenCatalogCommentCannotBeDecoded() {
+        Db2Agent agent = new Db2Agent();
+        TestSupport.setPrivateConnection(agent, preparedConnectionReturning(singleRowWithUndecodableColumn(
+            3, row("OBJECT_NAME", "KMH_VIEW", "OBJECT_TYPE", "VIEW", "OBJECT_COMMENT", "ignored"))));
+
+        List<ObjectInfo> objects = agent.listObjects("NRCBREPORT_WT",
+            new MetadataListConstraints(null, 10, null, List.of("VIEW")));
+
+        assertEquals(1, objects.size());
+        assertEquals("KMH_VIEW", objects.get(0).getName());
+        assertNull(objects.get(0).getComment());
+    }
+
+    @Test
+    void columnListingKeepsColumnsWhenCatalogCommentCannotBeDecoded() {
+        Db2Agent agent = new Db2Agent();
+        TestSupport.setPrivateConnection(agent, sequentialPreparedConnection(
+            rows(),
+            singleRowWithUndecodableColumn("REMARKS", row(
+                "COLNAME", "KHXH",
+                "TYPENAME", "VARCHAR",
+                "NULLS", "Y",
+                "DEFAULT", null,
+                "LENGTH", 32,
+                "SCALE", 0,
+                "REMARKS", "ignored"))));
+
+        List<ColumnInfo> columns = agent.getColumns("NRCBREPORT_WT", "KMH2026_GRZCHXKH");
+
+        assertEquals(1, columns.size());
+        assertEquals("KHXH", columns.get(0).getName());
+        assertEquals("VARCHAR(32)", columns.get(0).getData_type());
+        assertNull(columns.get(0).getComment());
+    }
+
+    @Test
+    void tableListingPropagatesUnrelatedMetadataErrors() {
+        Db2Agent agent = new Db2Agent();
+        TestSupport.setPrivateConnection(agent, preparedConnectionReturning(singleRowWithFailingColumn(
+            3, -4476, row("TABNAME", "KMH2026_GRZCHXKH", "TYPE", "T", "REMARKS", "ignored"))));
+
+        RuntimeException error = assertThrows(RuntimeException.class, () -> agent.listTables("NRCBREPORT_WT"));
+
+        assertTrue(error.getCause() instanceof SQLException);
+        assertEquals(-4476, ((SQLException) error.getCause()).getErrorCode());
+    }
+
+    @Test
     void viewObjectSourceReadsDefinitionFromSyscatViews() {
         Db2Agent agent = new Db2Agent();
         AtomicReference<String> executedSql = new AtomicReference<>();
@@ -274,6 +367,96 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
 
         assertEquals("BEGIN SELECT 1 FROM SYSIBM.SYSDUMMY1; END", source.getSource());
         assertEquals("SELECT TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = ? AND ROUTINENAME = ?", executedSql.get());
+    }
+
+    private static Connection preparedConnectionReturning(ResultSet resultSet) {
+        return proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("prepareStatement".equals(method.getName())) {
+                    return preparedStatementReturning(resultSet);
+                }
+                if ("isClosed".equals(method.getName())) {
+                    return false;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
+    private static Connection sequentialPreparedConnection(ResultSet... resultSets) {
+        AtomicInteger nextStatement = new AtomicInteger();
+        return proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("prepareStatement".equals(method.getName())) {
+                    int index = Math.min(nextStatement.getAndIncrement(), resultSets.length - 1);
+                    return preparedStatementReturning(resultSets[index]);
+                }
+                if ("isClosed".equals(method.getName())) {
+                    return false;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
+    private static PreparedStatement preparedStatementReturning(ResultSet resultSet) {
+        return proxy(PreparedStatement.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                String name = method.getName();
+                if ("executeQuery".equals(name)) {
+                    return resultSet;
+                }
+                if ("close".equals(name) || name.startsWith("set")) {
+                    return null;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
+    private static ResultSet singleRowWithUndecodableColumn(Object failingColumn, Map<String, Object> row) {
+        return singleRowWithFailingColumn(failingColumn, -4220, row);
+    }
+
+    private static ResultSet singleRowWithFailingColumn(Object failingColumn, int errorCode, Map<String, Object> row) {
+        return proxy(ResultSet.class, new MethodHandler() {
+            private int index = -1;
+
+            @Override
+            public Object handle(Method method, Object[] args) throws Exception {
+                String name = method.getName();
+                if ("next".equals(name)) {
+                    index += 1;
+                    return index < 1;
+                }
+                if ("getString".equals(name)) {
+                    if (args[0].equals(failingColumn)) {
+                        throw new SQLException("The value cannot be converted to the database encoding", null, errorCode);
+                    }
+                    Object value = valueAt(row, args[0]);
+                    return value == null ? null : String.valueOf(value);
+                }
+                if ("getObject".equals(name)) {
+                    return valueAt(row, args[0]);
+                }
+                if ("close".equals(name)) {
+                    return null;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
+    private static Object valueAt(Map<String, Object> row, Object column) {
+        if (column instanceof Number number) {
+            int index = number.intValue() - 1;
+            List<Object> values = new ArrayList<>(row.values());
+            return index >= 0 && index < values.size() ? values.get(index) : null;
+        }
+        return row.get(column);
     }
 
     private static Connection preparedConnection(AtomicReference<String> executedSql, Map<String, Object>... rows) {
@@ -409,7 +592,7 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
     private static <T> T proxy(Class<T> type, final MethodHandler handler) {
         InvocationHandler invocationHandler = new InvocationHandler() {
             @Override
-            public Object invoke(Object proxy, Method method, Object[] args) {
+            public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
                 return handler.handle(method, args);
             }
         };
@@ -445,6 +628,6 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     private interface MethodHandler {
-        Object handle(Method method, Object[] args);
+        Object handle(Method method, Object[] args) throws Exception;
     }
 }

@@ -222,7 +222,8 @@ async fn run(argv: Vec<String>) -> Result<String, (CliError, bool)> {
         Arc::new(
             LocalBackend::open(&db_path)
                 .await
-                .map_err(|message| (CliError::new("CONNECTION_STORE_ERROR", message), json_output))?,
+                .map_err(|message| (CliError::new("CONNECTION_STORE_ERROR", message), json_output))?
+                .wait_for_writes(),
         )
     };
 

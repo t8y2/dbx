@@ -158,6 +158,8 @@ pub fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         transport_layers: Vec::new(),
         connect_timeout_secs: 5,
         query_timeout_secs: 30,
+
+        write_timeout_secs: 0,
         idle_timeout_secs: 60,
         manual_transaction_timeout_secs: 300,
         idle_disconnect_secs: 0,

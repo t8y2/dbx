@@ -55,11 +55,12 @@ pub(super) async fn execute(
         schema,
         client.identifier_quote(),
     );
+    let timeout = statement_server_budget(options.timeout_secs, None, Some(DatabaseType::SqlServer), sql);
     let mut params = agent_execute_query_params(
         &execution_sql,
         Some(database),
         schema_for_execution_context(Some(DatabaseType::SqlServer), schema),
-        options.clone(),
+        QueryExecutionOptions { timeout_secs: Some(timeout.map_or(0, |value| value.as_secs())), ..options.clone() },
     );
     params["returnAllResults"] = serde_json::json!(true);
     let result: Result<Vec<db::QueryResult>, AgentCallError> = async {
@@ -78,13 +79,8 @@ pub(super) async fn execute(
             None => client.lock().await,
         };
         let lock_ms = lock_started.elapsed().as_secs_f64() * 1000.0;
-        let results: serde_json::Value = locked
-            .execute_query_typed_with_timeout_and_cancel(
-                params,
-                resolve_query_timeout(options.timeout_secs),
-                cancel_token.clone(),
-            )
-            .await?;
+        let results: serde_json::Value =
+            locked.execute_query_typed_with_timeout_and_cancel(params, timeout, cancel_token.clone()).await?;
         let results = batch_results(results)?;
         Ok(results
             .into_iter()

@@ -122,7 +122,7 @@ import {
   metadataSchemaForConnection,
   sqlServerQualifiesSqlWithTabSchema,
 } from "@/lib/database/jdbcDialect";
-import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
+import { frontendDeadlineForConnection, frontendQueryTimeoutDelayMs, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel, queryResultSourceNameParts } from "@/lib/sql/queryResultSource";
 import { sqlServerCountUsesLocalTempTable } from "@/lib/query/queryResultCountSession";
 import { stripPaginationRowNumber, trimQueryPageProbe } from "@/lib/query/queryPaginationResult";
@@ -8831,6 +8831,7 @@ export const useQueryStore = defineStore("query", () => {
     let unsubscribeQueryMessages: (() => void) | undefined;
     let paginationRowNumberColumn: string | undefined;
     let executionDispatched = false;
+    let writeWaitExpired = false;
     let clientRequestStartedAt: number | undefined;
     let producedResult = false;
     let refreshFailedPreservingRun = false;
@@ -9756,7 +9757,12 @@ export const useQueryStore = defineStore("query", () => {
         const current = findExecutionTab(id);
         return current !== tab || current.executionId !== executionId || current.isCancelling === true || (current.cancelRequestCount ?? 0) !== cancelRequestCountAtStart || manualTransactionTargetEpoch(current) !== executionTargetEpoch;
       };
-      const frontendTimeoutSecs = frontendQueryTimeoutSecsForSql(sqlToExecute, effectiveDbType, queryTimeoutSecs, sqlStatementParameterOptions);
+      // DDL and writes must not be abandoned by the client: a production
+      // partition rebuild legitimately outlives any read budget, and giving up
+      // halfway leaves the server rolling back while it holds metadata locks.
+      const frontendDeadline = frontendDeadlineForConnection(sqlToExecute, effectiveDbType, conn, settingsStore.editorSettings.globalQueryTimeoutSecs, sqlStatementParameterOptions);
+      const frontendTimeoutSecs = frontendDeadline.afterSecs;
+      const transactionReadTimeoutSecs = frontendDeadline.cancelOnTimeout ? frontendTimeoutSecs : 0;
       if (tab.mode === "data" && effectiveDbType === "oceanbase-oracle") {
         const meta = tableMetaForDataTab(tab);
         useLargeValuePreview = !!meta && /^(?:BASE )?TABLE$/i.test(meta.tableType ?? "") && columnsAllowDeferredLobMarkers(meta.columns) && meta.columns.some((column) => /^(N?CLOB|BLOB)$/i.test(column.data_type.trim()));
@@ -9963,9 +9969,9 @@ export const useQueryStore = defineStore("query", () => {
                 ] as const;
                 const reportCompilationErrors = tab.mode === "query" && shouldReportOracleCompilationErrors(effectiveDbType, sqlToExecute);
                 const results = await (effectiveDbType === "sqlserver"
-                  ? api.executeInManualTransaction(...args, executionId, frontendTimeoutSecs)
+                  ? api.executeInManualTransaction(...args, executionId, transactionReadTimeoutSecs)
                   : deferLobs
-                    ? api.executeInManualTransaction(...args, executionId, frontendTimeoutSecs, undefined, true, ...(reportCompilationErrors ? [true] : []))
+                    ? api.executeInManualTransaction(...args, executionId, transactionReadTimeoutSecs, undefined, true, ...(reportCompilationErrors ? [true] : []))
                     : reportCompilationErrors
                       ? api.executeInManualTransaction(...args, undefined, undefined, undefined, undefined, true)
                       : api.executeInManualTransaction(...args));
@@ -9998,6 +10004,9 @@ export const useQueryStore = defineStore("query", () => {
               if (effectiveDbType === "sqlserver" && tab.txnSessionId === txnSessionId) tab.txnStatus = "active";
               return results;
             } catch (error) {
+              if (effectiveDbType === "sqlserver" && writeWaitExpired && findExecutionTab(id) === tab && tab.txnSessionId === txnSessionId) {
+                reportSqlServerTransactionError(tab, error);
+              }
               if (effectiveDbType === "sqlserver" || options?.pagination?.sessionId || manualTransactionRecoveryAttempted || !isManualTransactionSessionExpired(error)) throw error;
               if (tab.executionId !== executionId || tab.autoCommit !== false || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) throw error;
               // Only a session that ran proven read-only statements lost nothing to
@@ -10035,8 +10044,16 @@ export const useQueryStore = defineStore("query", () => {
         if (responseWasAbandoned) void releaseResultLargeValues(...results);
         return results;
       });
-      const responseResults = await withFrontendQueryTimeout(observedExecution, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }), () => {
+      const responseResults = await withFrontendQueryTimeout(observedExecution, frontendTimeoutSecs, frontendDeadline.cancelOnTimeout ? t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }) : t("editor.writeTimeoutDetached", { seconds: frontendTimeoutSecs }), () => {
         responseWasAbandoned = true;
+        // A read-timeout cancel becomes KILL QUERY / pg_cancel_backend on the
+        // server. Doing that to a write aborts it mid-flight, so the caller can
+        // no longer tell whether the rows landed: never cancel those.
+        if (!frontendDeadline.cancelOnTimeout) {
+          writeWaitExpired = true;
+          queryExecutionLog("warn", "frontend-timeout:skip-cancel-for-write", { traceId });
+          return;
+        }
         void api.cancelQuery(executionId).catch((error) => queryExecutionLog("warn", "frontend-timeout:cancel-failed", { traceId, error }));
       });
       for (const result of responseResults) {
@@ -10450,7 +10467,9 @@ export const useQueryStore = defineStore("query", () => {
       // Handle manual transaction auto-rollback (idle timeout only for the banner;
       // other statement failures still clear the session without the 5-minute notice).
       if (tab.autoCommit === false && isSqlServerTransactionTab(tab)) {
-        reportSqlServerTransactionError(tab, e);
+        // A local write wait expiry does not end the manual session. Its
+        // in-flight request will update the session state when it settles.
+        if (!writeWaitExpired) reportSqlServerTransactionError(tab, e);
       } else if (tab.autoCommit === false) {
         const errMsg: string = e?.message ?? String(e);
         const idleTimeout = isManualTransactionSessionExpired(e) || errMsg.includes("已自动回滚");

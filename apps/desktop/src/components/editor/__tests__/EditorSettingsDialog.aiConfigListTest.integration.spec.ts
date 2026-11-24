@@ -17,9 +17,10 @@ const backend = vi.hoisted(() => ({
   testResult: null as AiTestConnectionResult | null,
   testError: null as Error | null,
   testCalls: [] as unknown[],
-  // hold 为 true 时挂起探测请求，由测试手动放行（模拟响应晚于配置编辑）。
+  // hold 为 true 时挂起探测请求，按顺序记录 resolver，由测试手动放行
+  // （模拟响应晚于配置编辑 / 旧响应晚于新请求）。
   hold: false,
-  release: null as ((result: AiTestConnectionResult) => void) | null,
+  releases: [] as Array<(result: AiTestConnectionResult) => void>,
 }));
 
 vi.mock("@/lib/backend/api", async (importOriginal) => {
@@ -44,7 +45,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
       backend.testCalls.push(config);
       if (backend.hold) {
         return await new Promise<AiTestConnectionResult>((resolve) => {
-          backend.release = resolve;
+          backend.releases.push(resolve);
         });
       }
       if (backend.testError) throw backend.testError;
@@ -90,7 +91,7 @@ beforeEach(() => {
   backend.testError = null;
   backend.testCalls = [];
   backend.hold = false;
-  backend.release = null;
+  backend.releases = [];
   localStorage.clear();
 });
 
@@ -207,12 +208,49 @@ describe("EditorSettingsDialog AI config list test", () => {
     await store.updateAiConfigItem(fixtureConfig.id, { ...fixtureConfig, model: "changed-model" });
     await settle();
 
-    backend.release!({ success: true, message: "ok", latencyMs: 456, modelUsed: "test-model" });
+    backend.releases.shift()!({ success: true, message: "ok", latencyMs: 456, modelUsed: "test-model" });
     await settle();
 
     const row = button!.closest("div")!;
     expect(row.textContent).not.toContain("连接成功");
     expect(row.textContent).not.toContain("456ms");
+    expect(button!.disabled).toBe(false);
+  });
+
+  // #15467 复审：配置变更后按钮必须真实可重试（可见状态过滤），且旧请求
+  // 的响应晚到也不能清掉新请求的状态。
+  it("lets a retest supersede the stale in-flight request and ignores its late response", async () => {
+    backend.hold = true;
+    const store = await mountAiSettings();
+
+    const button = rowTestButton();
+    button!.click();
+    await settle();
+    expect(backend.testCalls).toHaveLength(1);
+    expect(button!.disabled).toBe(true);
+
+    // 编辑配置：旧请求的 testing 状态被可见性过滤隐藏，按钮恢复可点。
+    await store.updateAiConfigItem(fixtureConfig.id, { ...fixtureConfig, endpoint: "https://changed.example/v1" });
+    await settle();
+    expect(button!.disabled).toBe(false);
+
+    // 重测发起第二个请求（覆盖第一请求的状态）。
+    button!.click();
+    await settle();
+    expect(backend.testCalls).toHaveLength(2);
+    expect(button!.disabled).toBe(true);
+
+    // 旧请求的响应晚到：不得清理/覆盖新请求的 testing 状态。
+    backend.releases.shift()!({ success: true, message: "ok", latencyMs: 111, modelUsed: "old-model" });
+    await settle();
+    const row = button!.closest("div")!;
+    expect(row.textContent).not.toContain("111ms");
+    expect(button!.disabled).toBe(true);
+
+    // 新请求的响应正常落定。
+    backend.releases.shift()!({ success: true, message: "ok", latencyMs: 222, modelUsed: "new-model" });
+    await settle();
+    expect(row.textContent).toContain("222ms");
     expect(button!.disabled).toBe(false);
   });
 });

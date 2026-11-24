@@ -8046,8 +8046,11 @@ interface AiListTestState {
   latencyMs: number | null;
   error: string;
   testedConfig: AiConfigItem;
+  /** 发起请求的令牌：只有最新请求能写回/清理该行的状态（#15467 复审）。 */
+  requestId: number;
 }
 const aiListTestStates = ref<Record<string, AiListTestState>>({});
+let aiListTestRequestSeq = 0;
 
 function aiListTestConfigCurrent(tested: AiConfigItem): boolean {
   const current = settingsStore.aiConfigs.find((candidate) => candidate.id === tested.id);
@@ -8070,23 +8073,31 @@ function aiListTestErrorTitle(configId: string): string {
 }
 
 async function aiTestConfigFromList(config: AiConfigItem) {
-  if (aiListTestStates.value[config.id]?.status === "testing") return;
-  aiListTestStates.value[config.id] = { status: "testing", latencyMs: null, error: "", testedConfig: { ...config } };
+  // A new attempt always takes over: the row shows "testing" for the request it
+  // is actually waiting on, and an older response can never clear or overwrite
+  // a newer request's state (token check below). This also keeps the button's
+  // enabled state honest — it is disabled only while a *current-config* request
+  // is in flight, and clicking always starts a fresh probe.
+  const requestId = ++aiListTestRequestSeq;
+  aiListTestStates.value[config.id] = { status: "testing", latencyMs: null, error: "", testedConfig: { ...config }, requestId };
+  const latest = () => aiListTestStates.value[config.id]?.requestId === requestId;
   const stillCurrent = () => aiListTestConfigCurrent(config);
   try {
     const result = await aiTestConnection(config);
+    if (!latest()) return;
     if (!stillCurrent()) {
       // 配置在测试期间被编辑/删除：结果描述的不是当前配置，直接丢弃。
       delete aiListTestStates.value[config.id];
       return;
     }
-    aiListTestStates.value[config.id] = { status: "success", latencyMs: result.latencyMs ?? null, error: "", testedConfig: { ...config } };
+    aiListTestStates.value[config.id] = { status: "success", latencyMs: result.latencyMs ?? null, error: "", testedConfig: { ...config }, requestId };
   } catch (e) {
+    if (!latest()) return;
     if (!stillCurrent()) {
       delete aiListTestStates.value[config.id];
       return;
     }
-    aiListTestStates.value[config.id] = { status: "error", latencyMs: null, error: translateBackendError(t, e), testedConfig: { ...config } };
+    aiListTestStates.value[config.id] = { status: "error", latencyMs: null, error: translateBackendError(t, e), testedConfig: { ...config }, requestId };
   }
 }
 

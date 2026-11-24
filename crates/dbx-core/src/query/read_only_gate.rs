@@ -53,32 +53,33 @@ impl std::error::Error for ReadOnlyGateError {}
 /// classifier are dialect-aware, so callers must pass the resolved connection
 /// type rather than a generic default.
 ///
-/// 参数说明:
-/// - `sql`: 待校验的 SQL，示例值 `SELECT * FROM users WHERE id = 1`
-/// - `database_type`: 连接类型，示例值 `DatabaseType::Mysql`
-///
-/// 返回值: 通过返回 `Ok(())`；失败返回具体原因。
+/// Returns `Ok(())` only for a statement the gate can prove read-only;
+/// anything else fails closed with the specific rejection reason.
 pub fn require_single_read_only_statement(
     sql: &str,
     database_type: DatabaseType,
 ) -> Result<(), ReadOnlyGateError> {
-    // 多语句脚本会绕过单条语句的权限判定，必须先按方言拆分再计数。
+    // A script would let later statements escape the per-statement read-only
+    // decision, so split with the dialect-aware splitter before counting.
     if crate::sql::split_sql_statements_for_database(sql, database_type).len() != 1 {
         return Err(ReadOnlyGateError::NotSingleStatement);
     }
-    // USE/切换数据库单独给明确原因，避免被分类器归到普通写语句。
+    // Report database switches with their own reason instead of letting the
+    // classifier lump them in with ordinary writes.
     if mcp_sql_has_forbidden_database_switch(sql, database_type) {
         return Err(ReadOnlyGateError::DatabaseSwitch);
     }
-    // 分类器负责识别锁读（FOR UPDATE/SHARE）、可写 CTE、副作用函数等
-    // 关键字扫描看不出的写语义；解析失败一律失败关闭。
+    // The classifier sees locking reads (FOR UPDATE/SHARE), writable CTEs and
+    // side-effect functions that a keyword scan misses; parse failures fail
+    // closed.
     match classify_sql_risk_for_database(sql, database_type) {
         Ok(SqlRisk::ReadOnly) => {}
         Ok(_) => return Err(ReadOnlyGateError::NotReadOnly),
         Err(_) => return Err(ReadOnlyGateError::Unverifiable),
     }
-    // 分类器只看 EXPLAIN 内部的语句本身，会放过 EXPLAIN ANALYZE；
-    // 但后者会真正执行语句（含副作用函数），因此单独拦截。
+    // The classifier only looks at the statement inside EXPLAIN and would pass
+    // EXPLAIN ANALYZE, but that form actually executes the statement
+    // (including side-effect functions), so reject it explicitly.
     if contains_explain_analyze(sql) {
         return Err(ReadOnlyGateError::NotReadOnly);
     }
@@ -88,16 +89,17 @@ pub fn require_single_read_only_statement(
 /// Detect `EXPLAIN ANALYZE ...` and PostgreSQL's
 /// `EXPLAIN (ANALYZE, ...) ...` spelling.
 ///
-/// 注释和字符串字面量先剥离，避免 `SELECT 'EXPLAIN ANALYZE'` 这类字面量
-/// 误判；只检查 `EXPLAIN` 紧邻的选项，不会把 `SELECT analyze` 列名当成
-/// 执行计划选项。
+/// Comments and string literals are stripped first so a literal like
+/// `SELECT 'EXPLAIN ANALYZE'` cannot trigger a false positive; only the
+/// options immediately after EXPLAIN are inspected, so a column named
+/// `analyze` in `EXPLAIN SELECT analyze FROM t` stays allowed.
 fn contains_explain_analyze(sql: &str) -> bool {
     let cleaned = crate::query_execution_sql::strip_sql_comments_and_literals(sql);
     let upper = cleaned.trim_start().to_ascii_uppercase();
     let Some(rest) = upper.strip_prefix("EXPLAIN") else {
         return false;
     };
-    // `EXPLAINPLAN` 之类的标识符不是 EXPLAIN 语句。
+    // An identifier such as `EXPLAINPLAN` is not an EXPLAIN statement.
     if rest.chars().next().is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
         return false;
     }
@@ -114,7 +116,8 @@ fn contains_explain_analyze(sql: &str) -> bool {
     false
 }
 
-/// 判断 `source` 是否以完整单词 `word` 开头（后面必须是分隔符）。
+/// Whether `source` starts with `word` as a whole word (followed by a
+/// delimiter or end of input).
 fn starts_with_word(source: &str, word: &str) -> bool {
     source.strip_prefix(word).is_some_and(|rest| {
         rest.chars().next().is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')

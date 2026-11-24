@@ -111,6 +111,7 @@ const editorSettingCategoryOverrides: Partial<Record<string, BackupSettingsCateg
   infiniteScrollMaxRows: "data",
   tableFontSize: "data",
   mongoViewMode: "data",
+  mongoFlattenNestedFields: "data",
   dataGridMultiRowTranspose: "data",
   dataGridHideNullColumns: "data",
   dataGridHideEmptyColumns: "data",

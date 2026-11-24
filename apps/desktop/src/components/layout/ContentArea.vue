@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, shallowRef, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { computed, ref, shallowRef, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted, markRaw } from "vue";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab, restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
@@ -85,6 +85,10 @@ import QueryMessagesView from "@/components/layout/QueryMessagesView.vue";
 import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarActions.vue";
 import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
+import MongoDocumentTreeView from "@/components/document/MongoDocumentTreeView.vue";
+import MongoNestedFieldsPopover from "@/components/document/MongoNestedFieldsPopover.vue";
+import { buildMongoFlatColumns, buildMongoIndexLabels, hasNestedMongoColumns, listExpandableMongoColumns, mongoCanonicalToBrowserValue, mongoPathToDotted, setMongoPathValue, type MongoFieldPath } from "@/lib/mongo/mongoDocumentTree";
+import { flattenMongoQueryResult, mongoQueryResultRowFromDocument } from "@/lib/mongo/mongoShellCommand";
 import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
 import OraclePackageMembers from "@/components/objects/OraclePackageMembers.vue";
@@ -840,7 +844,136 @@ const neo4jNodeTable = useNeo4jNodeTableResult(
   computed(() => props.activeTab.result),
   activeResultGridInstanceKey,
 );
-const activeGridResult = computed(() => (hasNeo4jNodes.value ? neo4jNodeTable.result.value : props.activeTab.result));
+// MongoDB query results: Tree view and expandable nested columns (NoSQLBooster-style).
+// Both are per-tab view state kept in memory; "flatten all" is the shared preference.
+const mongoTreeTabIds = ref(new Set<string>());
+const mongoExpandedColumnsByTab = ref(new Map<string, string[]>());
+const canShowMongoTree = computed(() => {
+  const result = props.activeTab.result;
+  return activeEffectiveDatabaseType.value === "mongodb" && !hasNeo4jNodes.value && !!result?.mongo_documents?.length && result.mongo_documents.length === result.rows.length;
+});
+const mongoTreeActive = computed(() => canShowMongoTree.value && mongoTreeTabIds.value.has(props.activeTab.id));
+const resultGridModeActive = computed(() => redisResultViewMode.value === "grid" && !mongoTreeActive.value);
+const mongoTreeDocuments = computed(() => {
+  const result = props.activeTab.result;
+  const documents = result?.mongo_documents ?? [];
+  const canonical = result?.mongo_copy_documents;
+  const source = canonical?.length === documents.length ? canonical : documents;
+  return source.map((document) => (document && typeof document === "object" && !Array.isArray(document) ? (document as Record<string, unknown>) : { value: document }));
+});
+const mongoExpandedColumns = computed(() => mongoExpandedColumnsByTab.value.get(props.activeTab.id) ?? []);
+const mongoFlattenAll = computed({
+  get: () => settingsStore.editorSettings.mongoFlattenNestedFields === true,
+  set: (value: boolean) => settingsStore.updateEditorSettings({ mongoFlattenNestedFields: value }),
+});
+const mongoNestedColumnsRequested = computed(() => canShowMongoTree.value && (mongoFlattenAll.value || mongoExpandedColumns.value.length > 0));
+const mongoFlatColumns = computed(() => {
+  const result = props.activeTab.result;
+  if (!result || !canShowMongoTree.value) return [];
+  return buildMongoFlatColumns(mongoTreeDocuments.value, result.columns, { expanded: mongoNestedColumnsRequested.value ? mongoExpandedColumns.value : [], flattenAll: mongoNestedColumnsRequested.value && mongoFlattenAll.value });
+});
+const mongoFlatResult = computed(() => {
+  const result = props.activeTab.result;
+  if (!result || !mongoNestedColumnsRequested.value || !hasNestedMongoColumns(mongoFlatColumns.value)) return undefined;
+  return flattenMongoQueryResult(result, mongoFlatColumns.value);
+});
+const mongoExpandableColumns = computed(() => {
+  if (!canShowMongoTree.value) return [];
+  const available = listExpandableMongoColumns(mongoTreeDocuments.value, mongoFlatColumns.value);
+  return [...new Set([...mongoExpandedColumns.value, ...available])].sort((left, right) => left.localeCompare(right));
+});
+
+function setMongoTree(tree: boolean) {
+  const next = new Set(mongoTreeTabIds.value);
+  if (tree) next.add(props.activeTab.id);
+  else next.delete(props.activeTab.id);
+  mongoTreeTabIds.value = next;
+}
+
+function setMongoExpandedColumns(columns: string[]) {
+  const next = new Map(mongoExpandedColumnsByTab.value);
+  if (columns.length) next.set(props.activeTab.id, columns);
+  else next.delete(props.activeTab.id);
+  mongoExpandedColumnsByTab.value = next;
+}
+
+function toggleMongoNestedColumn(column: string) {
+  const current = mongoExpandedColumns.value;
+  setMongoExpandedColumns(current.includes(column) ? current.filter((name) => name !== column && !name.startsWith(`${column}.`)) : [...current, column]);
+}
+
+function collapseMongoNestedColumns() {
+  setMongoExpandedColumns([]);
+  mongoFlattenAll.value = false;
+}
+
+function showMongoTreeFieldAsColumn(path: string, isSubdocument: boolean) {
+  const parts = path.split(".");
+  const parents = parts.slice(0, isSubdocument ? parts.length : parts.length - 1).map((_, index) => parts.slice(0, index + 1).join("."));
+  setMongoExpandedColumns([...new Set([...mongoExpandedColumns.value, ...parents])]);
+  setMongoTree(false);
+}
+
+// Index labels for the Tree view, cached per connection/database/collection.
+const mongoIndexLabelCache = new Map<string, Promise<Map<string, string>>>();
+const mongoTreeIndexLabels = shallowRef<Map<string, string>>(new Map());
+const mongoTreeIndexScope = computed(() => {
+  const result = props.activeTab.result;
+  const collection = props.activeTab.mongoEditTarget?.collection ?? result?.sourceName;
+  const database = result?.sourceQualifier || activeResultDatabase.value;
+  const connectionId = activeResultConnectionId.value;
+  return mongoTreeActive.value && collection && database && connectionId ? { connectionId, database, collection } : undefined;
+});
+watch(
+  mongoTreeIndexScope,
+  (scope) => {
+    if (!scope) return;
+    const key = JSON.stringify([scope.connectionId, scope.database, scope.collection]);
+    let pending = mongoIndexLabelCache.get(key);
+    if (!pending) {
+      pending = Promise.resolve()
+        .then(() => api.mongoListIndexSpecs(scope.connectionId, scope.database, scope.collection))
+        .then((specs) => buildMongoIndexLabels(specs ?? []))
+        .catch(() => new Map<string, string>());
+      mongoIndexLabelCache.set(key, pending);
+    }
+    void pending.then((labels) => {
+      const current = mongoTreeIndexScope.value;
+      if (current && JSON.stringify([current.connectionId, current.database, current.collection]) === key) mongoTreeIndexLabels.value = labels;
+    });
+  },
+  { immediate: true },
+);
+
+/** Tree view inline edit on a query result: `$set` one field, then patch the result in place. */
+const saveMongoTreeValue = computed(() => {
+  if (!mongoQueryResultSaveHandler.value) return undefined;
+  return async (request: { documentIndex: number; path: MongoFieldPath; value: unknown }) => {
+    const tab = props.activeTab;
+    const result = tab.result;
+    const target = tab.mongoEditTarget;
+    if (!result || !target) throw new Error("This result cannot be edited.");
+    const index = request.documentIndex;
+    const document = result.mongo_documents?.[index] as Record<string, unknown> | undefined;
+    const id = document?._id;
+    if (id === undefined) throw new Error("No _id field");
+    await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, serializeMongoDocumentId(id), JSON.stringify({ $set: { [mongoPathToDotted(request.path)]: request.value } }));
+    if (tab.result !== result) return;
+    const documents = [...(result.mongo_documents ?? [])];
+    documents[index] = setMongoPathValue(document, request.path, mongoCanonicalToBrowserValue(request.value));
+    result.mongo_documents = markRaw(documents);
+    if (result.mongo_copy_documents?.[index] !== undefined) {
+      const copies = [...result.mongo_copy_documents];
+      copies[index] = setMongoPathValue(copies[index], request.path, request.value);
+      result.mongo_copy_documents = markRaw(copies);
+    }
+    const rows = [...result.rows];
+    rows[index] = mongoQueryResultRowFromDocument(documents[index], result.columns);
+    result.rows = markRaw(rows);
+  };
+});
+
+const activeGridResult = computed(() => (hasNeo4jNodes.value ? neo4jNodeTable.result.value : (mongoFlatResult.value ?? props.activeTab.result)));
 const activeGridSort = computed(() => (hasNeo4jNodes.value ? neo4jNodeTable.sort.value : undefined));
 
 function sortQueryGrid(column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string) {
@@ -2629,7 +2762,7 @@ defineExpose({
                   :key="`${activeTab.id}:${activeTab.activeResultRunId ?? 'current'}`"
                   :items="visibleResultItems"
                   :busy="resultBatchBusy"
-                  :can-export-xlsx="activeOutputView === 'result' && redisResultViewMode === 'grid' && !!activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse"
+                  :can-export-xlsx="activeOutputView === 'result' && resultGridModeActive && !!activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse"
                   :active-index="activeTab.activeResultIndex ?? 0"
                   :active="activeOutputView === 'result'"
                   :connection-color="activeResultColor"
@@ -2643,7 +2776,7 @@ defineExpose({
                 />
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
-                <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
+                <template v-if="activeOutputView === 'result' && resultGridModeActive && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
                   <DataGridCopyFormatControl
                     toolbar
                     :compact="resultToolbarTier >= 1 || hideToolbarLabels"
@@ -2653,7 +2786,19 @@ defineExpose({
                     @select="dataGridRef?.setDefaultCopyPreference($event)"
                   />
                 </template>
-                <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson">
+                <template v-if="activeOutputView === 'result' && resultGridModeActive && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson">
+                  <MongoNestedFieldsPopover
+                    v-if="canShowMongoTree"
+                    :columns="mongoExpandableColumns"
+                    :expanded="mongoExpandedColumns"
+                    :flatten-all="mongoFlattenAll"
+                    :active="!!mongoFlatResult"
+                    :hint="t('mongo.nestedFieldsQueryHint')"
+                    @toggle="toggleMongoNestedColumn"
+                    @update:flatten-all="(value: boolean) => (mongoFlattenAll = value)"
+                    @expand-all="setMongoExpandedColumns(mongoExpandableColumns)"
+                    @collapse-all="collapseMongoNestedColumns"
+                  />
                   <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" :compact="resultToolbarTier >= 2 || hideToolbarLabels" />
                   <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
                     <Button
@@ -2686,7 +2831,7 @@ defineExpose({
                     </Button>
                   </LightTooltip>
                 </template>
-                <Popover v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse" v-model:open="dataGridViewOptionsOpen">
+                <Popover v-if="activeOutputView === 'result' && resultGridModeActive && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse" v-model:open="dataGridViewOptionsOpen">
                   <PopoverTrigger as-child>
                     <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
                       <Wrench class="h-4 w-4" />
@@ -3004,6 +3149,9 @@ defineExpose({
                 :can-show-messages="canShowMessagesOutput"
                 :can-show-redis-console="canShowRedisConsoleOutput"
                 :result-mode="redisResultViewMode"
+                :can-show-mongo-tree="canShowMongoTree"
+                :mongo-tree="mongoTreeActive"
+                @select-mongo-tree="setMongoTree"
                 :message-count="resultMessageCount"
                 :compact="standaloneResultToolbarCompact"
                 @select-view="selectOutputView(activeTab.id, $event)"
@@ -3023,7 +3171,7 @@ defineExpose({
                 @export-archive="exportResultArchive"
                 @open-result-view="openPluginResultView"
               >
-                <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
+                <template v-if="activeOutputView === 'result' && resultGridModeActive && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
                   <DataGridExportMenu
                     v-if="settingsStore.editorSettings.dataGridExportInToolbar"
                     :items="dataGridRef.exportMenuItems"
@@ -3197,6 +3345,18 @@ defineExpose({
 
             <QueryMessagesView v-else-if="activeOutputView === 'messages'" class="flex-1 min-h-0" :messages="resultMessages" />
 
+            <MongoDocumentTreeView
+              v-else-if="activeOutputView === 'result' && mongoTreeActive"
+              :key="`mongo-tree:${activeTab.id}:${activeTab.resultViewGeneration ?? ''}`"
+              class="flex-1 min-h-0"
+              :documents="mongoTreeDocuments"
+              :empty-text="t('mongo.emptyCollection')"
+              :index-labels="mongoTreeIndexLabels"
+              can-show-column
+              :save-value="saveMongoTreeValue"
+              @show-column="showMongoTreeFieldAsColumn"
+            />
+
             <template v-else>
               <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
               <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
@@ -3224,7 +3384,7 @@ defineExpose({
                 :page-sql="activeTab.resultPageSql"
                 :loading="activeResultIsLoading"
                 :busy-started-at="activeTab.isExecuting ? activeTab.queryExecutionStartedAt : undefined"
-                :editable="!hasNeo4jNodes && (!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler)"
+                :editable="!hasNeo4jNodes && !mongoFlatResult && (!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler)"
                 :source-columns="hasNeo4jNodes ? undefined : activeTab.querySourceColumns"
                 :joined-write-targets="hasNeo4jNodes ? undefined : activeTab.queryWriteTargets"
                 :query-multi-source="(activeTab.queryWriteTargets?.length ?? 0) > 1"
@@ -3305,6 +3465,9 @@ defineExpose({
                     :can-show-messages="canShowMessagesOutput"
                     :can-show-redis-console="canShowRedisConsoleOutput"
                     :result-mode="redisResultViewMode"
+                    :can-show-mongo-tree="canShowMongoTree"
+                    :mongo-tree="mongoTreeActive"
+                    @select-mongo-tree="setMongoTree"
                     :message-count="resultMessageCount"
                     :compact="compact"
                     @select-view="selectOutputView(activeTab.id, $event)"
@@ -3352,7 +3515,7 @@ defineExpose({
                     @export-archive="exportResultArchive"
                     @open-result-view="openPluginResultView"
                   >
-                    <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
+                    <template v-if="activeOutputView === 'result' && resultGridModeActive && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
                       <DataGridExportMenu v-if="settingsStore.editorSettings.dataGridExportInToolbar" :items="dataGridRef.exportMenuItems" :warning="dataGridRef.exportWarning" :label="t('grid.export')" :compact="compact" :on-select="dataGridRef.selectExportMenuItem" />
                       <Button
                         v-if="settingsStore.editorSettings.dataGridLoadAllInToolbar && dataGridRef.loadAllToolbarState?.visible"

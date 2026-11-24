@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { BarChart3, ListChecks, MessageSquareText, Network, SquareTerminal } from "@lucide/vue";
+import { BarChart3, ListChecks, ListTree, MessageSquareText, Network, SquareTerminal } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -19,21 +19,37 @@ const props = withDefaults(
     canShowMessages: boolean;
     canShowRedisConsole?: boolean;
     resultMode?: RedisResultViewMode;
+    /** MongoDB document results can switch the result pane to the Tree view. */
+    canShowMongoTree?: boolean;
+    mongoTree?: boolean;
     messageCount?: number;
     compact?: boolean;
   }>(),
-  { compact: false, messageCount: 0, canShowRedisConsole: false, resultMode: "grid" },
+  { compact: false, messageCount: 0, canShowRedisConsole: false, resultMode: "grid", canShowMongoTree: false, mongoTree: false },
 );
 
 const emit = defineEmits<{
   selectView: [view: PrimaryResultView];
   selectResultMode: [mode: RedisResultViewMode];
+  selectMongoTree: [tree: boolean];
 }>();
 
 const { t } = useI18n();
 
 const messagesTooltip = computed(() => (props.messageCount > 0 ? `${t("tabs.messages")} (${props.messageCount})` : t("tabs.messages")));
 const effectiveResultMode = computed<RedisResultViewMode>(() => (props.canShowRedisConsole ? props.resultMode : "grid"));
+const mongoTreeActive = computed(() => props.canShowMongoTree && props.mongoTree);
+
+function selectMongoTree(tree: boolean) {
+  if (props.mongoTree !== tree) emit("selectMongoTree", tree);
+  if (props.activeView !== "result") emit("selectView", "result");
+}
+
+function selectTableData() {
+  if (mongoTreeActive.value) selectMongoTree(false);
+  else if (props.canShowRedisConsole) selectResultMode("grid");
+  else selectView("result");
+}
 
 function selectView(view: PrimaryResultView) {
   if (props.activeView === view) return;
@@ -51,14 +67,31 @@ function selectResultMode(mode: RedisResultViewMode) {
   <div data-query-result-view-switcher class="flex shrink-0 items-center gap-1 px-1">
     <Button
       size="sm"
-      :variant="activeView === 'result' && effectiveResultMode === 'grid' ? 'secondary' : 'ghost'"
+      :variant="activeView === 'result' && effectiveResultMode === 'grid' && !mongoTreeActive ? 'secondary' : 'ghost'"
       class="h-5 shrink-0 px-2 text-xs leading-none"
       :disabled="!canShowResult"
-      :aria-pressed="activeView === 'result' && effectiveResultMode === 'grid'"
-      @click="canShowRedisConsole ? selectResultMode('grid') : selectView('result')"
+      :aria-pressed="activeView === 'result' && effectiveResultMode === 'grid' && !mongoTreeActive"
+      @click="selectTableData"
     >
       <span class="inline-flex h-4 items-center leading-none">{{ t("tabs.tableData") }}</span>
     </Button>
+
+    <LightTooltip v-if="canShowMongoTree" :text="t('mongo.treeView')" :disabled="!compact" side="bottom" :delay="0" :close-delay="0" nowrap>
+      <Button
+        size="sm"
+        :variant="activeView === 'result' && mongoTreeActive ? 'secondary' : 'ghost'"
+        class="h-5 shrink-0 text-xs leading-none"
+        :class="compact ? 'w-6 gap-0 px-0' : 'gap-1 px-2'"
+        :title="t('mongo.treeView')"
+        :aria-label="t('mongo.treeView')"
+        :aria-pressed="activeView === 'result' && mongoTreeActive"
+        data-mongo-result-tree
+        @click="selectMongoTree(true)"
+      >
+        <ListTree class="block h-3.5 w-3.5 self-center" />
+        <span v-if="!compact" class="inline-flex h-4 items-center leading-none">{{ t("mongo.treeViewShort") }}</span>
+      </Button>
+    </LightTooltip>
 
     <LightTooltip v-if="canShowGraph" :text="t('graph.title')" :disabled="!compact" side="bottom" :delay="0" :close-delay="0" nowrap>
       <Button size="sm" :variant="activeView === 'graph' ? 'secondary' : 'ghost'" class="h-5 shrink-0 px-2 text-xs leading-none" :class="compact ? 'w-6 px-0' : 'gap-1'" :title="t('graph.title')" :aria-label="t('graph.title')" :aria-pressed="activeView === 'graph'" @click="selectView('graph')">

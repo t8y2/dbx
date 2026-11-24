@@ -415,6 +415,37 @@ function parseMongoExistingFieldInputValue(raw: Exclude<MongoInputValue, null>, 
   return parseMongoDocumentInputValue(raw);
 }
 
+/**
+ * Parses text typed into the Tree view's inline editor, keeping the field's
+ * existing BSON type where the text allows it: a Date stays a Date, an
+ * ObjectId stays an ObjectId, Int32 stays Int32, a String stays a String.
+ * Returns `{ ok: false }` when the text cannot be the original type and would
+ * silently change it (e.g. "abc" over a Date).
+ */
+export function parseMongoTreeEditValue(text: string, originalValue: unknown): { ok: true; value: unknown } | { ok: false } {
+  const trimmed = text.trim();
+  const originalType = mongoExtendedJsonValueType(originalValue);
+  if (originalType === "date" || (typeof originalValue === "string" && MONGO_SHELL_DATE_PATTERN.test(originalValue.trim()))) {
+    const shell = mongoShellDateToExtendedJson(trimmed);
+    if (shell !== trimmed) return { ok: true, value: shell };
+    const normalized = normalizeMongoDateInput(trimmed);
+    return normalized ? { ok: true, value: { $date: normalized } } : { ok: false };
+  }
+  if (originalType === "objectId") {
+    const shell = mongoShellObjectIdToExtendedJson(trimmed);
+    if (shell !== trimmed) return { ok: true, value: shell };
+    return MONGO_OBJECT_ID_PATTERN.test(trimmed) ? { ok: true, value: { $oid: trimmed.toLowerCase() } } : { ok: false };
+  }
+  if (typeof originalValue === "boolean") {
+    if (/^true$/i.test(trimmed)) return { ok: true, value: true };
+    if (/^false$/i.test(trimmed)) return { ok: true, value: false };
+    return { ok: false };
+  }
+  if (typeof originalValue === "string") return { ok: true, value: text };
+  if (originalValue === null) return { ok: true, value: parseMongoDocumentInputValue(text) };
+  return { ok: true, value: parseMongoExistingFieldInputValue(text, originalValue) };
+}
+
 const MONGO_DECIMAL_INPUT_PATTERN = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
 const MIN_BSON_INT32 = -2147483648n;
 const MAX_BSON_INT32 = 2147483647n;

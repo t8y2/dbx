@@ -2,7 +2,7 @@
 import { computed, ref, shallowRef, nextTick, watch, onMounted, onBeforeUnmount, toRaw } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette, Copy } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette, Copy, ListTree } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -121,6 +121,9 @@ import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import DocumentQueryCompletionMenu from "./DocumentQueryCompletionMenu.vue";
 import JsonEditNode from "./JsonEditNode.vue";
+import MongoDocumentTreeView from "./MongoDocumentTreeView.vue";
+import MongoNestedFieldsPopover from "./MongoNestedFieldsPopover.vue";
+import { buildMongoFlatColumns, buildMongoIndexLabels, hasNestedMongoColumns, listExpandableMongoColumns, mergeMongoFilterText, mongoCanonicalToBrowserValue, mongoPathToDotted, projectMongoDocument, setMongoPathValue, type MongoFieldPath, type MongoFlatColumn } from "@/lib/mongo/mongoDocumentTree";
 
 import type { EditNode } from "@/types/editor";
 import type { ColumnInfo, DatabaseType, QueryResult, QueryTab } from "@/types/database";
@@ -144,7 +147,7 @@ const props = defineProps<{
 }>();
 
 type JsonRecord = Record<string, unknown>;
-type ViewMode = "document" | "table";
+type ViewMode = "document" | "table" | "tree";
 const DYNAMODB_DEFAULT_EXPORT_ROW_LIMIT = 10_000;
 
 // This component is keyed by tab in ContentArea and unmounted on every tab
@@ -207,6 +210,13 @@ const elasticsearchTextSearch = ref(restoredDocumentBrowserState?.elasticsearchT
 const elasticsearchTextInput = ref(elasticsearchTextSearch.value);
 const sortInput = ref(restoredDocumentBrowserState?.sortInput ?? "");
 const localColumnFilters = ref<SerializedDataGridLocalColumnFilters>(restoredDocumentBrowserState?.localColumnFilters ?? {});
+// Table view: subdocument columns the user expanded into dot-path sub-columns
+// (NoSQLBooster-style). "Flatten all" is a persisted preference instead.
+const expandedNestedColumns = ref<string[]>(restoredDocumentBrowserState?.expandedNestedColumns ?? []);
+const flattenNestedFields = computed({
+  get: () => settingsStore.editorSettings.mongoFlattenNestedFields === true,
+  set: (value: boolean) => settingsStore.updateEditorSettings({ mongoFlattenNestedFields: value }),
+});
 const localColumnFilterColumns = ref<string[] | undefined>(restoredDocumentBrowserState?.localColumnFilterColumns);
 const filterInputRef = ref<HTMLTextAreaElement>();
 const sortInputRef = ref<HTMLTextAreaElement>();
@@ -407,6 +417,7 @@ function persistDocumentBrowserState(options: { includeData?: boolean } = {}) {
     page: page.value,
     localColumnFilters: localColumnFilters.value,
     localColumnFilterColumns: localColumnFilterColumns.value,
+    expandedNestedColumns: expandedNestedColumns.value.length ? [...expandedNestedColumns.value] : undefined,
     // Any condition change drops the payload; only the unmount capture stores
     // rows, so a cached page can never outlive the conditions that produced it.
     data: options.includeData ? captureDocumentBrowserData() : undefined,
@@ -636,8 +647,55 @@ function commitLoadedDocuments(nextDocuments: JsonRecord[], nextCopyDocuments: J
   gridRows.value = combinedDocuments.map((document) => documentGridRow(document, nextColumns, kind));
 }
 
+/** Whether the Table view shows nested fields as their own dot-path columns. */
+const nestedColumnsActive = computed(() => documentStoreProvider.value.kind === "mongodb" && (flattenNestedFields.value || expandedNestedColumns.value.length > 0));
+
+const flatGridColumns = computed<MongoFlatColumn[]>(() => {
+  if (!nestedColumnsActive.value) return lastGridColumns.value.map((name) => ({ name, path: [name] }));
+  return buildMongoFlatColumns(documents.value, lastGridColumns.value, { expanded: expandedNestedColumns.value, flattenAll: flattenNestedFields.value });
+});
+
+/** Rows/types re-derived from the projected documents when nested columns are shown. */
+const flatGridData = computed(() => {
+  if (!nestedColumnsActive.value || !hasNestedMongoColumns(flatGridColumns.value)) return undefined;
+  const columns = flatGridColumns.value.map((column) => column.name);
+  const projected = documents.value.map((document) => projectMongoDocument(document, flatGridColumns.value));
+  return {
+    columns,
+    rows: projected.map((document) => documentGridRow(document, columns, "mongodb")),
+    columnTypes: mongoDocumentGridColumnTypes(projected, columns),
+    nestedColumns: flatGridColumns.value.filter((column) => column.path.length > 1).map((column) => column.name),
+  };
+});
+
+const expandableNestedColumns = computed(() => {
+  if (documentStoreProvider.value.kind !== "mongodb") return [];
+  const available = listExpandableMongoColumns(documents.value, flatGridColumns.value);
+  // Expanded parents no longer appear as columns; list them too so they can be collapsed.
+  return [...new Set([...expandedNestedColumns.value, ...available])].sort((left, right) => left.localeCompare(right));
+});
+
+function toggleNestedColumn(column: string) {
+  const current = expandedNestedColumns.value;
+  // Collapsing a parent also collapses everything expanded beneath it.
+  expandedNestedColumns.value = current.includes(column) ? current.filter((name) => name !== column && !name.startsWith(`${column}.`)) : [...current, column];
+  persistDocumentBrowserState({ includeData: true });
+}
+
+function expandAllNestedColumns() {
+  expandedNestedColumns.value = [...new Set([...expandedNestedColumns.value, ...expandableNestedColumns.value])];
+  persistDocumentBrowserState({ includeData: true });
+}
+
+function collapseAllNestedColumns() {
+  expandedNestedColumns.value = [];
+  flattenNestedFields.value = false;
+  persistDocumentBrowserState({ includeData: true });
+}
+
 const gridResult = computed<QueryResult>(() => {
   const docs = documents.value;
+  const flat = flatGridData.value;
   const columnTypes = documentStoreProvider.value.kind === "elasticsearch" ? elasticsearchGridColumnTypes.value : documentStoreProvider.value.kind === "solr" ? solrGridColumnTypes.value : lastGridColumnTypes.value;
   if (!docs.length) {
     return {
@@ -652,18 +710,88 @@ const gridResult = computed<QueryResult>(() => {
   }
 
   return {
-    columns: lastGridColumns.value,
-    column_types: columnTypes,
-    rows: gridRows.value,
+    columns: flat ? flat.columns : lastGridColumns.value,
+    column_types: flat ? flat.columnTypes : columnTypes,
+    rows: flat ? flat.rows : gridRows.value,
     mongo_documents: docs,
     mongo_copy_documents: copyDocuments.value,
     affected_rows: 0,
     execution_time_ms: 0,
     truncated: false,
-    appended_from_row_count: appendedFromRowCount.value,
+    // Projected rows are rebuilt whole, so the infinite-scroll append hint no longer applies.
+    appended_from_row_count: flat ? undefined : appendedFromRowCount.value,
     local_column_filters: localColumnFilters.value,
   };
 });
+
+/** Documents shown by the Tree view: canonical BSON when available so types are exact. */
+const treeDocuments = computed(() => (documentStoreProvider.value.kind === "mongodb" && mongoCopyDocumentsAvailable.value && copyDocuments.value.length === documents.value.length ? copyDocuments.value : documents.value));
+
+// Index labels such as "(asc index)" next to indexed fields in the Tree view.
+const mongoIndexLabels = shallowRef<Map<string, string>>(new Map());
+let mongoIndexLabelsKey = "";
+watch(
+  () => [viewMode.value, documentStoreProvider.value.kind, props.connectionId, props.database, props.collection] as const,
+  ([mode, kind, connectionId, database, collection]) => {
+    if (mode !== "tree" || kind !== "mongodb") return;
+    const key = JSON.stringify([connectionId, database, collection]);
+    if (key === mongoIndexLabelsKey) return;
+    mongoIndexLabelsKey = key;
+    void Promise.resolve()
+      .then(() => api.mongoListIndexSpecs(connectionId, database, collection))
+      .then((specs) => {
+        if (key === mongoIndexLabelsKey) mongoIndexLabels.value = buildMongoIndexLabels(specs ?? []);
+      })
+      .catch(() => {
+        // Labels are a hint only; a server that refuses listIndexes keeps the tree usable.
+        if (key === mongoIndexLabelsKey) mongoIndexLabels.value = new Map();
+      });
+  },
+  { immediate: true },
+);
+
+function filterFromTree(filter: Record<string, unknown>) {
+  filterInput.value = mergeMongoFilterText(filterInput.value, filter);
+  filterEnabled.value = true;
+  applyFilter();
+}
+
+function showTreeFieldAsColumn(path: string, isSubdocument: boolean) {
+  const parts = path.split(".");
+  const parents = parts.slice(0, isSubdocument ? parts.length : parts.length - 1).map((_, index) => parts.slice(0, index + 1).join("."));
+  expandedNestedColumns.value = [...new Set([...expandedNestedColumns.value, ...parents])];
+  viewMode.value = "table";
+  persistDocumentBrowserState({ includeData: true });
+}
+
+/** Tree view inline edit: `$set` one field, then patch the loaded copy in place (no reload, expansion kept). */
+async function saveTreeValue(request: { documentIndex: number; path: MongoFieldPath; value: unknown }) {
+  if (!documentStoreEditable.value) throw new Error(documentStoreEditDisabledReason.value);
+  const index = request.documentIndex;
+  const document = documents.value[index];
+  if (!document || document._id === undefined) throw new Error("No _id field");
+  const dotted = mongoPathToDotted(request.path);
+  await api.documentUpdateDocument(props.connectionId, props.database, props.collection, serializeMongoDocumentId(document._id), JSON.stringify({ $set: { [dotted]: request.value } }));
+  const nextDocuments = [...documents.value];
+  nextDocuments[index] = setMongoPathValue(document, request.path, mongoCanonicalToBrowserValue(request.value));
+  documents.value = nextDocuments;
+  if (copyDocuments.value[index]) {
+    const nextCopies = [...copyDocuments.value];
+    nextCopies[index] = setMongoPathValue(copyDocuments.value[index], request.path, request.value);
+    copyDocuments.value = nextCopies;
+  }
+  if (gridRows.value.length === nextDocuments.length) {
+    const nextRows = [...gridRows.value];
+    nextRows[index] = documentGridRow(nextDocuments[index]!, lastGridColumns.value, "mongodb");
+    gridRows.value = nextRows;
+  }
+}
+
+function editDocumentFromTree(index: number) {
+  viewMode.value = "document";
+  selectDoc(index);
+  if (documentStoreEditable.value) void nextTick(() => startEdit());
+}
 
 function captureDocumentStoreExport(queued = true) {
   const kind = documentStoreProvider.value.kind;
@@ -1884,7 +2012,8 @@ const customSaveHandler = computed<CustomSaveHandler>(() => ({
   save: gridSave,
   preview: previewDocumentChanges,
   supportsInsert: true,
-  readonlyColumns: documentStoreProvider.value.kind === "elasticsearch" ? ["_routing"] : undefined,
+  // Dot-path sub-columns are views into a parent field; edit them in the Document or Tree view.
+  readonlyColumns: documentStoreProvider.value.kind === "elasticsearch" ? ["_routing"] : flatGridData.value?.nestedColumns.length ? flatGridData.value.nestedColumns : undefined,
   targetLabel: props.collection,
 }));
 
@@ -2862,6 +2991,9 @@ defineExpose({ focusSearch });
         <Button variant="ghost" size="icon" class="h-5 w-5 rounded-none" :class="{ 'bg-accent': viewMode === 'table' }" :title="t('mongo.tableView')" @click="viewMode = 'table'">
           <Table2 class="h-3 w-3" />
         </Button>
+        <Button variant="ghost" size="icon" class="h-5 w-5 rounded-none" :class="{ 'bg-accent': viewMode === 'tree' }" :title="t('mongo.treeView')" data-mongo-view-tree @click="viewMode = 'tree'">
+          <ListTree class="h-3 w-3" />
+        </Button>
       </div>
 
       <span class="shrink-0 ml-1">{{ documentStoreLabels.documentsLabel }}</span>
@@ -2885,10 +3017,10 @@ defineExpose({ focusSearch });
         </Badge>
       </div>
 
-      <Button v-if="viewMode === 'document'" variant="ghost" size="icon" class="h-5 w-5" :disabled="!documentStoreEditable" :title="documentStoreEditDisabledReason" @click="startNew"><Plus class="h-3 w-3" /></Button>
-      <Button v-if="viewMode === 'document'" variant="ghost" size="icon" class="h-5 w-5" @click="refreshDocuments"><RefreshCw class="h-3 w-3" :class="{ 'animate-spin': loading }" /></Button>
+      <Button v-if="viewMode !== 'table'" variant="ghost" size="icon" class="h-5 w-5" :disabled="!documentStoreEditable" :title="documentStoreEditDisabledReason" @click="startNew"><Plus class="h-3 w-3" /></Button>
+      <Button v-if="viewMode !== 'table'" variant="ghost" size="icon" class="h-5 w-5" @click="refreshDocuments"><RefreshCw class="h-3 w-3" :class="{ 'animate-spin': loading }" /></Button>
 
-      <div v-if="viewMode === 'document'" class="flex items-center gap-1 ml-1">
+      <div v-if="viewMode !== 'table'" class="flex items-center gap-1 ml-1">
         <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="page <= 0" @click="prevPage">
           <ChevronLeft class="h-3 w-3" />
         </Button>
@@ -2900,6 +3032,18 @@ defineExpose({ focusSearch });
       </div>
 
       <div class="flex-1" />
+
+      <MongoNestedFieldsPopover
+        v-if="viewMode === 'table' && documentStoreProvider.kind === 'mongodb' && gridResult.columns.length"
+        :columns="expandableNestedColumns"
+        :expanded="expandedNestedColumns"
+        :flatten-all="flattenNestedFields"
+        :active="nestedColumnsActive"
+        @toggle="toggleNestedColumn"
+        @update:flatten-all="(value: boolean) => (flattenNestedFields = value)"
+        @expand-all="expandAllNestedColumns"
+        @collapse-all="collapseAllNestedColumns"
+      />
 
       <DataGridColumnLayoutPopover v-if="viewMode === 'table' && gridResult.columns.length" :grid="dataGridRef" />
 
@@ -3463,6 +3607,49 @@ defineExpose({ focusSearch });
         </div>
       </template>
     </DataGrid>
+
+    <!-- Tree view (NoSQLBooster-style Key | Value | Type) -->
+    <div v-else-if="viewMode === 'tree'" class="flex flex-1 min-h-0 flex-col overflow-hidden">
+      <form class="flex shrink-0 items-center gap-2 border-b px-3 py-1 text-xs" data-mongo-tree-query @submit.prevent="applyFilter">
+        <label class="flex shrink-0 items-center gap-1 font-medium select-none" :class="filterEnabled ? 'text-blue-600 dark:text-blue-400' : 'text-muted-foreground'">
+          <input v-model="filterEnabled" type="checkbox" class="h-3.5 w-3.5 accent-primary" :aria-label="t('grid.applyFilter')" :disabled="loading" @change="applyFilter" />
+          {{ documentStoreLabels.filterInputLabel }}
+        </label>
+        <input v-model="filterInput" class="min-w-0 flex-[2] bg-transparent font-mono outline-none placeholder:text-muted-foreground/60" placeholder="{}" spellcheck="false" autocapitalize="off" @keydown.enter.prevent="applyFilter" />
+        <span class="shrink-0 font-medium text-orange-600 dark:text-orange-400 select-none">{{ documentStoreLabels.sortInputLabel }}</span>
+        <input v-model="sortInput" class="min-w-0 flex-1 bg-transparent font-mono outline-none placeholder:text-muted-foreground/60" placeholder="{}" spellcheck="false" autocapitalize="off" @keydown.enter.prevent="applyFilter" />
+        <Button type="submit" variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading" :title="t('grid.applyFilter')"><Search class="h-3 w-3" /></Button>
+      </form>
+      <QueryLoadingState
+        v-if="loading && documents.length === 0"
+        class="flex-1 min-h-0"
+        :label-key="documentLoadingLabelKey"
+        :elapsed-seconds="documentLoadingElapsedSeconds"
+        show-cancel
+        :cancel-disabled="!documentLoadExecutionId || documentLoadCancelling"
+        :cancelling="documentLoadCancelling"
+        @cancel="cancelDocumentLoad"
+      />
+      <MongoDocumentTreeView
+        v-else
+        class="flex-1 min-h-0"
+        :documents="treeDocuments"
+        :index-offset="page * pageSize"
+        :selected-index="selectedIdx"
+        :font-style="documentFontStyle"
+        :editable="documentStoreEditable"
+        :empty-text="t('mongo.emptyCollection')"
+        :index-labels="documentStoreProvider.kind === 'mongodb' ? mongoIndexLabels : undefined"
+        :can-filter="documentStoreProvider.kind === 'mongodb'"
+        :can-show-column="documentStoreProvider.kind === 'mongodb'"
+        :save-value="documentStoreProvider.kind === 'mongodb' && documentStoreEditable ? saveTreeValue : undefined"
+        @select="(index: number) => (selectedIdx = index)"
+        @edit="editDocumentFromTree"
+        @filter="filterFromTree"
+        @show-column="showTreeFieldAsColumn"
+      />
+      <ErrorBanner v-if="error" :message="error" />
+    </div>
 
     <!-- Document view (split pane) -->
     <Splitpanes v-else class="flex-1 min-h-0">

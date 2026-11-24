@@ -1087,7 +1087,9 @@ export interface EditorSettings {
   dataGridShowWhitespace: boolean;
   regexMaxMatchCount: number;
   autoCalculateTotalRows: boolean;
-  mongoViewMode: "document" | "table";
+  mongoViewMode: "document" | "table" | "tree";
+  /** Table view: expand every MongoDB subdocument into dot-path columns. */
+  mongoFlattenNestedFields: boolean;
   showColumnCommentsInHeader: boolean;
   dataGridColumnCommentsInInfoArea: boolean;
   showColumnTypesInHeader: boolean;
@@ -1536,6 +1538,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   regexMaxMatchCount: 1000,
   autoCalculateTotalRows: false,
   mongoViewMode: "document",
+  mongoFlattenNestedFields: false,
   showColumnCommentsInHeader: true,
   dataGridColumnCommentsInInfoArea: false,
   showColumnTypesInHeader: true,
@@ -2316,7 +2319,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridShowWhitespace: settings.dataGridShowWhitespace ?? DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace,
     regexMaxMatchCount: typeof settings.regexMaxMatchCount === "number" && Number.isFinite(settings.regexMaxMatchCount) && settings.regexMaxMatchCount >= 100 && settings.regexMaxMatchCount <= 10000 ? Math.round(settings.regexMaxMatchCount) : DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount,
     autoCalculateTotalRows: settings.autoCalculateTotalRows ?? DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows,
-    mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
+    mongoViewMode: settings.mongoViewMode === "table" || settings.mongoViewMode === "tree" ? settings.mongoViewMode : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
+    mongoFlattenNestedFields: settings.mongoFlattenNestedFields === true,
     showColumnCommentsInHeader: settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
     dataGridColumnCommentsInInfoArea: settings.dataGridColumnCommentsInInfoArea ?? DEFAULT_EDITOR_SETTINGS.dataGridColumnCommentsInInfoArea,
     showColumnTypesInHeader: settings.showColumnTypesInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader,
@@ -3348,6 +3352,7 @@ export const useSettingsStore = defineStore("settings", () => {
         typeof partial.regexMaxMatchCount === "number" && Number.isFinite(partial.regexMaxMatchCount) && partial.regexMaxMatchCount >= 100 && partial.regexMaxMatchCount <= 10000 ? Math.round(partial.regexMaxMatchCount) : DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount;
     if (partial.autoCalculateTotalRows !== undefined) editorSettings.value.autoCalculateTotalRows = partial.autoCalculateTotalRows === true;
     if (partial.mongoViewMode !== undefined) editorSettings.value.mongoViewMode = partial.mongoViewMode;
+    if (partial.mongoFlattenNestedFields !== undefined) editorSettings.value.mongoFlattenNestedFields = partial.mongoFlattenNestedFields === true;
     if (partial.showColumnCommentsInHeader !== undefined) editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;
     if (partial.dataGridColumnCommentsInInfoArea !== undefined) editorSettings.value.dataGridColumnCommentsInInfoArea = partial.dataGridColumnCommentsInInfoArea;
     if (partial.showColumnTypesInHeader !== undefined) editorSettings.value.showColumnTypesInHeader = partial.showColumnTypesInHeader;

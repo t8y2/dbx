@@ -606,10 +606,10 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     try {
       await cancelDownload(true);
       await settingsStore.updateEditorSettingsAndPersist({ ignoredUpdateVersion: version });
-      const cache = downloaded.value;
+      const cache = downloaded.value ?? (await api.getDownloadedUpdate().catch(() => null));
       downloaded.value = null;
       phase.value = "idle";
-      if (cache) await api.discardDownloadedUpdate(cache.cache_id);
+      if (cache?.version === version) await api.discardDownloadedUpdate(cache.cache_id);
       showUpdateDialog.value = false;
     } catch (error) {
       fail(error);

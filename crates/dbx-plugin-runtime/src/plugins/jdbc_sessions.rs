@@ -106,6 +106,10 @@ impl JdbcLogicalSession {
             && self.runtime.process.sidecar.status().state == super::PluginSessionState::Running
     }
 
+    pub(super) fn has_in_flight_request(&self) -> bool {
+        self.operation.try_lock().is_err()
+    }
+
     pub(super) async fn invoke<T: serde::de::DeserializeOwned>(
         self: &Arc<Self>,
         method: &str,

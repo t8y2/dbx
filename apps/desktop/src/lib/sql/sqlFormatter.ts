@@ -146,6 +146,11 @@ export class UnsupportedStructuredInputError extends Error {
 export function sqlFormatDialectForDbType(dbType: string | null | undefined): SqlFormatDialect {
   switch (dbType) {
     case "mysql":
+    // Doris and StarRocks speak MySQL-protocol SQL, so they reuse the MySQL
+    // grammar: its backtick, ENGINE and comment handling matches their DDL,
+    // where the generic grammar only guesses.
+    case "doris":
+    case "starrocks":
       return "mysql";
     case "postgres":
     case "kwdb":
@@ -434,6 +439,204 @@ function restoreDuckDbPrefixAliasSeparators(sql: string, marker: string | null):
   return marker ? sql.split(marker).join(":") : sql;
 }
 
+// Doris range partitions list their bounds as bracketed tuple lists, e.g.
+// `PARTITION p202001 VALUES [("2020-01-01"), ("2020-02-01"))`. Neither
+// sql-formatter's MySQL grammar nor its generic grammar accepts the `[(`
+// bracket list, so formatting any such CREATE TABLE fails outright. Mask each
+// bracket list as a parenthesized marker string before formatting — a plain
+// value both grammars parse — and restore the original text afterwards. The
+// scan copies comments and quoted spans verbatim, so a `VALUES [` inside a
+// string literal or a comment is never touched.
+//
+// Doris closes the list with `)` rather than `]` (the `[` is a Doris-only
+// opener), so the scan ends at the first `)` outside any tuple instead of
+// waiting for a `]` that never comes. A `]` closer ends the list too, so a
+// hand-written `]` form is masked the same way.
+function protectDorisPartitionValues(sql: string, dialect: SqlFormatDialect): { sql: string; values: string[]; namespace: number } {
+  if (dialect !== "mysql" && dialect !== "generic") return { sql, values: [], namespace: 0 };
+
+  let namespace = 0;
+  while (sql.includes(`__DBX_DORIS_PARTITION_VALUES_${namespace}_`)) namespace += 1;
+
+  const values: string[] = [];
+  const isIdentifierChar = (ch: string | undefined): boolean => ch !== undefined && /[A-Za-z0-9_$]/.test(ch);
+  const isDashCommentAt = (position: number): boolean => {
+    if (sql[position] !== "-" || sql[position + 1] !== "-") return false;
+    const following = sql[position + 2];
+    return dialect !== "mysql" || following === undefined || following.charCodeAt(0) <= 32 || following.charCodeAt(0) === 127;
+  };
+
+  const scanQuoted = (start: number): number => {
+    const quote = sql[start];
+    let end = start + 1;
+    while (end < sql.length) {
+      if ((dialect === "mysql" || dialect === "generic") && sql[end] === "\\" && end + 1 < sql.length) {
+        end += 2;
+        continue;
+      }
+      if (sql[end] === quote) {
+        if (sql[end + 1] === quote) {
+          end += 2;
+          continue;
+        }
+        return end + 1;
+      }
+      end += 1;
+    }
+    return end;
+  };
+
+  const scanLineComment = (start: number): number => {
+    let end = start;
+    while (end < sql.length && sql[end] !== "\n" && sql[end] !== "\r") end += 1;
+    return end;
+  };
+
+  const scanBlockComment = (start: number): number => {
+    let end = start + 2;
+    let depth = 1;
+    while (end < sql.length && depth > 0) {
+      if (sql[end] === "/" && sql[end + 1] === "*") {
+        depth += 1;
+        end += 2;
+      } else if (sql[end] === "*" && sql[end + 1] === "/") {
+        depth -= 1;
+        end += 2;
+      } else {
+        end += 1;
+      }
+    }
+    return end;
+  };
+
+  let protectedSql = "";
+  let index = 0;
+  while (index < sql.length) {
+    const ch = sql[index];
+    const next = sql[index + 1];
+
+    if (isDashCommentAt(index)) {
+      const end = scanLineComment(index);
+      protectedSql += sql.slice(index, end);
+      index = end;
+      continue;
+    }
+
+    if (ch === "/" && next === "*") {
+      const end = scanBlockComment(index);
+      protectedSql += sql.slice(index, end);
+      index = end;
+      continue;
+    }
+
+    if (dialect === "mysql" && ch === "#") {
+      const end = scanLineComment(index);
+      protectedSql += sql.slice(index, end);
+      index = end;
+      continue;
+    }
+
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const end = scanQuoted(index);
+      protectedSql += sql.slice(index, end);
+      index = end;
+      continue;
+    }
+
+    const startsValuesKeyword = (ch === "V" || ch === "v") && !isIdentifierChar(sql[index - 1]) && sql.slice(index, index + 6).toUpperCase() === "VALUES" && !isIdentifierChar(sql[index + 6]);
+    if (startsValuesKeyword) {
+      let cursor = index + 6;
+      // Skip whitespace and comments between VALUES and the bracket opener:
+      // a comment here must not prevent masking the Doris bracket list.
+      for (;;) {
+        while (cursor < sql.length && /\s/.test(sql[cursor])) cursor += 1;
+        if (isDashCommentAt(cursor)) {
+          cursor = scanLineComment(cursor);
+          continue;
+        }
+        if (sql[cursor] === "/" && sql[cursor + 1] === "*") {
+          cursor = scanBlockComment(cursor);
+          continue;
+        }
+        if (dialect === "mysql" && sql[cursor] === "#") {
+          cursor = scanLineComment(cursor);
+          continue;
+        }
+        break;
+      }
+      if (sql[cursor] === "[") {
+        let bracketDepth = 1;
+        let parenDepth = 0;
+        let end = cursor + 1;
+        let closed = false;
+        while (end < sql.length) {
+          const current = sql[end];
+          const following = sql[end + 1];
+          if (isDashCommentAt(end)) {
+            end = scanLineComment(end);
+            continue;
+          }
+          if (current === "/" && following === "*") {
+            end = scanBlockComment(end);
+            continue;
+          }
+          if (dialect === "mysql" && current === "#") {
+            end = scanLineComment(end);
+            continue;
+          }
+          if (current === "'" || current === '"' || current === "`") {
+            end = scanQuoted(end);
+            continue;
+          }
+          if (current === "[") {
+            bracketDepth += 1;
+          } else if (current === "]") {
+            bracketDepth -= 1;
+            if (bracketDepth === 0) {
+              closed = true;
+              end += 1;
+              break;
+            }
+          } else if (current === "(") {
+            parenDepth += 1;
+          } else if (current === ")") {
+            if (parenDepth === 0) {
+              // The Doris list closer: `VALUES [(...), (...))`.
+              closed = true;
+              end += 1;
+              break;
+            }
+            parenDepth -= 1;
+          }
+          end += 1;
+        }
+        if (closed) {
+          const marker = `__DBX_DORIS_PARTITION_VALUES_${namespace}_${values.length}__`;
+          values.push(sql.slice(cursor, end));
+          protectedSql += sql.slice(index, cursor);
+          protectedSql += `('${marker}')`;
+          index = end;
+          continue;
+        }
+      }
+    }
+
+    protectedSql += ch;
+    index += 1;
+  }
+
+  return { sql: protectedSql, values, namespace };
+}
+
+function restoreDorisPartitionValues(sql: string, values: readonly string[], namespace: number): string {
+  if (values.length === 0) return sql;
+
+  // The marker string survives formatting as one string literal inside the
+  // placeholder parens, so the whole placeholder is swapped back for the
+  // bracket list byte-for-byte, whatever line it landed on.
+  return sql.replace(new RegExp(`\\(\\s*'__DBX_DORIS_PARTITION_VALUES_${namespace}_(\\d+)__'\\s*\\)`, "g"), (match, index) => values[Number(index)] ?? match);
+}
+
 function protectBlockCommentLineEndings(sql: string, dialect: SqlFormatDialect): { sql: string; markers: Map<string, string> } {
   const markers = new Map<string, string>();
   if (!sql.includes("\r")) return { sql, markers };
@@ -481,6 +684,10 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   const emptyLineProtection = emptyLineMode === "remove" ? null : protectCodeEmptyLines(commentProtection.sql, dialect, emptyLineMode === "single");
   const sqlWithProtectedEmptyLines = emptyLineProtection?.sql ?? commentProtection.sql;
   const protectedInput = dialect === "duckdb" ? protectDuckDbPrefixAliasSeparators(sqlWithProtectedEmptyLines) : { sql: sqlWithProtectedEmptyLines, marker: null };
+  // Doris range-partition value lists (`VALUES [(...), (...)]`) cannot be
+  // parsed by either grammar, so mask them before formatting and restore them
+  // in finalizeFormattedSql below.
+  const partitionValuesProtection = protectDorisPartitionValues(protectedInput.sql, dialect);
   const formatterOptions =
     language === "postgresql"
       ? {
@@ -534,7 +741,8 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
       return formatted;
     }
     const restoredDuckDbAliases = restoreDuckDbPrefixAliasSeparators(formatted, protectedInput.marker);
-    const laidOut = appliedCustomRules ? normalizeLikeOperatorCase(restoredDuckDbAliases, normalizedSettings, dialect) : applySqlFormatterLayout(restoredDuckDbAliases, normalizedSettings, dialect);
+    const restoredPartitionValues = restoreDorisPartitionValues(restoredDuckDbAliases, partitionValuesProtection.values, partitionValuesProtection.namespace);
+    const laidOut = appliedCustomRules ? normalizeLikeOperatorCase(restoredPartitionValues, normalizedSettings, dialect) : applySqlFormatterLayout(restoredPartitionValues, normalizedSettings, dialect);
     const restored = emptyLineProtection ? restoreProtectedEmptyLines(laidOut, emptyLineProtection.markers) : laidOut;
     return commentProtection.markers.size ? restored.replace(/\/\*[+!]?__DBX_PRESERVE_BLOCK_COMMENT_\d+_\d+__\*\//g, (marker) => commentProtection.markers.get(marker) ?? marker) : restored;
   };
@@ -582,9 +790,9 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   };
 
   try {
-    return applyRoutineBlockLayout(finalizeFormattedSql(await formatOnce(protectedInput.sql)));
+    return applyRoutineBlockLayout(finalizeFormattedSql(await formatOnce(partitionValuesProtection.sql)));
   } catch (err) {
-    const trailingDot = dialect === "dameng" ? splitTrailingStandaloneDot(protectedInput.sql) : null;
+    const trailingDot = dialect === "dameng" ? splitTrailingStandaloneDot(partitionValuesProtection.sql) : null;
     if (!trailingDot) throw err;
 
     try {

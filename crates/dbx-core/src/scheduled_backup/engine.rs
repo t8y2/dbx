@@ -1,6 +1,6 @@
 use chrono::Utc;
 use std::{fs::OpenOptions, path::Path, sync::Arc, time::Duration};
-use tokio::sync::watch;
+use tokio::{sync::watch, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::{models::*, BackupService};
@@ -11,9 +11,12 @@ use crate::{
     query, schema,
 };
 
+const WORKER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
 impl BackupService {
     pub(crate) async fn serve(&self, stop: CancellationToken, drain: CancellationToken) {
         let mut leader = None;
+        let mut next_heartbeat = Instant::now();
         let mut migration_ready = false;
         while !stop.is_cancelled() && !drain.is_cancelled() {
             if !migration_ready {
@@ -45,7 +48,7 @@ impl BackupService {
                 }
             }
             if migration_ready && leader.is_some() && !drain.is_cancelled() {
-                if let Err(error) = self.tick(&stop).await {
+                if let Err(error) = self.tick(&stop, &mut next_heartbeat).await {
                     log::error!("[database-backup] scheduler failed: {error}");
                 }
             }
@@ -55,8 +58,16 @@ impl BackupService {
         drop(leader);
     }
 
-    async fn tick(&self, stop: &CancellationToken) -> Result<(), String> {
-        self.store.heartbeat().await?;
+    async fn update_heartbeat_if_due(&self, next_heartbeat: &mut Instant) -> Result<(), String> {
+        if Instant::now() >= *next_heartbeat {
+            self.store.heartbeat().await?;
+            *next_heartbeat = Instant::now() + WORKER_HEARTBEAT_INTERVAL;
+        }
+        Ok(())
+    }
+
+    async fn tick(&self, stop: &CancellationToken, next_heartbeat: &mut Instant) -> Result<(), String> {
+        self.update_heartbeat_if_due(next_heartbeat).await?;
         self.store.enqueue_due().await?;
         let Some(job) = self.store.claim().await? else {
             return Ok(());
@@ -91,7 +102,7 @@ impl BackupService {
                         cancellation.cancel();
                         database_export::set_export_cancelled(&run_id).await;
                     }
-                    if let Err(error) = self.store.heartbeat().await { log::error!("[database-backup] heartbeat failed: {error}"); cancellation.cancel(); }
+                    if let Err(error) = self.update_heartbeat_if_due(next_heartbeat).await { log::error!("[database-backup] heartbeat failed: {error}"); cancellation.cancel(); }
                     let latest = receiver.borrow().clone();
                     if let Err(error) = self.store.progress(latest).await { log::error!("[database-backup] progress persistence failed: {error}"); cancellation.cancel(); }
                 }

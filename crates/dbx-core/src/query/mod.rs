@@ -3386,6 +3386,13 @@ fn postgres_drop_database_admin_database(target_database: &str) -> &'static str 
 }
 
 fn parse_drop_database_target(sql: &str) -> Option<String> {
+    // Every PostgreSQL statement passes through here; only parse the ones
+    // that can be a DROP DATABASE.
+    if !crate::sql::contains_ascii_case_insensitive(sql, "drop")
+        || !crate::sql::contains_ascii_case_insensitive(sql, "database")
+    {
+        return None;
+    }
     let dialect = PostgreSqlDialect {};
     let statements = Parser::parse_sql(&dialect, sql).ok()?;
     let [Statement::Drop { object_type, names, .. }] = statements.as_slice() else {
@@ -13218,6 +13225,8 @@ done
         assert_eq!(parse_drop_database_target("DROP TABLE vaultwarden;"), None);
         assert_eq!(parse_drop_database_target("DROP DATABASE vaultwarden; SELECT 1;"), None);
         assert_eq!(parse_drop_database_target("DROP DATABASE 123bad;"), None);
+        assert_eq!(parse_drop_database_target("INSERT INTO events (id) VALUES (1);"), None);
+        assert_eq!(parse_drop_database_target("INSERT INTO notes (body) VALUES ('drop database later');"), None);
     }
 
     #[test]

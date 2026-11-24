@@ -102,6 +102,7 @@ pub struct RedisStreamEntriesRequest {
     pub db: u32,
     pub key_raw: String,
     pub cursor: Option<String>,
+    pub newest_first: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -466,6 +467,7 @@ pub async fn get_stream_entries(
         req.db,
         &req.key_raw,
         req.cursor.as_deref(),
+        req.newest_first.unwrap_or_default(),
     )
     .await
     .map_err(AppError::from)?;

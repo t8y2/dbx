@@ -16,7 +16,7 @@ export interface SqlExecutionSnapshot {
 
 export type SqlExecutionOverride = string | SqlExecutionSnapshot;
 
-export type SqlExecutionTargetKind = "cursor" | "all";
+export type SqlExecutionTargetKind = "cursor" | "nested" | "all";
 
 /**
  * A candidate execution target surfaced by the execution target picker.
@@ -27,6 +27,8 @@ export interface SqlExecutionCandidate {
   kind: SqlExecutionTargetKind;
   supportedKinds: SqlExecutionTargetKind[];
   label: string;
+  /** 1-based nesting depth for `nested` candidates (1 = innermost). */
+  level?: number;
   sql: string;
   from: number;
   to: number;
@@ -44,10 +46,20 @@ export function isSqlExecutionSnapshot(value: SqlExecutionOverride | undefined):
 }
 
 export function executionCandidateForMode(candidates: SqlExecutionCandidate[], mode: ExecuteMode, options: { executeAllOnBlankLine?: boolean } = {}): SqlExecutionCandidate | null {
-  const targetKind: SqlExecutionTargetKind = mode === "current" ? "cursor" : "all";
-  const candidate = candidates.find((item) => item.supportedKinds.includes(targetKind));
-  if (candidate || mode !== "current" || !options.executeAllOnBlankLine) return candidate ?? null;
-  return candidates.find((item) => item.supportedKinds.includes("all")) ?? null;
+  if (mode === "current") {
+    // "current" keeps its historical meaning: the statement the cursor sits
+    // in — the OUTERMOST one. Nested subquery candidates (#15213) sort
+    // innermost-first ahead of it, so taking the LAST cursor-kind candidate
+    // stays correct for the no-nesting case (exactly one candidate) while the
+    // keyboard shortcut never silently starts running an inner query.
+    const cursorCandidates = candidates.filter((item) => item.supportedKinds.includes("cursor"));
+    const candidate = cursorCandidates.length > 0 ? cursorCandidates[cursorCandidates.length - 1]! : null;
+    if (candidate || !options.executeAllOnBlankLine) return candidate;
+    return candidates.find((item) => item.supportedKinds.includes("all")) ?? null;
+  }
+  const candidate = candidates.find((item) => item.supportedKinds.includes("all"));
+  if (candidate || !options.executeAllOnBlankLine) return candidate ?? null;
+  return null;
 }
 
 export function resolveExecutableSql(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number }): string {

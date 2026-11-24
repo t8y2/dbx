@@ -147,6 +147,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 - `host.clipboard:read` allows reading the system clipboard from the workbench UI (see [System Clipboard](#system-clipboard)). Clipboard writes need no permission; reads hand user data (passwords, tokens) to plugin code, so they are gated.
 - `host.data:read` allows `window.dbxPlugin.queryData` to run one read-only SQL statement on a connection the user granted to the plugin (see [Read-only Data Queries](#read-only-data-queries)). Every connection needs the user's consent; it never grants writes, DDL, or reconnects.
 - `host.connections:read` allows `window.dbxPlugin.getConnections()` or `window.dbxPlugin.connections.list()` to read secret-free summary metadata for all configured connections (see [Connection Enumeration](#connection-enumeration)).
+- `host.connections:edit` allows a workbench to [prefill a saved connection for editing](#prefill-a-saved-connection-for-editing), with saving controlled by the user.
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most 64 origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `host.openUrl:http(s)://host[:port]` permits requesting navigation to up to eight exact origins. It is independent of network access and rejects paths, credentials, wildcards, and trailing slashes. Use the canonical `URL.origin` (omit default ports); bracket IPv6 addresses.
 
@@ -586,6 +587,29 @@ Each returned connection object includes:
 - `database` / `schema`: default database or schema if configured.
 
 > **Security Boundary**: The returned list is completely sanitized and never contains passwords, usernames, hostnames, ports, or raw connection strings.
+
+### Prefill a Saved Connection for Editing
+
+A workbench can open the DBX editor for a saved connection with an optional patch to the draft. Declare `host.connections:edit` in the manifest and use `host.connections:read` if the workbench also needs to list targets. These methods are part of Host API 1.5 (`"engines": { "host_api": "^1.5" }`). Check `capabilities.connectionEditApi` after `ready` in the main desktop window.
+
+```js
+const { dbxPlugin } = window;
+await dbxPlugin.ready;
+if (dbxPlugin.capabilities.connectionEditApi) {
+  const editable = await dbxPlugin.connections.getEditFields(selectedConnectionId);
+  const fields = { name: "Reporting replica" };
+  if (editable.some(({ key }) => key === "port")) fields.port = 15432;
+  await dbxPlugin.connections.openEdit({ connectionId: selectedConnectionId, fields });
+}
+```
+
+`getEditFields(connectionId)` returns field descriptors for the target’s current form and mode. Text, hostname, color, and password descriptors include `key`, `type`, `maxLength`, and `allowEmpty`. Integer descriptors include `key`, `type`, `min`, and `max`. The response contains no saved values. Use the exact saved connection ID. Temporary connections are ineligible.
+
+- Every saved connection supports `name`, `note`, and `color` in the draft.
+- The field-based MySQL, PostgreSQL, SQL Server, Redshift, ClickHouse, and standard MongoDB forms also support `host`, `port`, `database`, `username`, and `password`. Redis supports the two authentication fields, with `host` and `port` available in standalone mode.
+- Discover available fields at runtime. Drivers, connection-string modes, and specialized forms can expose different sets. DBX owns the driver, connection identity, local file paths, raw connection strings, transport, TLS, credential storage, and protection settings.
+
+`openEdit()` validates the entire patch against the saved target before opening the editor. Omit `fields` to open it as-is. Omitted keys retain their values and `""` clears fields marked `allowEmpty`. Supply a hostname or IP address in `host` and a separate integer in `port`. The bridge passes the draft directly to the editor in memory. `{ opened: true }` reports opening status. Saving requires the user to confirm in the editor, even when deep-link auto-save is enabled. Closing the editor discards the draft. An invalid target, an invalid field, or an already open editor causes the request to be rejected.
 
 ### System Clipboard
 

@@ -1045,7 +1045,7 @@ watch(
             <Button variant="outline" size="sm" :disabled="!selectedTargets.length || isExecuting" @click="resetSelection">{{ t("multiDbExecute.clearTargets") }}</Button>
           </div>
 
-          <div class="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1.15fr)_minmax(300px,0.85fr)]">
+          <div class="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1.15fr)_minmax(300px,0.85fr)] lg:grid-rows-[minmax(0,1fr)]">
             <div class="min-h-0 overflow-y-auto rounded-md border bg-muted/10 p-2">
               <div v-if="compatibleConnections.length === 0" class="flex h-full min-h-40 items-center justify-center text-center text-sm text-muted-foreground">{{ t("multiDbExecute.noTargets") }}</div>
               <div v-else class="space-y-1">

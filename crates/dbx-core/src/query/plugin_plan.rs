@@ -129,8 +129,8 @@ pub struct PluginPlanResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub db_version: Option<String>,
     pub format: EstimatedPlanFormat,
-    /// The plan itself: a JSON document for `format: "json"`, otherwise the plan
-    /// text (ShowPlanXML stays a string).
+    /// The plan itself: a native JSON document or structured row array for
+    /// `format: "json"`, otherwise the plan text (ShowPlanXML stays a string).
     pub raw_plan: Value,
     /// True when the host cut the plan to respect its own limits.
     pub truncated: bool,
@@ -199,10 +199,7 @@ pub async fn explain_estimated_plan(state: &AppState, request: PluginPlanRequest
 
     let plan_text = non_empty_plan_text(plan_text)?;
     let mut payload = finalize_plan_payload(strategy.format(), plan_text)?;
-    if rows_truncated {
-        payload.truncated = true;
-        payload.warnings.push(WARNING_PLAN_ROWS_TRUNCATED.to_string());
-    }
+    mark_plan_rows_truncated(&mut payload, rows_truncated);
 
     Ok(PluginPlanResult {
         db_type: database_type.as_str().to_string(),
@@ -268,7 +265,9 @@ async fn native_estimated_plan(
     .await
     .map_err(|error| error.to_string())?;
 
-    Ok((join_result_text(&result), result.truncated))
+    let plan_text =
+        if strategy.returns_structured_rows() { structured_plan_rows(&result)? } else { join_result_text(&result) };
+    Ok((plan_text, result.truncated))
 }
 
 /// `SET SHOWPLAN_XML ON` is session state, so the toggle, the planned statement,
@@ -358,6 +357,44 @@ fn join_result_text(result: &QueryResult) -> String {
     result.rows.iter().flatten().map(cell_text).collect::<Vec<_>>().join("\n")
 }
 
+/// Serializes SQLite EQP's native table result as an array of row objects. The
+/// id/parent relationship and numeric fields remain structured; malformed
+/// driver output fails closed instead of silently flattening away tree edges.
+fn structured_plan_rows(result: &QueryResult) -> Result<String, String> {
+    if result.columns.is_empty() || result.rows.is_empty() {
+        return Err("The database returned an invalid structured estimated plan".to_string());
+    }
+
+    let mut column_names = std::collections::HashSet::with_capacity(result.columns.len());
+    for column in &result.columns {
+        if !column_names.insert(column.to_ascii_lowercase()) {
+            return Err("The database returned duplicate structured estimated plan columns".to_string());
+        }
+    }
+    for required in ["id", "parent", "notused", "detail"] {
+        if !column_names.contains(required) {
+            return Err("The database returned incomplete structured estimated plan columns".to_string());
+        }
+    }
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            if row.len() != result.columns.len() {
+                return Err("The database returned a malformed structured estimated plan row".to_string());
+            }
+            let mut object = serde_json::Map::new();
+            for (column, value) in result.columns.iter().zip(row) {
+                object.insert(column.to_ascii_lowercase(), value.clone());
+            }
+            Ok(Value::Object(object))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    serde_json::to_string(&Value::Array(rows)).map_err(|error| error.to_string())
+}
+
 fn cell_text(cell: &Value) -> String {
     match cell {
         Value::Null => String::new(),
@@ -407,6 +444,13 @@ fn finalize_plan_payload(plan_format: EstimatedPlanFormat, text: String) -> Resu
     };
     warnings.push(WARNING_PLAN_TRUNCATED.to_string());
     Ok(PlanPayload { format, raw_plan: Value::String(truncated), truncated: true, warnings })
+}
+
+fn mark_plan_rows_truncated(payload: &mut PlanPayload, rows_truncated: bool) {
+    if rows_truncated {
+        payload.truncated = true;
+        payload.warnings.push(WARNING_PLAN_ROWS_TRUNCATED.to_string());
+    }
 }
 
 fn plan_too_large_message() -> String {
@@ -765,6 +809,15 @@ mod tests {
     }
 
     #[test]
+    fn reports_driver_row_truncation_without_dropping_the_plan_payload() {
+        let mut payload = finalize_plan_payload(EstimatedPlanFormat::Json, "[{\"id\":1}]".to_string()).unwrap();
+        mark_plan_rows_truncated(&mut payload, true);
+        assert!(payload.truncated);
+        assert_eq!(payload.raw_plan, serde_json::json!([{ "id": 1 }]));
+        assert_eq!(payload.warnings, vec![WARNING_PLAN_ROWS_TRUNCATED.to_string()]);
+    }
+
+    #[test]
     fn truncates_oversized_text_plans_and_rejects_oversized_json_plans() {
         let oversized = "x".repeat(MAX_PLUGIN_PLAN_BYTES + 1_024);
         let payload = finalize_plan_payload(EstimatedPlanFormat::Text, oversized.clone()).unwrap();
@@ -800,6 +853,42 @@ mod tests {
         assert!(non_empty_plan_text(String::new()).is_err());
         assert!(non_empty_plan_text("  \n ".to_string()).is_err());
         assert_eq!(non_empty_plan_text("Seq Scan".to_string()).unwrap(), "Seq Scan");
+    }
+
+    #[test]
+    fn serializes_sqlite_eqp_rows_without_losing_parent_relationships() {
+        let result: QueryResult = serde_json::from_value(serde_json::json!({
+            "columns": ["id", "parent", "notused", "detail"],
+            "rows": [[1, 0, 0, "SCAN example"], [4, 1, 0, "SEARCH related USING INDEX related_id (id=?)"]],
+            "affected_rows": 0,
+            "execution_time_ms": 1
+        }))
+        .unwrap();
+
+        let payload = finalize_plan_payload(EstimatedPlanFormat::Json, structured_plan_rows(&result).unwrap()).unwrap();
+        assert_eq!(payload.format, EstimatedPlanFormat::Json);
+        assert_eq!(
+            payload.raw_plan[0],
+            serde_json::json!({
+                "id": 1,
+                "parent": 0,
+                "notused": 0,
+                "detail": "SCAN example"
+            })
+        );
+        assert_eq!(payload.raw_plan[1]["id"], 4);
+        assert_eq!(payload.raw_plan[1]["parent"], 1);
+        assert_eq!(payload.raw_plan[1]["detail"], "SEARCH related USING INDEX related_id (id=?)");
+        assert!(payload.warnings.is_empty());
+
+        let malformed: QueryResult = serde_json::from_value(serde_json::json!({
+            "columns": ["id", "parent", "detail"],
+            "rows": [[1, 0, "SCAN example"]],
+            "affected_rows": 0,
+            "execution_time_ms": 1
+        }))
+        .unwrap();
+        assert!(structured_plan_rows(&malformed).is_err());
     }
 
     #[test]
@@ -843,7 +932,9 @@ mod tests {
 
         for (database_type, expected_acquisition) in [
             (DatabaseType::Mysql, GeneratedSql),
+            (DatabaseType::Sqlite, GeneratedSql),
             (DatabaseType::Doris, GeneratedSql),
+            (DatabaseType::DuckDb, GeneratedSql),
             (DatabaseType::Postgres, GeneratedSql),
             (DatabaseType::OpenGauss, GeneratedSql),
             (DatabaseType::Questdb, GeneratedSql),
@@ -999,6 +1090,177 @@ mod tests {
             explain_estimated_plan(&state, request).await.unwrap_err(),
             unsupported_dialect_message(DatabaseType::Redis)
         );
+    }
+
+    #[cfg(feature = "duckdb-sidecar")]
+    #[tokio::test]
+    #[ignore = "requires DBX_DUCKDB_DRIVER_PATH pointing at an installed DuckDB worker"]
+    async fn duckdb_host_api_returns_live_estimated_plan_text() {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let config = config(DatabaseType::DuckDb, 30);
+        let (state, _dir) = saved_connection_state(std::slice::from_ref(&config)).await;
+        let driver = PathBuf::from(
+            std::env::var_os("DBX_DUCKDB_DRIVER_PATH").expect("set DBX_DUCKDB_DRIVER_PATH to the DBX DuckDB worker"),
+        );
+        let client = Arc::new(
+            crate::db::duckdb_worker_process::DuckDbWorkerClient::open_with_executable(
+                driver,
+                ":memory:".to_string(),
+                Vec::new(),
+                None,
+            )
+            .await
+            .expect("open actual DuckDB worker"),
+        );
+        state
+            .update_connection_pools(|pools| {
+                pools.insert(config.id.clone(), PoolKind::DuckDbWorker(client.clone()));
+            })
+            .await;
+
+        client
+            .execute(
+                None,
+                "CREATE TABLE plan_example (id INTEGER, category_id INTEGER, name VARCHAR)".to_string(),
+                Some(100),
+                None,
+                None,
+            )
+            .await
+            .expect("create example table");
+        client
+            .execute(None, "CREATE TABLE plan_category (id INTEGER, label VARCHAR)".to_string(), Some(100), None, None)
+            .await
+            .expect("create category table");
+        client
+            .execute(
+                None,
+                "INSERT INTO plan_example VALUES (1, 1, 'alpha'), (2, 2, 'beta')".to_string(),
+                Some(100),
+                None,
+                None,
+            )
+            .await
+            .expect("insert example rows");
+        client
+            .execute(None, "INSERT INTO plan_category VALUES (1, 'one'), (2, 'two')".to_string(), Some(100), None, None)
+            .await
+            .expect("insert category rows");
+
+        let capabilities = plugin_plan_capabilities(&state, &config.id).await.expect("DuckDB capabilities");
+        assert_eq!(capabilities.db_type, "duckdb");
+        assert!(capabilities.supports.estimated_plan);
+
+        for (sql, expected_operator) in [
+            ("SELECT * FROM plan_example", "seq_scan"),
+            (
+                "SELECT e.name, c.label FROM plan_example AS e JOIN plan_category AS c ON c.id = e.category_id",
+                "hash_join",
+            ),
+            ("SELECT id FROM plan_example ORDER BY category_id", "order_by"),
+        ] {
+            let plan = explain_estimated_plan(&state, request(PLUGIN_PLAN_MODE_ESTIMATED, sql))
+                .await
+                .unwrap_or_else(|error| panic!("DuckDB plan for {sql} failed: {error}"));
+            assert_eq!(plan.db_type, "duckdb");
+            assert_eq!(plan.format, EstimatedPlanFormat::Text);
+            assert!(!plan.truncated);
+            assert!(plan.warnings.is_empty());
+            let text = plan.raw_plan.as_str().expect("DuckDB EXPLAIN must remain text").to_ascii_lowercase();
+            assert!(text.contains(expected_operator), "expected {expected_operator} in plan: {text}");
+            assert!(text.contains("plan_example"), "plan should identify the source table: {text}");
+        }
+
+        let unsafe_request = request(PLUGIN_PLAN_MODE_ESTIMATED, "DELETE FROM plan_example");
+        assert!(explain_estimated_plan(&state, unsafe_request).await.unwrap_err().contains("not safe to plan"));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_host_api_returns_structured_eqp_for_common_query_shapes() {
+        let sqlite_config = config(DatabaseType::Sqlite, 30);
+        let (state, _dir) = saved_connection_state(std::slice::from_ref(&sqlite_config)).await;
+        let sqlite = crate::db::sqlite::connect_path(":memory:").await.expect("open in-memory SQLite");
+        state
+            .update_connection_pools(|pools| {
+                pools.insert(sqlite_config.id.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
+
+        crate::db::sqlite::execute_query(
+            &sqlite,
+            "CREATE TABLE example (id INTEGER PRIMARY KEY, name TEXT NOT NULL, category_id INTEGER NOT NULL)",
+        )
+        .await
+        .expect("create example table");
+        crate::db::sqlite::execute_query(
+            &sqlite,
+            "CREATE TABLE category (id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+        )
+        .await
+        .expect("create category table");
+        crate::db::sqlite::execute_query(&sqlite, "CREATE INDEX idx_example_name ON example(name)")
+            .await
+            .expect("create test index");
+        crate::db::sqlite::execute_query(&sqlite, "INSERT INTO example VALUES (1, 'alpha', 1), (2, 'beta', 2)")
+            .await
+            .expect("insert example rows");
+        crate::db::sqlite::execute_query(&sqlite, "INSERT INTO category VALUES (1, 'one'), (2, 'two')")
+            .await
+            .expect("insert category rows");
+
+        let capabilities = plugin_plan_capabilities(&state, &sqlite_config.id).await.expect("SQLite capabilities");
+        assert_eq!(capabilities.db_type, "sqlite");
+        assert!(capabilities.supports.estimated_plan);
+        assert_eq!(capabilities.limits.max_timeout_ms, 30_000);
+
+        let cases = [
+            ("SELECT * FROM example", "SCAN example"),
+            ("SELECT name FROM example WHERE name = 'alpha'", "idx_example_name"),
+            (
+                "SELECT e.name, c.label FROM example AS e JOIN category AS c ON c.id = e.category_id WHERE e.id = 1",
+                "SEARCH c",
+            ),
+            ("SELECT id FROM example ORDER BY category_id", "USE TEMP B-TREE FOR ORDER BY"),
+            (
+                "WITH selected AS (SELECT id FROM example WHERE name = 'alpha') SELECT e.name FROM example AS e JOIN selected AS s ON s.id = e.id",
+                "example",
+            ),
+        ];
+
+        for (sql, expected_detail) in cases {
+            let plan = explain_estimated_plan(&state, request(PLUGIN_PLAN_MODE_ESTIMATED, sql))
+                .await
+                .unwrap_or_else(|error| panic!("SQLite plan for {sql} failed: {error}"));
+            assert_eq!(plan.db_type, "sqlite");
+            assert_eq!(plan.format, EstimatedPlanFormat::Json);
+            assert!(!plan.truncated);
+            let nodes = plan.raw_plan.as_array().expect("EQP must remain a JSON array of nodes");
+            assert!(!nodes.is_empty(), "{sql} returned no plan nodes");
+            for node in nodes {
+                assert!(node["id"].is_number(), "id must retain its numeric value: {node}");
+                assert!(node["parent"].is_number(), "parent must retain its numeric value: {node}");
+                assert!(node["notused"].is_number(), "notused must retain its numeric value: {node}");
+                assert!(node["detail"].is_string(), "detail must remain text: {node}");
+            }
+            assert!(
+                nodes.iter().any(|node| node["detail"].as_str().unwrap().contains(expected_detail)),
+                "expected {expected_detail:?} in {nodes:?} for {sql}"
+            );
+        }
+
+        let unknown_table =
+            explain_estimated_plan(&state, request(PLUGIN_PLAN_MODE_ESTIMATED, "SELECT * FROM missing_table"))
+                .await
+                .unwrap_err();
+        assert!(!unknown_table.is_empty());
+
+        let unsafe_sql = explain_estimated_plan(&state, request(PLUGIN_PLAN_MODE_ESTIMATED, "DELETE FROM example"))
+            .await
+            .unwrap_err();
+        assert!(unsafe_sql.contains("not safe to plan"), "unsafe SQL must be rejected: {unsafe_sql}");
     }
 
     #[tokio::test]

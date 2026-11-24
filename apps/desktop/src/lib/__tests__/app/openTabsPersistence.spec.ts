@@ -21,6 +21,20 @@ function roundTrip(tabs: QueryTab[]) {
 }
 
 describe("openTabsPersistence originalSql round-trip", () => {
+  it("persists bookmarks for drafts and clean files before file content hydrates", () => {
+    const tabs = [queryTab({ sql: "a\nb\nc", editorBookmarks: [2, 3] }), queryTab({ id: "file", sql: "a\nb\nc", originalSql: "a\nb\nc", savedSqlId: "saved-example", editorBookmarks: [3] })];
+    const saved = serializeOpenTabs(tabs);
+    expect(saved[1].sql).toBe("");
+    const restored = restoreOpenTabsPayload({ tabs: saved }).tabs;
+    expect(restored.map((tab) => tab.editorBookmarks)).toEqual([[2, 3], [3]]);
+  });
+
+  it("normalizes malformed bookmark state without rejecting the saved session", () => {
+    const restored = restoreOpenTabsPayload({ tabs: [{ ...queryTab({}), editorBookmarks: [3, -1, 0, 3, 1.5, "2", null, 2] }] }).tabs;
+    expect(restored[0].editorBookmarks).toEqual([2, 3]);
+    expect(roundTrip([queryTab({})])[0].editorBookmarks).toEqual([]);
+  });
+
   it("preserves retained result source connections independently of the editor connection", () => {
     const base = { title: "Result", sequence: 1, sql: "SELECT 1", createdAt: 1 };
     const [restored] = roundTrip([

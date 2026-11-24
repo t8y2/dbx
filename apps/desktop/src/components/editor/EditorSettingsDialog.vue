@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import ToolbarSettingsList from "@/components/editor/ToolbarSettingsList.vue";
-import { TOOLBAR_ITEM_GROUPS, toolbarGroupOrder, replaceToolbarItemOrder, mergeToolbarItemOrder, type ToolbarItemGroup, type ToolbarItemKey } from "@/lib/settings/toolbarCustomization";
+import { TOOLBAR_SETTINGS_GROUPS, toolbarGroupOrder, replaceToolbarItemOrder, mergeToolbarItemOrder, type ToolbarSettingsGroup, type ToolbarItemKey, type ToolbarMenuItemKey } from "@/lib/settings/toolbarCustomization";
 import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { cleanupMcpHistoryRetention, loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit } from "@/lib/backend/api";
 import { HISTORY_RETENTION_LIMITS, useHistoryRetentionSetting } from "@/composables/useHistoryRetentionSetting";
@@ -137,6 +137,7 @@ import {
   type SqlTableCompletionSchemaQualification,
   type TableHoverLookupMode,
   normalizeTabMaxWidth,
+  TAB_WRAP_ROW_LIMITS,
   SIDEBAR_INDENT_MIN,
   SIDEBAR_INDENT_MAX,
   SIDEBAR_FONT_SIZE_MIN,
@@ -144,6 +145,11 @@ import {
   SIDEBAR_DENSITIES,
   isSidebarDensity,
   type SidebarDensity,
+  SIDEBAR_CONNECTION_ICON_STYLES,
+  isSidebarConnectionIconStyle,
+  type SidebarConnectionIconStyle,
+  MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS,
+  MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS,
 } from "@/stores/settingsStore";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
@@ -810,6 +816,7 @@ const editSequenceCompletionEnabled = ref(settingsStore.editorSettings.sequenceC
 const showSqlServerSpaceConfirmsCompletion = computed(() => hasSqlServerConnection.value || settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion || editSqlServerSpaceConfirmsCompletion.value);
 const editSortCompletionColumnsAlphabetically = ref(settingsStore.editorSettings.sortCompletionColumnsAlphabetically);
 const editSelectFirstCompletionOnOpen = ref(settingsStore.editorSettings.selectFirstCompletionOnOpen);
+const editCompletionAutoActivationDelayMs = ref(settingsStore.editorSettings.completionAutoActivationDelayMs);
 const editCompletionTriggerMode = ref<SqlCompletionTriggerMode>(settingsStore.editorSettings.completionTriggerMode);
 const editCompletionMatchMode = ref<SqlCompletionMatchMode>(settingsStore.editorSettings.completionMatchMode);
 const editExcludedCompletionItems = ref(settingsStore.editorSettings.excludedCompletionItems.join("\n"));
@@ -848,6 +855,7 @@ const editWelcomePageMode = ref<WelcomePageMode>(settingsStore.editorSettings.we
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editWebLogoPosition = ref<WebLogoPosition>(settingsStore.editorSettings.webLogoPosition);
 const editTabLayout = ref(settingsStore.editorSettings.tabLayout);
+const editTabWrapMaxRows = ref(settingsStore.editorSettings.tabWrapMaxRows);
 const editCrossWindowTabDragPreviewEnabled = ref(settingsStore.editorSettings.crossWindowTabDragPreviewEnabled);
 const editTabPlacement = ref<TabPlacement>(settingsStore.editorSettings.tabPlacement);
 const editColorizeConnectionTabs = ref(settingsStore.editorSettings.colorizeConnectionTabs);
@@ -927,6 +935,11 @@ const editSqlVariableSyntaxDatabaseType = ref<DatabaseType>(SQL_VARIABLE_SYNTAX_
 
 function updateTableOpenPageSizeDraft(value: string | number) {
   editTableOpenPageSize.value = normalizeTableOpenPageSizeDraft(value);
+}
+
+function updateCompletionAutoActivationDelayDraft(value: string | number) {
+  const parsed = typeof value === "number" ? value : Number.parseInt(String(value).trim(), 10);
+  editCompletionAutoActivationDelayMs.value = Number.isFinite(parsed) ? Math.min(MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.max(MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS, parsed)) : DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs;
 }
 
 function updatePageSizeDraft(value: string | number) {
@@ -1083,6 +1096,7 @@ const editSidebarShowTooltips = ref(settingsStore.editorSettings.sidebarShowTool
 const editSidebarIndent = ref(settingsStore.editorSettings.sidebarIndent);
 const editSidebarFontSize = ref(settingsStore.editorSettings.sidebarFontSize);
 const editSidebarDensity = ref<SidebarDensity>(settingsStore.editorSettings.sidebarDensity);
+const editSidebarConnectionIconStyle = ref<SidebarConnectionIconStyle>(settingsStore.editorSettings.sidebarConnectionIconStyle);
 const editExportBatchSize = ref(settingsStore.editorSettings.exportBatchSize);
 const editPreferredExportPath = ref(settingsStore.editorSettings.preferredExportPath);
 const editDamengClientBinDir = ref(settingsStore.editorSettings.damengClientBinDir);
@@ -1092,6 +1106,7 @@ const editCsvWithoutBom = ref(settingsStore.editorSettings.csvWithoutBom);
 const editCsvQuoteMode = ref<CsvQuoteMode>(settingsStore.editorSettings.csvQuoteMode);
 const editCsvNullMode = ref<CsvNullMode>(settingsStore.editorSettings.csvNullMode);
 const editQueryResultExportFileNameSource = ref<QueryResultExportFileNameSource>(settingsStore.editorSettings.queryResultExportFileNameSource);
+const editGlobalNumberGrouping = ref(settingsStore.editorSettings.globalNumberGrouping);
 const editGlobalDateTimeDisplayFormat = ref(settingsStore.editorSettings.globalDateTimeDisplayFormat);
 const editGlobalDateTimeExportFormat = ref(settingsStore.editorSettings.globalDateTimeExportFormat);
 const editGlobalDateTimeImportFormat = ref(settingsStore.editorSettings.globalDateTimeImportFormat);
@@ -1110,10 +1125,13 @@ const editUpdateDownloadSource = ref<UpdateDownloadSource>(settingsStore.editorS
 const editUpdateChannel = ref<UpdateChannel>(settingsStore.editorSettings.updateChannel);
 const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
 const editToolbarItemOrder = ref([...settingsStore.editorSettings.toolbarItemOrder]);
-const toolbarGroups = Object.keys(TOOLBAR_ITEM_GROUPS) as ToolbarItemGroup[];
-function toolbarGroupItems(group: ToolbarItemGroup) {
-  const keys = new Set<ToolbarItemKey>(TOOLBAR_ITEM_GROUPS[group]);
+function toolbarGroupItems(group: ToolbarSettingsGroup) {
+  const keys = new Set(toolbarGroupOrder(editToolbarItemOrder.value, group));
   return toolbarVisibilityItems.value.filter((item) => keys.has(item.key));
+}
+function toggleToolbarMenuPin(key: ToolbarMenuItemKey) {
+  const pinned = editToolbarItems.value.pinnedMenuItems;
+  editToolbarItems.value.pinnedMenuItems = pinned.includes(key) ? pinned.filter((item) => item !== key) : [...pinned, key];
 }
 // Desktop-only toolbar buttons (always-on-top) can never render in the Web build, so their switches stay out of the Web settings dialog.
 const toolbarVisibilityItems = computed(() => visibleToolbarVisibilityItems(TOOLBAR_VISIBILITY_ITEMS, isWeb));
@@ -1361,6 +1379,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sequenceCompletionEnabled: editSequenceCompletionEnabled.value,
     sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically.value,
     selectFirstCompletionOnOpen: editSelectFirstCompletionOnOpen.value,
+    completionAutoActivationDelayMs: editCompletionAutoActivationDelayMs.value,
     completionTriggerMode: editCompletionTriggerMode.value,
     completionMatchMode: editCompletionMatchMode.value,
     excludedCompletionItems: normalizeExcludedCompletionItems(editExcludedCompletionItems.value),
@@ -1383,6 +1402,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     appLayout: editAppLayout.value,
     webLogoPosition: editWebLogoPosition.value,
     tabLayout: editTabLayout.value,
+    tabWrapMaxRows: editTabWrapMaxRows.value,
     crossWindowTabDragPreviewEnabled: editCrossWindowTabDragPreviewEnabled.value,
     tabPlacement: editTabPlacement.value,
     colorizeConnectionTabs: editColorizeConnectionTabs.value,
@@ -1487,6 +1507,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarIndent: editSidebarIndent.value,
     sidebarFontSize: editSidebarFontSize.value,
     sidebarDensity: editSidebarDensity.value,
+    sidebarConnectionIconStyle: editSidebarConnectionIconStyle.value,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value),
     sidebarCopyTableNameSeparator: editSidebarCopyTableNameSeparator.value,
     sidebarCopyTableNameIncludeSchema: editSidebarCopyTableNameIncludeSchema.value,
@@ -1501,6 +1522,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     csvQuoteMode: editCsvQuoteMode.value,
     csvNullMode: editCsvNullMode.value,
     queryResultExportFileNameSource: editQueryResultExportFileNameSource.value,
+    globalNumberGrouping: editGlobalNumberGrouping.value,
     globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat.value,
     globalDateTimeExportFormat: editGlobalDateTimeExportFormat.value,
     globalDateTimeImportFormat: editGlobalDateTimeImportFormat.value,
@@ -2085,6 +2107,7 @@ function syncEditorSettingsDraftFromStore() {
   editSequenceCompletionEnabled.value = settingsStore.editorSettings.sequenceCompletionEnabled;
   editSortCompletionColumnsAlphabetically.value = settingsStore.editorSettings.sortCompletionColumnsAlphabetically;
   editSelectFirstCompletionOnOpen.value = settingsStore.editorSettings.selectFirstCompletionOnOpen;
+  editCompletionAutoActivationDelayMs.value = settingsStore.editorSettings.completionAutoActivationDelayMs;
   editCompletionTriggerMode.value = settingsStore.editorSettings.completionTriggerMode;
   editCompletionMatchMode.value = settingsStore.editorSettings.completionMatchMode;
   editExcludedCompletionItems.value = settingsStore.editorSettings.excludedCompletionItems.join("\n");
@@ -2108,6 +2131,7 @@ function syncEditorSettingsDraftFromStore() {
   editAppLayout.value = settingsStore.editorSettings.appLayout;
   editWebLogoPosition.value = settingsStore.editorSettings.webLogoPosition;
   editTabLayout.value = settingsStore.editorSettings.tabLayout;
+  editTabWrapMaxRows.value = settingsStore.editorSettings.tabWrapMaxRows;
   editCrossWindowTabDragPreviewEnabled.value = settingsStore.editorSettings.crossWindowTabDragPreviewEnabled;
   editTabPlacement.value = settingsStore.editorSettings.tabPlacement;
   editColorizeConnectionTabs.value = settingsStore.editorSettings.colorizeConnectionTabs;
@@ -2217,6 +2241,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarIndent.value = settingsStore.editorSettings.sidebarIndent;
   editSidebarFontSize.value = settingsStore.editorSettings.sidebarFontSize;
   editSidebarDensity.value = settingsStore.editorSettings.sidebarDensity;
+  editSidebarConnectionIconStyle.value = settingsStore.editorSettings.sidebarConnectionIconStyle;
   editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
   editPreferredExportPath.value = settingsStore.editorSettings.preferredExportPath;
   editDamengClientBinDir.value = settingsStore.editorSettings.damengClientBinDir;
@@ -2226,6 +2251,7 @@ function syncEditorSettingsDraftFromStore() {
   editCsvQuoteMode.value = settingsStore.editorSettings.csvQuoteMode;
   editCsvNullMode.value = settingsStore.editorSettings.csvNullMode;
   editQueryResultExportFileNameSource.value = settingsStore.editorSettings.queryResultExportFileNameSource;
+  editGlobalNumberGrouping.value = settingsStore.editorSettings.globalNumberGrouping;
   editGlobalDateTimeDisplayFormat.value = settingsStore.editorSettings.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = settingsStore.editorSettings.globalDateTimeExportFormat;
   editGlobalDateTimeImportFormat.value = settingsStore.editorSettings.globalDateTimeImportFormat;
@@ -2285,6 +2311,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sequenceCompletionEnabled: editSequenceCompletionEnabled,
   sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically,
   selectFirstCompletionOnOpen: editSelectFirstCompletionOnOpen,
+  completionAutoActivationDelayMs: editCompletionAutoActivationDelayMs,
   wordWrap: editWordWrap,
   showWhitespace: editShowWhitespace,
   ddlOpenMode: editDdlOpenMode,
@@ -2303,6 +2330,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   appLayout: editAppLayout,
   webLogoPosition: editWebLogoPosition,
   tabLayout: editTabLayout,
+  tabWrapMaxRows: editTabWrapMaxRows,
   crossWindowTabDragPreviewEnabled: editCrossWindowTabDragPreviewEnabled,
   tabPlacement: editTabPlacement,
   colorizeConnectionTabs: editColorizeConnectionTabs,
@@ -2405,6 +2433,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarIndent: editSidebarIndent,
   sidebarFontSize: editSidebarFontSize,
   sidebarDensity: editSidebarDensity,
+  sidebarConnectionIconStyle: editSidebarConnectionIconStyle,
   sidebarHiddenTablePrefixes: editSidebarHiddenTablePrefixes,
   sidebarCopyTableNameSeparator: editSidebarCopyTableNameSeparator,
   sidebarCopyTableNameIncludeSchema: editSidebarCopyTableNameIncludeSchema,
@@ -2422,6 +2451,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   exportRowLimitEnabled: editExportRowLimitEnabled,
   exportRowLimit: editExportRowLimit,
   queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled,
+  globalNumberGrouping: editGlobalNumberGrouping,
   globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat,
   globalDateTimeExportFormat: editGlobalDateTimeExportFormat,
   globalDateTimeImportFormat: editGlobalDateTimeImportFormat,
@@ -2552,6 +2582,7 @@ const collapsedShortcutScopes = ref<Set<ShortcutScope>>(new Set());
 const formatterEditorShortcutIds: ShortcutActionId[] = [
   "formatSql",
   "toggleLineComment",
+  "toggleLineCommentAndAdvance",
   "find",
   "replace",
   "saveSql",
@@ -2926,6 +2957,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSequenceCompletionEnabled.value = DEFAULT_EDITOR_SETTINGS.sequenceCompletionEnabled;
     editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
     editSelectFirstCompletionOnOpen.value = DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen;
+    editCompletionAutoActivationDelayMs.value = DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs;
     editCompletionTriggerMode.value = DEFAULT_EDITOR_SETTINGS.completionTriggerMode;
     editCompletionMatchMode.value = DEFAULT_EDITOR_SETTINGS.completionMatchMode;
     editExcludedCompletionItems.value = DEFAULT_EDITOR_SETTINGS.excludedCompletionItems.join("\n");
@@ -2965,9 +2997,11 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
     editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
     editWelcomePageMode.value = DEFAULT_EDITOR_SETTINGS.welcomePageMode;
+    editSidebarConnectionIconStyle.value = DEFAULT_EDITOR_SETTINGS.sidebarConnectionIconStyle;
     editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
     editWebLogoPosition.value = DEFAULT_EDITOR_SETTINGS.webLogoPosition;
     editTabLayout.value = DEFAULT_EDITOR_SETTINGS.tabLayout;
+    editTabWrapMaxRows.value = DEFAULT_EDITOR_SETTINGS.tabWrapMaxRows;
     editCrossWindowTabDragPreviewEnabled.value = DEFAULT_EDITOR_SETTINGS.crossWindowTabDragPreviewEnabled;
     editTabPlacement.value = DEFAULT_EDITOR_SETTINGS.tabPlacement;
     editColorizeConnectionTabs.value = DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabs;
@@ -3090,6 +3124,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
     editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
     editQueryResultExportFileNameSource.value = DEFAULT_EDITOR_SETTINGS.queryResultExportFileNameSource;
+    editGlobalNumberGrouping.value = DEFAULT_EDITOR_SETTINGS.globalNumberGrouping;
     editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
     editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
     editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
@@ -3150,6 +3185,7 @@ function resetAllDefaults() {
   editSequenceCompletionEnabled.value = DEFAULT_EDITOR_SETTINGS.sequenceCompletionEnabled;
   editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
   editSelectFirstCompletionOnOpen.value = DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen;
+  editCompletionAutoActivationDelayMs.value = DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs;
   editCompletionMatchMode.value = DEFAULT_EDITOR_SETTINGS.completionMatchMode;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
   editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
@@ -3272,6 +3308,7 @@ function resetAllDefaults() {
   editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
   editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
   editSidebarDensity.value = DEFAULT_EDITOR_SETTINGS.sidebarDensity;
+  editSidebarConnectionIconStyle.value = DEFAULT_EDITOR_SETTINGS.sidebarConnectionIconStyle;
   editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
   editSidebarCopyTableNameSeparator.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameSeparator;
   editSidebarCopyTableNameIncludeSchema.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameIncludeSchema;
@@ -3286,6 +3323,7 @@ function resetAllDefaults() {
   editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
   editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
   editQueryResultExportFileNameSource.value = DEFAULT_EDITOR_SETTINGS.queryResultExportFileNameSource;
+  editGlobalNumberGrouping.value = DEFAULT_EDITOR_SETTINGS.globalNumberGrouping;
   editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
   editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
@@ -3998,6 +4036,7 @@ const settingsSearchActiveIndex = ref(0);
 const settingsSearchInputContainerRef = ref<HTMLElement | null>(null);
 const highlightedSettingsSearchTargetId = ref("");
 let highlightedSettingsSearchElement: HTMLElement | null = null;
+let highlightedSettingsSearchOriginalClasses: ReadonlySet<string> | null = null;
 let pendingSettingsSearchResult: SettingsSearchEntry | null = null;
 const pendingSettingsSearchNavigation = shallowRef<{ result: SettingsSearchEntry; delivered: boolean } | null>(null);
 let settingsSearchHighlightTimer: ReturnType<typeof window.setTimeout> | null = null;
@@ -4040,7 +4079,15 @@ function clearSettingsSearchHighlight() {
     highlightedSettingsSearchElement.removeEventListener("animationend", settingsSearchHighlightAnimationHandler);
   }
   settingsSearchHighlightAnimationHandler = null;
-  highlightedSettingsSearchElement?.classList.remove(...settingsSearchHighlightClasses);
+  // Only strip classes the highlight itself introduced. Highlight targets are
+  // picked (see findSettingsSearchHighlightTarget) partly because they already
+  // carry classes from this list such as rounded-md; removing them blindly
+  // would delete the element's own styling and leave a square-cornered border
+  // behind after the highlight is gone.
+  for (const highlightClass of settingsSearchHighlightClasses) {
+    if (!highlightedSettingsSearchOriginalClasses?.has(highlightClass)) highlightedSettingsSearchElement?.classList.remove(highlightClass);
+  }
+  highlightedSettingsSearchOriginalClasses = null;
   highlightedSettingsSearchElement = null;
   highlightedSettingsSearchTargetId.value = "";
 }
@@ -4152,6 +4199,9 @@ function highlightSettingsSearchTarget(result: SettingsSearchEntry, searchRoot: 
   if (target === searchRoot) {
     highlightedSettingsSearchTargetId.value = result.targetId;
   }
+  // Remember the classes the target already owned so cleanup can remove only
+  // what the highlight added, never the element's original styling.
+  highlightedSettingsSearchOriginalClasses = new Set(target.classList);
   target.classList.add(...settingsSearchHighlightClasses);
   highlightedSettingsSearchElement = target;
 
@@ -8703,6 +8753,25 @@ onUnmounted(() => {
 
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
+                    <Label for="editor-completion-auto-activation-delay">{{ t("settings.completionAutoActivationDelay") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.completionAutoActivationDelayDescription") }}
+                    </p>
+                  </div>
+                  <Input
+                    id="editor-completion-auto-activation-delay"
+                    type="number"
+                    inputmode="numeric"
+                    class="h-7 w-24 px-2 text-left text-xs tabular-nums"
+                    :min="MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS"
+                    :max="MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS"
+                    :model-value="editCompletionAutoActivationDelayMs"
+                    @update:model-value="updateCompletionAutoActivationDelayDraft"
+                  />
+                </div>
+
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
                     <Label for="editor-auto-close-brackets">{{ t("settings.autoCloseBrackets") }}</Label>
                     <p class="text-xs text-muted-foreground">
                       {{ t("settings.autoCloseBracketsDescription") }}
@@ -9505,6 +9574,15 @@ onUnmounted(() => {
                     </div>
                   </Button>
                 </div>
+                <div v-if="editTabLayout === 'wrap'" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <Label for="tab-wrap-max-rows">{{ t("settings.tabWrapMaxRows") }}</Label>
+                  <Select :model-value="String(editTabWrapMaxRows)" @update:model-value="editTabWrapMaxRows = Number($event)">
+                    <SelectTrigger id="tab-wrap-max-rows" class="w-32"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="rows in TAB_WRAP_ROW_LIMITS" :key="rows" :value="String(rows)">{{ rows || t("settings.tabMaxWidthUnlimited") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
 
               <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
@@ -9716,6 +9794,32 @@ onUnmounted(() => {
                 </div>
               </div>
 
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="sidebar-connection-icon-style">{{ t("settings.sidebarConnectionIconStyle") }}</Label>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.sidebarConnectionIconStyleDescription") }}
+                  </p>
+                </div>
+                <Select
+                  :model-value="editSidebarConnectionIconStyle"
+                  @update:model-value="
+                    (value) => {
+                      if (isSidebarConnectionIconStyle(value)) editSidebarConnectionIconStyle = value;
+                    }
+                  "
+                >
+                  <SelectTrigger id="sidebar-connection-icon-style" class="h-8 w-36 shrink-0 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="end">
+                    <SelectItem v-for="style in SIDEBAR_CONNECTION_ICON_STYLES" :key="style" :value="style">
+                      {{ t(`settings.sidebarConnectionIconStyle_${style}`) }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
               <div v-if="!isWeb" class="settings-appearance-group" data-background-image-settings>
                 <Label>{{ t("settings.backgroundImage") }}</Label>
                 <p class="text-xs text-muted-foreground">{{ t("settings.backgroundImageDescription") }}</p>
@@ -9803,14 +9907,16 @@ onUnmounted(() => {
                 </div>
                 <p class="mt-2 text-xs text-muted-foreground">{{ t("settings.toolbarOrderHint") }}</p>
                 <div class="mt-2 grid gap-3 sm:grid-cols-2">
-                  <div v-for="group in toolbarGroups" :key="group" class="min-w-0 space-y-1.5">
+                  <div v-for="group in TOOLBAR_SETTINGS_GROUPS" :key="group" class="min-w-0 space-y-1.5">
                     <h4 class="text-xs font-medium">{{ t(`settings.toolbarGroup_${group}`) }}</h4>
                     <ToolbarSettingsList
                       :group="group"
                       :items="toolbarGroupItems(group)"
                       :order="toolbarGroupOrder(editToolbarItemOrder, group)"
                       :visibility="editToolbarItems"
+                      :pinned-menu-items="editToolbarItems.pinnedMenuItems"
                       @toggle="(key: ToolbarItemKey, visible: boolean) => (editToolbarItems[key] = visible)"
+                      @toggle-pin="toggleToolbarMenuPin"
                       @reorder="(keys: ToolbarItemKey[]) => (editToolbarItemOrder = replaceToolbarItemOrder(editToolbarItemOrder, keys))"
                     />
                   </div>
@@ -11169,6 +11275,14 @@ onUnmounted(() => {
 
                 <Separator />
               </template>
+
+              <div data-settings-search-id="global-number-grouping" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="settingsSearchTargetClass('global-number-grouping')">
+                <div class="min-w-0 space-y-1">
+                  <Label for="global-number-grouping">{{ t("settings.globalNumberGrouping") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.globalNumberGroupingDescription") }}</p>
+                </div>
+                <Switch id="global-number-grouping" v-model="editGlobalNumberGrouping" />
+              </div>
 
               <div class="space-y-3">
                 <div class="text-sm font-medium text-muted-foreground">

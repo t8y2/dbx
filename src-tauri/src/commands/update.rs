@@ -43,6 +43,10 @@ fn dbx_updater_builder(app: &AppHandle) -> UpdaterBuilder {
 
 fn with_update_channel(builder: UpdaterBuilder, channel: UpdateChannel) -> UpdaterBuilder {
     builder.version_comparator(move |current, update| {
+        // Tauri only hands us two version strings, so this cannot tell which
+        // build a promoted stable release ships. Hiding the already-installed
+        // artifact needs the manifest's `promoted_from`, so that lives in
+        // `build_update_info` (#15341); ranking stays purely by version here.
         dbx_core::update::is_channel_update_available(channel, &update.version.to_string(), &current.to_string())
     })
 }
@@ -194,6 +198,7 @@ impl DownloadCancellation {
 #[derive(Default)]
 pub struct PendingUpdateState {
     pending: Mutex<Option<PendingUpdate>>,
+    canceled_attempts: Mutex<Vec<String>>,
 }
 
 impl PendingUpdateState {
@@ -202,9 +207,26 @@ impl PendingUpdateState {
         if pending.is_some() {
             return Err(UPDATE_BUSY_ERROR.into());
         }
+        let mut canceled_attempts =
+            self.canceled_attempts.lock().map_err(|_| "Update state is unavailable.".to_string())?;
+        if let Some(index) = canceled_attempts.iter().position(|canceled| canceled == &attempt_id) {
+            canceled_attempts.remove(index);
+            return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+        }
         let cancellation = Arc::new(DownloadCancellation::new(attempt_id, version));
         *pending = Some(PendingUpdate::Downloading(Arc::clone(&cancellation)));
         Ok(cancellation)
+    }
+
+    fn remember_canceled_attempt(&self, attempt_id: String) {
+        let Ok(mut canceled_attempts) = self.canceled_attempts.lock() else { return };
+        if canceled_attempts.iter().any(|canceled| canceled == &attempt_id) {
+            return;
+        }
+        if canceled_attempts.len() >= 16 {
+            canceled_attempts.remove(0);
+        }
+        canceled_attempts.push(attempt_id);
     }
 
     fn download_state(&self) -> Result<UpdateDownloadState, String> {
@@ -325,7 +347,12 @@ impl PendingUpdateState {
     fn cancel_download(&self, attempt_id: &str) {
         let Ok(mut pending) = self.pending.lock() else { return };
         let action = Self::cancel_target(pending.as_ref());
-        let Some((cancellation, clear_slot)) = action else { return };
+        let Some((cancellation, clear_slot)) = action else {
+            if pending.is_none() {
+                self.remember_canceled_attempt(attempt_id.to_string());
+            }
+            return;
+        };
         if cancellation.attempt_id != attempt_id {
             return;
         }
@@ -1250,6 +1277,19 @@ mod tests {
         assert!(state.finish_download(&attempt, cached_fixture(), &root).is_err());
         assert!(!root.exists());
         assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_ok());
+    }
+
+    #[test]
+    fn cancellation_before_download_registration_is_consumed_by_that_attempt() {
+        let state = PendingUpdateState::default();
+        state.cancel_download("not-yet-registered");
+
+        assert_eq!(
+            state.begin_download("not-yet-registered".into(), "99.0.0".into()).unwrap_err(),
+            super::DOWNLOAD_CANCELED_ERROR
+        );
+        assert!(matches!(state.download_state().unwrap(), super::UpdateDownloadState::Idle));
+        assert!(state.begin_download("later-attempt".into(), "99.0.0".into()).is_ok());
     }
 
     #[test]

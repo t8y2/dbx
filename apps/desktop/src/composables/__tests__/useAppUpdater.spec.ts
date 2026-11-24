@@ -633,6 +633,16 @@ describe("silent update lifecycle", () => {
     expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith("cached");
     expect(updater.updateDownloaded.value).toBe(false);
   });
+  it("deletes a shared ready cache when this window has not adopted it", async () => {
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    mocks.getDownloadedUpdate.mockResolvedValueOnce(cache);
+
+    await updater.ignoreCurrentVersion();
+
+    expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith("cached");
+    expect(updater.updateDownloaded.value).toBe(false);
+  });
   it("keeps ready cache if ignoring cannot persist", async () => {
     mocks.persist.mockRejectedValue(new Error("disk full"));
     const updater = mount();

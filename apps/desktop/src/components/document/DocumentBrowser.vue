@@ -89,8 +89,10 @@ import {
   mongoDocumentDisplayValue,
   mongoDocumentGridValue,
   mongoDocumentGridColumnTypes,
+  formatMongoDeleteIdCondition,
   mongoDocumentIdForGrid,
   parseMongoDocumentInputValue,
+  serializeMongoDeleteId,
   serializeMongoDocumentId,
   type MongoInputValue,
 } from "@/lib/mongo/mongoDocumentValues";
@@ -1679,7 +1681,8 @@ async function gridSave(changes: DocumentGridChanges) {
     const routing = isEs ? documentRoutingFromDocument(document) : undefined;
     const documentType = isEs ? documentTypeFromDocument(document) : undefined;
     const documentId = document?._id ?? id;
-    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, isPathIdentityStore ? serializeDocumentStoreId(documentId, kind) : serializeMongoDocumentId(documentId), routing, documentType);
+    const deleteId = isPathIdentityStore ? serializeDocumentStoreId(documentId, kind) : serializeMongoDeleteId(documentId, mongoCopyDocumentsAvailable.value ? copyDocuments.value[rowIdx]?._id : undefined);
+    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, deleteId, routing, documentType);
   }
 
   for (const [newRowIndex, newRow] of changes.newRows.entries()) {
@@ -1839,7 +1842,10 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
       const routing = documentRoutingFromGridRow(row, columns);
       stmts.push(`DELETE /${coll}/_doc/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}`);
     } else {
-      stmts.push(`db.${coll}.deleteOne({_id: ${formatMongoShellLiteral(documents.value[rowIdx]?._id ?? id)}})`);
+      const documentId = documents.value[rowIdx]?._id ?? id;
+      const deleteId = serializeMongoDeleteId(documentId, mongoCopyDocumentsAvailable.value ? copyDocuments.value[rowIdx]?._id : undefined);
+      const condition = formatMongoDeleteIdCondition(documentId, deleteId);
+      stmts.push(`db.${coll}.deleteOne({_id: ${condition}})`);
     }
   }
 
@@ -2633,7 +2639,9 @@ async function applyDeleteDoc(idx: number) {
   if (id === undefined || id === null || id === "") return;
   error.value = "";
   try {
-    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(id, documentStoreProvider.value.kind), documentRoutingFromDocument(doc), documentStoreProvider.value.kind === "elasticsearch" ? documentTypeFromDocument(doc) : undefined);
+    const kind = documentStoreProvider.value.kind;
+    const deleteId = kind === "mongodb" ? serializeMongoDeleteId(id, mongoCopyDocumentsAvailable.value ? copyDocuments.value[idx]?._id : undefined) : serializeDocumentStoreId(id, kind);
+    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, deleteId, documentRoutingFromDocument(doc), kind === "elasticsearch" ? documentTypeFromDocument(doc) : undefined);
     if (selectedIdx.value === idx) {
       selectedIdx.value = null;
       editJson.value = "";

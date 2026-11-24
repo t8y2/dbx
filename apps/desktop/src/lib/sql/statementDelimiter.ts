@@ -5,7 +5,7 @@ export interface StatementDelimiterDocument {
 
 type StatementDelimiterSource = string | StatementDelimiterDocument;
 
-export function trailingStatementDelimiterPosition(source: StatementDelimiterSource, rangeTo: number): number | null {
+export function trailingStatementDelimiterPosition(source: StatementDelimiterSource, rangeTo: number, delimiter = ";"): number | null {
   let delimiterPos = rangeTo;
   let lineBreakCount = 0;
   while (delimiterPos < source.length) {
@@ -14,25 +14,26 @@ export function trailingStatementDelimiterPosition(source: StatementDelimiterSou
     if (char === "\n" && ++lineBreakCount > 1) return null;
     delimiterPos += 1;
   }
-  return sliceSource(source, delimiterPos, delimiterPos + 1) === ";" ? delimiterPos : null;
+  return sliceSource(source, delimiterPos, delimiterPos + delimiter.length) === delimiter ? delimiterPos : null;
 }
 
-export function cursorBelongsToTrailingStatementDelimiter(source: StatementDelimiterSource, rangeTo: number, cursorPos: number): boolean {
+export function cursorBelongsToTrailingStatementDelimiter(source: StatementDelimiterSource, rangeTo: number, cursorPos: number, delimiter = ";"): boolean {
   if (cursorPos < rangeTo) return false;
-  const delimiterPos = trailingStatementDelimiterPosition(source, rangeTo);
+  const delimiterPos = trailingStatementDelimiterPosition(source, rangeTo, delimiter);
   if (delimiterPos === null) return false;
-  if (cursorPos <= delimiterPos + 1) return true;
+  const delimiterEnd = delimiterPos + delimiter.length;
+  if (cursorPos <= delimiterEnd) return true;
 
-  const afterDelimiter = sliceSource(source, delimiterPos + 1, cursorPos);
-  // 分号到光标之间允许是空白或尾部注释（如 `SELECT 1; -- 备注`），
+  const afterDelimiter = sliceSource(source, delimiterEnd, cursorPos);
+  // 分隔符到光标之间允许是空白或尾部注释（如 `SELECT 1; -- 备注`），
   // 块注释自身可以跨行，但注释之外的换行仍表示光标已进入下一行
   // 否则行尾注释后的光标会被下一条语句的前置区域错误认领
   return trailingGapIsWhitespaceOrComment(afterDelimiter);
 }
 
 /**
- * 判断语句分号与光标之间的间隙是否只包含空白和注释。
- * 块注释内部允许换行；注释之外的换行表示光标已离开分号所在行。
+ * 判断语句分隔符与光标之间的间隙是否只包含空白和注释。
+ * 块注释内部允许换行。注释之外的换行表示光标已离开分隔符所在行。
  */
 function trailingGapIsWhitespaceOrComment(gap: string): boolean {
   let i = 0;

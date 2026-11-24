@@ -68,8 +68,10 @@ export function remapSqlFileOrder(order: SqlFileOrder, previousPath: string, nex
   for (const [parent, paths] of Object.entries(order)) {
     const nextParent = directory ? mapPath(parent) : parent;
     if (nextParent === null) continue;
-    const nextPaths = paths.map(mapPath).filter((path): path is string => path !== null);
-    if (nextPaths.length) result[nextParent] = [...new Set([...(result[nextParent] ?? []), ...nextPaths])];
+    for (const path of paths.map(mapPath).filter((path): path is string => path !== null)) {
+      const parentPath = sqlFileParentPath(path);
+      result[parentPath] = [...new Set([...(result[parentPath] ?? []), path])];
+    }
   }
   return changed ? result : order;
 }

@@ -40,4 +40,19 @@ describe("DataGrip literal and comment preservation", () => {
     expect(output).toContain("d. -- field\na");
     expect(output).toContain("FROM (SELECT 1 AS a) d;");
   });
+
+  it("keeps the FROM clause after a trailing comment in a scalar subquery", async () => {
+    const output = await format("SELECT * FROM t WHERE x = (SELECT max(y) -- m\nFROM z);");
+    expect(output).toMatch(/-- m\n\s*FROM z/);
+  });
+
+  it("keeps ELSE and END after a trailing comment in CASE", async () => {
+    const output = await format("SELECT CASE WHEN a THEN 1 -- k\nELSE 2 END;");
+    expect(output).toMatch(/-- k\n\s*ELSE 2 END/);
+  });
+
+  it("keeps a comma after a trailing line comment on the following line", async () => {
+    const output = await format("SELECT a -- c1\n, b FROM t;");
+    expect(output).toContain("-- c1\n, b");
+  });
 });

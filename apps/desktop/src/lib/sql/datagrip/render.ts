@@ -35,8 +35,11 @@ function renderInlineNode(node: AstNode | StatementNode, settings: DataGripLayou
   if (output) output += hasLineComment(node.leadingComments) ? "\n" : " ";
   output += renderInlineNodeBody(node, settings);
   const trailing = renderComments(node.trailingComments, settings, false);
-  if (trailing) output += hasLineComment(node.trailingComments) ? "\n" : " ";
-  return output + trailing;
+  if (trailing) {
+    output += ` ${trailing}`;
+    if (hasLineComment(node.trailingComments)) output += "\n";
+  }
+  return output;
 }
 function hasLineComment(comments: readonly CommentNode[] | undefined): boolean {
   return comments?.some((comment) => comment.type === "line_comment") ?? false;
@@ -102,6 +105,7 @@ function renderInlineNodeBody(node: AstNode | StatementNode, settings: DataGripL
     case "comma":
       return ",";
     case "line_comment":
+      return node.text + "\n";
     case "block_comment":
     case "disable_comment":
       return node.text;
@@ -143,6 +147,7 @@ export class DataGripWriter {
   private lines = [""];
   private lineEndings = [""];
   private lineCommentOpen = false;
+  private lineBreakPending = false;
 
   constructor(private readonly settings: DataGripLayoutSettings) {}
 
@@ -169,8 +174,8 @@ export class DataGripWriter {
     for (let index = 0; index < pieces.length; index++) {
       if (index > 0) this.pushLine("", separators[index - 1] ?? "\n");
       this.lines[this.lines.length - 1] += pieces[index];
+      this.lineBreakPending = /(?:\r\n|\r|\n)$/.test(text);
     }
-    if (/(?:\r\n|\r|\n)$/.test(text)) this.pushLine("");
   }
 
   space(): void {
@@ -187,6 +192,11 @@ export class DataGripWriter {
   }
 
   newline(indent = 0): void {
+    if (this.lineBreakPending && this.currentLine.length === 0) {
+      this.lineBreakPending = false;
+      return;
+    }
+    this.lineBreakPending = false;
     this.lines[this.lines.length - 1] = this.currentLine.trimEnd();
     this.pushLine(this.indentation(indent));
     this.lineCommentOpen = false;

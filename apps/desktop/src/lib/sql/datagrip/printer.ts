@@ -121,10 +121,13 @@ function printSelectList(writer: DataGripWriter, children: AstNode[], settings: 
   items.forEach((item, index) => {
     if (index === 0) writer.space();
     else {
-      writer.newline(settings.commaPosition === "before" ? Math.max(0, itemColumn - 2) : itemColumn);
-      if (settings.commaPosition === "before") {
-        writer.write(",");
-        writer.space();
+      if (writer.currentLine.trim() === ",") writer.space();
+      else {
+        writer.newline(settings.commaPosition === "before" ? Math.max(0, itemColumn - 2) : itemColumn);
+        if (settings.commaPosition === "before") {
+          writer.write(",");
+          writer.space();
+        }
       }
     }
     if (aliases?.[index]) {
@@ -245,6 +248,7 @@ function printCommaList(writer: DataGripWriter, children: AstNode[], settings: D
   }
   items.forEach((item, index) => {
     if (index === 0) writer.space();
+    else if (writer.currentLine.trim() === ",") writer.space();
     else {
       writer.newline(settings.commaPosition === "before" ? Math.max(0, itemColumn - 2) : itemColumn);
       if (settings.commaPosition === "before") {
@@ -354,8 +358,9 @@ function writeNode(writer: DataGripWriter, node: AstNode, settings: DataGripLayo
     writer.write("=");
     return;
   }
-  writer.write(renderDataGripInline(node, settings));
-  if (node.type === "line_comment") writer.markLineComment();
+  const inline = renderDataGripInline(node, settings);
+  writer.write(inline);
+  if (node.type === "line_comment" && !inline.endsWith("\n")) writer.markLineComment();
 }
 
 function containsQuery(node: ParenthesisNode): boolean {

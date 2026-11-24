@@ -56,6 +56,7 @@ import TableStructurePeekDialog from "./TableStructurePeekDialog.vue";
 import type { TableStructurePeekInsertKind } from "./TableStructurePeekDialog.vue";
 import type { ColumnInfo } from "@/types/database";
 import { createColumnReferencePayload, tableReferenceInsertText } from "@/lib/editor/queryEditorTableDrop";
+import { cutQueryEditorLine } from "@/lib/editor/queryEditorCutLine";
 import { clearRememberedFocusedQueryEditorView, focusedQueryEditorView, queryEditorInsertContext, registerQueryEditorInsertContext, rememberFocusedQueryEditorView, unregisterQueryEditorInsertContext } from "@/lib/editor/focusedQueryEditorView";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { structurePeekPanelId, structurePeekZIndexesByOrder } from "@/lib/editor/structurePeekPanel";
@@ -108,6 +109,7 @@ import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShort
 import { createQueryEditorEscapeHandler } from "@/lib/editor/queryEditorEscape";
 import { buildQueryEditorLineNumbersExtension, createQueryEditorLineNumberAlignmentExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { createQueryEditorBookmarks, type QueryEditorBookmarks } from "@/lib/editor/codemirrorBookmarks";
+import { createQueryEditorLastEditLocations, type QueryEditorLastEditLocations } from "@/lib/editor/codemirrorLastEditLocation";
 import { keepGuttersAttachedDuringSync } from "@/lib/editor/codemirrorGutterSync";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
@@ -133,7 +135,7 @@ import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatch
 import { createInsertValueHintsExtension, requestInsertValueHintsRefresh, supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { foldedRanges } from "@codemirror/language";
 import type { SavedSqlEditorFold } from "@/lib/app/savedSqlEditorPosition";
-import { createSqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
+import { createSqlBlockFoldService, sqlBeginEndMatching } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
 import { createSqlUnknownObjectHighlights, refreshSqlUnknownObjectHighlights } from "@/lib/editor/codemirrorSqlUnknownObjectHighlights";
 import { shouldParseQueryEditorSyntax, shouldUseQueryEditorLargeDocumentMode, shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
@@ -1485,6 +1487,7 @@ function runSqlShortcutAction(action: ReturnType<typeof enabledSqlShortcutAction
 }
 
 let bookmarkShortcuts: QueryEditorBookmarks | null = null;
+let lastEditLocations: QueryEditorLastEditLocations | null = null;
 
 function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view"))["keymap"]) {
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
@@ -1595,6 +1598,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         },
         ...binding(shortcuts.find, openSearch),
         ...binding(shortcuts.gotoLine, openGotoLine),
+        ...binding(shortcuts.goToLastEditLocation, (currentView) => lastEditLocations?.goBack(currentView) ?? false),
         ...replaceShortcutBindings,
         ...executeInNewResultTabBindings,
         ...executeAllBindings,
@@ -1620,6 +1624,14 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.joinLines, joinQueryEditorLines),
         ...binding(shortcuts.duplicateLine, (view) => codeMirrorRuntime.codeMirrorCopyLineDown?.(view) ?? false),
         ...binding(shortcuts.deleteLine, (view) => codeMirrorRuntime.codeMirrorDeleteLine?.(view) ?? false),
+        // Line-wise cut (Shift+Delete / Ctrl+X with an empty selection) cannot
+        // remove the last line's break natively, so empty lines pile up at the
+        // bottom of the editor; our variant joins with the previous line and
+        // returns false everywhere else. Deliberately no preventDefault here:
+        // a preventDefault binding swallows the key even when its command
+        // declines (runHandlers flags it prevented), killing the native cut.
+        { key: "Shift-Delete", run: cutQueryEditorLine },
+        { key: "Mod-x", run: cutQueryEditorLine },
         ...binding(shortcuts.moveLineUp, (view) => codeMirrorRuntime.codeMirrorMoveLineUp?.(view) ?? false),
         ...binding(shortcuts.moveLineDown, (view) => codeMirrorRuntime.codeMirrorMoveLineDown?.(view) ?? false),
         ...binding(shortcuts.scrollLineUp, (view) => scrollEditorLine(view, "up")),
@@ -1649,6 +1661,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.toggleCaseSelection, () => convertSelectedSqlCase("toggle")),
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.convertNamingStyle, () => convertSelectedNamingStyle()),
         ...createQueryEditorLineCommentShortcutBindings(shortcuts.toggleLineComment, (view) => codeMirrorRuntime.codeMirrorToggleLineComment?.(view) ?? false),
+        ...createQueryEditorLineCommentShortcutBindings(shortcuts.toggleLineCommentAndAdvance, toggleLineCommentAndAdvance),
         ...binding(shortcuts.toggleBlockComment, (view) => {
           if (!supportsQueryEditorBlockComments(props.databaseType)) return false;
           return codeMirrorRuntime.codeMirrorToggleBlockComment?.(view) ?? false;
@@ -2307,6 +2320,10 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       toggleLabel: () => t("settings.shortcutToggleBookmark"),
     });
     bookmarkShortcuts = bookmarks;
+    const lastEditLocationRuntime = createQueryEditorLastEditLocations({
+      modules: { StateField: modules.StateField, StateEffect: modules.StateEffect },
+    });
+    lastEditLocations = lastEditLocationRuntime;
     const initialSettings = settingsStore.editorSettings;
     const theme = await loadEditorTheme(initialSettings.theme, editorThemeAppearance(), resolveEditorThemeColors(initialSettings), themePalette.value);
     if (initialSettings.vimModeEnabled) {
@@ -2355,6 +2372,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         createQueryEditorNativeSelectionGuard(ViewPlugin, { enabled: isTauriRuntime() && isMacOS(), inputHandler: EditorView.inputHandler, finalizeClipboardText: (text) => clipboardLineEndings(text) }),
         initializedRuntime.runGutterComp.of(runStatementGutterExtension()),
         bookmarks.extension,
+        lastEditLocationRuntime.extension,
         initializedRuntime.lineNumbersComp.of(lineNumbersExtension(initialSettings.showLineNumbers)),
         createQueryEditorLineNumberAlignmentExtension(ViewPlugin),
         currentStatementFrameExtension,
@@ -2427,6 +2445,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         initializedRuntime.codeMirrorTheme.of(theme),
         initializedRuntime.closeBracketsComp.of(closeBracketsExtension(initialSettings.autoCloseBrackets)),
         bracketMatching(),
+        sqlBeginEndMatching,
         // Fix: intercept quote characters to prevent closeBrackets from
         // producing triple quotes ('''). When the cursor is immediately
         // before an auto-inserted closing quote, just skip past it.
@@ -3290,6 +3309,21 @@ function toggleLineComment(): boolean {
   const handled = codeMirrorRuntime.codeMirrorToggleLineComment?.(currentView) ?? false;
   if (handled) currentView.focus();
   return handled;
+}
+
+function toggleLineCommentAndAdvance(currentView: EditorViewType): boolean {
+  const { doc, selection } = currentView.state;
+  if (!codeMirrorRuntime.codeMirrorToggleLineComment?.(currentView)) return false;
+  if (selection.ranges.length !== 1 || !selection.main.empty) return true;
+  const line = doc.lineAt(selection.main.head);
+  if (line.number === doc.lines) return true;
+  const nextLine = currentView.state.doc.line(line.number + 1);
+  const column = selection.main.head - line.from;
+  currentView.dispatch({
+    selection: { anchor: Math.min(nextLine.from + column, nextLine.to) },
+    scrollIntoView: true,
+  });
+  return true;
 }
 
 function foldAllForView(currentView: EditorViewType): boolean {

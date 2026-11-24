@@ -131,6 +131,7 @@ const editorSettingCategoryOverrides: Partial<Record<string, BackupSettingsCateg
   dataGridSearchMode: "data",
   dataGridRowNumberMode: "data",
   dataGridCopyExtractor: "data",
+  dataGridSmartSingleColumnFormat: "data",
   dataGridExtractorOptions: "data",
   dataGridExtractorOptionsMigrationVersion: "data",
   resultRunDisplayMode: "data",

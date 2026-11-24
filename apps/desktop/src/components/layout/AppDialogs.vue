@@ -256,6 +256,7 @@ watch(
     :prefill-catalog="dialogs.transferPrefillCatalog.value"
     :prefill-schema="dialogs.transferPrefillSchema.value"
     :prefill-tables="dialogs.transferPrefillTables.value"
+    :prefill-views="dialogs.transferPrefillViews.value"
     :prefill-target-connection-id="dialogs.transferPrefillTargetConnectionId.value"
     :prefill-target-database="dialogs.transferPrefillTargetDatabase.value"
     :prefill-target-schema="dialogs.transferPrefillTargetSchema.value"

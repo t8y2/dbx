@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { IDBFactory } from "fake-indexeddb";
+import { IDBDatabase, IDBFactory } from "fake-indexeddb";
 
 function installIndexedDb(transactionOutcome: "complete" | "abort", capturedPuts?: unknown[]) {
   const transaction: Record<string, any> = {
@@ -142,4 +142,38 @@ it("keeps concurrent updates to different saved SQL files from separate browser 
   expect(await windowA.loadSavedSqlEditorPositions()).toEqual([b, a]);
   await windowB.saveSavedSqlEditorPositions({ type: "remove", savedSqlId: b.savedSqlId });
   expect(await windowA.loadSavedSqlEditorPositions()).toEqual([a]);
+});
+
+it("restores fallback positions after a failed IndexedDB write and carries them forward on recovery", async () => {
+  vi.stubGlobal("indexedDB", new IDBFactory());
+  const localValues = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => localValues.get(key) ?? null,
+    setItem: (key: string, value: string) => localValues.set(key, value),
+    removeItem: (key: string) => localValues.delete(key),
+  });
+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const windowA = await import("@/lib/backend/http");
+  const { createSavedSqlEditorFoldSnapshot, createSavedSqlEditorPosition } = await import("@/lib/app/savedSqlEditorPosition");
+  const sql = "SELECT\n  1;";
+  const old = createSavedSqlEditorPosition({ savedSqlId: "file-a", sql, now: 1 });
+  const folded = createSavedSqlEditorPosition({ savedSqlId: "file-b", sql, folds: createSavedSqlEditorFoldSnapshot(sql, [{ from: 6, to: 10 }]), now: 2 });
+  const recovered = createSavedSqlEditorPosition({ savedSqlId: "file-c", sql, now: 3 });
+  await windowA.saveSavedSqlEditorPositions({ type: "save", position: old });
+
+  const transaction = IDBDatabase.prototype.transaction;
+  vi.spyOn(IDBDatabase.prototype, "transaction").mockImplementation(function (this: IDBDatabase, ...args: Parameters<IDBDatabase["transaction"]>) {
+    const opened = transaction.apply(this, args);
+    if (args[1] === "readwrite") queueMicrotask(() => opened.abort());
+    return opened;
+  });
+  await windowA.saveSavedSqlEditorPositions({ type: "save", position: folded });
+  vi.resetModules();
+  const windowB = await import("@/lib/backend/http");
+  expect(await windowB.loadSavedSqlEditorPositions()).toEqual([folded, old]);
+
+  vi.mocked(IDBDatabase.prototype.transaction).mockRestore();
+  await windowB.saveSavedSqlEditorPositions({ type: "save", position: recovered });
+  expect(localValues.has("dbx-app-state:saved_sql_editor_positions")).toBe(false);
+  expect(await windowA.loadSavedSqlEditorPositions()).toEqual([recovered, folded, old]);
 });

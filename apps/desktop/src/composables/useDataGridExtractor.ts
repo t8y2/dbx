@@ -21,6 +21,7 @@ import {
   type DataGridExtractorOptions,
   type DataGridExtractWarningCode,
   type DataGridValueFormat,
+  type DataGridSmartSingleColumnFormat,
 } from "@/lib/dataGrid/dataGridCopyExtractor";
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
@@ -72,6 +73,7 @@ interface UseDataGridExtractorOptions {
   columnComments?: ComputedRef<Array<string | undefined> | undefined>;
   allColumnComments?: ComputedRef<Array<string | undefined> | undefined>;
   extractorOptions?: ComputedRef<DataGridExtractorOptions>;
+  smartSingleColumnFormat?: ComputedRef<DataGridSmartSingleColumnFormat>;
   databaseType: ComputedRef<DatabaseType | undefined>;
   identifierQuote?: ComputedRef<string | undefined>;
   tableMeta: ComputedRef<DataGridTableMeta | undefined>;
@@ -529,10 +531,12 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return selectionData() !== null;
   }
 
-  function resolveCopyPreference(preference: DataGridCopyPreference, extractorOptions: DataGridExtractorOptions): DataGridCopyExtractorId | null {
+  function resolveCopyPreference(preference: DataGridCopyPreference, extractorOptions: DataGridExtractorOptions, singleColumnFormat = options.smartSingleColumnFormat?.value ?? "default"): DataGridCopyExtractorId | null {
     const request = buildRequest("raw", extractorOptions);
     if (!request) return null;
-    return resolveDataGridCopyPreference(preference, request.rows.length * request.selectedColumnIndexes.length);
+    const columnCount = request.selectedColumnIndexes.length;
+    if (preference === "smart" && columnCount === 1 && singleColumnFormat !== "default" && canCopyWithExtractor(singleColumnFormat, extractorOptions)) return singleColumnFormat;
+    return resolveDataGridCopyPreference(preference, request.rows.length * columnCount);
   }
 
   async function resolveMongoExtractorResult(extractor: DataGridCopyExtractorId, request: DataGridExtractRequest, rowLimit?: number) {
@@ -617,9 +621,9 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return extractor ? copyWithExtractor(extractor, extractorOptions, isSessionValid) : false;
   }
 
-  async function previewWithPreference(preference: DataGridCopyPreference, extractorOptions: DataGridExtractorOptions): Promise<DataGridExtractPreview> {
+  async function previewWithPreference(preference: DataGridCopyPreference, extractorOptions: DataGridExtractorOptions, singleColumnFormat?: DataGridSmartSingleColumnFormat): Promise<DataGridExtractPreview> {
     if (hasUnsupportedDiscreteSelection.value) throw new Error(t("grid.copyExtractorUnsupportedSelection"));
-    const extractor = resolveCopyPreference(preference, extractorOptions);
+    const extractor = resolveCopyPreference(preference, extractorOptions, singleColumnFormat);
     if (!extractor) throw new Error(t("grid.copyExtractorEmptySelection"));
     return previewWithExtractor(extractor, extractorOptions);
   }

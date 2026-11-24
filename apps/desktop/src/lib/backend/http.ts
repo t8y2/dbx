@@ -330,7 +330,7 @@ import type {
   VacuumTableSqlOptions,
 } from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions } from "@/lib/export/databaseExport";
-import { loadBrowserAppState, saveBrowserAppState, updateBrowserAppState } from "@/lib/backend/browserAppStateStorage";
+import { loadBrowserAppState, loadUpdatedBrowserAppState, saveBrowserAppState, updateBrowserAppState } from "@/lib/backend/browserAppStateStorage";
 import { applySavedSqlEditorPositionsUpdate, type SavedSqlEditorPositionsUpdate } from "@/lib/app/savedSqlEditorPosition";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
 import { apiUrl, apiWebSocketUrl } from "@/lib/common/webPath";
@@ -2830,6 +2830,7 @@ export async function loadOpenTabsState(): Promise<OpenTabsStatePayload | null> 
     ? {
         tabs: payload.tabs,
         activeTabId: typeof payload.activeTabId === "string" ? payload.activeTabId : null,
+        ...(Array.isArray(payload.closedQueryDrafts) ? { closedQueryDrafts: payload.closedQueryDrafts } : {}),
         ...(payload.groups !== undefined ? { groups: payload.groups } : {}),
         ...(typeof payload.focusedGroupId === "string" ? { focusedGroupId: payload.focusedGroupId } : {}),
         ...(payload.orientation === "vertical" || payload.orientation === "horizontal" ? { orientation: payload.orientation } : {}),
@@ -2857,7 +2858,7 @@ export async function deleteDetachedTabHandoff(_tabId: string): Promise<void> {}
 export async function approveDetachedWindowClose(): Promise<void> {}
 
 export async function loadSavedSqlEditorPositions(): Promise<unknown[] | null> {
-  const value = await loadBrowserAppState("saved_sql_editor_positions");
+  const value = await loadUpdatedBrowserAppState("saved_sql_editor_positions");
   return Array.isArray(value) ? value : null;
 }
 
@@ -4190,8 +4191,8 @@ export async function redisGetTtl(connectionId: string, db: number, keyRaw: stri
   return post("/api/redis/get-ttl", { connectionId, db, keyRaw });
 }
 
-export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string): Promise<RedisStreamPage> {
-  return post("/api/redis/get-stream-entries", { connectionId, db, keyRaw, cursor });
+export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string, newestFirst?: boolean): Promise<RedisStreamPage> {
+  return post("/api/redis/get-stream-entries", { connectionId, db, keyRaw, cursor, ...(newestFirst ? { newestFirst } : {}) });
 }
 
 export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {

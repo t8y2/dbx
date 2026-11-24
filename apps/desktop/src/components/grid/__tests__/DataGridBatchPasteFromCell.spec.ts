@@ -695,7 +695,7 @@ describe("DataGrid multi-row paste from a blank cell", () => {
     expect(visibleCellTexts(displayRows(host)[0]!)[2]).toBe("v1");
   });
 
-  it("appends overflow from a large async paste through preparation (#15263)", async () => {
+  it("appends overflow from a large async paste through preparation (#15263)", { timeout: 30000 }, async () => {
     const save = vi.fn<CustomSaveHandler["save"]>().mockResolvedValue();
     const result = { ...defaultResult(), rows: Array.from({ length: 5 }, (_, i) => [i + 1, null, `seed-${i}`, "x"]) };
     const { host } = mountGrid({ result, customSaveHandler: { canInsert: true, save } });

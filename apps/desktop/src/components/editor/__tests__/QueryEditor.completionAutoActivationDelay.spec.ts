@@ -3,6 +3,8 @@
 import { createApp, h, reactive, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
+import { Transaction } from "@codemirror/state";
+import { completionStatus } from "@codemirror/autocomplete";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import QueryEditor from "../QueryEditor.vue";
@@ -31,11 +33,13 @@ const cleanups: Array<() => void> = [];
 afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup();
   capturedAutocompletionConfigs.length = 0;
+  vi.useRealTimers();
 });
 
-async function mountEditor() {
+async function mountEditor(delay?: number) {
   const pinia = createPinia();
   setActivePinia(pinia);
+  if (delay !== undefined) useSettingsStore().editorSettings.completionAutoActivationDelayMs = delay;
   const state = reactive({ sql: "" });
   const host = document.createElement("div");
   document.body.append(host);
@@ -80,6 +84,25 @@ describe("completion auto-activation delay (#15340)", () => {
     const settings = useSettingsStore();
     settings.editorSettings.completionAutoActivationDelayMs = 1234;
     await vi.waitFor(() => expect(lastConfig().activateOnTypingDelay).toBe(1234));
+  });
+
+  it.each(["input.type", "input.paste"])("waits after the last %s edit before opening the popup", async (event) => {
+    const view = await mountEditor(2000);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const insert = (text: string, pos: number) =>
+      view.dispatch({
+        changes: { from: pos, insert: text },
+        selection: { anchor: pos + text.length },
+        annotations: Transaction.userEvent.of(event),
+      });
+    insert("SE", 0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(completionStatus(view.state)).not.toBe("active");
+    insert("L", 2);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(completionStatus(view.state)).not.toBe("active");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(completionStatus(view.state)).toBe("active");
   });
 
   it("normalizes persisted values into the 0–5000 ms range", () => {

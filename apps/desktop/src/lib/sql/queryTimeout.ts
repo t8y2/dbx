@@ -84,7 +84,7 @@ function statementKeywordScope(statement: string, databaseType: DatabaseType | u
   if (!firstKeyword) return undefined;
   if (databaseType === "sqlserver" && firstKeyword === "waitfor") {
     const significant = tokens.filter((token) => token.kind !== "comment");
-    if (significant.at(-1)?.text === ";") significant.pop();
+    if (significant[significant.length - 1]?.text === ";") significant.pop();
     const [verb, mode, time] = significant;
     const literalWait = significant.length === 3 && verb.kind === "word" && verb.normalized === "waitfor" && mode.kind === "word" && ["delay", "time"].includes(mode.normalized) && time.kind === "string" && time.quote === "'" && time.closed;
     // A bare delay only waits. WAITFOR (RECEIVE ...) consumes queue messages.

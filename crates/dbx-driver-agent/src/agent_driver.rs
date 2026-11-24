@@ -2089,16 +2089,21 @@ async fn spawn_ready_agent_process_before(
     deadline: Instant,
     startup: Option<&StartupCleanupGuard>,
 ) -> Result<ReadyAgentProcess, String> {
-    startup_remaining(deadline)?;
+    startup_remaining(deadline).map_err(|cause| with_launch_command(cause, &launch_display(launch)))?;
     match spawn_ready_agent_process_once_internal(launch, Some(deadline), startup).await {
         Ok(process) => Ok(process),
         Err(failure) if failure.retryable => {
             let delay = Duration::from_millis(AGENT_STARTUP_RETRY_DELAY_MS);
-            if startup_remaining(deadline)? <= delay {
-                return Err("Agent startup deadline exceeded".into());
+            if startup_remaining(deadline).map_err(|cause| with_launch_command(cause, &launch_display(launch)))?
+                <= delay
+            {
+                return Err(with_launch_command(
+                    "Agent startup deadline exceeded".to_string(),
+                    &launch_display(launch),
+                ));
             }
             tokio::time::sleep(delay).await;
-            startup_remaining(deadline)?;
+            startup_remaining(deadline).map_err(|cause| with_launch_command(cause, &launch_display(launch)))?;
             spawn_ready_agent_process_once_internal(launch, Some(deadline), startup)
                 .await
                 .map_err(|failure| failure.message)
@@ -2129,7 +2134,7 @@ async fn spawn_ready_agent_process_once_internal(
     startup: Option<&StartupCleanupGuard>,
 ) -> Result<ReadyAgentProcess, AgentStartupFailure> {
     if let Some(deadline) = deadline {
-        startup_remaining(deadline)?;
+        startup_remaining(deadline).map_err(|cause| startup_deadline_failure(cause, launch))?;
     }
     let mut child = ChildStartupGuard {
         child: Some(spawn_agent_process(launch)?),
@@ -2141,13 +2146,11 @@ async fn spawn_ready_agent_process_once_internal(
     let child_stderr = child.stderr.take().ok_or("Failed to capture agent stderr")?;
     let stderr_tail = Arc::new(Mutex::new(StderrTail::default()));
     start_stderr_collector(child_stderr, stderr_tail.clone());
-    // A startup failure is only actionable when the report says which program
-    // and which jar actually ran: a stale jar, a custom launch config and a
-    // second data directory all look identical from the stderr tail alone.
-    let launch_command = launch_display(launch);
 
     let startup_timeout = match deadline {
-        Some(deadline) => startup_remaining(deadline)?.min(Duration::from_secs(STARTUP_TIMEOUT_SECS)),
+        Some(deadline) => startup_remaining(deadline)
+            .map_err(|cause| startup_deadline_failure(cause, launch))?
+            .min(Duration::from_secs(STARTUP_TIMEOUT_SECS)),
         None => Duration::from_secs(STARTUP_TIMEOUT_SECS),
     };
     let mut stdout = BufReader::new(child_stdout);
@@ -2170,15 +2173,20 @@ async fn spawn_ready_agent_process_once_internal(
 
     let stdout = match startup_result {
         Ok(Ok(Ok(stdout))) => stdout,
-        Ok(Ok(Err(error))) => {
-            return Err(AgentStartupFailure::new(child.startup_error(error, &stderr_tail), &launch_command));
+        Ok(Ok(Err(cause))) => {
+            // Classify the cause before the stderr tail is appended: the tail is
+            // agent-controlled text, and a line from it must not decide whether
+            // the process is retried.
+            let retryable = is_retryable_agent_startup_error(&cause);
+            let message = child.startup_error(cause, &stderr_tail);
+            return Err(startup_failure(retryable, message, launch));
         }
         Ok(Err(error)) => {
-            let error = child.startup_error(format!("Agent startup task failed: {error}"), &stderr_tail);
-            return Err(AgentStartupFailure::new(error, &launch_command));
+            let message = child.startup_error(format!("Agent startup task failed: {error}"), &stderr_tail);
+            return Err(startup_failure(false, message, launch));
         }
         Err(_) => {
-            let error = child.startup_error(
+            let message = child.startup_error(
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     "Agent startup deadline exceeded".to_string()
                 } else {
@@ -2186,12 +2194,12 @@ async fn spawn_ready_agent_process_once_internal(
                 },
                 &stderr_tail,
             );
-            return Err(AgentStartupFailure::new(error, &launch_command));
+            return Err(startup_failure(false, message, launch));
         }
     };
 
     if let Some(deadline) = deadline {
-        startup_remaining(deadline)?;
+        startup_remaining(deadline).map_err(|cause| startup_deadline_failure(cause, launch))?;
     }
     Ok(ReadyAgentProcess {
         child: child.child.take().expect("startup child already transferred"),
@@ -2226,13 +2234,16 @@ struct AgentStartupFailure {
     retryable: bool,
 }
 
-impl AgentStartupFailure {
-    fn new(cause: String, launch_command: &str) -> Self {
-        Self {
-            retryable: is_retryable_agent_startup_error(&cause),
-            message: with_launch_command(cause, launch_command),
-        }
-    }
+/// A startup failure is only actionable when the report says which program and
+/// which jar actually ran: a stale jar, a custom launch config and a second data
+/// directory all look identical from the stderr tail alone.
+fn startup_failure(retryable: bool, message: String, launch: &AgentLaunchSpec) -> AgentStartupFailure {
+    AgentStartupFailure { retryable, message: with_launch_command(message, &launch_display(launch)) }
+}
+
+/// A deadline miss is never retried, but it still names the command that ran.
+fn startup_deadline_failure(cause: String, launch: &AgentLaunchSpec) -> AgentStartupFailure {
+    AgentStartupFailure { retryable: false, message: with_launch_command(cause, &launch_display(launch)) }
 }
 
 impl From<String> for AgentStartupFailure {
@@ -4230,6 +4241,7 @@ fn launch_display(launch: &AgentLaunchSpec) -> String {
     let mut rendered = Vec::with_capacity(launch.args.len() + 2);
     rendered.push(quote_launch_argument(&launch.program.to_string_lossy()));
     let jar_argument = launch_jar_argument_index(&launch.args);
+    let mut separate_value_expected = false;
     for (index, argument) in launch.args.iter().enumerate() {
         let rendered_argument = if Some(index) == jar_argument {
             if looks_like_agent_jar_path(argument) {
@@ -4237,11 +4249,16 @@ fn launch_display(launch: &AgentLaunchSpec) -> String {
             } else {
                 REDACTED_LAUNCH_VALUE.to_string()
             }
+        } else if separate_value_expected && !looks_like_launch_option(argument) {
+            // The previous argument is a bare option, so this one carries its
+            // value. A value is a value even when it starts with `-`.
+            REDACTED_LAUNCH_VALUE.to_string()
         } else if keeps_its_launch_value(argument) {
             argument.clone()
         } else {
             redact_launch_argument(argument)
         };
+        separate_value_expected = looks_like_launch_option(argument) && !argument.contains('=');
         rendered.push(quote_launch_argument(&rendered_argument));
     }
     let command = rendered.join(" ");
@@ -4293,12 +4310,20 @@ fn looks_like_agent_jar_path(argument: &str) -> bool {
         && !argument.chars().any(char::is_control)
 }
 
+/// An argument that names an option instead of carrying a value.
+fn looks_like_launch_option(argument: &str) -> bool {
+    argument.starts_with("--")
+        || argument.starts_with("-D")
+        || argument.starts_with("-X")
+        || argument == "-jar"
+        || argument == "-cp"
+}
+
 /// Keeps the option name and drops the value.
 fn redact_launch_argument(argument: &str) -> String {
     let Some((name, _value)) = argument.split_once('=') else {
-        // A bare option either takes no value or takes it in a separate argument;
-        // that value is masked on its own iteration because it does not start
-        // with `-`.
+        // A value that follows a bare option is masked by the caller; what is
+        // left here is the bare option's own name.
         return if argument.starts_with('-') { argument.to_string() } else { REDACTED_LAUNCH_VALUE.to_string() };
     };
     if !name.starts_with('-') {
@@ -4334,7 +4359,10 @@ fn quote_launch_argument(value: &str) -> String {
 fn spawn_agent_process(launch: &AgentLaunchSpec) -> Result<Child, String> {
     // Record the resolved command even on the happy path: when a user reports a
     // startup failure, this line says which program and which jar were used.
-    log::debug!("[agent] launching {}", launch_display(launch));
+    // Building it is only worth it when the line is actually recorded.
+    if log::log_enabled!(log::Level::Debug) {
+        log::debug!("[agent] launching {}", launch_display(launch));
+    }
     match agent_command(launch).spawn() {
         Ok(child) => Ok(child),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -5749,7 +5777,8 @@ for line in sys.stdin:
         .await
         .err()
         .unwrap();
-        assert_eq!(error, "Agent startup deadline exceeded");
+        assert!(error.starts_with("Agent startup deadline exceeded"), "{error}");
+        assert!(error.contains("launch command:"), "{error}");
     }
 
     #[tokio::test]
@@ -5880,6 +5909,51 @@ for line in sys.stdin:
         assert!(display.contains("--add-opens=java.base/java.lang=ALL-UNNAMED"), "{display}");
         assert!(!display.contains("hunter2"), "credential leaked into {display}");
         assert!(!display.contains("passwd"), "configured text leaked into {display}");
+    }
+
+    #[test]
+    fn launch_display_masks_a_separated_value_that_looks_like_an_option() {
+        let launch = AgentLaunchSpec::new("java")
+            .with_args(["--password", "-p@ssw0rd", "-jar", "agent.jar"])
+            .with_working_dir("drivers/oracle");
+
+        let display = launch_display(&launch);
+
+        assert!(!display.contains("p@ssw0rd"), "a separated credential leaked: {display}");
+        assert!(display.contains("--password ***"), "the option name must stay readable: {display}");
+        assert!(display.contains("-jar agent.jar"), "{display}");
+    }
+
+    #[tokio::test]
+    async fn startup_failure_does_not_retry_because_stderr_contains_the_marker() {
+        let script = std::env::temp_dir().join("dbx_agent_marker_stderr.py");
+        let counter = std::env::temp_dir().join("dbx_agent_marker_stderr.count");
+        std::fs::write(
+            &script,
+            "import pathlib, sys\n\
+             counter = pathlib.Path(sys.argv[1])\n\
+             counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1')\n\
+             sys.stderr.write('Failed to read startup line from agent: end of stream\\n')\n\
+             sys.stderr.flush()\n\
+             print('{\"ready\": false}', flush=True)\n\
+             sys.stdin.read()\n",
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(&counter);
+        let launch = AgentLaunchSpec::new(test_python())
+            .with_args(vec![script.to_string_lossy().to_string(), counter.to_string_lossy().to_string()]);
+
+        let error = match AgentDriverClient::spawn(launch).await {
+            Ok(_) => panic!("a not-ready agent must not start"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("launch command:"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().trim(),
+            "1",
+            "only the cause may decide whether the agent is retried: {error}"
+        );
     }
 
     #[tokio::test]

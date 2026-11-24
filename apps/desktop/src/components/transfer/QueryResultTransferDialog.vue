@@ -540,7 +540,7 @@ async function transfer() {
             :search-placeholder="t('transfer.searchConnection')"
             :empty-text="t('common.noResults')"
             :disabled="submitting"
-            trigger-class="h-8 w-full justify-between text-xs"
+            trigger-class="h-8 w-full max-w-none justify-between gap-1.5 border border-input rounded-md bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
             list-class="w-[var(--reka-popover-trigger-width)]"
           />
         </div>

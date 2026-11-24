@@ -105,6 +105,7 @@ import DataGridTableInfoPanels from "@/components/grid/DataGridTableInfoPanels.v
 import DataGridColumnFilterPopover from "@/components/grid/DataGridColumnFilterPopover.vue";
 import DataGridCellDetailHeader from "@/components/grid/DataGridCellDetailHeader.vue";
 import DataGridCellDetailHexViewer from "@/components/grid/DataGridCellDetailHexViewer.vue";
+import DataGridCellDetailTextPreview from "@/components/grid/DataGridCellDetailTextPreview.vue";
 import DataGridCellDetailForeignKey, { type ForeignKeyRowPreviewState } from "@/components/grid/DataGridCellDetailForeignKey.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
@@ -385,7 +386,16 @@ import { canReadClipboardText, eventTargetAllowsNativeClipboard, isPlainClipboar
 import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, parseDataGridClipboardInBatches, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import { parseInsertStatementPaste, parseInsertStatementPasteInBatches } from "@/lib/dataGrid/dataGridInsertPaste";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
-import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, DATA_GRID_COPY_EXTRACTOR_IDS, DATA_GRID_DEFAULT_COPY_PREFERENCES, extractorUnavailableForDatabase, type DataGridCopyExtractorId, type DataGridCopyPreference, type DataGridPrimaryKeyMode } from "@/lib/dataGrid/dataGridCopyExtractor";
+import {
+  DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS,
+  DATA_GRID_COPY_EXTRACTOR_IDS,
+  DATA_GRID_DEFAULT_COPY_PREFERENCES,
+  extractorUnavailableForDatabase,
+  type DataGridCopyExtractorId,
+  type DataGridCopyPreference,
+  type DataGridPrimaryKeyMode,
+  type DataGridSmartSingleColumnFormat,
+} from "@/lib/dataGrid/dataGridCopyExtractor";
 import { columnNamesForCopy, formatColumnNamesForCopy, type ColumnNameCopyQuoteStyle, type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resolveDataGridMaxRowNumber, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { createDataGridColumnStructureSignature } from "@/lib/dataGrid/dataGridColumnWidthState";
@@ -1253,6 +1263,7 @@ const showMongoJsonPreview = ref(false);
 const mongoJsonPreviewScope = ref<"selected" | "page">("selected");
 const activeCellDetailTab = ref<CellDetailTab>(defaultCellDetailTab());
 const cellDetailDialogOpen = ref(false);
+const binaryTextPreviewDetail = shallowRef<DataGridCellDetail | null>(null);
 const cellDetailDialogTarget = ref<{ rowIndex: number; col: number } | null>(null);
 const cellDetailPanelRef = ref<{ openSearch: () => boolean } | null>(null);
 const rowDetailDialogOpen = ref(false);
@@ -10128,6 +10139,7 @@ const {
   allSourceColumns: computed(() => props.sourceColumns),
   visibleColumnIndexes,
   extractorOptions: computed(() => settingsStore.editorSettings.dataGridExtractorOptions),
+  smartSingleColumnFormat: computed(() => settingsStore.editorSettings.dataGridSmartSingleColumnFormat),
   sql: computed(() => props.sql),
   exportSql: computed(() => props.exportSql),
   pageSql: computed(() => props.pageSql),
@@ -10392,9 +10404,10 @@ function sqlInsertExtractorOptions(primaryKeyMode: DataGridPrimaryKeyMode) {
   };
 }
 
-function saveExtractorConfiguration(value: { preference: DataGridCopyPreference; options: typeof settingsStore.editorSettings.dataGridExtractorOptions; visibleCopyExtractors: typeof settingsStore.editorSettings.dataGridVisibleCopyExtractors }) {
+function saveExtractorConfiguration(value: { preference: DataGridCopyPreference; singleColumnFormat: DataGridSmartSingleColumnFormat; options: typeof settingsStore.editorSettings.dataGridExtractorOptions; visibleCopyExtractors: typeof settingsStore.editorSettings.dataGridVisibleCopyExtractors }) {
   settingsStore.updateEditorSettings({
     dataGridCopyExtractor: value.preference,
+    dataGridSmartSingleColumnFormat: value.singleColumnFormat,
     dataGridExtractorOptions: value.options,
     dataGridVisibleCopyExtractors: value.visibleCopyExtractors,
   });
@@ -12724,6 +12737,18 @@ async function downloadDetailBinaryValue(detail: DataGridCellDetail | null, mode
   } catch (e: any) {
     toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
   }
+}
+
+function binaryTextPreviewItem(detail: DataGridCellDetail | null): ContextMenuItem | null {
+  if (!detail || (detail.isNull ?? detail.value === null) || !isBinaryCellColumnType(detail.type)) return null;
+  const sourceResult = props.result;
+  return {
+    label: t("grid.binaryTextPreview"),
+    icon: Code2,
+    action: () => {
+      if (props.result === sourceResult) binaryTextPreviewDetail.value = detail;
+    },
+  };
 }
 
 function binaryDownloadSubmenu(detail: DataGridCellDetail | null): ContextMenuItem | null {
@@ -15057,6 +15082,7 @@ onActivated(() => {
 });
 onDeactivated(() => {
   gridClipboardActive = false;
+  binaryTextPreviewDetail.value = null;
   pendingColumnOrder.value = null;
   pendingPasteAsNewRows.value = null;
   gridClipboardLifecycle++;
@@ -15894,6 +15920,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         bulkEdit: openBulkEditDialog,
         transpose: openContextTranspose,
       },
+      binaryTextPreviewItem: binaryTextPreviewItem(contextCellDetail.value),
       pluginDecodeItem: pluginDecodeItem(contextCellDetail.value),
       importItem: binaryImportItem(contextCellDetail.value),
       downloadItem: binaryDownloadSubmenu(contextCellDetail.value),
@@ -18308,6 +18335,18 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       @edit="openDialogCellInSidePanel"
     />
 
+    <DataGridCellDetailTextPreview
+      v-if="binaryTextPreviewDetail"
+      :open="true"
+      hide-trigger
+      :identity="`${binaryTextPreviewDetail.rowId}:${binaryTextPreviewDetail.colIndex}`"
+      :value="binaryTextPreviewDetail.value"
+      :column-type="binaryTextPreviewDetail.type"
+      :database-type="resolvedDatabaseType"
+      :incomplete="binaryTextPreviewDetail.isSourceTruncated"
+      @update:open="!$event && (binaryTextPreviewDetail = null)"
+    />
+
     <DataGridValueDiffDialog v-if="detailValueDiffSnapshot" v-model:open="detailValueDiffOpen" :snapshot="detailValueDiffSnapshot" />
 
     <DataGridDetailDialogs
@@ -18402,6 +18441,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       v-model:open="extractorConfigOpen"
       mode="configure"
       :preference="selectedCopyPreference"
+      :single-column-format="settingsStore.editorSettings.dataGridSmartSingleColumnFormat"
       :source-table-name="props.tableMeta?.tableName"
       :visible-copy-extractors="settingsStore.editorSettings.dataGridVisibleCopyExtractors"
       :options="settingsStore.editorSettings.dataGridExtractorOptions"

@@ -1,11 +1,38 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch, useId } from "vue";
 import { useI18n } from "vue-i18n";
-import { FolderOpen, FolderClosed, FileCode, FileSpreadsheet, FileText, ExternalLink, FolderPlus, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings, FilePlus, Pencil, ArrowDownAZ, ArrowUpAZ, GripVertical, Check } from "@lucide/vue";
+import {
+  FolderOpen,
+  FolderClosed,
+  FileCode,
+  FileSpreadsheet,
+  FileText,
+  ExternalLink,
+  FolderPlus,
+  ChevronRight,
+  ChevronDown,
+  X,
+  Trash2,
+  RefreshCw,
+  FolderSearch,
+  Copy,
+  Play,
+  ChevronsUpDown,
+  ChevronsDownUp,
+  Settings,
+  FilePlus,
+  Pencil,
+  ArrowDownAZ,
+  ArrowUpAZ,
+  GripVertical,
+  Check,
+  Database,
+} from "@lucide/vue";
 
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { Label } from "@/components/ui/label";
 import { useSqlPanelSearchMode } from "@/composables/useSqlPanelSearchMode";
 import SqlPanelSearch from "@/components/layout/SqlPanelSearch.vue";
@@ -24,9 +51,21 @@ import type { SavedSqlLineMatch } from "@/lib/savedSql/savedSqlSearch";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { forgetExternalSqlFileTarget, forgetExternalSqlFolderTargets, moveExternalSqlFileTarget, moveExternalSqlFolderTargets, resolveExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import {
+  forgetExternalSqlFileTarget,
+  forgetExternalSqlFolderTargets,
+  MAX_EXTERNAL_SQL_FILE_TARGETS,
+  moveExternalSqlFileTarget,
+  moveExternalSqlFolderTargets,
+  rememberExternalSqlFileTargets,
+  resolveExternalSqlFileTarget,
+  resolveExternalSqlFileTargetForActiveTab,
+  unassociatedExternalSqlFileTarget,
+} from "@/lib/sql/externalSqlFileTarget";
 import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, formatSqlFileSize, isExternalSqlFileTooLargeError, isSqlFilePath, isSqlOrScriptFilePath, isSpreadsheetFilePath, normalizeExternalSqlPath, queryTabExternalFilePath, relocateExternalSqlPathWithinFolder } from "@/lib/sql/sqlFileOpen";
 
+import { supportsSqlFileExecution } from "@/lib/database/databaseFeatureSupport";
+import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
@@ -834,7 +873,9 @@ function collectFileEntries(entries: SqlFileEntry[], folder: FolderState, rows: 
   }
 }
 
+const fileTargetsRevision = ref(0);
 const connectionFileGroups = computed<ConnectionFileGroup[]>(() => {
+  void fileTargetsRevision.value;
   const rows: ConnectionFileRow[] = [];
   for (const folder of folders.value) {
     if (folder.loading) continue;
@@ -1403,6 +1444,52 @@ async function deleteSqlFile() {
   }
 }
 
+const showChangeFileConnection = ref(false);
+const changeConnectionPaths = ref<string[]>([]);
+const newFileConnectionId = ref("");
+const fileTargetConnections = computed(() => connectionStore.connections.filter((connection) => supportsSqlFileExecution(connection.db_type)));
+const newFileConnection = computed(() => fileTargetConnections.value.find((connection) => connection.id === newFileConnectionId.value));
+const hasOpenTargetFiles = computed(() => {
+  const paths = new Set(changeConnectionPaths.value);
+  return queryStore.tabs.some((tab) => {
+    const path = queryTabExternalFilePath(tab);
+    return path !== undefined && paths.has(normalizeExternalSqlPath(path));
+  });
+});
+
+function selectedSqlFilePaths(target: Extract<ContextTarget, { kind: "file" }>): string[] {
+  if (!selectedKeys.value.has(nodeKey(target.folderPath, "file", target.entry.path))) return [];
+  const visibleFiles = displayMode.value === "connection" ? expandedConnectionRows.value.map((row) => ({ id: row.id, path: row.entry.path })) : visibleItems.value.filter((item) => item.type === "file");
+  return [...new Set(visibleFiles.filter((file) => selectedKeys.value.has(file.id) && isSqlFilePath(file.path)).map((file) => normalizeExternalSqlPath(file.path)))];
+}
+
+function openChangeFileConnection(paths: string[]) {
+  changeConnectionPaths.value = paths;
+  newFileConnectionId.value = "";
+  showChangeFileConnection.value = true;
+}
+
+function changeFileConnection() {
+  const connection = newFileConnection.value;
+  const paths = changeConnectionPaths.value;
+  if (!connection || paths.length < 2 || hasOpenTargetFiles.value) return;
+  const database = resolveDefaultDatabase(connection, []);
+  const saved = rememberExternalSqlFileTargets(paths, { connectionId: connection.id, database, schema: connection.default_schema || undefined });
+  if (saved !== "saved") {
+    const message = saved === "capacity" ? t("sqlFileTree.changeConnectionCapacity", { count: MAX_EXTERNAL_SQL_FILE_TARGETS }) : t("sqlFileTree.changeConnectionSaveFailed");
+    toast(message, 5000);
+    return;
+  }
+  fileTargetsRevision.value++;
+  if (displayMode.value === "connection") {
+    expandedConnections.value = new Set([...expandedConnections.value, connection.id]);
+    saveExpandedConnectionsState();
+  }
+  showChangeFileConnection.value = false;
+  clearSelection();
+  toast(t("sqlLibrary.changeTargetSuccess", { count: paths.length }), 2500);
+}
+
 // ---- context menu ----
 const contextMenuItems = computed<ContextMenuItem[]>(() => {
   const target = contextTarget.value;
@@ -1491,6 +1578,14 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
         { label: t("sqlFileTree.openWithDefaultApp"), action: () => openFileWithDefaultApp(target.entry.path), icon: ExternalLink },
       ]
     : [{ label: t("sqlFileTree.openWithDefaultApp"), action: () => openFileWithDefaultApp(target.entry.path), icon: ExternalLink }];
+  const selectedPaths = selectedSqlFilePaths(target);
+  if (selectedPaths.length > 1 && fileTargetConnections.value.length) {
+    items.push({
+      label: `${t("sqlFileTree.changeConnectionForFiles", { count: selectedPaths.length })}…`,
+      action: () => openChangeFileConnection(selectedPaths),
+      icon: Database,
+    });
+  }
   items.push(
     { label: "", separator: true },
     { label: t("sqlFileTree.revealInFileManager"), action: () => revealInFileManager(target.entry.path), icon: FolderSearch },
@@ -1889,6 +1984,31 @@ function clearContextTarget() {
       <Input id="sql-file-filter" v-model="fileFilterDraft" :placeholder="t('sqlFileTree.fileFilterPlaceholder')" @keydown.enter="saveFileFilter" />
       <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.fileFilterHint", { regex: fileFilterRegexExample }) }}</p>
     </SqlFileInteractionSettingsDialog>
+
+    <Dialog v-model:open="showChangeFileConnection">
+      <DialogContent class="sm:max-w-[420px]" @close-auto-focus="restoreTreeFocus">
+        <DialogHeader>
+          <DialogTitle>{{ t("sqlFileTree.changeConnectionForFiles", { count: changeConnectionPaths.length }) }}</DialogTitle>
+          <DialogDescription>{{ t("sqlFileTree.changeConnectionForFilesDescription") }}</DialogDescription>
+        </DialogHeader>
+        <p v-if="changeConnectionPaths.length > MAX_EXTERNAL_SQL_FILE_TARGETS" class="text-sm text-muted-foreground">{{ t("sqlFileTree.changeConnectionLimit", { count: MAX_EXTERNAL_SQL_FILE_TARGETS }) }}</p>
+        <p v-if="hasOpenTargetFiles" class="text-sm text-muted-foreground">{{ t("sqlFileTree.changeConnectionCloseFiles") }}</p>
+        <ConnectionTreeSelect
+          v-model="newFileConnectionId"
+          :connections="fileTargetConnections"
+          :layout="connectionStore.sidebarLayout"
+          :placeholder="t('editor.selectConnection')"
+          :search-placeholder="t('editor.searchConnection')"
+          :empty-text="t('grid.noSearchResults')"
+          trigger-class="h-8 w-full max-w-none justify-between border border-input bg-background px-2.5 text-sm"
+          list-class="w-[360px] max-w-[calc(100vw-2rem)]"
+        />
+        <DialogFooter>
+          <Button variant="outline" size="sm" @click="showChangeFileConnection = false">{{ t("dangerDialog.cancel") }}</Button>
+          <Button size="sm" :disabled="!newFileConnection || hasOpenTargetFiles || changeConnectionPaths.length > MAX_EXTERNAL_SQL_FILE_TARGETS" @click="changeFileConnection">{{ t("sqlLibrary.changeTargetConfirm") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog :open="showCreateDialog" @update:open="(open) => (showCreateDialog = open)">
       <DialogContent class="sm:max-w-[380px]">

@@ -21,10 +21,12 @@ import {
   type DataGridCopyPreference,
   type DataGridCopyExtractorId,
   type DataGridExtractorOptions,
+  type DataGridSmartSingleColumnFormat,
   DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
   DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
   DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
   normalizeDataGridCopyPreference,
+  normalizeDataGridSmartSingleColumnFormat,
   normalizeDataGridExtractorOptions,
   normalizeVisibleDataGridCopyExtractors,
 } from "@/lib/dataGrid/dataGridCopyExtractor";
@@ -1154,6 +1156,7 @@ export interface EditorSettings {
   dataGridSearchMode: DataGridSearchMode;
   dataGridRowNumberMode: DataGridRowNumberMode;
   dataGridCopyExtractor: DataGridCopyPreference;
+  dataGridSmartSingleColumnFormat: DataGridSmartSingleColumnFormat;
   dataGridExtractorOptions: DataGridExtractorOptions;
   dataGridVisibleCopyExtractors: DataGridCopyExtractorId[];
   dataGridVisibleCopyExtractorsMigrationVersion: number;
@@ -1573,6 +1576,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridSearchMode: "filter",
   dataGridRowNumberMode: "view",
   dataGridCopyExtractor: "smart",
+  dataGridSmartSingleColumnFormat: "default",
   dataGridExtractorOptions: normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
   dataGridVisibleCopyExtractors: normalizeVisibleDataGridCopyExtractors(undefined),
   dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
@@ -2353,6 +2357,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
     dataGridRowNumberMode: normalizeDataGridRowNumberMode(settings.dataGridRowNumberMode),
     dataGridCopyExtractor: normalizeDataGridCopyPreference(settings.dataGridCopyExtractor),
+    dataGridSmartSingleColumnFormat: normalizeDataGridSmartSingleColumnFormat(settings.dataGridSmartSingleColumnFormat),
     dataGridExtractorOptions,
     dataGridVisibleCopyExtractors,
     dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
@@ -3390,6 +3395,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);
     if (partial.dataGridRowNumberMode !== undefined) editorSettings.value.dataGridRowNumberMode = normalizeDataGridRowNumberMode(partial.dataGridRowNumberMode);
     if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyPreference(partial.dataGridCopyExtractor);
+    if (partial.dataGridSmartSingleColumnFormat !== undefined) editorSettings.value.dataGridSmartSingleColumnFormat = normalizeDataGridSmartSingleColumnFormat(partial.dataGridSmartSingleColumnFormat);
     if (partial.dataGridExtractorOptions !== undefined) editorSettings.value.dataGridExtractorOptions = normalizeDataGridExtractorOptions(partial.dataGridExtractorOptions);
     if (partial.dataGridVisibleCopyExtractors !== undefined) editorSettings.value.dataGridVisibleCopyExtractors = normalizeVisibleDataGridCopyExtractors(partial.dataGridVisibleCopyExtractors);
     if (partial.dataGridVisibleCopyExtractorsMigrationVersion !== undefined) editorSettings.value.dataGridVisibleCopyExtractorsMigrationVersion = DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION;

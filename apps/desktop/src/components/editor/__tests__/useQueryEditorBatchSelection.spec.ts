@@ -126,6 +126,22 @@ describe("QueryEditor batch selection ownership", () => {
     expect(batch.expandedRendering).toBe(false);
   });
 
+  it("lets a same-row double-click reach single-completion handling", () => {
+    const { session, row } = createHarness();
+    const { label } = row(1);
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(label);
+
+    const firstMouseDown = new MouseEvent("mousedown", { button: 0, detail: 1, bubbles: true, cancelable: true });
+    label.dispatchEvent(firstMouseDown);
+    expect(firstMouseDown.defaultPrevented).toBe(true);
+    expect(session.selectedKeys).toEqual(new Set([session.candidates[1].key]));
+
+    const secondMouseDown = new MouseEvent("mousedown", { button: 0, detail: 2, bubbles: true, cancelable: true });
+    label.dispatchEvent(secondMouseDown);
+    expect(secondMouseDown.defaultPrevented).toBe(false);
+    expect(session.selectedKeys).toEqual(new Set([session.candidates[1].key]));
+  });
+
   it("uses the live selected completion and inserts fields in candidate order", () => {
     const { batch, session, runtime, currentView, completion } = createHarness();
     runtime.codeMirrorSelectedCompletion = () => completion(2);

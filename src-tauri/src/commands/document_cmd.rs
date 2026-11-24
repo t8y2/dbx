@@ -4,7 +4,7 @@ use tauri::State;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::document_result::DocumentQueryResult;
-use dbx_core::document_ops::CollectionInfo;
+use dbx_core::document_ops::{CollectionInfo, DocumentDeleteId};
 
 pub(crate) async fn run_cancellable<T, F>(
     state: &Arc<AppState>,
@@ -217,7 +217,7 @@ pub async fn document_delete_document(
     connection_id: String,
     database: String,
     collection: String,
-    id: String,
+    id: DocumentDeleteId,
     routing: Option<String>,
     document_type: Option<String>,
 ) -> Result<u64, String> {
@@ -227,7 +227,7 @@ pub async fn document_delete_document(
         &connection_id,
         &database,
         &collection,
-        &id,
+        id,
         routing.as_deref(),
         document_type.as_deref(),
     )

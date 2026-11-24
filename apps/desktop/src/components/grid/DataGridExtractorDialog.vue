@@ -10,11 +10,13 @@ import {
   DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS,
   DATA_GRID_COPY_EXTRACTOR_IDS,
   DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS,
+  DATA_GRID_SMART_SINGLE_COLUMN_FORMATS,
   normalizeVisibleDataGridCopyExtractors,
   normalizeDataGridExtractorOptions,
   validateDataGridExtractorOptions,
   type DataGridCopyExtractorId,
   type DataGridCopyPreference,
+  type DataGridSmartSingleColumnFormat,
   type DataGridExtractorOptions,
   type DataGridExtractPreview,
   type DataGridExtractWarningCode,
@@ -24,6 +26,7 @@ import {
 const props = defineProps<{
   open: boolean;
   preference: DataGridCopyPreference;
+  singleColumnFormat?: DataGridSmartSingleColumnFormat;
   sourceTableName?: string;
   visibleCopyExtractors: DataGridCopyExtractorId[];
   options: DataGridExtractorOptions;
@@ -31,20 +34,22 @@ const props = defineProps<{
   previewSessionKey?: number;
   items: Array<{ value: DataGridCopyPreference; label: string; disabled?: boolean }>;
   visibleItems: Array<{ value: DataGridCopyExtractorId; label: string; disabled?: boolean }>;
-  preview: (preference: DataGridCopyPreference, options: DataGridExtractorOptions) => Promise<DataGridExtractPreview>;
+  preview: (preference: DataGridCopyPreference, options: DataGridExtractorOptions, singleColumnFormat?: DataGridSmartSingleColumnFormat) => Promise<DataGridExtractPreview>;
   canCopy?: (preference: DataGridCopyPreference, options: DataGridExtractorOptions) => boolean;
   copy?: (preference: DataGridCopyPreference, options: DataGridExtractorOptions) => Promise<boolean>;
 }>();
 
 const emit = defineEmits<{
   "update:open": [value: boolean];
-  save: [value: { preference: DataGridCopyPreference; options: DataGridExtractorOptions; visibleCopyExtractors: DataGridCopyExtractorId[] }];
+  save: [value: { preference: DataGridCopyPreference; singleColumnFormat: DataGridSmartSingleColumnFormat; options: DataGridExtractorOptions; visibleCopyExtractors: DataGridCopyExtractorId[] }];
 }>();
 
 const { t } = useI18n();
 const formatRadioGroupName = `grid-copy-format-${useId()}`;
 const selectedFormat = ref<DataGridCopyPreference>(props.preference);
 const draftDefaultPreference = ref<DataGridCopyPreference>(props.preference);
+const draftSingleColumnFormat = ref<DataGridSmartSingleColumnFormat>(props.singleColumnFormat ?? "default");
+const singleColumnFormatItems = computed(() => props.items.filter((item) => DATA_GRID_SMART_SINGLE_COLUMN_FORMATS.some((format) => format === item.value)));
 const draftOptions = ref<DataGridExtractorOptions>(normalizeDataGridExtractorOptions(props.options));
 const draftVisibleCopyExtractors = ref<DataGridCopyExtractorId[]>(normalizeVisibleDataGridCopyExtractors(props.visibleCopyExtractors));
 const previewText = ref("");
@@ -127,7 +132,8 @@ async function refreshPreview() {
     return;
   }
   try {
-    const result = await props.preview(selectedFormat.value, normalizeDataGridExtractorOptions(draftOptions.value));
+    const options = normalizeDataGridExtractorOptions(draftOptions.value);
+    const result = props.singleColumnFormat !== undefined && selectedFormat.value === "smart" ? await props.preview(selectedFormat.value, options, draftSingleColumnFormat.value) : await props.preview(selectedFormat.value, options);
     if (sequence === previewSequence) {
       previewText.value = result.text;
       previewWarnings.value = (result.warnings ?? []).map((warning) => warningText(warning.code, result.omittedColumns));
@@ -170,6 +176,7 @@ watch(
     dialogSession += 1;
     selectedFormat.value = props.preference;
     draftDefaultPreference.value = props.preference;
+    draftSingleColumnFormat.value = props.singleColumnFormat ?? "default";
     draftOptions.value = normalizeDataGridExtractorOptions(props.options);
     draftVisibleCopyExtractors.value = normalizeVisibleDataGridCopyExtractors(props.visibleCopyExtractors);
     previewExpanded.value = false;
@@ -182,7 +189,7 @@ watch(
 );
 
 watch(
-  [selectedFormat, draftOptions],
+  [selectedFormat, draftOptions, draftSingleColumnFormat],
   () => {
     copyError.value = "";
     if (props.open && previewExpanded.value) schedulePreview();
@@ -226,7 +233,7 @@ onBeforeUnmount(() => {
 
 function save() {
   if (optionsError.value) return;
-  emit("save", { preference: draftDefaultPreference.value, options: normalizeDataGridExtractorOptions(draftOptions.value), visibleCopyExtractors: [...draftVisibleCopyExtractors.value] });
+  emit("save", { preference: draftDefaultPreference.value, singleColumnFormat: draftSingleColumnFormat.value, options: normalizeDataGridExtractorOptions(draftOptions.value), visibleCopyExtractors: [...draftVisibleCopyExtractors.value] });
   emit("update:open", false);
 }
 
@@ -284,6 +291,14 @@ function handleFormatKeydown(event: KeyboardEvent, itemIndex: number) {
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem v-for="item in items" :key="item.value" :value="item.value" :disabled="item.disabled">{{ item.label }}</SelectItem>
+              </SelectContent>
+            </Select>
+            <Label>{{ t("grid.copyExtractorSingleColumnFormat") }}</Label>
+            <Select v-model="draftSingleColumnFormat">
+              <SelectTrigger :aria-label="t('grid.copyExtractorSingleColumnFormat')"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">{{ t("grid.copyExtractorUseSmartDefaults") }}</SelectItem>
+                <SelectItem v-for="item in singleColumnFormatItems" :key="item.value" :value="item.value" :disabled="item.disabled">{{ item.label }}</SelectItem>
               </SelectContent>
             </Select>
           </div>

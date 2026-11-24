@@ -32,6 +32,10 @@ static EXPORT_CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
 
 pub const EXPORT_CANCELLED_ERROR: &str = "Export cancelled";
 const EXPORT_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+// This sentinel is written only to temporary PostgreSQL/openGauss schema files. The NUL
+// bytes keep it distinct from user SQL comments, literals, and DDL text that the phase
+// combiner must preserve.
+const DATABASE_EXPORT_TABLE_BOUNDARY_MARKER: &str = "\0DBX table export boundary\0";
 
 /// MySQL scripts written by the exporter are always UTF-8: values are decoded off the
 /// wire and reformatted into Rust strings before they are written, so the file encoding
@@ -2434,7 +2438,6 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
             );
             lines.push(format!("-- Structure for {}", table.display_name));
             lines.push(ddl);
-            lines.push(String::new());
         }
 
         lines.push(format!("-- Data for {}", table.display_name));
@@ -3814,7 +3817,7 @@ fn write_database_export_rows_with_mode<W: Write>(
         insert_dialect,
     )?;
     for statement in statements {
-        writeln!(file, "{statement}\n").map_err(|error| format!("Failed to write file: {error}"))?;
+        writeln!(file, "{statement}").map_err(|error| format!("Failed to write file: {error}"))?;
     }
     Ok(())
 }
@@ -4923,6 +4926,10 @@ fn copy_postgres_export_phase<W: Write>(
         if source.read_line(&mut chunk).map_err(|e| format!("Failed to read export phase: {e}"))? == 0 {
             break;
         }
+        if chunk.trim() == DATABASE_EXPORT_TABLE_BOUNDARY_MARKER {
+            destination.write_all(b"\n").map_err(|e| format!("Failed to write export phase: {e}"))?;
+            continue;
+        }
         for statement in splitter.push_chunk(&chunk) {
             if is_export_cancelled_now(export_id) {
                 return Err(EXPORT_CANCELLED_ERROR.to_string());
@@ -4963,6 +4970,10 @@ fn combine_schema_sql_export<W: Write>(source: &mut dyn BufRead, destination: &m
         let bytes_read = source.read_line(&mut chunk)?;
         if bytes_read == 0 {
             break;
+        }
+        if chunk.trim() == DATABASE_EXPORT_TABLE_BOUNDARY_MARKER {
+            destination.write_all(b"\n")?;
+            continue;
         }
         for statement in splitter.push_chunk(&chunk) {
             destination.write_all(format!("{statement};\n").as_bytes())?;
@@ -5046,6 +5057,7 @@ async fn export_postgres_all_schemas_sql_core(
                 &schema_request,
                 child_progress,
                 phases.as_mut(),
+                true,
             ))
             .await?;
             let terminal = terminal.lock().expect("export terminal mutex poisoned").clone();
@@ -5236,7 +5248,7 @@ async fn export_database_sql_core_inner(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
-    Box::pin(export_database_sql_core_inner_with_phases(state, request, on_progress, None)).await
+    Box::pin(export_database_sql_core_inner_with_phases(state, request, on_progress, None, false)).await
 }
 
 async fn export_database_sql_core_inner_with_phases(
@@ -5244,6 +5256,7 @@ async fn export_database_sql_core_inner_with_phases(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
     mut phases: Option<&mut PostgresSchemaExportPhases>,
+    preserve_table_boundaries: bool,
 ) -> Result<(), String> {
     let _snapshot_keep_alive = if let Some(snapshot_session_id) = request.snapshot_session_id.as_deref() {
         Some(crate::query::keep_manual_transaction_alive(state, snapshot_session_id).await?)
@@ -5862,6 +5875,14 @@ async fn export_database_sql_core_inner_with_phases(
     }
 
     for (table_index, table_info) in tables.iter().enumerate().filter(|_| exports_database_tables(request)) {
+        if table_index > 0 {
+            if preserve_table_boundaries {
+                writeln!(file, "{DATABASE_EXPORT_TABLE_BOUNDARY_MARKER}")
+                    .map_err(|e| format!("Failed to write file: {e}"))?;
+            }
+            writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
+        }
+
         // Check cancellation
         if is_export_cancelled(&request.export_id).await {
             emit_database_export_cancelled(
@@ -5897,7 +5918,7 @@ async fn export_database_sql_core_inner_with_phases(
         // Export structure
         if request.include_structure {
             if request.drop_table_if_exists {
-                writeln!(file, "{}\n", drop_table_if_exists_sql(table_name, &request.schema, &db_type))
+                writeln!(file, "{}", drop_table_if_exists_sql(table_name, &request.schema, &db_type))
                     .map_err(|e| format!("Failed to write file: {e}"))?;
             }
             for sequence in postgres_sequences.iter().filter(|sequence| {
@@ -5917,7 +5938,7 @@ async fn export_database_sql_core_inner_with_phases(
                     error_summary: None,
                 });
 
-                writeln!(file, "{};\n", generate_postgres_sequence_create_ddl(sequence, &request.schema))
+                writeln!(file, "{};", generate_postgres_sequence_create_ddl(sequence, &request.schema))
                     .map_err(|e| format!("Failed to write file: {e}"))?;
                 object_index += 1;
             }
@@ -5966,7 +5987,7 @@ async fn export_database_sql_core_inner_with_phases(
                         Some(db_type),
                         DdlNormalizeOptions { omit_auto_increment: request.omit_auto_increment },
                     );
-                    writeln!(file, "{ddl}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+                    writeln!(file, "{ddl}").map_err(|e| format!("Failed to write file: {e}"))?;
                     if let Some(phases) = phases.as_deref_mut() {
                         if !ddl.trim().is_empty() {
                             phases.table_structures.push(PostgresExportRelation {
@@ -10923,7 +10944,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO `orders` (`id`, `quantity`, `created_at`) VALUES (7, 2, '2026-07-30 08:00:00');\n\n"
+            "INSERT INTO `orders` (`id`, `quantity`, `created_at`) VALUES (7, 2, '2026-07-30 08:00:00');\n"
         );
     }
 
@@ -10949,7 +10970,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO \"dbo\".\"event]log\" (\"enabled\", \"path\") VALUES (TRUE, 'C:\\exports\\O''Hara');\n\n"
+            "INSERT INTO \"dbo\".\"event]log\" (\"enabled\", \"path\") VALUES (TRUE, 'C:\\exports\\O''Hara');\n"
         );
     }
 
@@ -10979,12 +11000,7 @@ mod tests {
         .unwrap();
         drop(file);
 
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO `order.items` (`id`) VALUES (1);
-
-"
-        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "INSERT INTO `order.items` (`id`) VALUES (1);\n");
     }
 
     #[test]
@@ -11044,12 +11060,7 @@ mod tests {
         .unwrap();
         drop(file);
 
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO \"app\".\"users\" (\"id\") VALUES (1);
-
-"
-        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "INSERT INTO \"app\".\"users\" (\"id\") VALUES (1);\n");
     }
 
     #[test]
@@ -11078,12 +11089,7 @@ mod tests {
         .unwrap();
         drop(file);
 
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');
-
-"
-        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');\n");
     }
 
     #[test]
@@ -11108,7 +11114,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO `app`.`users` (`id`, `name`) VALUES (1, 'Ada');\n\n"
+            "INSERT INTO `app`.`users` (`id`, `name`) VALUES (1, 'Ada');\n"
         );
     }
 
@@ -11138,7 +11144,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');\n\nINSERT INTO `users` (`id`, `name`) VALUES (2, 'Linus');\n\n"
+            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');\nINSERT INTO `users` (`id`, `name`) VALUES (2, 'Linus');\n"
         );
     }
 
@@ -11162,10 +11168,7 @@ mod tests {
         .unwrap();
         drop(file);
 
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO \"dbo\".\"sync_state\" (\"id\") VALUES (7);\n\n"
-        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "INSERT INTO \"dbo\".\"sync_state\" (\"id\") VALUES (7);\n");
     }
 
     #[test]
@@ -11302,6 +11305,23 @@ mod tests {
             let containing_parts = sql_parts.iter().filter(|(_, contents)| contents.contains(unit)).count();
             assert_eq!(containing_parts, 1, "unit must appear whole in exactly one part: {unit:?}");
         }
+    }
+
+    #[test]
+    fn postgres_spool_readers_keep_table_groups_without_leaking_the_boundary_marker() {
+        let first = "CREATE TABLE sales.orders (id int);\nINSERT INTO sales.orders VALUES (1);\n";
+        let second = "CREATE TABLE archive.orders (id int);\nINSERT INTO archive.orders VALUES (2);\n";
+        let spool = format!("{first}{}\n\n{second}", super::DATABASE_EXPORT_TABLE_BOUNDARY_MARKER);
+        let expected = format!("{first}\n{second}");
+
+        let mut output = Vec::new();
+        combine_schema_sql_export(&mut std::io::Cursor::new(&spool), &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), expected);
+
+        let mut output = Vec::new();
+        super::copy_postgres_export_phase(&mut std::io::Cursor::new(&spool), &mut output, "table-boundary-unit")
+            .unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), expected);
     }
 
     #[test]
@@ -11624,7 +11644,7 @@ mod tests {
 
         let content = std::fs::read_to_string(path).unwrap();
         assert!(!content.contains("IDENTITY_INSERT"));
-        assert_eq!(content, "INSERT INTO \"SYSDBA\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\n\n");
+        assert_eq!(content, "INSERT INTO \"SYSDBA\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\n");
     }
 
     #[test]
@@ -11712,7 +11732,6 @@ mod tests {
                 String::new(),
                 "-- Structure for users".to_string(),
                 "CREATE TABLE `users` (`id` int);".to_string(),
-                String::new(),
                 "-- Data for users".to_string(),
                 format!("-- Exported rows: 1 (truncated at {DATABASE_EXPORT_ROW_LIMIT})"),
                 "INSERT INTO `users` (`id`) VALUES (1);".to_string(),

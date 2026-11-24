@@ -152,55 +152,58 @@ async function copyPreview() {
 <template>
   <Dialog v-model:open="open">
     <DialogContent class="max-h-[86vh] border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[620px]">
-      <DialogHeader>
-        <DialogTitle class="flex items-center gap-2">
-          <List class="h-5 w-5 text-primary" />
-          {{ t("editor.delimitedList.title") }}
-        </DialogTitle>
-      </DialogHeader>
+      <!-- Form wrapper so Enter in any field submits (implicit submission → Confirm). -->
+      <form class="grid gap-4" @submit.prevent="confirm">
+        <DialogHeader>
+          <DialogTitle class="flex items-center gap-2">
+            <List class="h-5 w-5 text-primary" />
+            {{ t("editor.delimitedList.title") }}
+          </DialogTitle>
+        </DialogHeader>
 
-      <div class="grid gap-4">
-        <div class="grid grid-cols-2 gap-4">
-          <div class="grid gap-1.5">
-            <Label class="text-xs">{{ t("editor.delimitedList.columnDelimiter") }}</Label>
-            <Input v-model="columnDelimiter" class="h-8 font-mono text-xs" />
+        <div class="grid gap-4">
+          <div class="grid grid-cols-2 gap-4">
+            <div class="grid gap-1.5">
+              <Label class="text-xs">{{ t("editor.delimitedList.columnDelimiter") }}</Label>
+              <Input v-model="columnDelimiter" class="h-8 font-mono text-xs" />
+            </div>
+            <div class="grid gap-1.5">
+              <Label class="text-xs">{{ t("editor.delimitedList.resultDelimiter") }}</Label>
+              <Input v-model="resultDelimiter" class="h-8 font-mono text-xs" />
+            </div>
+            <div class="grid gap-1.5">
+              <Label class="text-xs">{{ t("editor.delimitedList.quoteChar") }}</Label>
+              <Input v-model="quoteChar" class="h-8 font-mono text-xs" />
+            </div>
+            <div class="grid gap-1.5">
+              <Label class="text-xs">{{ t("editor.delimitedList.wrapColumn") }}</Label>
+              <Input v-model.number="wrapColumn" type="number" class="h-8 font-mono text-xs" min="1" />
+            </div>
+            <div class="grid gap-1.5">
+              <Label class="text-xs">{{ t("editor.delimitedList.prefixText") }}</Label>
+              <Input v-model="prefixText" class="h-8 font-mono text-xs" />
+            </div>
+            <div class="grid gap-1.5">
+              <Label class="text-xs">{{ t("editor.delimitedList.suffixText") }}</Label>
+              <Input v-model="suffixText" class="h-8 font-mono text-xs" />
+            </div>
           </div>
+
           <div class="grid gap-1.5">
-            <Label class="text-xs">{{ t("editor.delimitedList.resultDelimiter") }}</Label>
-            <Input v-model="resultDelimiter" class="h-8 font-mono text-xs" />
-          </div>
-          <div class="grid gap-1.5">
-            <Label class="text-xs">{{ t("editor.delimitedList.quoteChar") }}</Label>
-            <Input v-model="quoteChar" class="h-8 font-mono text-xs" />
-          </div>
-          <div class="grid gap-1.5">
-            <Label class="text-xs">{{ t("editor.delimitedList.wrapColumn") }}</Label>
-            <Input v-model.number="wrapColumn" type="number" class="h-8 font-mono text-xs" min="1" />
-          </div>
-          <div class="grid gap-1.5">
-            <Label class="text-xs">{{ t("editor.delimitedList.prefixText") }}</Label>
-            <Input v-model="prefixText" class="h-8 font-mono text-xs" />
-          </div>
-          <div class="grid gap-1.5">
-            <Label class="text-xs">{{ t("editor.delimitedList.suffixText") }}</Label>
-            <Input v-model="suffixText" class="h-8 font-mono text-xs" />
+            <Label class="text-xs">{{ t("editor.delimitedList.preview") }}</Label>
+            <pre class="max-h-48 min-w-0 overflow-auto rounded-md bg-muted px-3 py-2 text-xs font-mono whitespace-pre">{{ preview || t("editor.delimitedList.emptyPreview") }}</pre>
           </div>
         </div>
 
-        <div class="grid gap-1.5">
-          <Label class="text-xs">{{ t("editor.delimitedList.preview") }}</Label>
-          <pre class="max-h-48 min-w-0 overflow-auto rounded-md bg-muted px-3 py-2 text-xs font-mono whitespace-pre">{{ preview || t("editor.delimitedList.emptyPreview") }}</pre>
-        </div>
-      </div>
-
-      <DialogFooter>
-        <Button variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button variant="outline" @click="copyPreview" :disabled="!preview">
-          <Copy class="mr-1.5 h-4 w-4" />
-          {{ t("grid.copy") }}
-        </Button>
-        <Button @click="confirm" :disabled="!preview">{{ t("editor.delimitedList.confirm") }}</Button>
-      </DialogFooter>
+        <DialogFooter>
+          <Button type="button" variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
+          <Button type="button" variant="outline" @click="copyPreview" :disabled="!preview">
+            <Copy class="mr-1.5 h-4 w-4" />
+            {{ t("grid.copy") }}
+          </Button>
+          <Button type="submit" :disabled="!preview">{{ t("editor.delimitedList.confirm") }}</Button>
+        </DialogFooter>
+      </form>
     </DialogContent>
   </Dialog>
 </template>

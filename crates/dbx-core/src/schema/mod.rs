@@ -8491,6 +8491,10 @@ pub async fn completion_assistant_search_core(
                 PoolKind::Mysql(pool, mode) if *mode != MysqlMode::OceanBaseOracle => Some(pool.clone()),
                 _ => None,
             }) {
+                let db_config = connection_config(state, &request.connection_id).await;
+                if db_config.as_ref().is_some_and(db::doris::is_config) {
+                    pool.set_doris_metadata_defaults();
+                }
                 return db::mysql::completion_assistant_search(&pool, &request).await;
             }
         }

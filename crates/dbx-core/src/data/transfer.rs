@@ -4032,7 +4032,12 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             match db_type {
                 DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks => {
                     if column_type.is_some_and(is_mysql_bit_type) {
-                        format!("b'{}'", n)
+                        let s = n.to_string();
+                        if s == "0" || s == "1" {
+                            format!("b'{s}'")
+                        } else {
+                            s
+                        }
                     } else {
                         n.to_string()
                     }
@@ -4095,7 +4100,25 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                 DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks
                     if column_type.is_some_and(is_mysql_bit_type) =>
                 {
-                    format!("b'{escaped}'")
+                    let trimmed = s.trim();
+                    if trimmed.eq_ignore_ascii_case("true") {
+                        "b'1'".to_string()
+                    } else if trimmed.eq_ignore_ascii_case("false") {
+                        "b'0'".to_string()
+                    } else {
+                        let clean_bit_inner = trimmed
+                            .strip_prefix("b'")
+                            .or_else(|| trimmed.strip_prefix("B'"))
+                            .and_then(|stripped| stripped.strip_suffix('\''))
+                            .filter(|inner| {
+                                !inner.is_empty() && inner.bytes().all(|byte| byte == b'0' || byte == b'1')
+                            });
+                        if let Some(inner) = clean_bit_inner {
+                            format!("b'{inner}'")
+                        } else {
+                            format!("b'{escaped}'")
+                        }
+                    }
                 }
                 DatabaseType::SqlServer => format!("N'{escaped}'"),
                 _ => format!("'{escaped}'"),
@@ -6244,12 +6267,16 @@ const OPENGAUSS_ONLY_TABLE_STORAGE_OPTIONS: &[&str] = &[
 /// PostgreSQL connection profiled as openGauss/GaussDB reads its table DDL through that
 /// same function (`schema::opengauss_table_ddl`), so the profile counts exactly like the
 /// database type — the same grouping `is_opengauss_family_config` uses.
+fn is_opengauss_family_transfer_config(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
+    matches!(db_type, DatabaseType::OpenGauss | DatabaseType::Gaussdb)
+        || matches!(driver_profile, Some("opengauss" | "gaussdb"))
+}
+
 fn source_ddl_carries_opengauss_table_options(
     source_db_type: &DatabaseType,
     source_driver_profile: Option<&str>,
 ) -> bool {
-    matches!(source_db_type, DatabaseType::OpenGauss | DatabaseType::Gaussdb)
-        || matches!(source_driver_profile, Some("opengauss" | "gaussdb"))
+    is_opengauss_family_transfer_config(source_db_type, source_driver_profile)
 }
 
 /// Targets that speak the openGauss dialect and therefore accept its table storage
@@ -9607,8 +9634,13 @@ pub async fn get_columns_for_transfer(
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
-            let db_type = get_db_type(state, connection_id).await.ok();
-            if matches!(db_type, Some(DatabaseType::OpenGauss | DatabaseType::Gaussdb)) {
+            let is_opengauss_family = {
+                let configs = state.configs.read().await;
+                configs.get(connection_id).is_some_and(|config| {
+                    is_opengauss_family_transfer_config(&config.db_type, config.driver_profile.as_deref())
+                })
+            };
+            if is_opengauss_family {
                 db::postgres::get_columns_compat_first(&p, &schema, &table).await
             } else {
                 db::postgres::get_columns(&p, &schema, &table).await
@@ -20533,6 +20565,13 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         // A target profiled as openGauss understands the clause too.
         assert!(strip(&DatabaseType::OpenGauss, None, Some("gaussdb")), "GaussDB-profiled target");
         assert!(!strip(&DatabaseType::OpenGauss, None, Some("postgres")), "unrelated target profile");
+
+        assert!(is_opengauss_family_transfer_config(&DatabaseType::Postgres, Some("opengauss")));
+        assert!(is_opengauss_family_transfer_config(&DatabaseType::Postgres, Some("gaussdb")));
+        assert!(is_opengauss_family_transfer_config(&DatabaseType::OpenGauss, None));
+        assert!(is_opengauss_family_transfer_config(&DatabaseType::Gaussdb, None));
+        assert!(!is_opengauss_family_transfer_config(&DatabaseType::Postgres, Some("postgres")));
+        assert!(!is_opengauss_family_transfer_config(&DatabaseType::Postgres, None));
     }
 
     #[test]
@@ -23100,6 +23139,65 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
         assert!(sql.contains("USING (VALUES\n(1, 1)\n)"));
         assert!(!sql.contains("TRUE"));
         assert!(!sql.contains("FALSE"));
+    }
+
+    #[test]
+    fn mysql_insert_formats_bit_literals() {
+        let sql = generate_insert_typed(
+            &[
+                String::from("b_str1"),
+                String::from("b_str0"),
+                String::from("b_str_multi"),
+                String::from("b_prefix"),
+                String::from("b_num1"),
+                String::from("b_num0"),
+                String::from("b_bool1"),
+                String::from("b_bool0"),
+            ],
+            &[
+                Some(String::from("bit(1)")),
+                Some(String::from("bit(1)")),
+                Some(String::from("bit(8)")),
+                Some(String::from("bit(1)")),
+                Some(String::from("bit(1)")),
+                Some(String::from("bit(1)")),
+                Some(String::from("bit(1)")),
+                Some(String::from("bit(1)")),
+            ],
+            &[vec![json!("1"), json!("0"), json!("101"), json!("b'1'"), json!(1), json!(0), json!(true), json!(false)]],
+            "calendar",
+            "test_db",
+            &DatabaseType::Mysql,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO `calendar` (`b_str1`, `b_str0`, `b_str_multi`, `b_prefix`, `b_num1`, `b_num0`, `b_bool1`, `b_bool0`) VALUES\n(b'1', b'0', b'101', b'1', b'1', b'0', b'1', b'0')"
+        );
+    }
+
+    #[test]
+    fn mysql_insert_escapes_invalid_bit_literals_safely() {
+        let malicious_val = "b'1''); DROP TABLE t; --";
+        let invalid_val = "b'1x'";
+        let empty_inner = "b''";
+        let sql = generate_insert_typed(
+            &[String::from("col_malicious"), String::from("col_invalid"), String::from("col_empty")],
+            &[Some(String::from("bit(1)")), Some(String::from("bit(1)")), Some(String::from("bit(1)"))],
+            &[vec![json!(malicious_val), json!(invalid_val), json!(empty_inner)]],
+            "t",
+            "test_db",
+            &DatabaseType::Mysql,
+            None,
+        );
+
+        // Verify invalid / malicious bit literals fallback to escaped strings inside b'...'
+        // without breaking out of the literal or allowing SQL injection.
+        assert!(sql.contains("b'b''1''''); DROP TABLE t; --'"));
+        assert!(sql.contains("b'b''1x'''"));
+        assert!(sql.contains("b'b'''''"), "{sql}");
+        assert!(!sql.contains("b'1'); DROP TABLE t; --'"));
     }
 
     #[test]

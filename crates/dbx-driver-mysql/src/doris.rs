@@ -1,10 +1,17 @@
 use crate::models::connection::{ConnectionConfig, DatabaseType};
+use crate::mysql::MySqlPool;
+use crate::types::IndexInfo;
 
 pub use super::mysql_compatible::{
     get_columns_show_from as get_catalog_columns, list_catalog_indexes, list_catalogs,
-    list_databases_show_from as list_catalog_databases, list_indexes_with_ddl_fallback as list_indexes,
-    list_tables_show_from as list_catalog_tables, show_create_table_ddl_from as get_catalog_table_ddl,
+    list_databases_show_from as list_catalog_databases, list_tables_show_from as list_catalog_tables,
+    show_create_table_ddl_from as get_catalog_table_ddl,
 };
+
+pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
+    pool.set_doris_metadata_defaults();
+    super::mysql_compatible::list_indexes_with_ddl_fallback(pool, database, table).await
+}
 
 pub fn is_config(config: &ConnectionConfig) -> bool {
     is_profile(&config.db_type, config.driver_profile.as_deref())

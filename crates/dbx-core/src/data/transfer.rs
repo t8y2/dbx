@@ -153,16 +153,6 @@ static INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE: std::sync::LazyLock<Regex> = std::
     Regex::new(r#"(?i)^\s*(?:CONSTRAINT\s+(?:`[^`]*`|"[^"]*"|\S+)\s+)?FOREIGN\s+KEY\s*\("#)
         .expect("valid inline foreign key constraint line regex")
 });
-// `CONSTRAINT <name> <kind>` — a PostgreSQL table constraint definition.
-static POSTGRES_CONSTRAINT_NAME_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r#"(?i)\bCONSTRAINT\s+("[^"]+"|`[^`]+`|[A-Za-z_][A-Za-z0-9_$]*)\s+(?:PRIMARY\s+KEY|UNIQUE|CHECK|FOREIGN\s+KEY|EXCLUDE)\b"#)
-        .expect("valid postgres constraint name regex")
-});
-// PostgreSQL's own message for a name collision, English or Chinese server locale.
-static POSTGRES_RELATION_NAME_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r#"(?i)(?:"([^"]+)"|关系\s+"?([^"\s:]+)"?)\s*(?:has already been used|already exists|已经存在|已存在)"#)
-        .expect("valid postgres relation exists regex")
-});
 
 static ORACLE_TRIGGER_STATEMENT_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r"(?i)^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?|ALTER\s+)TRIGGER\s")
@@ -1362,186 +1352,6 @@ impl Drop for AbortTransferTaskOnDrop {
     fn drop(&mut self) {
         self.0.abort();
     }
-}
-
-/// Stack size for the per-table transfer pass. Debug builds of the transfer call chain
-/// (batch DDL planning, row decoding, write SQL generation) need several megabytes;
-/// tokio's default worker stack (2 MB) is below that, and exceeding it aborts the
-/// process rather than failing the table.
-const TRANSFER_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
-
-/// Run `future` on a dedicated thread with [`TRANSFER_WORKER_STACK_BYTES`] of stack,
-/// without pinning it to a shared runtime worker.
-async fn on_transfer_worker_stack<F, T>(future: F) -> T
-where
-    F: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let handle = std::thread::Builder::new()
-        .name("dbx-transfer".to_string())
-        .stack_size(TRANSFER_WORKER_STACK_BYTES)
-        .spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build transfer runtime")
-                .block_on(future)
-        })
-        .expect("spawn transfer thread");
-    tokio::task::spawn_blocking(move || handle.join())
-        .await
-        .expect("join transfer thread")
-        .expect("transfer thread panicked")
-}
-
-/// Identity of the schema-scoped objects a reused source `CREATE TABLE` DDL names
-/// inline: `CONSTRAINT <name> ...` (primary key / unique / check / foreign key) and
-/// `CREATE [UNIQUE] INDEX <name>`. The reused DDL is template text taken from the
-/// source table, so these names are the *source* object names and are re-created
-/// verbatim on the target.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PostgresOwnedDdlObjectName {
-    name: String,
-    is_index: bool,
-    /// A serial/identity sequence owned by the source table's column.
-    is_sequence: bool,
-}
-
-fn postgres_ddl_owned_object_names(ddl: &str) -> Vec<PostgresOwnedDdlObjectName> {
-    // Identifiers stay visible (double quotes are NOT treated as string literals);
-    // only `'...'` literals and comments are masked.
-    let (sql, _) = protect_sql_literals(ddl, false);
-    let mut names: Vec<PostgresOwnedDdlObjectName> = Vec::new();
-    for statement in split_sql_statements(&sql) {
-        let trimmed = statement.trim_start();
-        let upper = trimmed.to_ascii_uppercase();
-        let index = if upper.starts_with("CREATE UNIQUE INDEX ") {
-            split_second_token(trimmed, "CREATE UNIQUE INDEX ")
-        } else if upper.starts_with("CREATE INDEX ") {
-            split_second_token(trimmed, "CREATE INDEX ")
-        } else {
-            None
-        };
-        if let Some(name) = index.map(|name| unquote_identifier_token(name.trim())) {
-            if !name.is_empty() {
-                names.push(PostgresOwnedDdlObjectName { name, is_index: true, is_sequence: false });
-            }
-        }
-    }
-    for capture in POSTGRES_CONSTRAINT_NAME_RE.captures_iter(&sql) {
-        let name = unquote_identifier_token(&capture[1]);
-        if !name.is_empty() {
-            names.push(PostgresOwnedDdlObjectName { name, is_index: false, is_sequence: false });
-        }
-    }
-    names.sort_by(|left, right| left.name.cmp(&right.name).then(left.is_index.cmp(&right.is_index)));
-    names.dedup_by(|left, right| left.name == right.name && left.is_index == right.is_index);
-    names
-}
-
-fn split_second_token<'a>(statement: &'a str, prefix: &str) -> Option<&'a str> {
-    let rest = statement.get(prefix.len()..)?;
-    rest.trim_start().split(['(', ' ']).next()
-}
-
-fn unquote_identifier_token(token: &str) -> String {
-    let token = token.trim();
-    token.strip_prefix('"').and_then(|inner| inner.strip_suffix('"')).unwrap_or(token).to_string()
-}
-
-/// Sequences the source table's own columns own (serial / identity). The reused source
-/// DDL does not recreate them — a rebuilt serial column is rewritten to a fresh target
-/// sequence — but an identity column keeps the source name, and a backup that still holds
-/// it would leave the new column pointing at the backup's sequence.
-async fn postgres_attached_identity_names(
-    state: &AppState,
-    pool_key: &str,
-    source_schema: &str,
-    source_table: &str,
-) -> Vec<PostgresOwnedDdlObjectName> {
-    match get_postgres_owned_sequences_for_transfer(state, pool_key, source_schema, &[source_table.to_string()]).await {
-        Ok(sequences) => sequences
-            .into_iter()
-            .map(|sequence| PostgresOwnedDdlObjectName { name: sequence.name, is_index: false, is_sequence: true })
-            .collect(),
-        Err(error) => {
-            log::debug!("[transfer] failed to list owned sequences for {source_table}: {error}");
-            Vec::new()
-        }
-    }
-}
-
-/// Rename the backup's copies of the objects the reused source DDL is about to
-/// re-create, so the rebuilt table can own those names again.
-///
-/// `ALTER TABLE ... RENAME TO` does not move a PostgreSQL table's indexes, primary key
-/// or constraints: they keep the schema-scoped `<table>_pkey` / `<table>_<column>_key` /
-/// `<table>_<column>_idx` names that the reused source DDL writes verbatim. Freeing only
-/// the names the create itself will recreate means no metadata query is needed and no
-/// object outside the table being rebuilt can be touched.
-///
-/// A name that is not held by the backup (freed by someone else, or never created) makes
-/// the statement a no-op: the create that follows owns that name either way.
-async fn rename_backup_owned_object_names_aside(
-    state: &AppState,
-    pool_key: &str,
-    target_schema: &str,
-    backup_table: &str,
-    owned_names: &[PostgresOwnedDdlObjectName],
-) -> Result<Vec<String>, String> {
-    if owned_names.is_empty() {
-        return Ok(Vec::new());
-    }
-    let pg = &DatabaseType::Postgres;
-    let schema_prefix = if target_schema.trim().is_empty() {
-        String::new()
-    } else {
-        format!("{}.", quote_identifier(target_schema, pg))
-    };
-    let qualified_backup = format!("{schema_prefix}{}", quote_identifier(backup_table, pg));
-    let schema_lit = quote_string_literal(if target_schema.trim().is_empty() { "public" } else { target_schema });
-    // Everything below ends up inside `EXECUTE '<ddl>'`, so the DDL text needs one extra
-    // round of quote doubling before it becomes a string literal.
-    let escaped_ddl = |ddl: String| quote_string_literal(&ddl.replace('\'', "''"));
-    let mut released = Vec::new();
-    for object in owned_names {
-        let aside_name = format!("{}{}$freed", object.name, crate::transfer_rebuild::BACKUP_TABLE_MARKER);
-        let rename_sql = if object.is_index {
-            let ddl = format!(
-                "ALTER {} {schema_prefix}{} RENAME TO {}",
-                if object.is_sequence { "SEQUENCE" } else { "INDEX" },
-                quote_identifier(&object.name, pg),
-                quote_identifier(&aside_name, pg)
-            );
-            format!(
-                "DO $dbx$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
-                   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-                   WHERE n.nspname = {schema_lit} AND c.relname = {name_lit} AND c.relkind IN ('i','S')) \
-                   THEN EXECUTE {exec}; END IF; END $dbx$",
-                name_lit = quote_string_literal(&object.name),
-                exec = escaped_ddl(ddl),
-            )
-        } else {
-            let ddl = format!(
-                "ALTER TABLE {qualified_backup} RENAME CONSTRAINT {} TO {}",
-                quote_identifier(&object.name, pg),
-                quote_identifier(&aside_name, pg)
-            );
-            format!(
-                "DO $dbx$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c \
-                   WHERE c.conname = {name_lit} AND c.conrelid = {regclass}::regclass) \
-                   THEN EXECUTE {exec}; END IF; END $dbx$",
-                name_lit = quote_string_literal(&object.name),
-                regclass = quote_string_literal(&qualified_backup),
-                exec = escaped_ddl(ddl),
-            )
-        };
-        execute_on_pool(state, pool_key, &rename_sql).await.map_err(|error| {
-            format!("Failed to free '{name}' from backup table '{backup_table}': {error}", name = object.name)
-        })?;
-        released.push(format!("{} -> {}", object.name, aside_name));
-    }
-    Ok(released)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3531,6 +3341,7 @@ fn generate_postgres_foreign_key_ddl(
     statements
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn restore_postgres_table_schema_objects(
     state: &AppState,
     target_pool_key: &str,
@@ -3539,12 +3350,34 @@ async fn restore_postgres_table_schema_objects(
     target_schema: &str,
     source_indexes: &[db::IndexInfo],
     source_foreign_keys: &[db::ForeignKeyInfo],
+    rebuild: bool,
 ) -> Result<(), String> {
-    let index_if_not_exists = target_supports_if_not_exists_ddl(state, target_pool_key).await;
-    for statement in generate_postgres_index_ddl(source_indexes, target_table, target_schema, index_if_not_exists) {
-        execute_on_pool(state, target_pool_key, &statement)
-            .await
-            .map_err(|e| format!("Failed to create PostgreSQL index for {target_table}: {e}"))?;
+    let index_if_not_exists = !rebuild && target_supports_if_not_exists_ddl(state, target_pool_key).await;
+    for index in source_indexes {
+        let statements =
+            generate_postgres_index_ddl(std::slice::from_ref(index), target_table, target_schema, index_if_not_exists);
+        for (position, statement) in statements.into_iter().enumerate() {
+            if let Err(error) = execute_on_pool(state, target_pool_key, &statement).await {
+                // Native CREATE TABLE may have already created the constraint's
+                // index. Only accept the collision if the target table owns it.
+                if rebuild
+                    && position == 0
+                    && index.constraint_backed
+                    && postgres_duplicate_relation_error(&error, &index.name)
+                    && postgres_target_owns_constraint_index(
+                        state,
+                        target_pool_key,
+                        target_schema,
+                        target_table,
+                        &index.name,
+                    )
+                    .await
+                {
+                    continue;
+                }
+                return Err(format!("Failed to create PostgreSQL index for {target_table}: {error}"));
+            }
+        }
     }
     for statement in generate_postgres_foreign_key_ddl(source_foreign_keys, target_table, source_schema, target_schema)
     {
@@ -9092,35 +8925,108 @@ async fn execute_transfer_create_table_ddl_on_pool(
         .map_err(|error| format!("{original_error}; retry without unsupported MySQL collations failed: {error}"))
 }
 
-/// True only when the *table name itself* is taken. PostgreSQL keeps indexes,
-/// primary keys and constraints in the same schema-wide namespace, so
-/// `relation "orders_pkey" already exists` during CREATE TABLE means the table was
-/// not created — treating it as "already exists" (skip create, keep target
-/// preexisting) hides the real conflict and leaves the table missing (#7741).
-fn transfer_table_already_exists_error(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    if lower.contains("duplicate_table") {
-        return true;
+/// Only a collision naming the relation in the CREATE TABLE head can be a
+/// concurrent table creation. A constraint or another statement in reused DDL
+/// can also produce PostgreSQL's duplicate-relation error.
+fn postgres_create_table_name_collision(statement: &str, error: &str, table: &str, schema: &str) -> bool {
+    let qualified = qualified_table(table, schema, &DatabaseType::Postgres, None);
+    let statement = statement.trim_start();
+    let is_target_create = ["CREATE TABLE ", "CREATE UNLOGGED TABLE "].iter().any(|prefix| {
+        let Some(head) = statement.get(..prefix.len()) else { return false };
+        if !head.eq_ignore_ascii_case(prefix) {
+            return false;
+        }
+        statement[prefix.len()..]
+            .trim_start()
+            .strip_prefix(&qualified)
+            .is_some_and(|rest| rest.trim_start().starts_with('('))
+    });
+    if !is_target_create {
+        return false;
     }
-    // Non-PostgreSQL servers (MySQL/Oracle/Dameng/...) only ever name the table here.
-    if !lower.contains("relation ") && !lower.contains("关系 ") && !lower.contains("关系\"") {
-        return lower.contains("already exists")
-            || lower.contains("there is already")
-            || error.contains("已经存在")
-            || error.contains("已存在");
-    }
-    POSTGRES_RELATION_NAME_RE.captures_iter(error).any(|capture| {
-        let name = capture.get(1).or_else(|| capture.get(2)).map(|name| name.as_str()).unwrap_or_default();
-        !is_postgres_owned_index_or_constraint_name(name)
+
+    postgres_duplicate_relation_error(error, table)
+}
+
+fn postgres_duplicate_relation_error(error: &str, relation: &str) -> bool {
+    // The driver currently exposes server errors as rendered strings. Compare
+    // the whole relation name, with no assumptions about identifier suffixes.
+    let message = error.lines().next().unwrap_or(error);
+    let message = message.strip_prefix("ERROR: ").or_else(|| message.strip_prefix("错误: ")).unwrap_or(message);
+    [
+        format!("relation \"{relation}\" already exists"),
+        format!("关系 \"{relation}\" 已经存在"),
+        format!("关系 \"{relation}\" 已存在"),
+    ]
+    .iter()
+    .any(|expected| message.strip_prefix(expected).is_some_and(|rest| rest.is_empty() || rest == " (SQLSTATE 42P07)"))
+}
+
+async fn postgres_target_owns_constraint_index(
+    state: &AppState,
+    pool_key: &str,
+    schema: &str,
+    table: &str,
+    index: &str,
+) -> bool {
+    let sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_index i \
+         JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid \
+         JOIN pg_catalog.pg_class t ON t.oid = i.indrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
+         JOIN pg_catalog.pg_constraint c ON c.conindid = i.indexrelid AND c.conrelid = i.indrelid \
+         WHERE n.nspname = COALESCE(NULLIF({}, ''), current_schema()) \
+           AND t.relname = {} AND idx.relname = {} AND c.contype IN ('p', 'u', 'x'))",
+        quote_string_literal(schema),
+        quote_string_literal(table),
+        quote_string_literal(index),
+    );
+    postgres_catalog_exists(state, pool_key, &sql).await
+}
+
+async fn postgres_catalog_exists(state: &AppState, pool_key: &str, sql: &str) -> bool {
+    execute_read_on_pool(state, pool_key, sql).await.is_ok_and(|result| {
+        result.rows.first().and_then(|row| row.first()).and_then(serde_json::Value::as_bool) == Some(true)
     })
 }
 
-/// `<table>_pkey` / `<table>_<column>_key` / `<table>_<column>_fkey` — the names
-/// PostgreSQL gives the objects it derives from a table, which a reused source DDL
-/// re-creates and which therefore never mean "the table already exists".
-fn is_postgres_owned_index_or_constraint_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    ["_pkey", "_key", "_fkey", "_excl", "_idx", "_index"].iter().any(|suffix| lower.ends_with(suffix))
+async fn execute_postgres_transfer_create_table(
+    state: &AppState,
+    pool_key: &str,
+    ddl: &str,
+    table: &str,
+    schema: &str,
+    rebuild: bool,
+) -> Result<bool, String> {
+    for statement in transfer_ddl_statements(ddl, &DatabaseType::Postgres) {
+        if let Err(error) = execute_on_pool(state, pool_key, &statement).await {
+            if !rebuild && postgres_create_table_name_collision(&statement, &error, table, schema) {
+                let sql = format!(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+                     JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid \
+                     WHERE n.nspname = COALESCE(NULLIF({}, ''), current_schema()) \
+                       AND c.relname = {} AND c.relkind IN ('r', 'p'))",
+                    quote_string_literal(schema),
+                    quote_string_literal(table),
+                );
+                if postgres_catalog_exists(state, pool_key, &sql).await {
+                    return Ok(false);
+                }
+            }
+            return Err(format!("Failed to create table: {error}"));
+        }
+    }
+    Ok(true)
+}
+
+fn transfer_table_already_exists_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("already exists")
+        || lower.contains("there is already")
+        || lower.contains("duplicate_table")
+        || lower.contains("42p07")
+        || error.contains("已经存在")
+        || error.contains("已存在")
 }
 
 fn transfer_create_table_created(result: Result<(), String>, error_prefix: &str) -> Result<bool, String> {
@@ -10383,7 +10289,7 @@ pub async fn check_data_charset_transfer(state: &AppState, request: &TransferReq
 }
 
 pub async fn transfer_schema_objects<F>(
-    state: &Arc<AppState>,
+    state: &AppState,
     request: &TransferRequest,
     source_pool_key: &str,
     target_pool_key: &str,
@@ -10416,41 +10322,15 @@ where
         &request.target_connection_id,
     )
     .await?;
-    // PostgreSQL object transfer replays ownership, grants and dependent objects: the same
-    // deep-frame profile as the per-table pass, which overflows a 2 MB tokio worker stack in
-    // debug builds and aborts the whole process instead of failing one step. Run it on the
-    // dedicated transfer stack; the progress callback cannot cross a thread boundary, so it
-    // is pumped through a channel.
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(TRANSFER_PROGRESS_CHANNEL_CAPACITY);
-    let worker_state = Arc::clone(state);
-    let worker_request = request.clone();
-    let worker_source_pool_key = source_pool_key.to_string();
-    let worker_target_pool_key = target_pool_key.to_string();
-    let worker_routine_context = routine_context;
-    let mut task = tokio::spawn(on_transfer_worker_stack(async move {
-        transfer_schema_objects_with_routine_context(
-            worker_state.as_ref(),
-            &worker_request,
-            &worker_source_pool_key,
-            &worker_target_pool_key,
-            worker_routine_context.as_ref(),
-            |progress| try_send_transfer_progress(&progress_tx, progress),
-        )
-        .await
-    }));
-    let worker_outcome = loop {
-        tokio::select! {
-            biased;
-            Some(progress) = progress_rx.recv() => progress_callback(progress),
-            outcome = &mut task => {
-                break outcome.map_err(|error| format!("Schema object transfer task failed: {error}"))?;
-            }
-        }
-    };
-    let mut outcome = worker_outcome?;
-    while let Ok(progress) = progress_rx.try_recv() {
-        progress_callback(progress);
-    }
+    let mut outcome = transfer_schema_objects_with_routine_context(
+        state,
+        request,
+        source_pool_key,
+        target_pool_key,
+        routine_context.as_ref(),
+        &mut progress_callback,
+    )
+    .await?;
     if let Some(packages) = packages {
         let (package_outcome, cancelled, preflight_error) =
             packages.run(state, request, outcome.failed.is_empty(), progress_callback).await;
@@ -13438,19 +13318,6 @@ async fn create_transfer_target_table(
         return Ok(());
     }
 
-    // The table this transfer renamed aside, when the target is being rebuilt.
-    let target_backup_name = if target_renamed_to_backup {
-        crate::transfer_rebuild::backup_table_name(
-            *target_db_type,
-            &request.transfer_id,
-            &format!("{}.{}", request.source_schema, table),
-            target_table,
-        )
-        .ok()
-    } else {
-        None
-    };
-
     let owned_sequences = prepare_postgres_owned_sequences_for_transfer(
         state,
         request,
@@ -13503,38 +13370,24 @@ async fn create_transfer_target_table(
         ddl
     };
     let deferred_fk_alters = prepared.deferred_fk_alters;
-    // A rebuild reuses the source DDL text, which names the source table's own indexes and
-    // constraints. PostgreSQL did not move those schema-scoped names when the rename
-    // pre-pass moved the table aside, so the backup still holds them and the create would
-    // fail with `relation "<table>_pkey" already exists`. Free exactly the names this
-    // statement is about to re-create — the backup is the table being rebuilt, so those
-    // names belong to it, and nothing whose object we do not create is touched. Deciding
-    // this from the DDL and the transfer's own state keeps bulk transfers from paying a
-    // metadata scan per table.
-    if reused_source_ddl && target_renamed_to_backup && is_postgres_family_target(target_db_type) {
-        if let Some(backup_table) = target_backup_name.as_deref() {
-            let mut owned_names = postgres_ddl_owned_object_names(&ddl);
-            owned_names
-                .extend(postgres_attached_identity_names(state, source_pool_key, &request.source_schema, table).await);
-            owned_names.sort_by(|left, right| left.name.cmp(&right.name).then(left.is_index.cmp(&right.is_index)));
-            owned_names.dedup();
-            rename_backup_owned_object_names_aside(
-                state,
-                target_pool_key,
-                &request.target_schema,
-                backup_table,
-                &owned_names,
-            )
-            .await?;
-        }
-    }
     log::info!("[transfer] creating target table: {}", ddl.chars().take(200).collect::<String>());
-    let target_table_created = transfer_create_table_created(
-        execute_transfer_create_table_ddl_on_pool(state, target_pool_key, &ddl, target_db_type, reused_source_ddl)
-            .await,
-        "Failed to create table",
-    )?;
-
+    let target_table_created = if *target_db_type == DatabaseType::Postgres {
+        execute_postgres_transfer_create_table(
+            state,
+            target_pool_key,
+            &ddl,
+            target_table,
+            &request.target_schema,
+            request.drop_target_before_create,
+        )
+        .await?
+    } else {
+        transfer_create_table_created(
+            execute_transfer_create_table_ddl_on_pool(state, target_pool_key, &ddl, target_db_type, reused_source_ddl)
+                .await,
+            "Failed to create table",
+        )?
+    };
     if target_table_created {
         pending_fk_alters.extend(deferred_fk_alters.into_iter().map(|statement| (target_table.to_string(), statement)));
         let comment_stmts = generate_comment_ddl_with_column_quoting(
@@ -13924,6 +13777,7 @@ where
                 &request.target_schema,
                 &source_indexes,
                 &source_foreign_keys,
+                request.drop_target_before_create,
             )
             .await?;
         }
@@ -14591,6 +14445,7 @@ where
             &request.target_schema,
             &source_indexes,
             &source_foreign_keys,
+            request.drop_target_before_create,
         )
         .await?;
     }
@@ -14987,10 +14842,7 @@ where
     let (source_count_tx, mut source_count_rx) = tokio::sync::mpsc::channel(1);
     let operation_timeout_secs = current_transfer_operation_timeout_secs();
 
-    // Run the per-table pass on a thread of its own: a debug build's transfer frame chain
-    // needs ~3 MB, while tokio worker threads default to 2 MB, and a stack overflow aborts
-    // the whole process instead of failing one table.
-    let mut task = tokio::spawn(on_transfer_worker_stack(async move {
+    let mut task = tokio::spawn(async move {
         let mut task_pending_fk_alters = Vec::new();
         let result = with_transfer_operation_timeout(
             operation_timeout_secs,
@@ -15017,7 +14869,7 @@ where
         )
         .await;
         (result, task_pending_fk_alters)
-    }));
+    });
     let _abort_on_drop = AbortTransferTaskOnDrop(task.abort_handle());
 
     loop {
@@ -20257,69 +20109,11 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         )
         .unwrap());
         assert!(!transfer_create_table_created(Err("错误: 关系 \"items\" 已经存在".to_string()), "create").unwrap());
-        assert!(!transfer_create_table_created(
-            Err("ERROR: relation \"items\" already exists (SQLSTATE 42P07)".to_string()),
-            "create"
-        )
-        .unwrap());
         assert!(transfer_create_table_created(Ok(()), "create").unwrap());
         assert_eq!(
             transfer_create_table_created(Err("permission denied for schema public".to_string()), "create")
                 .unwrap_err(),
             "create: permission denied for schema public"
-        );
-    }
-
-    #[test]
-    fn schema_scoped_object_collision_is_not_an_existing_table() {
-        // PostgreSQL keeps indexes/PKs in the same namespace as tables. A reused source
-        // DDL re-creates `<table>_pkey` etc.; that collision means the table was NOT
-        // created, so it must never be reported as "table already exists" (#7741).
-        for error in [
-            "ERROR: relation \"base_line_city_pkey\" already exists",
-            "ERROR: relation \"base_line_city_name_key\" already exists",
-            "ERROR: relation \"orders_pkey\" already exists (SQLSTATE 42P07)",
-            "错误: 关系 \"base_line_city_pkey\" 已经存在",
-        ] {
-            assert_eq!(
-                transfer_create_table_created(Err(error.to_string()), "Failed to create table"),
-                Err(format!("Failed to create table: {error}"))
-            );
-        }
-        assert!(transfer_table_already_exists_error("ERROR: relation \"base_line_city\" already exists"));
-        assert!(transfer_table_already_exists_error("错误: 关系 \"base_line_city\" 已经存在"));
-    }
-
-    #[test]
-    fn postgres_ddl_owned_object_names_collects_constraints_and_indexes() {
-        let ddl = "CREATE TABLE \"public\".\"base_line_city\" (\n  \"id\" integer NOT NULL,\n  \
-                   \"name\" text,\n  \"code\" text DEFAULT 'CONSTRAINT fake_pkey PRIMARY KEY'::text,\n  \
-                   CONSTRAINT \"base_line_city_pkey\" PRIMARY KEY (\"id\")\n);\n\
-                   CREATE UNIQUE INDEX \"base_line_city_code_idx\" ON \"public\".\"base_line_city\" (\"code\");\n\
-                   CREATE INDEX base_line_city_name_idx ON public.base_line_city (\"name\");";
-
-        let mut names = postgres_ddl_owned_object_names(ddl);
-        names.sort_by(|left, right| left.name.cmp(&right.name).then(left.is_index.cmp(&right.is_index)));
-
-        assert_eq!(
-            names,
-            vec![
-                PostgresOwnedDdlObjectName {
-                    name: "base_line_city_code_idx".to_string(),
-                    is_index: true,
-                    is_sequence: false,
-                },
-                PostgresOwnedDdlObjectName {
-                    name: "base_line_city_name_idx".to_string(),
-                    is_index: true,
-                    is_sequence: false,
-                },
-                PostgresOwnedDdlObjectName {
-                    name: "base_line_city_pkey".to_string(),
-                    is_index: false,
-                    is_sequence: false,
-                },
-            ]
         );
     }
 

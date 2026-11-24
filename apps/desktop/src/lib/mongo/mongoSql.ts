@@ -91,6 +91,8 @@ interface SelectItem {
   fn?: "count" | "sum" | "avg" | "min" | "max";
   star?: boolean;
   alias?: string;
+  /** Aggregate used only by HAVING: computed in $group, removed after the $match. */
+  hidden?: boolean;
 }
 
 interface TableRef {
@@ -113,6 +115,10 @@ interface OrderKey {
 
 type Tok = { kind: "ident"; text: string } | { kind: "string"; text: string } | { kind: "number"; value: number } | { kind: "op"; text: string } | { kind: "eof" };
 
+const HAVING_AGGREGATES = new Set(["count", "sum", "avg", "min", "max"]);
+/** HAVING paths are already resolved against the grouped row; nothing may be re-qualified. */
+const HAVING_ALIASES: { base: TableRef; joins: Map<string, TableRef> } = { base: { collection: "\u0000having" }, joins: new Map() };
+
 const RESERVED = new Set("select from where group by order limit offset insert into values update set delete as join inner left right full cross outer on and or not in is null like ilike between union intersect except with distinct having over window true false".split(" "));
 
 function translateMongoSqlStatement(sql: string): string {
@@ -129,6 +135,8 @@ function translateMongoSqlStatement(sql: string): string {
 class Parser {
   private readonly tokens: Tok[];
   private index = 0;
+  /** Select items while parsing HAVING, so COUNT(*) etc. resolve to $group outputs. */
+  private havingItems?: SelectItem[];
 
   constructor(sql: string) {
     this.tokens = tokenize(sql);
@@ -136,29 +144,44 @@ class Parser {
 
   parseSelect(): string {
     this.expectKeyword("select");
-    if (this.eatKeyword("distinct")) throw new MongoSqlError("DISTINCT is not supported in MongoDB SQL mode.");
+    const distinct = this.eatKeyword("distinct");
     const items = this.parseSelectList();
     this.expectKeyword("from");
     const from = this.parseTableRef();
     const joins: Join[] = [];
     while (this.canStartJoin()) joins.push(this.parseJoin(from));
     const where = this.eatKeyword("where") ? this.parseExpr() : undefined;
-    return this.finishSelect(items, from, joins, where);
+    return this.finishSelect(items, from, joins, where, distinct);
   }
 
-  private finishSelect(items: SelectItem[], from: TableRef, joins: Join[], where: Expr | undefined): string {
+  private finishSelect(items: SelectItem[], from: TableRef, joins: Join[], where: Expr | undefined, distinct = false): string {
     let groupBy: FieldRef[] | undefined;
     if (this.atKeyword("group")) {
       this.expectKeyword("group");
       this.expectKeyword("by");
       groupBy = this.parseFieldList();
     }
-    if (this.eatKeyword("having")) throw new MongoSqlError("HAVING is not supported in MongoDB SQL mode. Filter rows with WHERE before grouping.");
+    if (distinct) {
+      // SELECT DISTINCT a, b  ≡  SELECT a, b … GROUP BY a, b
+      if (groupBy) throw new MongoSqlError("DISTINCT cannot be combined with GROUP BY in MongoDB SQL mode.");
+      if (items.some((item) => item.type !== "field" || !item.field)) throw new MongoSqlError("DISTINCT supports plain columns only in MongoDB SQL mode (no * or aggregates).");
+      groupBy = items.map((item) => item.field!);
+    }
+    let having: Expr | undefined;
+    if (this.eatKeyword("having")) {
+      if (!groupBy && !items.some((item) => item.type === "agg")) throw new MongoSqlError("HAVING requires GROUP BY or an aggregate in MongoDB SQL mode.");
+      this.havingItems = items;
+      try {
+        having = this.parseExpr();
+      } finally {
+        this.havingItems = undefined;
+      }
+    }
     const orderBy = this.eatKeyword("order") ? (this.expectKeyword("by"), this.parseOrderBy()) : [];
     const limit = this.eatKeyword("limit") ? this.parseInteger("LIMIT") : undefined;
     const offset = this.eatKeyword("offset") ? this.parseInteger("OFFSET") : undefined;
     this.expectEnd();
-    return compileSelect(items, from, joins, where, groupBy, orderBy, limit, offset);
+    return compileSelect(items, from, joins, where, groupBy, orderBy, limit, offset, having);
   }
 
   parseInsert(): string {
@@ -417,6 +440,9 @@ class Parser {
 
   private parsePrimary(): Primary {
     if (this.peekKeyword() === "select") throw new MongoSqlError("Subqueries are not supported in MongoDB SQL mode.");
+    if (this.havingItems && this.peek().kind === "ident" && this.lookaheadIsOp("(") && HAVING_AGGREGATES.has(this.peekText())) {
+      return { type: "field", field: this.parseHavingAggregate(this.havingItems) };
+    }
     if (this.peek().kind === "ident" && this.lookaheadIsOp("(")) {
       return { type: "value", value: this.parseCtor() };
     }
@@ -424,6 +450,30 @@ class Parser {
       return { type: "value", value: this.parseLiteral() };
     }
     return { type: "field", field: this.parseFieldRef() };
+  }
+
+  /**
+   * COUNT(*) / SUM(x)… inside HAVING. Reuses the matching SELECT aggregate's
+   * output; otherwise adds a hidden accumulator that is dropped after $match.
+   */
+  private parseHavingAggregate(items: SelectItem[]): FieldRef {
+    const fn = this.nextIdent().toLowerCase() as NonNullable<SelectItem["fn"]>;
+    this.expectOp("(");
+    let star = false;
+    let field: FieldRef | undefined;
+    if (fn === "count" && this.eatOp("*")) star = true;
+    else field = this.parseFieldRef();
+    this.expectOp(")");
+    const key = (item: SelectItem) => `${item.fn}|${item.star ? "*" : (item.field?.parts.map((part) => part.name).join(".") ?? "")}`;
+    const wanted = key({ type: "agg", fn, star, field });
+    const names = aggregateOutputNames(items);
+    const existing = items.find((item) => item.type === "agg" && key(item) === wanted);
+    if (existing) return { parts: [{ name: names.get(existing)!, indexes: [] }] };
+    let index = 1;
+    while (items.some((item) => item.alias === `__having_${index}`)) index += 1;
+    const hidden: SelectItem = { type: "agg", fn, star, field, alias: `__having_${index}`, hidden: true };
+    items.push(hidden);
+    return { parts: [{ name: hidden.alias!, indexes: [] }] };
   }
 
   private parseCtor(): ShellValue {
@@ -668,7 +718,7 @@ function tokenize(sql: string): Tok[] {
   return tokens;
 }
 
-function compileSelect(items: SelectItem[], from: TableRef, joins: Join[], where: Expr | undefined, groupBy: FieldRef[] | undefined, orderBy: OrderKey[], limit: number | undefined, offset: number | undefined): string {
+function compileSelect(items: SelectItem[], from: TableRef, joins: Join[], where: Expr | undefined, groupBy: FieldRef[] | undefined, orderBy: OrderKey[], limit: number | undefined, offset: number | undefined, having?: Expr): string {
   if (items.some((item) => item.type === "star") && items.length > 1) {
     throw new MongoSqlError("SELECT * cannot be combined with other columns in MongoDB SQL mode.");
   }
@@ -717,6 +767,12 @@ function compileSelect(items: SelectItem[], from: TableRef, joins: Join[], where
     pipeline.push({ $group: groupStage(items, groupBy, aliases, from) });
     const project = groupProject(items, groupBy, aliases, from);
     if (project) pipeline.push({ $project: project });
+    if (having) {
+      // HAVING filters the grouped rows: aggregate outputs and the projected group columns.
+      pipeline.push({ $match: exprToFilter(rewriteHavingFields(having, items, groupBy, aliases, from, project !== undefined), HAVING_ALIASES) });
+      const hidden = items.filter((item) => item.hidden && item.alias).map((item) => item.alias!);
+      if (hidden.length) pipeline.push({ $unset: hidden });
+    }
     if (orderBy.length) pipeline.push({ $sort: orderDocument(orderBy, items, true, aliases, from, groupBy) });
   } else {
     if (orderBy.length) pipeline.push({ $sort: orderDocument(orderBy, items, false, aliases, from) });
@@ -815,6 +871,7 @@ function lastPartName(field: FieldRef | undefined): string | undefined {
 }
 
 function groupProject(items: SelectItem[], groupBy: FieldRef[], aliases: AliasMap, from: TableRef): ShellValue | undefined {
+  if (groupBy.length > 1) return multiGroupProject(items, aliases, from);
   if (groupBy.length !== 1) return undefined;
   const grouped = fieldPath(groupBy[0]!, aliases, from).path.split(".").pop() ?? "";
   const selected = items.filter((item) => item.type === "field");
@@ -836,6 +893,79 @@ function groupProject(items: SelectItem[], groupBy: FieldRef[], aliases: AliasMa
   }
   project._id = 0;
   return project;
+}
+
+/** Output column name of each aggregate, numbered exactly as groupStage names them. */
+function aggregateOutputNames(items: SelectItem[]): Map<SelectItem, string> {
+  const used = new Set<string>();
+  const names = new Map<SelectItem, string>();
+  for (const item of items) if (item.type === "agg") names.set(item, aggregateName(item, used));
+  return names;
+}
+
+/** Column name a selected GROUP BY field gets in multiGroupProject (alias, last segment, or full path when ambiguous). */
+function multiGroupColumnNames(items: SelectItem[], aliases: AliasMap, from: TableRef): Array<{ item: SelectItem; qualified: string; name: string }> {
+  const selected = items.filter((item) => item.type === "field" && item.field);
+  const lastNames = selected.map((item) => item.alias ?? lastPartName(item.field) ?? "");
+  return selected.map((item, index) => {
+    const qualified = qualifiedPath(fieldPath(item.field!, aliases, from));
+    const last = lastNames[index]!;
+    return { item, qualified, name: item.alias ?? (lastNames.filter((candidate) => candidate === last).length > 1 ? qualified : last) };
+  });
+}
+
+function multiGroupColumnName(field: FieldRef, items: SelectItem[], aliases: AliasMap, from: TableRef): string | undefined {
+  const qualified = qualifiedPath(fieldPath(field, aliases, from));
+  return multiGroupColumnNames(items, aliases, from).find((column) => column.qualified === qualified)?.name;
+}
+
+/** GROUP BY a, b (and DISTINCT a, b): lift the compound `_id` back into flat columns. */
+function multiGroupProject(items: SelectItem[], aliases: AliasMap, from: TableRef): ShellValue | undefined {
+  const columns = multiGroupColumnNames(items, aliases, from);
+  if (columns.length === 0) return undefined;
+  const project: Record<string, ShellValue> = {};
+  for (const column of columns) project[column.name] = `$_id.${column.qualified}`;
+  for (const name of aggregateOutputNames(items).values()) project[name] = 1;
+  project._id = 0;
+  return project;
+}
+
+/**
+ * Points HAVING field references at the grouped row: aggregate outputs and
+ * aliases stay as they are; a GROUP BY column becomes its projected name
+ * (or `_id` / `_id.path` when the stage has no $project).
+ */
+function rewriteHavingFields(expr: Expr, items: SelectItem[], groupBy: FieldRef[], aliases: AliasMap, from: TableRef, projected: boolean): Expr {
+  const outputs = new Set([...aggregateOutputNames(items).values(), ...items.filter((item) => item.alias).map((item) => item.alias!)]);
+  const groupPaths = groupBy.map((field) => qualifiedPath(fieldPath(field, aliases, from)));
+  const selectedNames = new Map<string, string>();
+  for (const item of items) {
+    if (item.type !== "field" || !item.field) continue;
+    selectedNames.set(qualifiedPath(fieldPath(item.field, aliases, from)), item.alias ?? lastPartName(item.field) ?? "");
+  }
+  const mapField = (field: FieldRef): FieldRef => {
+    const dotted = field.parts.map((part) => part.name).join(".");
+    if (field.parts.length === 1 && outputs.has(dotted)) return field;
+    const path = qualifiedPath(fieldPath(field, aliases, from));
+    if (!groupPaths.includes(path)) throw new MongoSqlError(`HAVING can only use GROUP BY columns or aggregates; ${dotted} is neither.`);
+    const projectedName = groupPaths.length > 1 ? multiGroupColumnName(field, items, aliases, from) : selectedNames.get(path);
+    const name = projected && projectedName ? projectedName : groupPaths.length === 1 ? "_id" : `_id.${path}`;
+    return { parts: name.split(".").map((part) => ({ name: part, indexes: [] })) };
+  };
+  const visit = (node: Expr): Expr => {
+    switch (node.type) {
+      case "and":
+      case "or":
+        return { ...node, items: node.items.map(visit) };
+      case "not":
+        return { ...node, item: visit(node.item) };
+      case "cmp":
+        return { ...node, left: node.left.type === "field" ? { type: "field", field: mapField(node.left.field) } : node.left, right: node.right.type === "field" ? { type: "field", field: mapField(node.right.field) } : node.right };
+      default:
+        return { ...node, field: mapField(node.field) };
+    }
+  };
+  return visit(expr);
 }
 
 function projectStage(items: SelectItem[], aliases: AliasMap, from: TableRef): ShellValue {
@@ -892,7 +1022,7 @@ function sortKey(field: FieldRef, items: SelectItem[], projectsFields: boolean, 
     const alias = items.find((item) => item.alias === field.parts[0]!.name);
     if (alias?.alias) return alias.alias;
   }
-  if (groupBy && groupBy.length > 1) return `_id.${full}`;
+  if (groupBy && groupBy.length > 1) return multiGroupColumnName(field, items, aliases, from) ?? `_id.${full}`;
   if (fieldHasIndex(field)) return full;
   return resolved.path.split(".").pop() ?? full;
 }

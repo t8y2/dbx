@@ -6013,10 +6013,19 @@ async function revalidateCachedObjectStatistics(request: ObjectBrowserRowsLoadHa
 }
 
 function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined, detailsComplete = true) {
-  const statsByKey = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
+  const exactStats = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
+  // MySQL with lower_case_table_names=0 keeps `Orders` and `orders` as two
+  // different tables. Fold case only when the folded key is unambiguous so a
+  // case-sensitive pair never shares one table's engine/charset statistics.
+  const foldedStats = new Map<string, ObjectStatistics | null>();
+  for (const stat of stats) {
+    const foldedKey = objectStatisticKey(stat.schema || fallbackSchema, stat.name).toLowerCase();
+    foldedStats.set(foldedKey, foldedStats.has(foldedKey) ? null : stat);
+  }
   rows.value = rows.value.map((row) => {
     if (row.type !== "TABLE") return row;
-    const stat = statsByKey.get(objectStatisticKey(row.schema || fallbackSchema, row.name));
+    const key = objectStatisticKey(row.schema || fallbackSchema, row.name);
+    const stat = exactStats.get(key) ?? foldedStats.get(key.toLowerCase()) ?? undefined;
     if (!stat) return row;
     return {
       ...row,
@@ -6031,7 +6040,9 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
 }
 
 function objectStatisticKey(schema: string | undefined, name: string) {
-  return `${schema || ""}\0${name}`.toLowerCase();
+  // Case-preserving on purpose: callers fold the key themselves only after the
+  // exact key misses, and never fold an ambiguous pair.
+  return `${schema || ""}\0${name}`;
 }
 
 function normalizeStatisticNumber(value: number | null | undefined): number | null {

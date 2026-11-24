@@ -72,6 +72,7 @@ describe("mysqlTableEngine", () => {
       objects: [{ name: " orders ", object_type: "TABLE", schema: " app " }],
       database: "app",
       fallbackSchema: "app",
+      databaseType: "mysql",
     });
     expect(mysqlTableEngineChangeSql({ database: row.schema, table: row.name, engine: "InnoDB" })).toBe("ALTER TABLE ` app `.` orders ` ENGINE = InnoDB");
   });

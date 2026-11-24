@@ -78,6 +78,7 @@ describe("mysqlTableCollation", () => {
       objects: [{ name: " orders ", object_type: "TABLE", schema: " shop " }],
       database: "shop",
       fallbackSchema: "shop",
+      databaseType: "mysql",
     });
     expect(mysqlTableCharsetChangeSql({ database: row.schema, table: row.name, charset: "utf8mb4" })).toBe("ALTER TABLE ` shop `.` orders ` DEFAULT CHARACTER SET utf8mb4");
   });

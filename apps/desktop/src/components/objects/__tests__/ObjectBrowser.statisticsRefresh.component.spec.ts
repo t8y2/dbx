@@ -637,6 +637,35 @@ describe("MySQL storage engine column", () => {
     expect(document.querySelector("[data-test-danger-dialog]")).toBeNull();
     expect(mocks.executeQuery).not.toHaveBeenCalledWith(connection.id, "pgdemo", expect.stringContaining("ALTER TABLE"), expect.anything());
   });
+
+  it("keeps case-sensitive table statistics and engine edits separate when names differ only by case", async () => {
+    mocks.listObjects.mockResolvedValue([
+      { name: "Orders", object_type: "TABLE", schema: "pgdemo" },
+      { name: "orders", object_type: "TABLE", schema: "pgdemo" },
+    ]);
+    mocks.listObjectStatistics.mockResolvedValue([
+      { name: "Orders", schema: "pgdemo", engine: "InnoDB", collation: "utf8mb4_bin" },
+      { name: "orders", schema: "pgdemo", engine: "MyISAM", collation: "latin1_swedish_ci" },
+    ]);
+
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(tableRow(host, "Orders")?.textContent).toContain("utf8mb4_bin"));
+
+    expect(tableRow(host, "Orders")?.textContent).toContain("InnoDB");
+    expect(tableRow(host, "orders")?.textContent).toContain("MyISAM");
+    expect(tableRow(host, "orders")?.textContent).toContain("latin1_swedish_ci");
+    expect(tableRow(host, "Orders")?.textContent).not.toContain("latin1_swedish_ci");
+
+    tableRow(host, "Orders")!.querySelector<HTMLButtonElement>("[data-object-engine-trigger]")!.click();
+    let option: HTMLElement | undefined;
+    await vi.waitFor(() => {
+      option = document.querySelector<HTMLElement>('[data-object-engine-option="MyISAM"]') ?? undefined;
+      expect(option).toBeTruthy();
+    });
+    option!.click();
+
+    await vi.waitFor(() => expect(document.querySelector("[data-test-danger-sql]")?.textContent).toBe("ALTER TABLE `pgdemo`.`Orders` ENGINE = MyISAM"));
+  });
 });
 
 describe("MySQL table charset and collation pickers", () => {

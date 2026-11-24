@@ -9653,7 +9653,7 @@ mod tests {
                 ],
             )
         };
-        let rows = vec![
+        let rows = [
             statistics_row(" orders ", "InnoDB", "utf8mb4_bin"),
             statistics_row("orders", "MyISAM", "latin1_swedish_ci"),
             statistics_row("   ", "InnoDB", "utf8mb4_bin"),

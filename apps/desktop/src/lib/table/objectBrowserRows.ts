@@ -4,6 +4,7 @@ import { pinnedTreeNodeIdentityMatches, type PinnedTreeNodeIdentity } from "@/li
 import { toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
 import { buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
 import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
+import { preservesExactTableIdentifier } from "@/lib/database/databaseObjectCapabilities";
 import { exactOracleTriggerMetadata, exactOracleTriggerObjectMetadata, oracleTriggerIdentityKey } from "@/lib/database/oracleTriggerIdentity";
 
 export type ObjectBrowserRow = {
@@ -50,11 +51,6 @@ export function isForeignTableObjectType(objectType: string | null | undefined):
 export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "engine" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
-
-// MySQL-family identifiers may contain leading/trailing spaces inside quotes,
-// so those rows must carry the exact metadata name. Other dialects keep the
-// historical normalized name; schema-index identities already opt in via type.
-const EXACT_TABLE_IDENTIFIER_DATABASE_TYPES: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb"]);
 
 export type ObjectBrowserPinnedTreeNodeContext = {
   connectionId: string;
@@ -221,7 +217,7 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
     // driver-reported name and normalize the display text; trimming would make
     // `ALTER TABLE` address a different table (#14905). Other dialects keep
     // their normalized name, preserving the pre-fix behavior.
-    const preserveIdentifier = (type === "TABLE" || type === "VIEW" || type === "MATERIALIZED_VIEW") && !!options.databaseType && EXACT_TABLE_IDENTIFIER_DATABASE_TYPES.has(options.databaseType);
+    const preserveIdentifier = preservesExactTableIdentifier(options.databaseType, type);
     const postgresSequenceIdentity = type === "SEQUENCE" && options.databaseType === "postgres" ? { name: object.name, schema: object.schema ?? options.rowSchema } : undefined;
     const name = type === "INDEX" || preserveIdentifier ? object.name : normalizeDatabaseObjectName(object.name);
     if (!name.trim() && !postgresSequenceIdentity?.name) return [];

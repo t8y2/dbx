@@ -32,6 +32,10 @@ const POSTGRES_NO_TYPE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIA
 // exposes the same parent-table-aware metadata contract.
 const KINGBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "TYPE"];
 const VASTBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "TYPE"];
+// Vastbase G100 in Oracle-compatible mode keeps packages in gs_package, the same
+// catalog openGauss uses, so the A-mode tree advertises both package objects
+// (t8y2/dbx#15359).
+const VASTBASE_A_OBJECTS: SidebarObjectKind[] = [...VASTBASE_OBJECTS, "PACKAGE", "PACKAGE_BODY"];
 
 const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"];
 const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "INDEX", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
@@ -196,7 +200,14 @@ export function schemaDiffRoutineObjectTypesIntersection(sourceDbType?: Database
 
 export function sidebarObjectKindsForDatabase(dbType?: DatabaseType, compatibilityMode?: string): SidebarObjectKind[] {
   if (!dbType) return [...TABLE_VIEW_OBJECTS];
-  if (dbType === "opengauss" && compatibilityMode?.trim().toUpperCase() === "A") return [...OPENGAUSS_A_OBJECTS];
+  const mode = compatibilityMode?.trim().toUpperCase();
+  const inOracleMode = mode === "A";
+  if (dbType === "opengauss" && inOracleMode) return [...OPENGAUSS_A_OBJECTS];
+  // The Vastbase agent reports both the server's raw value (A, O, ORA, ORACLE)
+  // and, for connections that already normalised it, "oracle".
+  if (dbType === "vastbase" && (inOracleMode || mode === "O" || mode === "ORA" || mode === "ORACLE")) {
+    return [...VASTBASE_A_OBJECTS];
+  }
   return DATABASE_TYPE_OBJECTS.get(dbType) ?? [...ROUTINE_OBJECTS];
 }
 

@@ -2618,7 +2618,11 @@ export const useConnectionStore = defineStore("connection", () => {
   function objectTreeCacheVersion(config: ConnectionConfig | undefined, database: string | undefined, schema: string | undefined, baseVersion: string): string {
     if (isNativePostgresTreeConfig(config) && (baseVersion === "objects-v9" || baseVersion === "objects-simple-v9")) baseVersion = `${baseVersion}-pg-roots-v1`;
     let scopedVersion = config?.db_type === "xugu" && isXuguPublicSynonymScope(schema) ? `${baseVersion}-public-synonyms` : config?.db_type === "xugu" && isXuguSchedulerJobScope(schema) ? `${baseVersion}-scheduler-jobs` : baseVersion;
-    if (config?.db_type === "opengauss" && databaseCompatibilityMode(config.id, database)?.trim().toUpperCase() === "A") {
+    // openGauss and Vastbase gained A-mode package groups in the same release,
+    // so a single condition keeps their cache invalidation in step.
+    const packageTreeDbType = config?.db_type === "opengauss" || config?.db_type === "vastbase";
+    const packageTreeMode = databaseCompatibilityMode(config?.id, database)?.trim().toUpperCase();
+    if (packageTreeDbType && (packageTreeMode === "A" || packageTreeMode === "O" || packageTreeMode === "ORA" || packageTreeMode === "ORACLE")) {
       scopedVersion = `${scopedVersion}-a-packages-v1`;
     }
     if (oracleTriggerReadOptions(effectiveDatabaseTypeForConnection(config))) scopedVersion += "-oracle-trigger-exact-v1";

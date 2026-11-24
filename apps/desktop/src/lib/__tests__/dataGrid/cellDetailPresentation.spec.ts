@@ -21,6 +21,8 @@ describe("cellDetailPresentation", () => {
     expect(isGeometryColumnType("geometry")).toBe(true);
     expect(isGeometryColumnType("GEOGRAPHY")).toBe(true);
     expect(isGeometryColumnType("geometry(Point, 4326)")).toBe(true);
+    expect(isGeometryColumnType("ST_GEOMETRY")).toBe(true);
+    expect(isGeometryColumnType("MDSYS.ST_GEOMETRY")).toBe(true);
     expect(isGeometryColumnType("text")).toBe(false);
 
     // Geometry column with valid WKT
@@ -32,6 +34,8 @@ describe("cellDetailPresentation", () => {
     expect(canPreviewCellGeometry("MULTIPOLYGON EMPTY", "text")).toBe(true);
     expect(canPreviewCellGeometry("LINESTRING Z (1 2 3, 4 5 6)", "text")).toBe(true);
     expect(canPreviewCellGeometry("point(1 2)", "text")).toBe(true);
+    // YashanDB ST_GEOMETRY now arrives as decoded WKT
+    expect(canPreviewCellGeometry("POINT Z(116.397 39.908 50)", "MDSYS.ST_GEOMETRY")).toBe(true);
 
     // Non-geometry strings or null
     expect(canPreviewCellGeometry("just a normal string", "text")).toBe(false);

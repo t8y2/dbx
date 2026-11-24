@@ -7,6 +7,7 @@ import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
+import com.dbx.agent.SpatialColumn;
 import com.dbx.agent.test.JdbcFakeExecutionBehaviorTest;
 import com.dbx.agent.test.TestSupport;
 import com.yashandb.udt.YasStruct;
@@ -144,6 +145,78 @@ class YashandbAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertTrue(calls.contains("getString:2"));
         Assertions.assertTrue(calls.contains("getInt:3"));
         Assertions.assertTrue(calls.contains("getBoolean:4"));
+    }
+
+    @Test
+    void decodesStGeometryEwkbIntoWktAndSrid() throws SQLException {
+        Struct value = structValue(
+            "MDSYS.ST_GEOMETRY",
+            hex("00011400e610000043cbe84244cbe842caa11f42cba11f42"),
+            new SerialBlob(hex("0101000020e6100000c520b07268195d404e62105839f44340"))
+        );
+        YashandbAgent agent = agentWithResultSet(geometryRow(value));
+
+        QueryResult result = agent.executeQuery("SELECT SHAPE FROM REST_ORIGIN", null, new ExecuteQueryOptions());
+
+        Assertions.assertEquals(List.of(List.of("POINT(116.397 39.908)")), result.getRows());
+        Assertions.assertEquals(List.of("MDSYS.ST_GEOMETRY"), result.getColumn_types());
+        Assertions.assertEquals(List.of(new SpatialColumn(0, 4326)), result.getSpatial_columns());
+        Assertions.assertEquals(List.of(List.of(4326)), result.getSpatial_values());
+    }
+
+    @Test
+    void decodesThreeDimensionalStGeometry() throws SQLException {
+        Struct value = structValue(
+            "MDSYS.ST_GEOMETRY",
+            hex("00011500e610000043cbe84244cbe842caa11f42cba11f42"),
+            new SerialBlob(hex("01010000a0e6100000c520b07268195d404e62105839f443400000000000004940"))
+        );
+        YashandbAgent agent = agentWithResultSet(geometryRow(value));
+
+        QueryResult result = agent.executeQuery("SELECT SHAPE FROM REST_ORIGIN", null, new ExecuteQueryOptions());
+
+        Assertions.assertEquals(List.of(List.of("POINT Z(116.397 39.908 50)")), result.getRows());
+        Assertions.assertEquals(List.of(new SpatialColumn(0, 4326)), result.getSpatial_columns());
+    }
+
+    @Test
+    void fallsBackToGeometryHeaderSridWhenPayloadIsPlainWkb() throws SQLException {
+        Struct value = structValue(
+            "MDSYS.ST_GEOMETRY",
+            hex("000114008a11000043cbe84244cbe842caa11f42cba11f42"),
+            new SerialBlob(hex("0101000000c520b07268195d404e62105839f44340"))
+        );
+        YashandbAgent agent = agentWithResultSet(geometryRow(value));
+
+        QueryResult result = agent.executeQuery("SELECT SHAPE FROM REST_ORIGIN", null, new ExecuteQueryOptions());
+
+        Assertions.assertEquals(List.of(List.of("POINT(116.397 39.908)")), result.getRows());
+        Assertions.assertEquals(List.of(new SpatialColumn(0, 4490)), result.getSpatial_columns());
+    }
+
+    @Test
+    void keepsStructTextWhenGeometryPayloadIsMalformed() throws SQLException {
+        Struct value = structValue(
+            "MDSYS.ST_GEOMETRY",
+            hex("00011400e610000043cbe84244cbe842caa11f42cba11f42"),
+            new SerialBlob(new byte[]{1, 2, 3, 4})
+        );
+        YashandbAgent agent = agentWithResultSet(geometryRow(value));
+
+        QueryResult result = agent.executeQuery("SELECT SHAPE FROM REST_ORIGIN", null, new ExecuteQueryOptions());
+
+        Assertions.assertEquals(List.of(List.of("MDSYS.ST_GEOMETRY(0x00011400e610000043cbe84244cbe842caa11f42cba11f42, 0x01020304)")), result.getRows());
+        Assertions.assertTrue(result.getSpatial_columns().isEmpty());
+    }
+
+    @Test
+    void nullStGeometryBecomesNullSpatialValue() {
+        YashandbAgent agent = agentWithResultSet(geometryRow(null));
+
+        QueryResult result = agent.executeQuery("SELECT SHAPE FROM REST_ORIGIN", null, new ExecuteQueryOptions());
+
+        Assertions.assertEquals(List.of(Arrays.asList((Object) null)), result.getRows());
+        Assertions.assertEquals(List.of(new SpatialColumn(0, null)), result.getSpatial_columns());
     }
 
     @Test
@@ -338,6 +411,25 @@ class YashandbAgentTest extends JdbcFakeExecutionBehaviorTest {
             null,
             new ArrayList<>()
         );
+    }
+
+    private static ResultSet geometryRow(Struct value) {
+        return queryRows(
+            new String[]{"SHAPE"},
+            new int[]{Types.STRUCT},
+            new String[]{"MDSYS.ST_GEOMETRY"},
+            new Object[][]{{value}},
+            null,
+            new ArrayList<>()
+        );
+    }
+
+    private static byte[] hex(String value) {
+        byte[] bytes = new byte[value.length() / 2];
+        for (int i = 0; i < bytes.length; i++) {
+            bytes[i] = (byte) Integer.parseInt(value.substring(i * 2, i * 2 + 2), 16);
+        }
+        return bytes;
     }
 
     private static Connection queryConnection(ResultSet resultSet) {

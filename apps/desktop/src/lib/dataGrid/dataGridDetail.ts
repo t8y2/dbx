@@ -24,6 +24,8 @@ export interface DataGridCellDetail {
   isValuePreviewTruncated: boolean;
   /** True only while the backend value is incomplete, not when the UI clips its preview. */
   isSourceTruncated?: boolean;
+  /** Per-cell SRID for geometry values, when the result carries spatial metadata. */
+  srid?: number | null;
   imagePreviewUrl: string | null;
   length: number;
   isNull?: boolean;
@@ -63,6 +65,7 @@ export interface BuildDataGridCellDetailOptions {
   isValuePreviewTruncated?: boolean;
   /** Rendering only; never replaces the source value used by copy/export. */
   pendingDecodePlaceholder?: string;
+  srid?: number | null;
 }
 
 export interface BuildDataGridRowDetailOptions {
@@ -80,6 +83,7 @@ export interface BuildDataGridRowDetailOptions {
   isEditableColumn?: (columnIndex: number) => boolean;
   isValuePreviewTruncated?: (columnIndex: number) => boolean;
   pendingDecodePlaceholder?: (columnIndex: number) => string | undefined;
+  spatialSrid?: (rowId: number, columnIndex: number) => number | null;
 }
 
 export interface BuildDataGridColumnDetailRow {
@@ -103,6 +107,7 @@ export interface BuildDataGridColumnDetailOptions {
   displayValue: (value: CellValue, columnIndex: number) => string;
   rawValue?: (value: CellValue, columnIndex: number) => string;
   isNullValue?: (value: CellValue) => boolean;
+  spatialSrid?: (rowId: number, columnIndex: number) => number | null;
 }
 
 export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions): DataGridCellDetail | null {
@@ -132,6 +137,7 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
     displayValuePreview,
     isSourceTruncated: options.isValuePreviewTruncated === true,
     isValuePreviewTruncated: options.isValuePreviewTruncated === true || rawValuePreview.length < rawValue.length || displayValuePreview.length < displayValue.length,
+    srid: options.srid ?? null,
     imagePreviewUrl:
       options.pendingDecodePlaceholder === undefined
         ? cellImagePreviewUrl(value, type, {
@@ -168,6 +174,7 @@ export function buildDataGridColumnDetail(options: BuildDataGridColumnDetailOpti
         includeBinaryImagePreview: false,
         isValuePreviewTruncated: row.isValuePreviewTruncated,
         pendingDecodePlaceholder: row.pendingDecodePlaceholder,
+        srid: options.spatialSrid?.(row.rowId, options.columnIndex) ?? null,
       }),
     )
     .filter((field): field is DataGridCellDetail => field !== null);
@@ -200,6 +207,7 @@ export function buildDataGridRowDetail(options: BuildDataGridRowDetailOptions): 
         includeBinaryImagePreview: false,
         isValuePreviewTruncated: options.isValuePreviewTruncated?.(columnIndex),
         pendingDecodePlaceholder: options.pendingDecodePlaceholder?.(columnIndex),
+        srid: options.spatialSrid?.(options.rowId, columnIndex) ?? null,
       }),
     )
     .filter((field): field is DataGridCellDetail => field !== null);

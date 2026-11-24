@@ -203,21 +203,26 @@ export function trimmedSelectionLayer() {
 
   // Line metrics change with a font zoom without any document or selection
   // transaction, so they are part of the cache key rather than only an
-  // invalidation on `geometryChanged`.
-  const currentGeometrySignature = (view: EditorView) => `${view.scaleX}:${view.scaleY}:${view.defaultCharacterWidth}:${view.defaultLineHeight}`;
+  // invalidation on `geometryChanged`. So do the content box's offset inside
+  // the scroller (a gutter growing or being toggled shifts every line) and its
+  // width (wrapped lines break elsewhere after a resize); both are measured
+  // from the content origin and therefore stay put while the view scrolls.
+  const currentGeometrySignature = (view: EditorView, base: { left: number }) => {
+    const content = view.contentDOM.getBoundingClientRect();
+    return `${view.scaleX}:${view.scaleY}:${view.defaultCharacterWidth}:${view.defaultLineHeight}:${Math.round(content.left - base.left)}:${Math.round(content.width)}`;
+  };
 
   return layer({
     above: false,
     class: "cm-trimmedSelectionLayer",
     markers(view) {
-      const signature = currentGeometrySignature(view);
+      const markers: InstanceType<typeof RectangleMarker>[] = [];
+      const base = layerBase(view);
+      const signature = currentGeometrySignature(view, base);
       if (signature !== geometrySignature) {
         geometrySignature = signature;
         wholeLineRects.clear();
       }
-
-      const markers: InstanceType<typeof RectangleMarker>[] = [];
-      const base = layerBase(view);
 
       for (const range of view.state.selection.ranges) {
         if (range.empty) continue;
@@ -277,11 +282,14 @@ export function trimmedSelectionLayer() {
       // measured from the content origin, so they survive it — including the
       // `geometryChanged` an update carries while a scroll is measuring lines
       // for the first time, which is most of the frames of a long scroll and
-      // used to throw every cached line away. Anything that can move a line's
-      // own rectangle — an edit, a different selection, a re-measure after a
-      // font or theme change — is caught either here or by the block and
-      // geometry checks in `markers` above.
-      if (update.docChanged || update.selectionSet) wholeLineRects.clear();
+      // used to throw every cached line away. A selection change survives too:
+      // a wholly selected line's rectangle depends on that line's layout, not
+      // on where the selection ends, and a drag changes the selection on every
+      // pointer move while only its two end lines need measuring. Anything that
+      // can move a line's own rectangle — an edit (which also re-keys lines), a
+      // re-measure after a font, theme or width change — is caught either here
+      // or by the block and geometry checks in `markers` above.
+      if (update.docChanged) wholeLineRects.clear();
       return update.docChanged || update.selectionSet || update.viewportChanged || update.geometryChanged;
     },
   });

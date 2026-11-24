@@ -12,6 +12,7 @@ export type ShortcutActionId =
   | "formatSql"
   | "expandSelectStar"
   | "toggleLineComment"
+  | "toggleLineCommentAndAdvance"
   | "toggleBlockComment"
   | "saveSql"
   | "acceptCompletion"
@@ -69,6 +70,7 @@ export type ShortcutActionId =
   | "openSettings"
   | "closeTab"
   | "reopenClosedTab"
+  | "openRecentTables"
   | "closeOtherTabs"
   | "closeAllTabs"
   | "saveAllTabs"
@@ -99,6 +101,7 @@ export type ShortcutActionId =
   | "resetUiZoom"
   | "find"
   | "gotoLine"
+  | "goToLastEditLocation"
   | "replace"
   | "refreshData"
   | "toggleResultsPane"
@@ -120,7 +123,13 @@ export type ShortcutActionId =
   | "createSidebarTable"
   | "createSidebarDatabase"
   | "sendSelectionToAi"
-  | "sqlIntentionActions";
+  | "sqlIntentionActions"
+  | "commitTransaction"
+  | "copyResultColumn1"
+  | "copyResultColumn2"
+  | "copyResultColumn3"
+  | "copyResultColumn4"
+  | "copyResultColumn5";
 
 export type ShortcutScope = "global" | "debug" | "editor" | "grid" | "search" | "sidebar";
 
@@ -262,6 +271,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutToggleLineComment",
     scope: "editor",
     defaultShortcut: "Mod+/",
+  },
+  {
+    id: "toggleLineCommentAndAdvance",
+    labelKey: "settings.shortcutToggleLineCommentAndAdvance",
+    scope: "editor",
+    defaultShortcut: "",
   },
   {
     id: "toggleBlockComment",
@@ -594,6 +609,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Shift+Mod+T",
   },
   {
+    id: "openRecentTables",
+    labelKey: "tabs.recentTablesTitle",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
     id: "closeOtherTabs",
     labelKey: "contextMenu.closeOtherTabs",
     scope: "global",
@@ -778,6 +799,16 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: gotoLineDefaultShortcut(),
   },
   {
+    // JetBrains `Ctrl+Shift+Backspace` / VS Code "Go to Last Edit Location".
+    // Free on every platform: CodeMirror's default keymap binds `Backspace`,
+    // `Mod-Backspace` (macOS: `Alt-Backspace`/`Mod-Backspace`) but not
+    // `Shift-Mod-Backspace`.
+    id: "goToLastEditLocation",
+    labelKey: "settings.shortcutGoToLastEditLocation",
+    scope: "editor",
+    defaultShortcut: "Shift+Mod+Backspace",
+  },
+  {
     id: "replace",
     labelKey: "settings.shortcutReplace",
     scope: "editor",
@@ -788,6 +819,42 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutRefreshData",
     scope: "global",
     defaultShortcut: "F5",
+  },
+  {
+    id: "commitTransaction",
+    labelKey: "settings.shortcutCommitTransaction",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn1",
+    labelKey: "settings.shortcutCopyResultColumn1",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn2",
+    labelKey: "settings.shortcutCopyResultColumn2",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn3",
+    labelKey: "settings.shortcutCopyResultColumn3",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn4",
+    labelKey: "settings.shortcutCopyResultColumn4",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn5",
+    labelKey: "settings.shortcutCopyResultColumn5",
+    scope: "global",
+    defaultShortcut: "",
   },
   {
     id: "toggleResultsPane",

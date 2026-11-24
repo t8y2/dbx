@@ -20,6 +20,7 @@ const rpc = vi.hoisted(() => ({
   listSchemas: vi.fn(),
   getObjectSource: vi.fn(),
   executeQuery: vi.fn(),
+  executeMultiWithProgress: vi.fn(),
   prepareOracleTriggerSql: vi.fn(),
   buildDropObjectSql: vi.fn(),
   buildDropTableSql: vi.fn(),
@@ -508,4 +509,55 @@ it.each(["menu", "keyboard", "batch-success", "batch-mixed", "batch-unknown", "b
     expect(writes()).toEqual(batch ? [dropSql(owner), dropSql(secondOwner), ...(mixed ? [parentDrop] : [])] : [dropSql(owner)]);
     expect(rpc.getObjectSource).toHaveBeenCalled();
   }
+});
+
+it.each([false, true])("plans an exact mixed Oracle package and sequence drop (preview fails: %s)", async (previewFails) => {
+  const schema = executionSchema;
+  const names = ["BatchSequence", "BatchPackage"];
+  const objects = [
+    { name, schema: owner, object_type: "TRIGGER", trigger: raw.trigger },
+    { name: names[0]!, schema, object_type: "SEQUENCE" },
+    { name: names[1]!, schema, object_type: "PACKAGE" },
+    { name: names[1]!, schema, object_type: "PACKAGE_BODY" },
+  ];
+  const expectedSql = ["DROP SEQUENCE " + quote(schema) + "." + quote(names[0]!), "DROP PACKAGE BODY " + quote(schema) + "." + quote(names[1]!), "DROP PACKAGE " + quote(schema) + "." + quote(names[1]!)];
+  rpc.listObjects.mockResolvedValue(objects);
+  rpc.buildDropObjectSql.mockImplementation(async (input) => {
+    if (previewFails && input.objectType === "PACKAGE_BODY") throw new Error("Cannot generate package body SQL");
+    return "DROP " + input.objectType.replaceAll("_", " ") + " " + quote(input.schema) + "." + quote(input.name) + ";";
+  });
+  rpc.executeMultiWithProgress.mockResolvedValue(expectedSql.map((_, statement_index) => ({ statement_index, columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 })));
+  const host = await mountTriggerBrowser("all");
+  const labels = () => [...host.querySelectorAll<HTMLElement>("[title]")].filter((item) => names.includes(item.title) && item.closest<HTMLElement>(".vue-recycle-scroller__item-view")?.style.visibility !== "hidden");
+  await vi.waitFor(() => expect(labels()).toHaveLength(3));
+  for (const label of labels()) label.closest(".grid")!.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true, detail: 1 }));
+  await nextTick();
+  expect(host.textContent).toContain(i18n.global.t("objects.selectedObjects", { count: 3 }));
+  const dropLabel = i18n.global.t("objects.dropSelected");
+  [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === dropLabel)!.click();
+
+  const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]');
+  const confirm = () => [...(dialog()?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((button) => button.textContent?.trim() === dropLabel);
+  if (previewFails) {
+    await vi.waitFor(() => expect(dialog()?.textContent).toContain("Cannot generate package body SQL"));
+    expect(confirm()?.disabled).toBe(true);
+    expect(dialog()?.textContent).not.toContain(expectedSql[0]);
+    confirm()?.click();
+    expect(rpc.executeMultiWithProgress).not.toHaveBeenCalled();
+    return;
+  }
+
+  await vi.waitFor(() => expect(confirm()?.disabled).toBe(false));
+  expect(dialog()?.textContent).toContain(i18n.global.t("objects.dropPackageBodyHint"));
+  confirm()!.click();
+  await vi.waitFor(() => expect(rpc.executeMultiWithProgress).toHaveBeenCalledOnce());
+  const sql = rpc.executeMultiWithProgress.mock.calls[0]![2] as string;
+  expect(
+    sql
+      .split(";")
+      .map((statement) => statement.trim())
+      .filter(Boolean)
+      .sort(),
+  ).toEqual([...expectedSql].sort());
+  expect(sql.indexOf(expectedSql[1]!)).toBeLessThan(sql.indexOf(expectedSql[2]!));
 });

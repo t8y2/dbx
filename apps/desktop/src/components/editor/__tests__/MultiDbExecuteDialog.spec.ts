@@ -141,6 +141,15 @@ describe("multi-database selection filtered by connection ID", () => {
   });
 });
 
+describe("multi-database selection layout", () => {
+  it("caps the target-list grid row so both panels fit the dialog height", async () => {
+    mountDialog({ open: true, sql: "SELECT 1", sourceTabId: "source", databaseType: "mysql", initialTargets: [], launchId: 1, executeTarget: vi.fn() });
+    await flushPromises();
+    const grid = document.querySelector(".grid.min-h-0.flex-1");
+    expect(grid?.className).toContain("lg:grid-rows-[minmax(0,1fr)]");
+  });
+});
+
 describe("manual multi-database dialog", () => {
   it("shows pending changes, commits only on click, and clears transaction controls", async () => {
     const finish = vi.fn().mockResolvedValue(undefined);

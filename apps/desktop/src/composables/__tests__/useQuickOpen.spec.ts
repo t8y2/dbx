@@ -583,6 +583,37 @@ describe("useQuickOpen", () => {
       }
     });
 
+    it("clears previous content matches while a newer query is pending", async () => {
+      vi.useFakeTimers();
+      const pending = deferred<Awaited<ReturnType<typeof api.globalSearch>>>();
+      vi.mocked(api.globalSearch).mockResolvedValueOnce({
+        matches: [{ path: "/sql/old.sql", fileName: "old.sql", line: 1, column: 1, lineText: "old", matchText: "old" }],
+        errors: [],
+      });
+      vi.mocked(api.globalSearch).mockReturnValueOnce(pending.promise);
+      vi.mocked(api.cancelGlobalSearch).mockResolvedValue(undefined);
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [], connectedIds: new Set() } as any);
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        state.setContentMode(true);
+        state.setQuery("old");
+        await vi.advanceTimersByTimeAsync(250);
+        await flushAsyncWork();
+        expect(state.contentGroups.value[0]?.filePath).toBe("/sql/old.sql");
+
+        state.setQuery("new");
+        expect(state.contentGroups.value).toEqual([]);
+        expect(state.contentSearching.value).toBe(true);
+        await vi.advanceTimersByTimeAsync(250);
+        pending.resolve({ matches: [], errors: [] });
+        await flushAsyncWork();
+      } finally {
+        scope.stop();
+        vi.useRealTimers();
+      }
+    });
+
     it("keeps partial matches when the backend reports scan errors", async () => {
       vi.useFakeTimers();
       vi.mocked(api.globalSearch).mockResolvedValueOnce({

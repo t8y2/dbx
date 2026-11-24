@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { encodeSpreadsheetTsvCell } from "@/lib/common/spreadsheetTsv";
 import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, parseDataGridClipboardInBatches, planDataGridPaste, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
 import { DataGridClipboardCapacityError } from "@/lib/dataGrid/dataGridRowPreparation";
 
@@ -104,6 +105,63 @@ describe("planDataGridPaste", () => {
 });
 
 describe("parseDataGridClipboard", () => {
+  it.each<[string, string[][]]>([
+    ['"line 1\nline 2"\tnote', [["line 1\nline 2", "note"]]],
+    [
+      '"left\tinside"\t"a ""quoted"" value"\r\nnext\trow\r\n',
+      [
+        ["left\tinside", 'a "quoted" value'],
+        ["next", "row"],
+      ],
+    ],
+    ['"line 1\r\nline 2"\t""', [["line 1\r\nline 2", ""]]],
+    ['""\t""\n', [["", ""]]],
+    ['"a"\t', [["a", ""]]],
+    ['plain"quote\t"quoted"', [['plain"quote', "quoted"]]],
+    [
+      '"unfinished\tcell\nnext\trow',
+      [
+        ['"unfinished', "cell"],
+        ["next", "row"],
+      ],
+    ],
+  ])("parses quoted spreadsheet cells without internal clipboard metadata: %j", async (text, expected) => {
+    expect(parseDataGridClipboard(text)).toEqual(expected);
+    expect(await parseDataGridClipboardInBatches(text)).toEqual(expected);
+  });
+
+  it("round-trips the spreadsheet TSV encoder without internal copy metadata", () => {
+    const row = ["left\tinside", "line 1\r\nline 2", 'a "quoted" value', "中文", ""];
+    expect(parseDataGridClipboard(row.map(encodeSpreadsheetTsvCell).join("\t"))).toEqual([row]);
+  });
+
+  it("keeps quoted NULL text literal while restoring unquoted NULL markers", async () => {
+    const text = '"NULL"\tNULL\t""';
+    const expected = [["NULL", null, ""]];
+    expect(parseDataGridClipboard(text, {}, "NULL")).toEqual(expected);
+    expect(await parseDataGridClipboardInBatches(text, {}, {}, "NULL")).toEqual(expected);
+  });
+
+  it("applies row and cell limits to logical quoted cells", () => {
+    const text = '"line 1\nline 2"\tend';
+    expect(parseDataGridClipboard(text, { maxRows: 1, maxCells: 2 })).toEqual([["line 1\nline 2", "end"]]);
+    expect(() => parseDataGridClipboard(text, { maxCells: 1 })).toThrow(DataGridClipboardCapacityError);
+    expect(() => parseDataGridClipboard(text + "\nnext", { maxRows: 1 })).toThrow(DataGridClipboardCapacityError);
+  });
+
+  it("yields and can be cancelled inside a large quoted cell", async () => {
+    const controller = new AbortController();
+    const text = '"' + "line\n".repeat(20_000) + '"\tend';
+    const result = await parseDataGridClipboardInBatches(text, {
+      signal: controller.signal,
+      onProgress: ({ completed }) => {
+        if (completed > 0) controller.abort();
+      },
+    });
+    expect(result).toBeNull();
+    expect(await parseDataGridClipboardInBatches(text, {}, { maxRows: 1, maxCells: 2 })).toEqual([["line\n".repeat(20_000), "end"]]);
+  });
+
   it("bounds logical rows and cells before allocating an oversized clipboard", () => {
     expect(() => parseDataGridClipboard("a\nb\nc", { maxRows: 2 })).toThrow(DataGridClipboardCapacityError);
     expect(() => parseDataGridClipboard("a\tb\tc", { maxCells: 2 })).toThrow(DataGridClipboardCapacityError);

@@ -13,12 +13,15 @@ const mocks = vi.hoisted(() => ({
   read: vi.fn(),
   open: vi.fn(),
   toast: vi.fn(),
+  move: vi.fn(),
+  relocate: vi.fn(),
+  watch: vi.fn<(_path: string, _recursive: boolean, _changed: () => void) => Promise<() => Promise<void>>>(async () => vi.fn(async () => {})),
 }));
 
-vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ tabs: [], activeTabId: "", openExternalSqlFile: mocks.open }) }));
+vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ tabs: [], activeTabId: "", openExternalSqlFile: mocks.open, relocateExternalSqlFilePath: mocks.relocate }) }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ getConfig: () => undefined }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: {} }) }));
-vi.mock("@/lib/backend/api", () => ({ listSqlFilesInFolder: mocks.list, readExternalSqlFileSnapshot: mocks.read }));
+vi.mock("@/lib/backend/api", () => ({ listSqlFilesInFolder: mocks.list, readExternalSqlFileSnapshot: mocks.read, moveSqlFileInFolder: mocks.move, watchSqlFileFolder: mocks.watch }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 
@@ -49,7 +52,7 @@ function unmountPanels() {
 }
 
 function row(host: HTMLElement, path: string) {
-  const result = host.querySelector<HTMLElement>(`[data-sql-file-path="${path}"]`);
+  const result = host.querySelector<HTMLElement>(`[data-sql-file-path="${path}"], [data-sql-file-drop-path="${path}"]`);
   expect(result).not.toBeNull();
   return result!;
 }
@@ -101,6 +104,60 @@ afterEach(() => {
 });
 
 describe("SqlFilePanel drag sorting", () => {
+  it("moves a nested file back to the opened root directory", async () => {
+    const host = await mountPanel();
+    row(host, "/sql/sub").click();
+    await nextTick();
+    mocks.move.mockResolvedValueOnce("/sql/child.sql");
+    mocks.list.mockResolvedValueOnce([entry("/sql/sub", []), entry("/sql/child.sql"), entry("/sql/a.sql"), entry("/sql/b.sql"), entry("/sql/c.sql")]);
+    const drag = await beginDrag(host, "/sql/sub/child.sql", "/sql");
+    releaseDrag(drag.point);
+    await vi.waitFor(() => expect(rootFileNames(host)).toContain("child.sql"));
+    expect(mocks.move).toHaveBeenCalledWith("/sql", "/sql/sub/child.sql", "/sql", "/sql");
+  });
+
+  it("refreshes the file tree when its native directory watcher reports a change", async () => {
+    const host = await mountPanel();
+    mocks.list.mockResolvedValueOnce([entry("/sql/new.sql"), entry("/sql/a.sql")]);
+    const notify = mocks.watch.mock.calls.at(-1)![2] as () => void;
+    notify();
+    notify();
+    await vi.waitFor(() => expect(rootFileNames(host)).toEqual(["a.sql", "new.sql"]));
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes the tree on window focus when notifications are unavailable", async () => {
+    const host = await mountPanel();
+    mocks.list.mockResolvedValueOnce([entry("/sql/changed.sql")]);
+    window.dispatchEvent(new Event("focus"));
+    await vi.waitFor(() => expect(rootFileNames(host)).toEqual(["changed.sql"]));
+  });
+  it("moves a file into a collapsed directory and updates its open-tab identity", async () => {
+    saveSqlFileOrder({ "/sql": ["/sql/c.sql", "/sql/a.sql"], "/sql/sub": ["/sql/sub/child.sql"] });
+    const host = await mountPanel();
+    mocks.move.mockResolvedValueOnce("/sql/sub/c.sql");
+    mocks.list.mockResolvedValueOnce([entry("/sql/sub", [entry("/sql/sub/child.sql"), entry("/sql/sub/c.sql")]), entry("/sql/a.sql"), entry("/sql/b.sql")]);
+    const drag = await beginDrag(host, "/sql/c.sql", "/sql/sub");
+    expect(drag.target.classList.contains("ring-primary")).toBe(true);
+    releaseDrag(drag.point);
+    await vi.waitFor(() => expect(row(host, "/sql/sub/c.sql")).toBeDefined());
+    expect(mocks.move).toHaveBeenCalledWith("/sql", "/sql/c.sql", "/sql", "/sql/sub");
+    expect(mocks.relocate).toHaveBeenCalledWith("/sql/c.sql", "/sql/sub/c.sql");
+    expect(rootFileNames(host)).toEqual(["a.sql", "b.sql"]);
+    expect(mocks.read).not.toHaveBeenCalled();
+    expect(getSqlFileOrder()["/sql"]).toEqual(["/sql/a.sql"]);
+    expect(getSqlFileOrder()["/sql/sub"]).toEqual(["/sql/sub/c.sql", "/sql/sub/child.sql"]);
+  });
+
+  it("keeps the tree and open tabs unchanged when a move fails", async () => {
+    const host = await mountPanel();
+    mocks.move.mockRejectedValueOnce(new Error("destination already exists"));
+    const drag = await beginDrag(host, "/sql/c.sql", "/sql/sub");
+    releaseDrag(drag.point);
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalled());
+    expect(rootFileNames(host)).toEqual(["a.sql", "b.sql", "c.sql"]);
+    expect(mocks.relocate).not.toHaveBeenCalled();
+  });
   it.each([
     { mode: "default", source: "c.sql", initial: ["a.sql", "b.sql", "c.sql"], expected: ["a.sql", "c.sql", "b.sql"] },
     { mode: "desc", source: "a.sql", initial: ["c.sql", "b.sql", "a.sql"], expected: ["c.sql", "a.sql", "b.sql"] },

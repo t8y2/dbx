@@ -168,28 +168,44 @@ function persistGlobalSearchSettings(): void {
  */
 export async function initializeGlobalSearchSettings(): Promise<void> {
   const revisionAtStart = globalSearchSettingsVersion.value;
+  const initialRoots = getGlobalSearchRoots();
+  const initialExtensions = getGlobalSearchExtensions();
+  const initialMatchMode = getGlobalSearchMatchMode();
+  const initialShowQuickFilters = getGlobalSearchShowQuickFilters();
+  const initialItemTypes = getGlobalSearchItemTypes();
+  const sameStrings = (left: string[], right: string[]): boolean => left.length === right.length && left.every((value, index) => value === right[index]);
+  const sameItemTypes = (left: GlobalSearchItemTypes, right: GlobalSearchItemTypes): boolean => GLOBAL_SEARCH_ITEM_TYPES.every((type) => left[type] === right[type]);
+
   try {
     const disk = await api.loadGlobalSearchSettings();
-    if (!disk || globalSearchSettingsVersion.value !== revisionAtStart) return;
+    if (!disk) return;
     let hydrated = false;
-    if (Array.isArray(disk.roots) && disk.roots.length > 0) {
-      safeLocalStorageSet(ROOTS_STORAGE_KEY, JSON.stringify(normalizeRoots(disk.roots)));
+    const localEditOccurred = globalSearchSettingsVersion.value !== revisionAtStart;
+    const currentRoots = getGlobalSearchRoots();
+    const currentExtensions = getGlobalSearchExtensions();
+    const currentMatchMode = getGlobalSearchMatchMode();
+    const currentShowQuickFilters = getGlobalSearchShowQuickFilters();
+    const currentItemTypes = getGlobalSearchItemTypes();
+
+    if (Array.isArray(disk.roots) && disk.roots.length > 0 && (!localEditOccurred || sameStrings(currentRoots, initialRoots))) {
+      const roots = normalizeRoots(disk.roots);
+      safeLocalStorageSet(ROOTS_STORAGE_KEY, JSON.stringify(roots));
       hydrated = true;
     }
-    if (Array.isArray(disk.extensions) && disk.extensions.length > 0) {
+    if (Array.isArray(disk.extensions) && disk.extensions.length > 0 && (!localEditOccurred || sameStrings(currentExtensions, initialExtensions))) {
       const extensions = normalizeExtensions(disk.extensions);
       if (extensions.length > 0) safeLocalStorageSet(EXTENSIONS_STORAGE_KEY, JSON.stringify(extensions));
       hydrated = true;
     }
-    if (disk.matchMode === "precise" || disk.matchMode === "enhanced") {
+    if ((disk.matchMode === "precise" || disk.matchMode === "enhanced") && (!localEditOccurred || currentMatchMode === initialMatchMode)) {
       safeLocalStorageSet(MATCH_MODE_STORAGE_KEY, disk.matchMode);
       hydrated = true;
     }
-    if (typeof disk.showQuickFilters === "boolean") {
+    if (typeof disk.showQuickFilters === "boolean" && (!localEditOccurred || currentShowQuickFilters === initialShowQuickFilters)) {
       safeLocalStorageSet(SHOW_QUICK_FILTERS_STORAGE_KEY, disk.showQuickFilters ? "true" : "false");
       hydrated = true;
     }
-    if (disk.itemTypes && typeof disk.itemTypes === "object") {
+    if (disk.itemTypes && typeof disk.itemTypes === "object" && (!localEditOccurred || sameItemTypes(currentItemTypes, initialItemTypes))) {
       const itemTypes = Object.fromEntries(GLOBAL_SEARCH_ITEM_TYPES.map((type) => [type, (disk.itemTypes as Record<string, unknown>)[type] !== false])) as GlobalSearchItemTypes;
       safeLocalStorageSet(SEARCH_ITEM_TYPES_STORAGE_KEY, JSON.stringify(itemTypes));
       hydrated = true;

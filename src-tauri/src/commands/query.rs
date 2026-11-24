@@ -866,8 +866,15 @@ pub fn build_rename_database_sql(
     old_name: String,
     new_name: String,
     terminate_connections: bool,
+    identifier_quote: Option<String>,
 ) -> Result<String, String> {
-    dbx_core::db_admin_sql::build_rename_database_sql(database_type, &old_name, &new_name, terminate_connections)
+    dbx_core::db_admin_sql::build_rename_database_sql(
+        database_type,
+        &old_name,
+        &new_name,
+        terminate_connections,
+        identifier_quote.as_deref(),
+    )
 }
 
 #[tauri::command]

@@ -278,6 +278,10 @@ export function isReopenClosedTabShortcut(event: ShortcutLikeEvent, shortcuts?: 
   return matchesShortcut(event, actionShortcut("reopenClosedTab", shortcuts));
 }
 
+export function isOpenRecentTablesShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("openRecentTables", shortcuts));
+}
+
 export function isCloseOtherTabsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
   return matchesShortcut(event, actionShortcut("closeOtherTabs", shortcuts), platform);
 }
@@ -333,6 +337,10 @@ export function isFocusSearchShortcut(event: ShortcutLikeEvent, shortcuts?: Part
 
 export function isRefreshDataShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("refreshData", shortcuts));
+}
+
+export function isCommitTransactionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("commitTransaction", shortcuts));
 }
 
 /**
@@ -579,6 +587,15 @@ export function switchToTabIndexFromShortcut(event: ShortcutLikeEvent, shortcuts
   const normalized = readNormalizedShortcutSettings(shortcuts);
   const index = SWITCH_TO_TAB_ACTIONS.findIndex((actionId) => matchesShortcut(event, normalized[actionId]));
   return index >= 0 ? index : null;
+}
+
+const COPY_RESULT_COLUMN_ACTIONS: ShortcutActionId[] = ["copyResultColumn1", "copyResultColumn2", "copyResultColumn3", "copyResultColumn4", "copyResultColumn5"];
+
+/** The 1-based result column the event's copy-result-column shortcut targets, or null. */
+export function copyResultColumnIndexFromShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): number | null {
+  const normalized = readNormalizedShortcutSettings(shortcuts);
+  const index = COPY_RESULT_COLUMN_ACTIONS.findIndex((actionId) => matchesShortcut(event, normalized[actionId]));
+  return index >= 0 ? index + 1 : null;
 }
 
 export function isBrowserReloadShortcut(event: ShortcutLikeEvent): boolean {

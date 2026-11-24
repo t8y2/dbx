@@ -32,6 +32,7 @@ import { createSidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
 import { filterConnectionIndexes, hideSimpleSidebarIndexes, insertConnectionIndexSearchControls } from "@/lib/sidebar/sidebarIndexSearch";
 import { firstSidebarSearchMatchDataNode, hasActiveSidebarSearch } from "@/lib/sidebar/sidebarSearchEnter";
 import { collectSidebarRegexIndexScopes } from "@/lib/sidebar/sidebarRegexSearchIndex";
+import { createSidebarTableCommentUpdates, patchSidebarTableComments } from "@/lib/sidebar/sidebarTableCommentUpdates";
 import { collectSidebarGlobalSearchIndexes, sidebarIndexedObjectGroupTypes } from "@/lib/sidebar/sidebarGlobalSearchIndex";
 import { runSidebarSearchTasks } from "./sidebarSearchTaskRunner";
 import { resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
@@ -76,8 +77,9 @@ import {
   type ActiveTabSidebarTarget,
   type SidebarNodeScrollAlign,
 } from "@/lib/sidebar/sidebarActiveTabTarget";
-import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
+import { normalizeLocateCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, resolveConnectionRootLocateSchema, resolveLoadedLocateTarget, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
 import { createFlatTreeIndex, flatTreeRowsChanged, getSidebarTreeRowHeight, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, SIDEBAR_TREE_VIRTUALIZE_HYSTERESIS, SIDEBAR_TREE_VIRTUALIZE_THRESHOLD, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
+import { sidebarTreeIconSize } from "@/lib/sidebar/connectionBadge";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHostInstance } from "@/lib/sidebar/sidebarTreeRuntime";
 import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHandlerRegistry";
@@ -113,7 +115,7 @@ import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion
 import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
 import type { OracleTriggerSqlBinding } from "@/lib/database/oracleTriggerSql";
-import { SidebarDdlViewDialog, SidebarElasticsearchIndexMetadataDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
+import { SidebarDdlViewDialog, SidebarElasticsearchIndexMetadataDialog, SidebarObjectSourceDialog, SidebarPostgresSequenceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { connectionEndpointUserLabel } from "@/lib/connection/connectionPresentation";
 import { orderSidebarConnectionUtilitiesForDisplay } from "@/lib/sidebar/sidebarNodeOrdering";
@@ -187,6 +189,8 @@ const sidebarElasticsearchIndexMetadataTarget = ref<{ node: TreeNode; kind: Elas
 const sidebarElasticsearchIndexMetadataOpen = ref(false);
 const sidebarObjectSourceTarget = ref<{ node: TreeNode; initialEditing: boolean; initialSection?: ObjectDetailsSection; createTrigger?: SidebarActionRequest<OracleTriggerSqlBinding> } | null>(null);
 const sidebarObjectSourceOpen = ref(false);
+const sidebarPostgresSequenceTarget = ref<TreeNode | null>(null);
+const sidebarPostgresSequenceOpen = ref(false);
 const sidebarProcedureTarget = ref<TreeNode | null>(null);
 const sidebarProcedureOpen = ref(false);
 const sidebarVisibleDatabasesTarget = ref<TreeNode | null>(null);
@@ -582,6 +586,8 @@ function restoreTableSearchInput(focusRestore: TableSearchFocusRestore) {
 const userAdminVisibility = computed(() => sidebarUserAdminVisibility(store.treeNodes, store.getConfig, store.connections));
 const displayedTreeNodes = computed(() => sortConnectionListForDisplay(orderSidebarConnectionUtilitiesForDisplay(userAdminVisibility.value.nodes), settingsStore.editorSettings.sidebarConnectionSortMode));
 const localTableSearchResults = ref<Record<string, TableInfo[] | null>>({});
+const localTableSearchScopes = new Map<string, SidebarRegexScopeIdentity>();
+const localTableCommentUpdates = createSidebarTableCommentUpdates();
 const localTableSearchRequestRevisions = new Map<string, number>();
 type InvalidatedTableSearchScope = SidebarRegexScopeIdentity & { parentNodeId: string };
 const pendingInvalidatedTableSearchScopes = new Map<string, InvalidatedTableSearchScope>();
@@ -628,6 +634,7 @@ const globalIndexSearchQuery = computed(() => qualifiedGlobalSearch.value?.name 
 const { scopes: globalTableSearchScopes, isLoading: isGlobalIndexLoading } = useSidebarSearchIndexes({
   query: globalIndexSearchQuery,
   context: globalSearchContext,
+  commentUpdate: () => store.sidebarTableCommentUpdate,
   load: loadGlobalTableSearchIndexes,
   onError: (error) => toast(error instanceof Error ? error.message : String(error), 5000),
 });
@@ -761,6 +768,21 @@ function filterGloballyIndexedTables(nodes: TreeNode[]): TreeNode[] {
 
 watch([deferredSearchQuery, regexMode, searchMatchMode, () => store.sidebarTableSearchIndexInvalidation.revision, () => [...store.connectedIds].join("\0")], store.clearSidebarSearchDetailTables, { flush: "sync" });
 
+watch(
+  () => store.sidebarTableCommentUpdate,
+  (update) => {
+    if (!update) return;
+    localTableCommentUpdates.record(update);
+    const results = { ...localTableSearchResults.value };
+    for (const [parentNodeId, scope] of localTableSearchScopes) {
+      const entries = results[parentNodeId];
+      if (entries) results[parentNodeId] = patchSidebarTableComments(scope, entries, [update]);
+    }
+    localTableSearchResults.value = results;
+  },
+  { flush: "sync" },
+);
+
 function scheduleLocalSidebarTableSearchRefresh(parentNodeId: string, focusRestore?: TableSearchFocusRestore) {
   scheduleExclusiveSidebarTableSearchDebounce(parentNodeId, localTableSearchDebouncer, remoteTableSearchDebouncer, () => {
     void loadLocalTableSearchResults(parentNodeId, false, focusRestore);
@@ -771,15 +793,34 @@ function invalidatedTableSearchScopeKey(scope: InvalidatedTableSearchScope): str
   return [scope.connectionId, scope.catalog ?? "", scope.database, scope.schema ?? "", scope.nodeType, scope.parentNodeId].join("\0");
 }
 
+function localTableSearchScope(parentNodeId: string): SidebarRegexScopeIdentity | undefined {
+  const find = (nodes: readonly TreeNode[]): TreeNode | undefined => {
+    for (const node of nodes) {
+      if (node.id === parentNodeId) return node;
+      const child = find(node.children ?? []);
+      if (child) return child;
+    }
+    return undefined;
+  };
+  const parent = find(store.treeNodes);
+  return parent?.connectionId && parent.database !== undefined ? { connectionId: parent.connectionId, database: parent.database, schema: parent.schema, catalog: parent.catalog, nodeType: parent.type } : undefined;
+}
+
 async function loadLocalTableSearchResults(parentNodeId: string, refresh = false, focusRestore?: TableSearchFocusRestore, identity?: SidebarRegexScopeIdentity) {
   const requestRevision = (localTableSearchRequestRevisions.get(parentNodeId) ?? 0) + 1;
   localTableSearchRequestRevisions.set(parentNodeId, requestRevision);
+  const scope = identity ?? localTableSearchScope(parentNodeId);
+  const updates = localTableCommentUpdates.begin();
   try {
     const query = store.sidebarTableSearchQueries[parentNodeId]?.trim() ?? "";
     const entries = await store.ensureSidebarTableSearchIndex(parentNodeId, query, identity, { refresh });
     if (localTableSearchRequestRevisions.get(parentNodeId) !== requestRevision) return;
-    if (query || refresh) localTableSearchResults.value = { ...localTableSearchResults.value, [parentNodeId]: entries };
+    if (query || refresh) {
+      if (scope) localTableSearchScopes.set(parentNodeId, scope);
+      localTableSearchResults.value = { ...localTableSearchResults.value, [parentNodeId]: scope && entries ? updates.patchEntries(scope, entries) : entries };
+    }
   } finally {
+    updates.finish();
     if (focusRestore) restoreTableSearchInput(focusRestore);
   }
 }
@@ -807,6 +848,7 @@ watch(
     const nextResults = { ...localTableSearchResults.value };
     for (const scope of invalidation.scopes) {
       delete nextResults[scope.parentNodeId];
+      localTableSearchScopes.delete(scope.parentNodeId);
       localTableSearchDebouncer.cancel(scope.parentNodeId);
       pendingInvalidatedTableSearchScopes.set(invalidatedTableSearchScopeKey(scope), scope);
     }
@@ -943,7 +985,8 @@ const sidebarTreeLeadingWidthItems = computed(() => {
     if (node.type === "schema" && node.connectionId && node.schema && store.isDefaultSchema(node.connectionId, node.schema)) badges.push(t("editor.defaultSchema"));
     if (showSidebarRowProductionBadge(node, config) && isSidebarProductionContainer(node)) badges.push("PROD");
     const secondary = sidebarTreeSecondaryValue(node, t, config ? effectiveDatabaseTypeForConnection(config) : undefined);
-    const leadingExtraWidth = (secondary && node.type === "elasticsearch-index" ? 16 : 0) + (node.type === "oracle-db-links" ? 26 : 0);
+    const iconExtraWidth = sidebarTreeIconSize(node.type, config, settingsStore.editorSettings.sidebarConnectionIconStyle) - 14;
+    const leadingExtraWidth = iconExtraWidth + (secondary && node.type === "elasticsearch-index" ? 16 : 0) + (node.type === "oracle-db-links" ? 26 : 0);
     return { id, depth, node, label: sidebarCommentLabel(node), badges, secondary, leadingExtraWidth };
   });
 });
@@ -1831,7 +1874,17 @@ async function focusSidebarTreeNode(nodeId: string) {
 }
 
 function sidebarDialogOpen(): boolean {
-  return sidebarDdlOpen.value || sidebarElasticsearchIndexMetadataOpen.value || sidebarObjectSourceOpen.value || sidebarProcedureOpen.value || sidebarVisibleDatabasesOpen.value || sidebarVisibleSchemasOpen.value || sidebarVisibleNacosNamespacesOpen.value || sidebarTableNameFilterOpen.value;
+  return (
+    sidebarDdlOpen.value ||
+    sidebarElasticsearchIndexMetadataOpen.value ||
+    sidebarObjectSourceOpen.value ||
+    sidebarPostgresSequenceOpen.value ||
+    sidebarProcedureOpen.value ||
+    sidebarVisibleDatabasesOpen.value ||
+    sidebarVisibleSchemasOpen.value ||
+    sidebarVisibleNacosNamespacesOpen.value ||
+    sidebarTableNameFilterOpen.value
+  );
 }
 
 function restoreSidebarTreeFocusAfterDialog(nodeId: string | null | undefined) {
@@ -1945,14 +1998,19 @@ async function locateTabInSidebarTarget(tab: QueryTab | undefined | null, align:
   }
 
   const config = connId ? store.getConfig(connId) : undefined;
-  const cursorCandidate = locatesSavedSql ? null : queryCursorTableCandidate(tab, effectiveDatabaseTypeForConnection(config));
+  const rawCursorCandidate = locatesSavedSql ? null : queryCursorTableCandidate(tab, effectiveDatabaseTypeForConnection(config));
+  const cursorCandidate = rawCursorCandidate ? normalizeLocateCandidate(rawCursorCandidate, store.treeNodes, config) : null;
   const tabTableCandidate = locatesSavedSql || cursorCandidate ? null : tableLocateCandidateFromTarget(tabTarget, config);
-  const locateTableCandidate = cursorCandidate ?? tabTableCandidate;
-  const fallbackTarget = locatesSavedSql ? tabTarget : (queryContextTargetFromCandidate(tab, cursorCandidate) ?? tabTarget);
+  let locateTableCandidate = cursorCandidate ?? tabTableCandidate;
+  let fallbackTarget = locatesSavedSql ? tabTarget : (queryContextTargetFromCandidate(tab, locateTableCandidate ?? rawCursorCandidate) ?? tabTarget);
+  if (fallbackTarget?.type === "query-context" && connectionUsesConnectionRootSchemaMode(config)) {
+    const schema = resolveConnectionRootLocateSchema(store.treeNodes, connId, fallbackTarget.schema || fallbackTarget.database, config);
+    fallbackTarget = { ...fallbackTarget, database: schema, schema };
+  }
   let initialTarget = locateTableCandidate ? tableTargetFromCandidate(locateTableCandidate) : fallbackTarget;
   if (!initialTarget) return;
   if (initialTarget.type === "query-context" && connectionUsesConnectionRootSchemaMode(config)) {
-    const schema = initialTarget.schema || initialTarget.database;
+    const schema = resolveConnectionRootLocateSchema(store.treeNodes, connId, initialTarget.schema || initialTarget.database, config);
     initialTarget = { ...initialTarget, database: schema, schema };
   }
 
@@ -1970,6 +2028,15 @@ async function locateTabInSidebarTarget(tab: QueryTab | undefined | null, align:
       : initialTarget;
   await ensureTreeLoadedForTarget(treeLoadTarget, { requireDatabaseChildren: locatesSavedSql });
 
+  if (!locatesSavedSql && locateTableCandidate && connectionUsesConnectionRootSchemaMode(config)) {
+    const normalizedAfterLoad = normalizeLocateCandidate(locateTableCandidate, store.treeNodes, config);
+    if (normalizedAfterLoad.database !== locateTableCandidate.database || normalizedAfterLoad.schema !== locateTableCandidate.schema) {
+      locateTableCandidate = normalizedAfterLoad;
+      initialTarget = tableTargetFromCandidate(locateTableCandidate);
+      await ensureTreeLoadedForTarget(initialTarget);
+    }
+  }
+
   // Clear any active search filter so the node is visible
   if (isRootListPartial.value) {
     searchQuery.value = "";
@@ -1978,21 +2045,21 @@ async function locateTabInSidebarTarget(tab: QueryTab | undefined | null, align:
     clearSearchScopeFilter();
   }
 
-  let target = resolveLoadedLocateTarget(initialTarget, locateTableCandidate);
+  let target = resolveLoadedLocateTarget(store.treeNodes, initialTarget, locateTableCandidate, config);
   let nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
   if (!nodePath && !locatesSavedSql) {
     // The first load may have served a stale schema cache whose async refresh
     // replaced the database node before its tables finished loading, so the
     // table isn't in the tree yet. Force a synchronous reload and retry once so
     // locate reaches the table, not just the database (issue #715).
-    await ensureTreeLoadedForTarget(treeLoadTarget, { force: true });
-    target = resolveLoadedLocateTarget(initialTarget, locateTableCandidate);
+    await ensureTreeLoadedForTarget(initialTarget, { force: true });
+    target = resolveLoadedLocateTarget(store.treeNodes, initialTarget, locateTableCandidate, config);
     nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
   }
 
   if (!nodePath && locateTableCandidate) {
     await store.loadTableForLocate(locateTableCandidate);
-    target = resolveLoadedLocateTarget(initialTarget, locateTableCandidate);
+    target = resolveLoadedLocateTarget(store.treeNodes, initialTarget, locateTableCandidate, config);
     nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
   }
 
@@ -2038,19 +2105,17 @@ function tableTargetFromCandidate(candidate: QueryCursorTableCandidate): ActiveT
 function tableLocateCandidateFromTarget(target: ActiveTabSidebarTarget | null, config: ReturnType<typeof store.getConfig>): QueryCursorTableCandidate | null {
   if (target?.type === "hbase-table") return { connectionId: target.connectionId, database: target.namespace, tableName: target.tableName };
   if (target?.type !== "table") return null;
-  const database = connectionUsesConnectionRootSchemaMode(config) && target.schema ? target.schema : target.database;
-  return {
-    connectionId: target.connectionId,
-    database,
-    catalog: target.catalog,
-    schema: target.schema,
-    tableName: target.tableName,
-  };
-}
-
-function resolveLoadedLocateTarget(target: ActiveTabSidebarTarget, candidate: QueryCursorTableCandidate | null): ActiveTabSidebarTarget | null {
-  if (!candidate) return target;
-  return findLoadedTableTargetForCandidate(store.treeNodes, candidate);
+  return normalizeLocateCandidate(
+    {
+      connectionId: target.connectionId,
+      database: target.database,
+      catalog: target.catalog,
+      schema: target.schema,
+      tableName: target.tableName,
+    },
+    store.treeNodes,
+    config,
+  );
 }
 
 async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: { force?: boolean; requireDatabaseChildren?: boolean }) {
@@ -2383,6 +2448,7 @@ function beginSidebarAction(): number {
   sidebarDdlOpen.value = false;
   sidebarElasticsearchIndexMetadataOpen.value = false;
   sidebarObjectSourceOpen.value = false;
+  sidebarPostgresSequenceOpen.value = false;
   sidebarProcedureOpen.value = false;
   sidebarVisibleDatabasesOpen.value = false;
   sidebarVisibleSchemasOpen.value = false;
@@ -2391,6 +2457,7 @@ function beginSidebarAction(): number {
   sidebarDdlTarget.value = null;
   sidebarElasticsearchIndexMetadataTarget.value = null;
   sidebarObjectSourceTarget.value = null;
+  sidebarPostgresSequenceTarget.value = null;
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
   sidebarVisibleSchemasTarget.value = null;
@@ -2470,6 +2537,14 @@ function openSidebarObjectSource(node: TreeNode, initialEditing: boolean, initia
   // 界面上没有任何反馈；现在连接与取源都在弹窗自身的加载态之内完成。
   sidebarObjectSourceTarget.value = { node: target, initialEditing, initialSection, createTrigger };
   sidebarObjectSourceOpen.value = true;
+}
+
+function openSidebarPostgresSequence(node: TreeNode) {
+  if (node.type !== "sequence" || node.postgresSequenceExactIdentity !== true || !node.objectName || !node.connectionId || !node.database || !node.schema || store.getConfig(node.connectionId)?.db_type !== "postgres") return;
+  const target = createSidebarActionTarget(node);
+  beginSidebarAction();
+  sidebarPostgresSequenceTarget.value = target;
+  sidebarPostgresSequenceOpen.value = true;
 }
 
 function openSidebarSettings(initialTab: string) {
@@ -2594,7 +2669,7 @@ async function executeSidebarProcedureSql(sql: string) {
 }
 
 async function refreshSidebarActionTarget() {
-  const target = sidebarObjectSourceTarget.value?.createTrigger?.target || sidebarObjectSourceTarget.value?.node || sidebarDdlTarget.value || sidebarInstallExtensionTarget.value;
+  const target = sidebarObjectSourceTarget.value?.createTrigger?.target || sidebarObjectSourceTarget.value?.node || sidebarPostgresSequenceTarget.value || sidebarDdlTarget.value || sidebarInstallExtensionTarget.value;
   if (!target) return;
   const currentTarget = findSidebarActionTarget(store.treeNodes, target);
   if (!currentTarget) return;
@@ -2617,6 +2692,14 @@ watch(sidebarObjectSourceOpen, (open) => {
   if (!open) {
     const nodeId = sidebarObjectSourceTarget.value?.createTrigger?.target.id || sidebarObjectSourceTarget.value?.node.id;
     sidebarObjectSourceTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
+});
+
+watch(sidebarPostgresSequenceOpen, (open) => {
+  if (!open) {
+    const nodeId = sidebarPostgresSequenceTarget.value?.id;
+    sidebarPostgresSequenceTarget.value = null;
     restoreSidebarTreeFocusAfterDialog(nodeId);
   }
 });
@@ -3119,6 +3202,7 @@ onUnmounted(() => {
   sidebarDdlTarget.value = null;
   sidebarElasticsearchIndexMetadataTarget.value = null;
   sidebarObjectSourceTarget.value = null;
+  sidebarPostgresSequenceTarget.value = null;
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
   sidebarVisibleSchemasTarget.value = null;
@@ -3167,6 +3251,7 @@ defineExpose({
       @peek-structure="openSidebarStructurePeek"
       @open-elasticsearch-index-metadata="openSidebarElasticsearchIndexMetadata"
       @open-object-source="openSidebarObjectSource"
+      @open-postgres-sequence="openSidebarPostgresSequence"
       @open-procedure="openSidebarProcedure"
       @open-settings="openSidebarSettings"
       @open-connection-settings="(connectionId) => emit('open-connection-settings', connectionId)"
@@ -3451,6 +3536,16 @@ defineExpose({
       :execution-schema="sidebarObjectSourceTarget.node.schema || sidebarObjectSourceTarget.node.database"
       :trigger-identity-mode="exactOracleTriggerNodeMetadata(sidebarObjectSourceTarget.node) ? 'exact' : undefined"
       @open-object="(context: ObjectDependencyTarget, target: SqlObjectNavigationTarget) => emit('open-dependency-object', context, target)"
+      @saved="refreshSidebarActionTarget"
+    />
+
+    <SidebarPostgresSequenceDialog
+      v-if="sidebarPostgresSequenceTarget?.connectionId && sidebarPostgresSequenceTarget.database && sidebarPostgresSequenceTarget.schema"
+      v-model:open="sidebarPostgresSequenceOpen"
+      :connection-id="sidebarPostgresSequenceTarget.connectionId"
+      :database="sidebarPostgresSequenceTarget.database"
+      :schema="sidebarPostgresSequenceTarget.schema"
+      :name="sidebarPostgresSequenceTarget.objectName!"
       @saved="refreshSidebarActionTarget"
     />
 

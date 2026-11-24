@@ -62,8 +62,15 @@ into the `plugin_stats_archive` KV namespace — the permanent layer future UI
 reads:
 
 - `archive:v2` — **one** JSON document holding every counter:
-  `{v:2, lastSuccess, total:{"kind:pluginId:version": n}, uniqd:{"kind:pluginId:day": n}}`
-  (plus `kind:pluginId` rollups inside `total`). A pass reads it once, folds in
+  `{v:2, lastSuccess, total:{"kind:pluginId:version": n}, uniqd:{"kind:pluginId:day": n}}`.
+  `total` also holds the `kind:pluginId` rollups, advanced from the same counts
+  entry as the versioned counter, so `sum(versions) == rollup` stays true. (The
+  old aggregator wrote versions in one phase and rollups in a later one, so each
+  mid-pass failure left the rollups behind — `dl` was ~11% short by 2026-11-10.
+  `reconcile-rollups.mjs` reset them to `max(previous, sum of versions)`, which
+  never lowers a counter; four legacy `inst` rollups still sit +1 above their
+  version sum, from an event whose version string failed validation.)
+  A pass reads the document once, folds in
   the window, writes it back — the number of distinct keys touched per pass is
   constant (archive + summary + lock) no matter how many plugins exist.
 - `summary` — one JSON blob `{dl: {pluginId: n}, inst: {...}, updt: {...}}` for

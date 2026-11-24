@@ -143,6 +143,20 @@ describe("globalSearchSettings", () => {
     expect(getGlobalSearchRoots()).toEqual(["D:\\local-edit"]);
   });
 
+  it("merges untouched disk fields when a startup edit changes one setting", async () => {
+    let resolveDisk!: (value: unknown) => void;
+    mocks.load.mockReturnValueOnce(new Promise((resolve) => (resolveDisk = resolve)));
+    const initializing = initializeGlobalSearchSettings();
+    saveGlobalSearchMatchMode("enhanced");
+    resolveDisk({ roots: ["D:\\disk-root"], extensions: ["txt"], matchMode: "precise", showQuickFilters: false });
+    await initializing;
+
+    expect(getGlobalSearchRoots()).toEqual(["D:\\disk-root"]);
+    expect(getGlobalSearchExtensions()).toEqual(["txt"]);
+    expect(getGlobalSearchMatchMode()).toBe("enhanced");
+    expect(getGlobalSearchShowQuickFilters()).toBe(false);
+  });
+
   it("serializes rapid writes and leaves the last payload on disk", async () => {
     saveGlobalSearchRoots(["D:\\first"]);
     saveGlobalSearchRoots(["D:\\last"]);

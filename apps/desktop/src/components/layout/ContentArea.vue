@@ -216,7 +216,7 @@ import type { ExportReadControl } from "@/lib/export/snapshotCompletion";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { promptExportSavePath } from "@/lib/export/exportPath";
 import { queryResultExportBaseName } from "@/lib/export/saveTextFile";
-import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, serializeMongoDeleteId, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { buildMongoQueryResultOperations, formatMongoQueryResultOperationPreview } from "@/lib/mongo/mongoQueryResultEditing";
 import { buildInfluxDbV1DeleteStatements, canDeleteInfluxDbV1Row, resolveInfluxDbV1DeleteTarget } from "@/lib/influxdb/influxDbV1Delete";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
@@ -396,6 +396,7 @@ const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
 const elasticsearchJsonResponsePanelRef = ref<ElasticsearchJsonResponsePanelHandle>();
 const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean>; focusSearch: () => boolean }>();
 const standaloneResultToolbarRef = ref<HTMLElement | null>(null);
+const resultToolbarRef = ref<HTMLElement | null>(null);
 const standaloneResultToolbarWidth = ref(0);
 const standaloneResultToolbarViewportWidth = ref(0);
 const resultTabsScrollerRef = ref<HTMLElement | null>(null);
@@ -412,6 +413,10 @@ const { tier: dataToolbarTier } = useToolbarOverflow(dataToolbarRef, [
   // action set grows at that point, so the row must be re-measured.
   () => !!dataGridRef.value?.canOpenTableStructureEditor,
   () => !!dataGridRef.value?.goToColumnToolbarCapability?.visible,
+  // Hidden labels remove text without resizing the row; the breadcrumb shows
+  // the connection name, whose width can change on rename.
+  () => hideToolbarLabels.value,
+  () => props.activeConnection?.name,
 ]);
 const dataToolbarCompact = computed(() => dataToolbarTier.value >= 1);
 const showDataColumnsChip = computed(() => dataToolbarTier.value < 2);
@@ -456,11 +461,18 @@ const activeResultDatabase = computed(() => activeResultExecutionTarget.value?.d
 const activeResultSchema = computed(() => activeResultExecutionTarget.value?.schema ?? props.activeTab.schema);
 const graphViewKey = computed(() => JSON.stringify([props.activeTab.id, props.activeTab.resultViewGeneration, props.activeTab.activeResultRunId, props.activeTab.activeResultIndex, activeResultConnectionId.value, activeResultDatabase.value]));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
+const debugRoutine = computed(() => {
+  const { objectSource, sql, originalSql } = props.activeTab;
+  if (!objectSource || sql !== originalSql) return undefined;
+  const { schema, name, objectType } = objectSource;
+  if (objectType === "PROCEDURE" || objectType === "FUNCTION") return { schema, name, objectType };
+  return undefined;
+});
 const managedTypeSource = computed(() => isOracleFamilyTypeSource(effectiveDatabaseTypeForConnection(props.activeConnection), props.activeTab.objectSource?.objectType));
-const showOraclePackageMembers = computed(() => {
+const showPackageMembers = computed(() => {
   const type = effectiveDatabaseTypeForConnection(props.activeConnection);
   const source = props.activeTab.objectSource?.objectType ?? props.activeTab.objectDetails?.objectType;
-  return (type === "oracle" || type === "oceanbase-oracle") && (source === "PACKAGE" || source === "PACKAGE_BODY");
+  return (type === "oracle" || type === "oceanbase-oracle" || type === "dameng") && (source === "PACKAGE" || source === "PACKAGE_BODY");
 });
 const unfinishedTypeChange = computed(() => !!props.activeTab.typeManagementDraft && props.activeTab.typeManagementDraft.state !== "complete");
 const verifiedTypeDeletion = computed(() => props.activeTab.typeManagementDraft?.state === "complete" && props.activeTab.typeManagementDraft.operation.startsWith("delete"));
@@ -995,6 +1007,16 @@ const hasTabularResult = computed(() => {
 const redisConsoleResults = computed(() => (props.activeTab.results?.length ? props.activeTab.results : props.activeTab.result ? [props.activeTab.result] : []));
 const canShowRedisConsoleOutput = computed(() => activeEffectiveDatabaseType.value === "redis" && (props.activeTab.isExecuting || redisConsoleResults.value.some((result) => result.execution_error === true || typeof result.redis_console_output === "string")));
 const redisResultViewMode = computed<RedisResultViewMode>(() => (activeEffectiveDatabaseType.value === "redis" ? (props.activeTab.uiState?.redisResultViewMode ?? "grid") : "grid"));
+const { tier: resultToolbarTier } = useToolbarOverflow(resultToolbarRef, [
+  () => props.activeTab.id,
+  () => !!props.activeTab.result,
+  () => props.activeOutputView,
+  () => redisResultViewMode.value,
+  () => !!dataGridRef.value?.goToColumnToolbarCapability?.visible,
+  () => !!dataGridRef.value?.tableInfoToolbarCapability?.visible,
+  () => hideToolbarLabels.value,
+  () => dataGridRef.value?.defaultCopyPreferenceLabel,
+]);
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
 const activeGraphAdapter = computed(() => graphAdapterForDatabase(activeEffectiveDatabaseType.value));
 const canShowGraphOutput = computed(() => !!activeGraphAdapter.value && !!props.activeTab.result?.graph_data?.nodes.length);
@@ -1105,6 +1127,10 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
   if (!tab.result.columns.includes(target.idColumn)) return undefined;
 
   const editTarget = { idColumn: target.idColumn, documentAt: (rowIdx: number) => tab.result?.mongo_documents?.[rowIdx] };
+  function deleteIdForRow(id: unknown, rowIndex: number) {
+    const canonicalDocument = tab.result?.mongo_copy_documents?.[rowIndex] as Record<string, unknown> | undefined;
+    return serializeMongoDeleteId(id, canonicalDocument?._id);
+  }
 
   const save: CustomSaveHandler["save"] = async (changes: MongoQueryGridChanges) => {
     if (changes.newRows.length > 0) {
@@ -1112,16 +1138,16 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
     }
     if (!changes.columns.includes(target.idColumn)) throw new Error("No _id column");
     for (const operation of buildMongoQueryResultOperations(changes, editTarget)) {
-      const id = serializeMongoDocumentId(operation.id);
       if (operation.kind === "delete") {
-        await api.mongoDeleteDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, id);
+        await api.mongoDeleteDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, deleteIdForRow(operation.id, operation.rowIndex));
       } else {
-        await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, id, JSON.stringify(operation.update));
+        await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, serializeMongoDocumentId(operation.id), JSON.stringify(operation.update));
       }
     }
   };
 
-  const preview: CustomSaveHandler["preview"] = async (changes: MongoQueryGridChanges) => buildMongoQueryResultOperations(changes, editTarget).map((operation) => formatMongoQueryResultOperationPreview(target.collection, operation));
+  const preview: CustomSaveHandler["preview"] = async (changes: MongoQueryGridChanges) =>
+    buildMongoQueryResultOperations(changes, editTarget).map((operation) => formatMongoQueryResultOperationPreview(target.collection, operation, operation.kind === "delete" ? deleteIdForRow(operation.id, operation.rowIndex) : undefined));
 
   const applySavedChanges: NonNullable<CustomSaveHandler["applySavedChanges"]> = ({ dirtyRows, columns }) => {
     const documents = tab.result?.mongo_documents;
@@ -2406,12 +2432,12 @@ defineExpose({
                   {{ t("common.retry") }}
                 </Button>
               </div>
-              <div v-else :class="showOraclePackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
-                <OraclePackageMembers v-if="showOraclePackageMembers" :key="activeTab.id" :source="activeTab.sql" @navigate="queryEditorRef?.focusPackageMember($event)" />
+              <div v-else :class="showPackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
+                <OraclePackageMembers v-if="showPackageMembers" :key="activeTab.id" :source="activeTab.sql" @navigate="queryEditorRef?.focusPackageMember($event)" />
                 <QueryEditor
                   ref="queryEditorRef"
                   class="relative z-0 flex-1"
-                  :class="{ 'min-w-0': showOraclePackageMembers }"
+                  :class="{ 'min-w-0': showPackageMembers }"
                   :auto-focus="sourceSectionActive && autoFocus !== false"
                   :model-value="activeTab.sql"
                   :tab-id="activeTab.id"
@@ -2420,6 +2446,7 @@ defineExpose({
                   :catalog="activeTab.catalog"
                   :database="activeTab.database"
                   :schema="activeTab.schema"
+                  :debug-routine="debugRoutine"
                   :client-session-id="activeTab.id"
                   :completion-context-version="activeTab.completionContextVersion"
                   :database-type="activeEffectiveDatabaseType"
@@ -2441,6 +2468,8 @@ defineExpose({
                   :statement-execution-markers="activeStatementExecutionMarkers"
                   :initial-viewport="activeTab.editorViewport"
                   :initial-selection="activeTab.editorSelection"
+                  :bookmark-lines="activeTab.editorBookmarks"
+                  :bookmark-document="activeTab.editorBookmarksDocument"
                   :reveal-request="activeTab.editorRevealRequest"
                   :force-word-wrap="activeTab.forceWordWrap"
                   :read-only="!!activeTab.ddlViewer || (managedTypeSource && (!activeTab.typeSourceEditing || unfinishedTypeChange || verifiedTypeDeletion))"
@@ -2455,6 +2484,7 @@ defineExpose({
                   @preview-changes-available="emit('previewChangesAvailable', activeTab.id, $event)"
                   @viewport-change="(viewport, tabId) => emit('editorViewportChange', tabId ?? activeTab.id, viewport)"
                   @selection-state-change="emit('editorSelectionStateChange', activeTab.id, $event)"
+                  @bookmarks-change="(lines, tabId) => queryStore.updateEditorBookmarks(tabId ?? activeTab.id, lines)"
                   @editor-state-flushed="emit('editorStateFlushed', activeTab.id)"
                   @editor-reveal-consumed="clearEditorRevealRequest(activeTab)"
                   @format-error="emit('formatError', activeTab.id)"
@@ -2497,7 +2527,7 @@ defineExpose({
               Gating it on hasQueryOutput alone left users with an always-open, empty
               shared pane and no way to collapse it (#8233).
             -->
-            <div v-if="hasQueryOutput || resultOnly" class="flex h-10 shrink-0 items-center gap-1 border-b bg-muted/20 px-2">
+            <div v-if="hasQueryOutput || resultOnly" ref="resultToolbarRef" class="flex h-10 min-w-0 shrink-0 items-center gap-1 overflow-hidden border-b bg-muted/20 px-2">
               <Button
                 v-if="activeTab.mode === 'query' && activeTab.result"
                 variant="ghost"
@@ -2516,7 +2546,7 @@ defineExpose({
               </Button>
               <template v-if="resultRuns.length > 0 || visibleResultItems.length > 0">
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
-                <div v-if="showResultRunTabs" data-result-run-tabs-region class="relative min-w-0 flex-1 self-stretch">
+                <div v-if="showResultRunTabs" data-result-run-tabs-region class="relative min-w-40 flex-1 self-stretch">
                   <div v-if="hasResultTabOverflow" class="result-tab-scrollbar" :class="{ 'result-tab-scrollbar--dragging': isResultTabsScrollbarDragging }" @pointerdown="startResultTabsScrollbarDrag">
                     <div class="result-tab-scrollbar__thumb" :style="resultTabsScrollbarThumbStyle" />
                   </div>
@@ -2561,7 +2591,7 @@ defineExpose({
                     </div>
                   </div>
                 </div>
-                <div v-else-if="showResultRunSelector" class="min-w-0" :class="{ 'flex-1': visibleResultItems.length <= 1 }">
+                <div v-else-if="showResultRunSelector" class="min-w-40" :class="{ 'flex-1': visibleResultItems.length <= 1 }">
                   <DropdownMenu>
                     <DropdownMenuTrigger as-child>
                       <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
@@ -2605,6 +2635,7 @@ defineExpose({
                   :connection-color="activeResultColor"
                   :display-mode="resultRunDisplayMode"
                   :has-sibling-run-tabs="resultRuns.length > 0"
+                  class="min-w-40"
                   @select="selectResultItem"
                   @copy-sql="copySelectedResultSql"
                   @copy-query-sql="copySelectedResultQueries"
@@ -2612,8 +2643,18 @@ defineExpose({
                 />
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
+                <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
+                  <DataGridCopyFormatControl
+                    toolbar
+                    :compact="resultToolbarTier >= 1 || hideToolbarLabels"
+                    :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
+                    :current-value="dataGridRef?.defaultCopyPreference ?? ''"
+                    :items="dataGridRef?.copyPreferenceMenuItems ?? []"
+                    @select="dataGridRef?.setDefaultCopyPreference($event)"
+                  />
+                </template>
                 <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson">
-                  <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" :compact="hideToolbarLabels" />
+                  <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" :compact="resultToolbarTier >= 2 || hideToolbarLabels" />
                   <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
                     <Button
                       data-toolbar-action="navigation"
@@ -2626,7 +2667,7 @@ defineExpose({
                       @click="dataGridRef.goToColumnToolbarCapability.onTrigger()"
                     >
                       <Columns3 class="h-3.5 w-3.5" />
-                      <span v-if="!hideToolbarLabels">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
+                      <span v-if="resultToolbarTier < 3 && !hideToolbarLabels">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
                     </Button>
                   </LightTooltip>
                   <LightTooltip v-if="dataGridRef?.tableInfoToolbarCapability?.visible" :text="t('contextMenu.viewDdl')" side="bottom" nowrap>
@@ -2641,7 +2682,7 @@ defineExpose({
                       @click="dataGridRef.tableInfoToolbarCapability.onTrigger()"
                     >
                       <TableProperties class="h-3.5 w-3.5" />
-                      <span v-if="!hideToolbarLabels">DDL</span>
+                      <span v-if="resultToolbarTier < 3 && !hideToolbarLabels">DDL</span>
                     </Button>
                   </LightTooltip>
                 </template>
@@ -3370,7 +3411,7 @@ defineExpose({
     <!-- Data mode: full-height grid -->
     <template v-else-if="activeTab.mode === 'data'">
       <div class="flex-1 min-h-0 flex flex-col">
-        <div ref="dataToolbarRef" class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs overflow-hidden">
+        <div ref="dataToolbarRef" data-toolbar-row class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs overflow-hidden">
           <!-- Context breadcrumb. The connection and database segments are
                capped so a long connection name can never eat half the row;
                the table name gets the remaining room and is the only filled

@@ -469,6 +469,7 @@ function openPreviewMatch(): void {
 }
 
 function handleSelect(item: QuickOpenItem): void {
+  if (item.connectionId && scopeActive.value && !scopeConnectionIds.value.includes(item.connectionId)) return;
   if (!canLeavePreview()) return;
   recordRecentItem(item);
   // Plugin commands execute inside this component: they are NOT dispatched to App.vue object navigation (that chain

@@ -97,6 +97,7 @@ impl LiveRoutineEnv {
             schema: Some(self.database.clone()),
             name: name.to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         }
     }
 

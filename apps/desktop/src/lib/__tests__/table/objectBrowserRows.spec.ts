@@ -43,6 +43,24 @@ describe("buildObjectBrowserRows", () => {
     }
   });
 
+  it("does not turn synonyms and jobs into table rows", () => {
+    const rows = buildObjectBrowserRows({
+      objects: [
+        { name: "actual_table", object_type: "TABLE" },
+        { name: "actual_sequence", object_type: "SEQUENCE" },
+        { name: "alias", object_type: "SYNONYM" },
+        { name: "job", object_type: "JOB" },
+      ],
+      database: "app",
+      fallbackSchema: "app",
+    });
+
+    expect(rows.map(({ type, name }) => [type, name])).toEqual([
+      ["TABLE", "actual_table"],
+      ["SEQUENCE", "actual_sequence"],
+    ]);
+  });
+
   it("keeps a schema index distinct from a table and preserves its exact parent identity", () => {
     const rows = buildObjectBrowserRows({
       objects: [{ name: " Ix (a) ", object_type: "INDEX", schema: "Index Owner", parent_schema: "Table Owner", parent_name: " T(a) " }],

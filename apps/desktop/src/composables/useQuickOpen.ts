@@ -1,5 +1,5 @@
 import { computed, onScopeDispose, ref, shallowRef, watch, type Ref } from "vue";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, TreeNode } from "@/types/database";
 import type { SqlCompletionColumn, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog } from "@/lib/database/databaseCapabilities";
@@ -62,6 +62,7 @@ const RECENT_QUICK_OPEN_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
 
 const CONTENT_SEARCH_DEBOUNCE_MS = 200;
 const CONTENT_SEARCH_MAX_RESULTS = 500;
+const METADATA_INDEX_MAX_RESULTS = 1000;
 const QUICK_OPEN_RESULTS_DEBOUNCE_MS = 120;
 const QUICK_OPEN_RESULTS_DEBOUNCE_THRESHOLD = 500;
 
@@ -400,6 +401,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   const metadataIndexBuildGenerations = new Map<string, number>();
   let metadataIndexStatusGeneration = 0;
   const metadataIndexBuildingConnections = new Set<string>();
+  const metadataIndexClearedConnections = new Set<string>();
 
   function persistedQuickOpenItemKey(item: PersistedQuickOpenItem): string {
     if (item.type === "column") return JSON.stringify(["column", item.connectionId, item.catalog ?? "", item.database ?? "", item.schema ?? "", item.tableName ?? "", item.columnName ?? item.label]);
@@ -827,12 +829,38 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     }
   }
 
+  const databaseTreeNodesByConnection = computed(() => {
+    const roots = connectionStore.treeNodes;
+    const byConnection = new Map<string, TreeNode[]>();
+    // Keep supporting metadata trees that expose database nodes at the root.
+    for (const node of roots) {
+      if (!node.connectionId) continue;
+      const fallback = byConnection.get(node.connectionId);
+      if (fallback) fallback.push(node);
+      else byConnection.set(node.connectionId, [node]);
+    }
+
+    const seenConnections = new Set<string>();
+    function indexConnectionNodes(nodes: TreeNode[]): void {
+      for (const node of nodes) {
+        const connectionId = node.connectionId;
+        if (node.type === "connection" && connectionId && !seenConnections.has(connectionId)) {
+          seenConnections.add(connectionId);
+          if (node.children) byConnection.set(connectionId, node.children);
+        }
+        if (node.children?.length) indexConnectionNodes(node.children);
+      }
+    }
+
+    indexConnectionNodes(roots);
+    return byConnection;
+  });
+
   const allItems = computed((): QuickOpenItem[] => {
     const items: QuickOpenItem[] = [];
     // A narrowed scope hides unselected connections and everything beneath them,
     // keeping local tree entries in sync with the remote search pool.
     const connections = connectionStore.connections.filter((conn) => quickOpenScopeIncludes(conn.id));
-    const treeNodes = connectionStore.treeNodes;
 
     // Add connections
     for (const conn of connections) {
@@ -850,16 +878,10 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     // reachable in the no-query list before the (much longer) tree items.
     items.push(...pluginWorkbenchItems.value);
 
-    // Add databases and tables from tree nodes
-    // Filter tree nodes by connection
+    const databaseTreeNodes = databaseTreeNodesByConnection.value;
     for (const conn of connections) {
-      // Connections may live under sidebar groups, so locate their tree recursively.
-      const connectionTreeNode = findConnectionTreeNode(treeNodes, conn.id);
-      const connectionTreeNodes = connectionTreeNode?.children || treeNodes.filter((node) => node.connectionId === conn.id);
-      if (connectionTreeNodes.length === 0) continue;
-
-      // Process tree nodes to extract databases and tables
-      processDatabaseTreeNodes(connectionTreeNodes, conn, items);
+      const nodes = databaseTreeNodes.get(conn.id);
+      if (nodes?.length) processDatabaseTreeNodes(nodes, conn, items);
     }
 
     return items;
@@ -1116,24 +1138,13 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
 
   const liveMetadataItemsForPersistence = computed<QuickOpenItem[]>(() => {
     const items: QuickOpenItem[] = [];
+    const databaseTreeNodes = databaseTreeNodesByConnection.value;
     for (const conn of connectionStore.connections) {
-      const connectionTreeNode = findConnectionTreeNode(connectionStore.treeNodes, conn.id);
-      const connectionTreeNodes = connectionTreeNode?.children || connectionStore.treeNodes.filter((node) => node.connectionId === conn.id);
-      if (connectionTreeNodes.length > 0) processDatabaseTreeNodes(connectionTreeNodes, conn, items);
+      const nodes = databaseTreeNodes.get(conn.id);
+      if (nodes?.length) processDatabaseTreeNodes(nodes, conn, items);
     }
     return items;
   });
-
-  function findConnectionTreeNode(nodes: any[], connectionId: string): any | undefined {
-    for (const node of nodes) {
-      if (node.type === "connection" && node.connectionId === connectionId) return node;
-      if (node.children) {
-        const match = findConnectionTreeNode(node.children, connectionId);
-        if (match) return match;
-      }
-    }
-    return undefined;
-  }
 
   function quickOpenItemKey(item: QuickOpenItem): string {
     if (item.type === "plugin_command" || item.type === "plugin_workbench") return JSON.stringify(["plugin", item.id]);
@@ -1375,6 +1386,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     items: QuickOpenItem[];
     failedScopes: MetadataIndexScope[];
     coveredScopes: MetadataIndexScope[];
+    incomplete: boolean;
   }
 
   const metadataIndexScopeLabel = (scope: MetadataIndexScope): string => [scope.catalog, scope.database, scope.schema].filter(Boolean).join(" / ");
@@ -1396,6 +1408,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   async function loadAllMetadataIndexObjects(connection: ConnectionConfig, assertCurrent: () => void): Promise<MetadataIndexBuildResult> {
     const items = new Map<string, QuickOpenItem>();
     const scopes = new Map<string, { database: string; catalog?: string }>();
+    let incomplete = false;
     const addScope = (database: string, catalog?: string): void => {
       if (!database) return;
       scopes.set(JSON.stringify([catalog ?? "", database]), { database, catalog });
@@ -1412,14 +1425,18 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
           for (const database of databases) addScope(database.name, catalog.name);
         }
       } catch {
-        // Keep tree/configured database scopes when catalog discovery is unavailable.
+        // Keep tree/configured database scopes when catalog discovery is unavailable,
+        // but preserve the old cache for scopes that could not be confirmed.
+        incomplete = true;
       }
     }
     if (typeof connectionStore.listCompletionDatabases === "function") {
       try {
         for (const database of await connectionStore.listCompletionDatabases(connection.id)) addScope(database);
       } catch {
-        // Keep configured/tree-discovered scopes when database discovery is unavailable.
+        // Keep configured/tree-discovered scopes when database discovery is unavailable,
+        // but do not treat the resulting snapshot as complete.
+        incomplete = true;
       }
     }
     if (connection.database?.trim()) addScope(connection.database.trim());
@@ -1536,7 +1553,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
               return { name: table.name, schema: tableScope.schema ?? table.schema ?? undefined, catalog, type, comment: table.comment };
             });
           } else if (typeof connectionStore.listCompletionTables === "function") {
-            tables = await connectionStore.listCompletionTables(connection.id, database, "", undefined, tableScope.schema, true, undefined, catalog, { activateConnection: false, allowConnection: false, verifySchemaMetadata: true });
+            tables = await connectionStore.listCompletionTables(connection.id, database, "", METADATA_INDEX_MAX_RESULTS, tableScope.schema, true, undefined, catalog, { activateConnection: false, allowConnection: false, verifySchemaMetadata: true, requireComplete: true });
           } else {
             tables = [];
           }
@@ -1546,13 +1563,13 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
             const relation = remoteTableItem({ ...table, database, catalog: table.catalog ?? catalog, schema: table.schema ?? tableScope.schema }, connection, database, catalog);
             addScopeItem(relation);
             if (typeof connectionStore.listCompletionColumns !== "function") return;
-            const columns = await connectionStore.listCompletionColumns(connection.id, database, table.name, table.schema ?? tableScope.schema, undefined, catalog, { activateConnection: false });
+            const columns = await connectionStore.listCompletionColumns(connection.id, database, table.name, table.schema ?? tableScope.schema, undefined, catalog, { activateConnection: false, requireComplete: true });
             assertCurrent();
             for (const column of columns) addScopeItem(createColumnItem(table, column, database, catalog));
           });
 
           if (!catalog && typeof connectionStore.listCompletionObjects === "function") {
-            const objects = await connectionStore.listCompletionObjects(connection.id, database, "", undefined, tableScope.schema, undefined, true, undefined);
+            const objects = await connectionStore.listCompletionObjects(connection.id, database, "", METADATA_INDEX_MAX_RESULTS, tableScope.schema, undefined, true, undefined, ["routine"], false, { requireComplete: true });
             for (const object of objects) {
               const item = createRoutineItem(object, database, tableScope.schema ?? object.schema, catalog);
               if (item) addScopeItem(item);
@@ -1566,12 +1583,13 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
         }
       });
     }
-    return { items: [...items.values()], failedScopes, coveredScopes };
+    return { items: [...items.values()], failedScopes, coveredScopes, incomplete };
   }
 
   async function rebuildMetadataIndex(connectionId: string): Promise<boolean> {
     const existing = metadataIndexBuilds.get(connectionId);
     if (existing) return existing;
+    metadataIndexClearedConnections.delete(connectionId);
     const buildGeneration = (metadataIndexBuildGenerations.get(connectionId) ?? 0) + 1;
     metadataIndexBuildGenerations.set(connectionId, buildGeneration);
     const assertCurrent = (): void => {
@@ -1591,13 +1609,14 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
         assertCurrent();
         const buildResult = await loadAllMetadataIndexObjects(connection, assertCurrent);
         assertCurrent();
-        if (buildResult.failedScopes.length > 0 && buildResult.coveredScopes.length === 0) throw new Error(`Metadata index collection failed for ${buildResult.failedScopes.length} scope(s)`);
-        const partial = buildResult.failedScopes.length > 0;
+        if (buildResult.failedScopes.length > 0 && buildResult.coveredScopes.length === 0 && !buildResult.incomplete) throw new Error(`Metadata index collection failed for ${buildResult.failedScopes.length} scope(s)`);
+        const partial = buildResult.failedScopes.length > 0 || buildResult.incomplete;
         const failedScopeText = buildResult.failedScopes.map(metadataIndexScopeLabel).join(", ");
+        const statusError = [buildResult.incomplete ? "Database discovery was incomplete" : "", failedScopeText ? `Failed scopes: ${failedScopeText}` : ""].filter(Boolean).join("; ");
         await persistLiveQuickOpenMetadata(buildResult.items, {
           ...(partial ? { replaceScopes: buildResult.coveredScopes } : { replaceConnectionId: connectionId }),
           throwOnError: true,
-          status: partial ? { state: "partial", error: `Failed scopes: ${failedScopeText}` } : { state: "ready" },
+          status: partial ? { state: "partial", error: statusError } : { state: "ready" },
         });
         assertCurrent();
         persistedMetadataLoadGeneration += 1;
@@ -1610,8 +1629,14 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
         metadataIndexStatuses.value = {
           ...metadataIndexStatuses.value,
           [connectionId]:
-            buildResult.failedScopes.length > 0
-              ? { connectionId, state: "partial", itemCount: persistedStatus?.itemCount ?? buildResult.items.length, capturedAt: persistedStatus?.capturedAt, error: `Failed scopes: ${buildResult.failedScopes.map(metadataIndexScopeLabel).join(", ")}` }
+            buildResult.failedScopes.length > 0 || buildResult.incomplete
+              ? {
+                  connectionId,
+                  state: "partial",
+                  itemCount: persistedStatus?.itemCount ?? buildResult.items.length,
+                  capturedAt: persistedStatus?.capturedAt,
+                  error: [buildResult.incomplete ? "Database discovery was incomplete" : "", failedScopeText ? `Failed scopes: ${failedScopeText}` : ""].filter(Boolean).join("; "),
+                }
               : (persistedStatus ?? { connectionId, state: "ready", itemCount: buildResult.items.length }),
         };
         return true;
@@ -1658,6 +1683,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     metadataIndexStatusGeneration += 1;
     metadataIndexBuildGenerations.set(connectionId, (metadataIndexBuildGenerations.get(connectionId) ?? 0) + 1);
     metadataIndexBuildingConnections.delete(connectionId);
+    metadataIndexClearedConnections.add(connectionId);
     invalidateQuickOpenMetadataCache(connectionId);
     await deleteSchemaCachePrefix(quickOpenMetadataCacheKey(connectionId));
     persistedMetadataItems.value = persistedMetadataItems.value.filter((item) => item.connectionId !== connectionId);
@@ -1669,7 +1695,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     watch(
       liveMetadataItemsForPersistence,
       (items) => {
-        const writableItems = items.filter((item) => item.connectionId && !metadataIndexBuildingConnections.has(item.connectionId));
+        const writableItems = items.filter((item) => item.connectionId && !metadataIndexBuildingConnections.has(item.connectionId) && !metadataIndexClearedConnections.has(item.connectionId));
         void persistLiveQuickOpenMetadata(writableItems);
       },
       { flush: "post", immediate: true },
@@ -2209,6 +2235,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     const normalizedQuery = queryText.trim().toLowerCase();
     const candidates = quickSearchCandidateEntries(quickSearchIndex.value, parsedQuery);
     const buckets = new Map<string, MatchedItem[]>();
+    const remoteBuckets = new Map<string, MatchedItem[]>();
     const seen = new Set<string>();
     const matchMode = options.matchMode?.value ?? "enhanced";
 
@@ -2235,13 +2262,26 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
         matchIndices: labelMatch?.indices ?? [],
       };
       const category = quickSearchCategory(item);
-      const bucket = buckets.get(category) ?? [];
+      const bucketMap = item.source === "remote" ? remoteBuckets : buckets;
+      const bucket = bucketMap.get(category) ?? [];
       const limit = item.source === "remote" ? REMOTE_SEARCH_MAX_RESULTS_PER_CATEGORY : QUICK_OPEN_MAX_RESULTS;
       addTopMatchedItem(bucket, matched, limit);
-      buckets.set(category, bucket);
+      bucketMap.set(category, bucket);
     }
 
-    const matched = [...buckets.values()].flat();
+    const matchedByCategory = new Map<string, MatchedItem[]>();
+    for (const [category, items] of buckets) {
+      const combined = matchedByCategory.get(category) ?? [];
+      for (const item of items) addTopMatchedItem(combined, item, QUICK_OPEN_MAX_RESULTS);
+      matchedByCategory.set(category, combined);
+    }
+    for (const [category, items] of remoteBuckets) {
+      const combined = matchedByCategory.get(category) ?? [];
+      for (const item of items) addTopMatchedItem(combined, item, QUICK_OPEN_MAX_RESULTS);
+      matchedByCategory.set(category, combined);
+    }
+
+    const matched = [...matchedByCategory.values()].flat();
     matched.sort(compareMatchedItems);
     return matched;
   });
@@ -2358,7 +2398,11 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
         clearContentResults();
         return;
       }
+      // Do not leave results from the previous query selectable while the new
+      // backend search is waiting for its debounce timer or response.
+      contentItems.value = [];
       contentSearchError.value = null;
+      contentSearching.value = true;
       contentSearchTimer = setTimeout(() => {
         contentSearchTimer = undefined;
         void runContentSearch(normalizedQuery, generation);
@@ -2371,6 +2415,8 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   watch(globalSearchSettingsVersion, () => {
     if (contentMode.value && searchQuery.value.trim()) {
       const generation = ++contentSearchGeneration;
+      contentItems.value = [];
+      contentSearching.value = true;
       void runContentSearch(searchQuery.value.trim(), generation);
     }
   });

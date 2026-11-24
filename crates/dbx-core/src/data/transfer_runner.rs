@@ -75,11 +75,26 @@ fn cancelled_table_counts(
     // Cancellation does not roll back batches already committed to Xugu. Keep
     // the current table's acknowledged writes, never a previous table's count.
     // Preserve the existing terminal-event contract for every other DB pair.
-    if super::transfer::mysql_xugu::is_pair(source, target) {
+    if super::transfer::mysql_xugu::is_pair(source, target) || super::transfer::oracle_xugu::is_pair(source, target) {
         (moved_rows.unwrap_or(0), source_rows)
     } else {
         (0, None)
     }
+}
+
+fn preflight_terminal_progress(
+    source: &DatabaseType,
+    target: &DatabaseType,
+    mut progress: TransferProgress,
+) -> TransferProgress {
+    // Oracle's pair-local source scan can be cancelled before any table work.
+    // Do not turn that cancellation into a schema-object failure, or change
+    // existing preflight error handling for other transfer pairs.
+    if super::transfer::oracle_xugu::is_pair(source, target) && progress.error.as_deref() == Some("Cancelled") {
+        progress.status = TransferStatus::Cancelled;
+        progress.error = None;
+    }
+    progress
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -108,6 +123,9 @@ where
         super::transfer::validate_transfer_database_pair(&request, &source_db_type, &target_db_type)?;
         if super::transfer::mysql_xugu::is_pair(&source_db_type, &target_db_type) {
             super::transfer::mysql_xugu::preflight(&state, &request, &source_pool_key, &target_pool_key).await?;
+        }
+        if super::transfer::oracle_xugu::is_pair(&source_db_type, &target_db_type) {
+            super::transfer::oracle_xugu::preflight(&state, &request, &source_pool_key, &target_pool_key).await?;
         }
         let routine = crate::schema::oracle_routines::capture_routine_transfer_context(
             &state,
@@ -139,11 +157,14 @@ where
     {
         Ok(context) => context,
         Err(error) => {
-            if let Some(journal) = history.as_ref() {
-                journal.record_schema_objects_error(false).await;
+            let progress = preflight_terminal_progress(&source_db_type, &target_db_type, error.into_progress(&request));
+            if !matches!(progress.status, TransferStatus::Cancelled) {
+                if let Some(journal) = history.as_ref() {
+                    journal.record_schema_objects_error(false).await;
+                }
             }
             super::transfer::clear_cancelled(&transfer_id).await;
-            return error.into_progress(&request);
+            return progress;
         }
     };
 
@@ -901,7 +922,47 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn oracle_xugu_preflight_cancellation_is_not_a_schema_error() {
+        let progress = |message: &str| TransferProgress {
+            oracle_package_approval: None,
+            oracle_package_preflight: None,
+            oracle_routine_operation: None,
+            transfer_id: "cancel-preflight".into(),
+            table: "schema objects".into(),
+            table_index: 0,
+            total_tables: 1,
+            rows_transferred: 0,
+            total_rows: None,
+            status: TransferStatus::Error,
+            error: Some(message.into()),
+            terminal: true,
+        };
+        let cancelled = preflight_terminal_progress(&DatabaseType::Oracle, &DatabaseType::Xugu, progress("Cancelled"));
+        assert!(matches!(cancelled.status, TransferStatus::Cancelled));
+        assert!(cancelled.error.is_none());
+        assert_eq!(cancelled.rows_transferred, 0);
+        assert!(cancelled.terminal);
+        let failed =
+            preflight_terminal_progress(&DatabaseType::Oracle, &DatabaseType::Xugu, progress("permission denied"));
+        assert!(matches!(failed.status, TransferStatus::Error));
+        assert_eq!(failed.error.as_deref(), Some("permission denied"));
+        for (source, target) in [
+            (DatabaseType::Mysql, DatabaseType::Xugu),
+            (DatabaseType::Xugu, DatabaseType::Xugu),
+            (DatabaseType::Oracle, DatabaseType::Postgres),
+        ] {
+            let unchanged = preflight_terminal_progress(&source, &target, progress("Cancelled"));
+            assert!(matches!(unchanged.status, TransferStatus::Error));
+            assert_eq!(unchanged.error.as_deref(), Some("Cancelled"));
+        }
+    }
+
+    #[test]
     fn mysql_xugu_cancellation_preserves_only_current_table_acknowledged_rows() {
+        assert_eq!(
+            cancelled_table_counts(&DatabaseType::Oracle, &DatabaseType::Xugu, Some(413), Some(10_000)),
+            (413, Some(10_000))
+        );
         assert_eq!(
             cancelled_table_counts(&DatabaseType::Mysql, &DatabaseType::Xugu, Some(413), Some(10_000)),
             (413, Some(10_000))

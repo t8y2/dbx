@@ -135,6 +135,7 @@ const streamTab = ref<"entries" | "groups">("entries");
 const streamEntries = ref<RedisStreamEntry[]>([]);
 const streamEntriesCursor = ref<string | undefined>();
 const streamEntriesLoadingMore = ref(false);
+const streamNewestFirst = ref(false);
 const streamGroups = ref<RedisStreamGroup[]>([]);
 const streamGroupsLoaded = ref(false);
 const streamGroupsLoading = ref(false);
@@ -1103,6 +1104,18 @@ function resetStreamMonitoring() {
   streamGroupsError.value = "";
 }
 
+async function toggleStreamOrder() {
+  if (redisKind.value !== "stream" || loading.value || streamEntriesLoadingMore.value || refreshingValue.value) return;
+  const previous = streamNewestFirst.value;
+  streamNewestFirst.value = !previous;
+  try {
+    if (!(await load({ notifyParent: false }))) streamNewestFirst.value = previous;
+  } catch (error) {
+    streamNewestFirst.value = previous;
+    toast(errorMessage(error), 3000);
+  }
+}
+
 async function loadMoreStreamEntries() {
   const cursor = streamEntriesCursor.value;
   if (redisKind.value !== "stream" || !cursor || loading.value || streamEntriesLoadingMore.value) return;
@@ -1110,7 +1123,7 @@ async function loadMoreStreamEntries() {
   const requestId = ++streamEntriesRequestId;
   streamEntriesLoadingMore.value = true;
   try {
-    const page = await api.redisGetStreamEntries(props.connectionId, props.db, props.keyRaw, cursor);
+    const page = streamNewestFirst.value ? await api.redisGetStreamEntries(props.connectionId, props.db, props.keyRaw, cursor, true) : await api.redisGetStreamEntries(props.connectionId, props.db, props.keyRaw, cursor);
     if (requestId !== streamEntriesRequestId || redisKind.value !== "stream" || streamEntriesCursor.value !== cursor) return;
 
     streamEntries.value = [...streamEntries.value, ...page.entries];
@@ -1840,6 +1853,10 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
   try {
     let loadedValue = await api.redisGetValue(loadScope.connectionId, loadScope.db, loadScope.keyRaw, loadScope.previewLimitBytes);
     if (requestId !== loadRequestId || !redisValueViewerIsActive || (options.shouldApply && !options.shouldApply())) return false;
+    if (loadedValue.data.kind === "stream" && streamNewestFirst.value) {
+      const page = await api.redisGetStreamEntries(loadScope.connectionId, loadScope.db, loadScope.keyRaw, undefined, true);
+      loadedValue = { ...loadedValue, data: { ...loadedValue.data, entries: page.entries, next_cursor: page.next_cursor } };
+    }
     if (loadedValue.data.kind === "zset" && zsetSortDir.value === "desc") {
       const sortedPage = await collectionSearchController.readPage({ ...loadScope, kind: "zset", sortDirection: "desc" }, 0, "", () => requestId === loadRequestId && (!options.shouldApply || options.shouldApply()));
       if (!sortedPage) return false;
@@ -3710,6 +3727,20 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
                 {{ t("redis.consumerGroups") }}
               </TabsTrigger>
             </TabsList>
+            <Button
+              v-if="streamTab === 'entries'"
+              data-redis-stream-sort
+              variant="ghost"
+              size="sm"
+              class="ml-auto h-7 shrink-0 self-center gap-1 px-2 text-xs"
+              :disabled="loading || streamEntriesLoadingMore || refreshingValue"
+              :title="t(streamNewestFirst ? 'grid.sortAscending' : 'grid.sortDescending')"
+              @click="toggleStreamOrder"
+            >
+              <ArrowDown v-if="streamNewestFirst" class="h-3 w-3" />
+              <ArrowUp v-else class="h-3 w-3" />
+              {{ t(streamNewestFirst ? "mqMessages.newestFirst" : "mqMessages.oldestFirst") }}
+            </Button>
             <template v-if="streamTab === 'groups' && selectedStreamGroup">
               <span class="mx-1 h-4 w-px shrink-0 self-center bg-border" aria-hidden="true" />
               <button

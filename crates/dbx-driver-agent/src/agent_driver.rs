@@ -5748,9 +5748,10 @@ for line in sys.stdin:
 
     #[test]
     fn launch_display_escapes_control_characters() {
-        // Control characters in a configured path or option would otherwise turn
-        // one diagnostic line into several.
-        let launch = AgentLaunchSpec::new("java\nbin").with_args(["-jar", "agent\ntab\tname.jar"]);
+        // Control characters in a kept field would otherwise turn one diagnostic
+        // line into several.
+        let launch =
+            AgentLaunchSpec::new("java\nbin").with_args(["-jar", "agent.jar"]).with_working_dir("drivers\ntab\tdir");
 
         let display = launch_display(&launch);
 
@@ -5758,7 +5759,96 @@ for line in sys.stdin:
         assert!(!display.contains('\t'), "tab leaked into {display:?}");
         assert!(display.contains("\\n"), "{display}");
         assert!(display.contains("\\t"), "{display}");
-        assert!(display.contains("agent\\ntab\\tname.jar"), "{display}");
+        assert!(display.contains("drivers\\ntab\\tdir"), "{display}");
+    }
+
+    #[test]
+    fn launch_display_masks_a_positional_argument_that_carries_a_value() {
+        // A connection URI carries the password after `?`, and it is not an
+        // option: keeping everything before the first `=` would leak the user
+        // and password that come before it.
+        let launch = AgentLaunchSpec::new("java").with_args([
+            "-jar",
+            "agent.jar",
+            "jdbc:oracle:thin:scott/tiger@db.example.com:1521/svc?password=hunter2",
+        ]);
+
+        let display = launch_display(&launch);
+
+        for leaked in ["scott", "tiger", "hunter2"] {
+            assert!(!display.contains(leaked), "credential leaked into {display}");
+        }
+        assert!(display.contains("-jar agent.jar ***"), "{display}");
+    }
+
+    #[test]
+    fn launch_display_masks_a_jar_argument_that_is_not_a_jar_path() {
+        // A custom `agent-launch.json` decides what follows `-jar`; only a path
+        // shaped like a jar keeps its text.
+        let launch = AgentLaunchSpec::new("java").with_args(["-jar", "--key=hunter2"]);
+
+        let display = launch_display(&launch);
+
+        assert!(!display.contains("hunter2"), "credential leaked into {display}");
+        assert!(display.contains("-jar ***"), "{display}");
+    }
+
+    #[test]
+    fn launch_display_masks_add_opens_values_that_dbx_did_not_compose() {
+        let launch = AgentLaunchSpec::new("java").with_args([
+            "--add-opens=java.base/java.lang=ALL-UNNAMED",
+            "--add-opens=/etc/passwd=hunter2",
+            "-jar",
+            "agent.jar",
+        ]);
+
+        let display = launch_display(&launch);
+
+        assert!(display.contains("--add-opens=java.base/java.lang=ALL-UNNAMED"), "{display}");
+        assert!(!display.contains("hunter2"), "credential leaked into {display}");
+        assert!(!display.contains("passwd"), "configured text leaked into {display}");
+    }
+
+    #[tokio::test]
+    async fn startup_failure_does_not_retry_because_the_command_contains_the_marker() {
+        // The command is appended to a startup failure only for display. A jar
+        // path that a custom launch config fills with the retry marker must not
+        // turn a non-retryable cause into a retried spawn.
+        let test_id = uuid::Uuid::new_v4();
+        let script_path = std::env::temp_dir().join(format!("dbx-agent-startup-marker-{test_id}.py"));
+        let counter_path = std::env::temp_dir().join(format!("dbx-agent-startup-marker-{test_id}.count"));
+        std::fs::write(
+            &script_path,
+            r#"import json, pathlib, sys
+counter_path = pathlib.Path(sys.argv[1])
+attempt = int(counter_path.read_text()) + 1 if counter_path.exists() else 1
+counter_path.write_text(str(attempt))
+print(json.dumps({'ready': False}), flush=True)
+sys.stdin.read()
+"#,
+        )
+        .unwrap();
+
+        let launch = AgentLaunchSpec::new(test_python()).with_args(vec![
+            script_path.to_string_lossy().to_string(),
+            counter_path.to_string_lossy().to_string(),
+            "-jar".to_string(),
+            "Failed to read startup line from agent: end of stream.jar".to_string(),
+        ]);
+
+        let error = match AgentDriverClient::spawn(launch).await {
+            Ok(_) => panic!("the launch should fail: the agent never reports ready"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("launch command:"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&counter_path).unwrap(),
+            "1",
+            "a command that looks like a premature EOF must not trigger a retry: {error}"
+        );
+        let _ = std::fs::remove_file(script_path);
+        let _ = std::fs::remove_file(counter_path);
     }
 
     #[test]

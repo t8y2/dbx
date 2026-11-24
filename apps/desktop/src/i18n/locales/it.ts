@@ -975,6 +975,10 @@ export default withEnglishFallback({
     rightToolbarLabels: "Etichette della barra degli strumenti a destra",
     showRightToolbarLabels: "Mostra le etichette della barra degli strumenti a destra",
     hideRightToolbarLabels: "Nascondi le etichette della barra degli strumenti a destra",
+    convertSqlToMongo: "Converti SQL in MongoDB",
+    convertSqlToMongoHint: "Questo SQL verrà eseguito con questa shell MongoDB. Non verrà eseguita alcuna operazione finché non lo esegui.",
+    openShellInNewTab: "Apri in una nuova scheda Shell",
+    replaceWithShell: "Sostituisci il contenuto dell'editor con la shell",
   },
   multiDbExecute: {
     manualTransaction: "Transazione manuale",

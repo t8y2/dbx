@@ -976,6 +976,10 @@ export default withEnglishFallback({
     rightToolbarLabels: "右側ツールバーのラベル",
     showRightToolbarLabels: "右側ツールバーのラベルを表示",
     hideRightToolbarLabels: "右側ツールバーのラベルを非表示",
+    convertSqlToMongo: "SQL を MongoDB に変換",
+    convertSqlToMongoHint: "この SQL はこの MongoDB shell で実行されます。実行するまで何も行われません。",
+    openShellInNewTab: "新しい Shell タブで開く",
+    replaceWithShell: "エディターの内容を shell で置き換える",
   },
   multiDbExecute: {
     manualTransaction: "手動トランザクション",

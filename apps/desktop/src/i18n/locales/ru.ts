@@ -958,6 +958,10 @@ export default withEnglishFallback({
     rightToolbarLabels: "Подписи правой панели инструментов",
     showRightToolbarLabels: "Показать подписи правой панели инструментов",
     hideRightToolbarLabels: "Скрыть подписи правой панели инструментов",
+    convertSqlToMongo: "Преобразовать SQL в MongoDB",
+    convertSqlToMongoHint: "Этот SQL будет выполнен в этой оболочке MongoDB. Ничего не будет выполнено, пока вы не запустите его.",
+    openShellInNewTab: "Открыть в новой вкладке Shell",
+    replaceWithShell: "Заменить содержимое редактора на shell",
   },
   multiDbExecute: {
     manualTransaction: "Ручная транзакция",

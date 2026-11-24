@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'app.dbx'
-version = '0.1.54'
+version = '0.1.55'
 
 java {
     toolchain {
@@ -16,7 +16,7 @@ repositories {
     mavenCentral()
 }
 
-def mavenResolverVersion = '2.0.25'
+def mavenResolverVersion = '2.0.26'
 def mavenCoreVersion = '4.0.0-rc-7'
 
 dependencies {

@@ -42,6 +42,10 @@ fn dbx_updater_builder(app: &AppHandle) -> UpdaterBuilder {
 
 fn with_update_channel(builder: UpdaterBuilder, channel: UpdateChannel) -> UpdaterBuilder {
     builder.version_comparator(move |current, update| {
+        // Tauri only hands us two version strings, so this cannot tell which
+        // build a promoted stable release ships. Hiding the already-installed
+        // artifact needs the manifest's `promoted_from`, so that lives in
+        // `build_update_info` (#15341); ranking stays purely by version here.
         dbx_core::update::is_channel_update_available(channel, &update.version.to_string(), &current.to_string())
     })
 }

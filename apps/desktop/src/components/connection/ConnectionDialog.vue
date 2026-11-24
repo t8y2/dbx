@@ -53,6 +53,7 @@ import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
 import { insertSqliteRemoteTransportLayer, isSqliteRemoteTransportLayerType, sqliteRemoteTransportError } from "@/lib/connection/sqliteRemoteTransport";
 import { sanitizeConnectionCredentials } from "@/lib/connection/credentialSanitizer";
+import { connectionColorOptions as colorOptions } from "@/lib/connection/connectionColors";
 import { applySshAuthMethod, inferSshAuthMethod } from "@/lib/connection/sshAuthMethod";
 import { editableSshLocalPort, normalizeSshLocalPort, sshLocalPortState, sshLocalPortSupportedForConnection } from "@/lib/connection/sshLocalPort";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
@@ -203,7 +204,7 @@ import {
   buildDraftVisibleSchemasConnectionId,
   normalizeVisibleSchemaSelection,
 } from "@/lib/database/visibleDatabases";
-import { isSchemaAware, isSingleDatabase, supportsDataDictionary, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, isSingleDatabase, supportsDataDictionary, supportsShowSystemObjectsSetting, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 import { normalizeConnectionIdentityFields, normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
 import { databaseConnectionFormKind, databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
@@ -1285,16 +1286,6 @@ watch(nacosImplementation, (implementation) => {
   if (implementation === "rnacos") nacosVersionMode.value = "v2";
   if (implementation !== "rnacos") nacosHistoryEnabled.value = false;
 });
-
-const colorOptions = [
-  { value: "", class: "bg-transparent border-dashed", labelKey: "connection.colorNone" },
-  { value: "#22c55e", class: "bg-green-500", labelKey: "connection.colorGreen" },
-  { value: "#eab308", class: "bg-yellow-500", labelKey: "connection.colorYellow" },
-  { value: "#f97316", class: "bg-orange-500", labelKey: "connection.colorOrange" },
-  { value: "#ef4444", class: "bg-red-500", labelKey: "connection.colorRed" },
-  { value: "#3b82f6", class: "bg-blue-500", labelKey: "connection.colorBlue" },
-  { value: "#a855f7", class: "bg-purple-500", labelKey: "connection.colorPurple" },
-];
 
 const isPresetColor = (color: string | undefined) => colorOptions.some((c) => c.value === (color || ""));
 const customColorInput = ref("");
@@ -4468,6 +4459,14 @@ function setProductionProtectionEnabled(enabled: boolean) {
   }
 }
 const canChooseVisibleSchemas = computed(() => isSchemaAware(form.value.db_type));
+
+// MySQL-family engines have no schema level: their system namespaces
+// (information_schema, performance_schema, mysql, sys) are databases, so the
+// same `show_system_schemas` flag drives the database list instead.
+const showSystemObjectsSettingVisible = computed(() => supportsShowSystemObjectsSetting(form.value.db_type));
+const showSystemObjectsSettingLabelKey = computed(() => (isSchemaAware(form.value.db_type) ? "connection.showSystemSchemas" : "connection.showSystemDatabases"));
+const showSystemObjectsSettingHintKey = computed(() => (isSchemaAware(form.value.db_type) ? "connection.showSystemSchemasHint" : "connection.showSystemDatabasesHint"));
+
 const visibleSchemasDatabaseKey = computed(() => form.value.database || "");
 const hasVisibleSchemaFilter = computed(() => {
   const key = visibleSchemasDatabaseKey.value;
@@ -11101,11 +11100,11 @@ function openExternalUrl(url: string) {
                       <span class="text-xs text-muted-foreground">{{ t("connection.doltShowSystemTablesHint") }}</span>
                     </label>
                   </div>
-                  <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-center gap-4">
-                    <Label :class="connectionLabelSmallClass">{{ t("connection.showSystemSchemas") }}</Label>
+                  <div v-if="showSystemObjectsSettingVisible" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t(showSystemObjectsSettingLabelKey) }}</Label>
                     <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                       <input type="checkbox" v-model="form.show_system_schemas" class="mr-0" />
-                      <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
+                      <span class="text-xs text-muted-foreground">{{ t(showSystemObjectsSettingHintKey) }}</span>
                     </label>
                   </div>
                   <div v-if="supportsOracleDatabaseLinks(form.db_type)" class="grid grid-cols-4 items-center gap-4">

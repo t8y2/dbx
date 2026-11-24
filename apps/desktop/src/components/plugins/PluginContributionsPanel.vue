@@ -1453,13 +1453,17 @@ onBeforeUnmount(() => {
     </div>
 
     <Tabs v-model="activeSection" class="min-h-0 flex-1 gap-3">
-      <TabsList class="grid h-9 w-full grid-cols-3">
-        <TabsTrigger value="marketplace" class="gap-1.5 text-xs"><Store class="size-3.5" />{{ t("pluginPlatform.marketplace") }}</TabsTrigger>
-        <TabsTrigger value="installed" class="gap-1.5 text-xs">
-          <PackageCheck class="size-3.5" />{{ t("pluginPlatform.installed") }}
-          <span v-if="installedUpdateCount" class="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold text-amber-950 dark:text-amber-950">{{ installedUpdateCount > 99 ? "99+" : installedUpdateCount }}</span>
+      <TabsList class="flex min-h-9 w-full shrink-0 flex-wrap gap-1 group-data-horizontal/tabs:h-auto">
+        <TabsTrigger value="marketplace" class="h-7 min-w-0 max-w-full flex-auto text-xs"
+          ><Store class="size-3.5" /><span class="truncate">{{ t("pluginPlatform.marketplace") }}</span></TabsTrigger
+        >
+        <TabsTrigger value="installed" class="h-7 min-w-0 max-w-full flex-auto text-xs">
+          <PackageCheck class="size-3.5" /><span class="truncate">{{ t("pluginPlatform.installed") }}</span>
+          <span v-if="installedUpdateCount" class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold text-amber-950 dark:text-amber-950">{{ installedUpdateCount > 99 ? "99+" : installedUpdateCount }}</span>
         </TabsTrigger>
-        <TabsTrigger value="settings" class="gap-1.5 text-xs"><Settings2 class="size-3.5" />{{ t("pluginPlatform.settings") }}</TabsTrigger>
+        <TabsTrigger value="settings" class="h-7 min-w-0 max-w-full flex-auto text-xs"
+          ><Settings2 class="size-3.5" /><span class="truncate">{{ t("pluginPlatform.settings") }}</span></TabsTrigger
+        >
       </TabsList>
 
       <TabsContent value="marketplace" class="@container m-0 min-h-0 flex-1 overflow-y-auto">

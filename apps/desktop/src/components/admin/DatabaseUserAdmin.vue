@@ -20,7 +20,8 @@ import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
-import { grantsFromQueryResult, normalizeStarrocksCatalog, resolveDatabaseUserAdminProviderForConnection, type DatabaseTablePrivilegeGrant, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/database/databaseUserAdmin";
+import { grantsFromQueryResult, mysqlListUsersWithStatusSql, normalizeStarrocksCatalog, resolveDatabaseUserAdminProviderForConnection, type DatabaseTablePrivilegeGrant, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/database/databaseUserAdmin";
+import { formatError } from "@/lib/backend/errorUtils";
 import {
   authorizationPlanSql,
   authorizationPlanStatus,
@@ -67,6 +68,7 @@ const selectedUserKey = ref(restoredUiState.selectedUserKey ?? "");
 const grants = ref<string[]>([]);
 const grantsLoaded = ref(false);
 const search = ref(restoredUiState.search ?? "");
+const accountStatusFilter = ref("all");
 const loadingUsers = ref(false);
 const loadingGrants = ref(false);
 const applying = ref(false);
@@ -181,10 +183,12 @@ const canRevokePrivileges = computed(() => !!actions.value?.revokePrivilegesSql)
 const canEditPrivileges = computed(() => canGrantPrivileges.value || canRevokePrivileges.value);
 const supportsEditTableGrants = computed(() => provider.value?.supportsTableGrantsOnEdit ?? !!provider.value?.supportsTableGrantsOnCreate);
 const selectedUser = computed(() => users.value.find((user) => userKey(user) === selectedUserKey.value));
+const supportsAccountStatus = computed(() => !!mysqlListUsersWithStatusSql(props.connection));
+const hasLockStatus = computed(() => supportsAccountStatus.value && users.value.some((user) => user.accountLocked !== undefined));
 const filteredUsers = computed(() => {
   const query = search.value.trim().toLowerCase();
-  if (!query) return users.value;
-  return users.value.filter((user) => userLabel(user).toLowerCase().includes(query));
+  const status = hasLockStatus.value ? accountStatusFilter.value : "all";
+  return users.value.filter((user) => (!query || userLabel(user).toLowerCase().includes(query)) && (status === "all" || user.accountLocked === (status === "locked")));
 });
 const selectedPrivilegeSet = computed(() => new Set(selectedPrivileges.value));
 const availablePrivileges = computed(() => (isOracle.value ? oraclePrivilegesForScope(privilegeScope.value) : (provider.value?.privilegesForScope?.(privilegeScope.value) ?? [])));
@@ -288,9 +292,15 @@ async function loadUsers() {
     if (!userProvider) return;
     let nextUsers: DatabaseUserIdentity[] = [];
     try {
-      const result = await api.executeQuery(connection.id, "", userProvider.listUsersSql(), undefined, undefined, {
-        maxRows: 5000,
-      });
+      const queryUsers = (sql: string) => api.executeQuery(connection.id, "", sql, undefined, undefined, { maxRows: 5000 });
+      const statusSql = mysqlListUsersWithStatusSql(connection);
+      const result = statusSql
+        ? await queryUsers(statusSql).catch(async (error: unknown) => {
+            // Legacy servers and column-level grants can allow listing users but not reading status.
+            if (!current() || !/\b(?:1054|1142|1143|42S22)\b|unknown column|column .*access denied|SELECT command denied/i.test(formatError(error))) throw error;
+            return queryUsers(userProvider.listUsersSql());
+          })
+        : await queryUsers(userProvider.listUsersSql());
       if (!current()) return;
       nextUsers = userProvider.parseUsers(result);
     } catch (error) {
@@ -1131,6 +1141,7 @@ watch(
     currentTableGrantsLoading.value = false;
     tableGrantLoadError.value = "";
     selectedUserKey.value = "";
+    accountStatusFilter.value = "all";
     grants.value = [];
     grantsLoaded.value = false;
     privilegeScope.value = isOracle.value ? "table" : (provider.value?.defaultScope ?? "mysql");
@@ -1222,11 +1233,19 @@ onBeforeUnmount(() => {
 
     <div v-else class="grid min-h-0 flex-1 grid-cols-[280px_minmax(0,1fr)]">
       <aside class="flex min-h-0 flex-col border-r bg-muted/10">
-        <div class="flex h-12 items-center border-b px-2">
-          <div class="flex h-8 items-center gap-2 rounded-md border bg-background px-2">
+        <div class="flex min-h-12 flex-wrap items-center gap-1.5 border-b px-2 py-1.5">
+          <div class="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border bg-background px-2">
             <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             <input v-model="search" class="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t(isOracle ? 'oracleSecurity.filter' : 'userAdmin.searchUser')" />
           </div>
+          <Select v-if="hasLockStatus" v-model="accountStatusFilter">
+            <SelectTrigger class="h-8 max-w-full shrink-0 text-xs" :aria-label="t('userAdmin.accountStatus')"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">{{ t("userAdmin.accountAll") }}</SelectItem>
+              <SelectItem value="unlocked">{{ t("userAdmin.accountUnlocked") }}</SelectItem>
+              <SelectItem value="locked">{{ t("userAdmin.accountLocked") }}</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
         <div class="min-h-0 flex-1 overflow-auto">
           <div v-if="loadingUsers" class="flex items-center gap-2 px-3 py-4 text-xs text-muted-foreground">
@@ -1247,6 +1266,9 @@ onBeforeUnmount(() => {
               <span class="block truncate font-medium">{{ userLabel(user) || t("userAdmin.anonymous") }}</span>
               <span v-if="userDetail(user)" class="mt-1 inline-flex max-w-full rounded-full border bg-muted/40 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
                 <span class="truncate">{{ userDetail(user) }}</span>
+              </span>
+              <span v-if="user.accountLocked === true" class="ms-1 mt-1 inline-flex items-center gap-1 rounded-full border border-destructive/30 bg-destructive/10 px-1.5 py-0.5 text-[10px] leading-none text-destructive">
+                <Lock class="h-2.5 w-2.5" aria-hidden="true" />{{ t("userAdmin.accountLocked") }}
               </span>
             </span>
           </button>
@@ -1290,6 +1312,21 @@ onBeforeUnmount(() => {
             </Button>
           </div>
         </div>
+
+        <dl v-if="selectedUser && supportsAccountStatus" class="flex shrink-0 flex-wrap gap-x-5 gap-y-1 border-b px-4 py-2 text-xs">
+          <div class="flex flex-wrap items-baseline gap-1.5">
+            <dt class="text-muted-foreground">{{ t("userAdmin.accountStatus") }}</dt>
+            <dd>{{ t(selectedUser.accountLocked === undefined ? "userAdmin.accountUnknown" : selectedUser.accountLocked ? "userAdmin.accountLocked" : "userAdmin.accountUnlocked") }}</dd>
+          </div>
+          <div v-if="selectedUser.passwordExpired !== undefined" class="flex flex-wrap items-baseline gap-1.5">
+            <dt class="text-muted-foreground">{{ t("userAdmin.passwordExpirationFlag") }}</dt>
+            <dd>{{ t(selectedUser.passwordExpired ? "userAdmin.passwordMarkedExpired" : "userAdmin.passwordNotMarkedExpired") }}</dd>
+          </div>
+          <div v-if="selectedUser.passwordLastChanged" class="flex flex-wrap items-baseline gap-1.5">
+            <dt class="text-muted-foreground">{{ t("userAdmin.passwordLastChanged") }}</dt>
+            <dd>{{ selectedUser.passwordLastChanged }}</dd>
+          </div>
+        </dl>
 
         <div v-if="selectedUser" class="grid min-h-0 flex-1" :class="canEditPrivileges ? 'grid-cols-[minmax(0,1fr)_320px]' : 'grid-cols-1'">
           <section class="flex min-h-0 flex-col" :class="{ 'border-r': canEditPrivileges }">

@@ -10,7 +10,7 @@ import { notifyExportComplete } from "@/lib/export/exportReveal";
 import { dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import * as api from "@/lib/backend/api";
 import { type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
-import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridCopyExtractorId, type DataGridCopyPreference, type DataGridExtractRequest, type DataGridExtractorOptions, type DataGridPrimaryKeyMode } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridCopyExtractorId, type DataGridCopyPreference, type DataGridExtractRequest, type DataGridExtractorOptions, type DataGridPrimaryKeyMode, type DataGridSmartSingleColumnFormat } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { useToast } from "@/composables/useToast";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { clipboardCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
@@ -121,6 +121,7 @@ export interface UseDataGridExportOptions {
   allSourceColumns?: ComputedRef<Array<string | undefined> | undefined>;
   visibleColumnIndexes?: ComputedRef<number[]>;
   extractorOptions?: ComputedRef<DataGridExtractorOptions>;
+  smartSingleColumnFormat?: ComputedRef<DataGridSmartSingleColumnFormat>;
   sql: ComputedRef<string | undefined>;
   exportSql?: ComputedRef<string | undefined>;
   pageSql?: ComputedRef<string | undefined>;
@@ -1084,6 +1085,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     columnComments: columnCommentsOption,
     allColumnComments: allColumnCommentsOption,
     extractorOptions: extractorOptionsOption,
+    smartSingleColumnFormat: options.smartSingleColumnFormat,
     databaseType,
     identifierQuote,
     tableMeta,
@@ -3128,7 +3130,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 }
 
 export function defaultDataGridExportFileName(baseName: string | undefined, fallbackBaseName: string, extension: string, options: { page?: boolean; allResults?: boolean } = {}): string {
-  const sanitizedBaseName = sanitizeExportBaseName(baseName || "") || sanitizeExportBaseName(fallbackBaseName) || "export";
+  const suggestedBaseName = sanitizeExportBaseName(baseName || "").replace(/^[.\s]+/, "");
+  const sanitizedBaseName = suggestedBaseName || sanitizeExportBaseName(fallbackBaseName).replace(/^[.\s]+/, "") || "export";
   const suffix = options.allResults ? "results" : options.page ? "page" : "";
   return [sanitizedBaseName, suffix, compactLocalTimestamp()].filter(Boolean).join("_") + `.${extension}`;
 }

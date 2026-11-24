@@ -21,10 +21,12 @@ import {
   type DataGridCopyPreference,
   type DataGridCopyExtractorId,
   type DataGridExtractorOptions,
+  type DataGridSmartSingleColumnFormat,
   DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
   DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
   DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
   normalizeDataGridCopyPreference,
+  normalizeDataGridSmartSingleColumnFormat,
   normalizeDataGridExtractorOptions,
   normalizeVisibleDataGridCopyExtractors,
 } from "@/lib/dataGrid/dataGridCopyExtractor";
@@ -1056,6 +1058,7 @@ export interface EditorSettings {
   /** 重名标签页的区分方式：序号或连接名。见 {@link DuplicateTabTitleMode}。 */
   duplicateTabTitleMode: DuplicateTabTitleMode;
   tabLayout: TabLayoutMode;
+  tabWrapMaxRows: number;
   tabPlacement: TabPlacement;
   colorizeConnectionTabs: boolean;
   colorizeConnectionTabsScope: ConnectionTabColorScope;
@@ -1153,6 +1156,7 @@ export interface EditorSettings {
   dataGridSearchMode: DataGridSearchMode;
   dataGridRowNumberMode: DataGridRowNumberMode;
   dataGridCopyExtractor: DataGridCopyPreference;
+  dataGridSmartSingleColumnFormat: DataGridSmartSingleColumnFormat;
   dataGridExtractorOptions: DataGridExtractorOptions;
   dataGridVisibleCopyExtractors: DataGridCopyExtractorId[];
   dataGridVisibleCopyExtractorsMigrationVersion: number;
@@ -1505,6 +1509,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   crossWindowTabDragPreviewEnabled: true,
   duplicateTabTitleMode: "ordinal",
   tabLayout: "scroll",
+  tabWrapMaxRows: 0,
   tabPlacement: "top",
   colorizeConnectionTabs: true,
   colorizeConnectionTabsScope: "all",
@@ -1571,6 +1576,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridSearchMode: "filter",
   dataGridRowNumberMode: "view",
   dataGridCopyExtractor: "smart",
+  dataGridSmartSingleColumnFormat: "default",
   dataGridExtractorOptions: normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
   dataGridVisibleCopyExtractors: normalizeVisibleDataGridCopyExtractors(undefined),
   dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
@@ -1762,6 +1768,12 @@ function normalizeColumnWidthDensity(value: unknown): ColumnWidthDensity {
 
 function normalizeDataGridColumnWidthMode(value: unknown): DataGridColumnWidthMode {
   return DATA_GRID_COLUMN_WIDTH_MODES.includes(value as DataGridColumnWidthMode) ? (value as DataGridColumnWidthMode) : DEFAULT_EDITOR_SETTINGS.dataGridColumnWidthMode;
+}
+
+export const TAB_WRAP_ROW_LIMITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+function normalizeTabWrapMaxRows(value: unknown): number {
+  return typeof value === "number" && TAB_WRAP_ROW_LIMITS.includes(value) ? value : DEFAULT_EDITOR_SETTINGS.tabWrapMaxRows;
 }
 
 function normalizeTabLayout(value: unknown): TabLayoutMode {
@@ -2278,6 +2290,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     compactTabTitleDefaultVersion,
     crossWindowTabDragPreviewEnabled: typeof settings.crossWindowTabDragPreviewEnabled === "boolean" ? settings.crossWindowTabDragPreviewEnabled : DEFAULT_EDITOR_SETTINGS.crossWindowTabDragPreviewEnabled,
     tabLayout: normalizeTabLayout(settings.tabLayout),
+    tabWrapMaxRows: normalizeTabWrapMaxRows(settings.tabWrapMaxRows),
     tabPlacement: normalizeTabPlacement(settings.tabPlacement),
     colorizeConnectionTabs: typeof settings.colorizeConnectionTabs === "boolean" ? settings.colorizeConnectionTabs : DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabs,
     colorizeConnectionTabsScope: normalizeConnectionTabColorScope(settings.colorizeConnectionTabsScope),
@@ -2344,6 +2357,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
     dataGridRowNumberMode: normalizeDataGridRowNumberMode(settings.dataGridRowNumberMode),
     dataGridCopyExtractor: normalizeDataGridCopyPreference(settings.dataGridCopyExtractor),
+    dataGridSmartSingleColumnFormat: normalizeDataGridSmartSingleColumnFormat(settings.dataGridSmartSingleColumnFormat),
     dataGridExtractorOptions,
     dataGridVisibleCopyExtractors,
     dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
@@ -3306,6 +3320,7 @@ export const useSettingsStore = defineStore("settings", () => {
     }
     if (partial.crossWindowTabDragPreviewEnabled !== undefined) editorSettings.value.crossWindowTabDragPreviewEnabled = partial.crossWindowTabDragPreviewEnabled === true;
     if (partial.tabLayout !== undefined) editorSettings.value.tabLayout = normalizeTabLayout(partial.tabLayout);
+    if (partial.tabWrapMaxRows !== undefined) editorSettings.value.tabWrapMaxRows = normalizeTabWrapMaxRows(partial.tabWrapMaxRows);
     if (partial.tabPlacement !== undefined) editorSettings.value.tabPlacement = normalizeTabPlacement(partial.tabPlacement);
     if (partial.colorizeConnectionTabs !== undefined) editorSettings.value.colorizeConnectionTabs = partial.colorizeConnectionTabs === true;
     if (partial.colorizeConnectionTabsScope !== undefined) editorSettings.value.colorizeConnectionTabsScope = normalizeConnectionTabColorScope(partial.colorizeConnectionTabsScope);
@@ -3380,6 +3395,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);
     if (partial.dataGridRowNumberMode !== undefined) editorSettings.value.dataGridRowNumberMode = normalizeDataGridRowNumberMode(partial.dataGridRowNumberMode);
     if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyPreference(partial.dataGridCopyExtractor);
+    if (partial.dataGridSmartSingleColumnFormat !== undefined) editorSettings.value.dataGridSmartSingleColumnFormat = normalizeDataGridSmartSingleColumnFormat(partial.dataGridSmartSingleColumnFormat);
     if (partial.dataGridExtractorOptions !== undefined) editorSettings.value.dataGridExtractorOptions = normalizeDataGridExtractorOptions(partial.dataGridExtractorOptions);
     if (partial.dataGridVisibleCopyExtractors !== undefined) editorSettings.value.dataGridVisibleCopyExtractors = normalizeVisibleDataGridCopyExtractors(partial.dataGridVisibleCopyExtractors);
     if (partial.dataGridVisibleCopyExtractorsMigrationVersion !== undefined) editorSettings.value.dataGridVisibleCopyExtractorsMigrationVersion = DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION;

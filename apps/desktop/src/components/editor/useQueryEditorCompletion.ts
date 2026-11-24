@@ -1542,7 +1542,11 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (!localOnlyMetadata && !schemaLookupDatabase && (completionContext.suggestTables || (!!completionContext.qualifier && !isReferencedTableQualifier(completionContext)))) {
       const crossSchemaSearch = searchesAcrossPostgresSchemas(completionContext, scope);
       const globalTableSearch = crossSchemaSearch || (isOracleCompletionDatabase(props.databaseType) && completionContext.suggestTables && !completionContext.qualifier);
-      const localTableKeys = crossSchemaSearch ? new Set(connectionStore.lookupLocalCompletionTables(connectionId, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, undefined, props.catalog).map((table) => JSON.stringify([table.schema, table.name]))) : undefined;
+      const qualifiedPostgresTableSearch = tableNameCompletion && !!completionContext.qualifier && !!tableLookupTarget.schema && (props.databaseType === "postgres" || props.databaseType === "gaussdb");
+      const localTableKeys =
+        crossSchemaSearch || qualifiedPostgresTableSearch
+          ? new Set(connectionStore.lookupLocalCompletionTables(connectionId, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, tableLookupTarget.schema, props.catalog).map((table) => JSON.stringify([table.schema, table.name])))
+          : undefined;
       const refreshEpoch = completionEpoch;
       queueTableCompletionRefresh(async () => {
         if (refreshEpoch !== completionEpoch) return;

@@ -179,26 +179,27 @@ describe("isLargeEditorSelection", () => {
 });
 
 describe("keepNativeSelectionParkedDuringDrag", () => {
-  it("parks once the gesture has dragged out enough lines to be worth it", () => {
+  it("parks as soon as the gesture has selected anything, however short", () => {
     const frames = manualFrames();
-    const { view, contentDOM, setSelection } = fakeView(0, 4);
+    const { view, contentDOM, setSelection, publishSelection } = fakeView(0, 0);
     const park = keepNativeSelectionParkedDuringDrag(view);
 
     expect(contentDOM.contains(document.getSelection()?.anchorNode ?? null)).toBe(true);
 
-    setSelection(0, NATIVE_SELECTION_PARK_MIN_CHARS);
+    // A few highlighted lines already cost a serialization per pointer move on macOS 26/27.
+    setSelection(0, 40);
+    publishSelection();
     frames.runFrame();
     expect(contentDOM.contains(document.getSelection()?.anchorNode ?? null)).toBe(false);
 
     park.release();
   });
 
-  it("leaves a gesture that never grows past a few lines alone", () => {
+  it("leaves a click that never selects anything alone", () => {
     const frames = manualFrames();
-    const { view, contentDOM, setSelection, publishSelection } = fakeView(0, 4);
+    const { view, contentDOM, publishSelection } = fakeView(4, 4);
     const park = keepNativeSelectionParkedDuringDrag(view);
 
-    setSelection(0, 40);
     publishSelection();
     frames.runFrame();
     frames.runFrame();

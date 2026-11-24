@@ -1498,6 +1498,9 @@ fn test_agent_jar_bytes() -> Vec<u8> {
     // The production validator rejects corrupt driver artifacts by requiring a real JAR manifest.
     zip.start_file("META-INF/MANIFEST.MF", options).unwrap();
     std::io::Write::write_all(&mut zip, b"Manifest-Version: 1.0\nMain-Class: com.dbx.agent.TestAgent\n\n").unwrap();
+    // ... and the class that manifest names, otherwise the install boundary refuses the jar.
+    zip.start_file("com/dbx/agent/TestAgent.class", options).unwrap();
+    std::io::Write::write_all(&mut zip, b"class-bytes").unwrap();
     zip.finish().unwrap().into_inner()
 }
 

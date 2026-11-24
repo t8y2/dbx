@@ -137,6 +137,7 @@ import {
   type SqlTableCompletionSchemaQualification,
   type TableHoverLookupMode,
   normalizeTabMaxWidth,
+  TAB_WRAP_ROW_LIMITS,
   SIDEBAR_INDENT_MIN,
   SIDEBAR_INDENT_MAX,
   SIDEBAR_FONT_SIZE_MIN,
@@ -342,6 +343,7 @@ import { useToast } from "@/composables/useToast";
 import type { ConnectionConfig, InstalledPlugin, DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
 import { getCcSwitchPluginStatus, isCcSwitchPluginAvailable, isMagpieImportAvailable, MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION } from "@/lib/ai/ccSwitch";
 import { uuid } from "@/lib/common/utils";
+import { MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES, mergeImportedVscodeSnippets, parseVscodeSnippetsFile, readVscodeSnippetsFile, serializeVscodeSnippetsFile, type VscodeSnippetsImportError, type VscodeSnippetsParseResult } from "@/lib/sql/vscodeSnippetsImport";
 import { DEFAULT_SQL_SHORTCUT_SELECT_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
 import {
   BUILTIN_SQL_SHORTCUT_COUNT_ID,
@@ -854,6 +856,7 @@ const editWelcomePageMode = ref<WelcomePageMode>(settingsStore.editorSettings.we
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editWebLogoPosition = ref<WebLogoPosition>(settingsStore.editorSettings.webLogoPosition);
 const editTabLayout = ref(settingsStore.editorSettings.tabLayout);
+const editTabWrapMaxRows = ref(settingsStore.editorSettings.tabWrapMaxRows);
 const editCrossWindowTabDragPreviewEnabled = ref(settingsStore.editorSettings.crossWindowTabDragPreviewEnabled);
 const editTabPlacement = ref<TabPlacement>(settingsStore.editorSettings.tabPlacement);
 const editColorizeConnectionTabs = ref(settingsStore.editorSettings.colorizeConnectionTabs);
@@ -1400,6 +1403,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     appLayout: editAppLayout.value,
     webLogoPosition: editWebLogoPosition.value,
     tabLayout: editTabLayout.value,
+    tabWrapMaxRows: editTabWrapMaxRows.value,
     crossWindowTabDragPreviewEnabled: editCrossWindowTabDragPreviewEnabled.value,
     tabPlacement: editTabPlacement.value,
     colorizeConnectionTabs: editColorizeConnectionTabs.value,
@@ -1779,6 +1783,134 @@ function confirmDeleteSnippet(snippet: SqlSnippet) {
     deleteSnippet(snippet.id);
   }
 }
+// --- Snippet import (VS Code snippets JSON) ---
+
+const snippetsImporting = ref(false);
+const snippetsFileInputRef = ref<HTMLInputElement | null>(null);
+
+function onImportSnippetsClick() {
+  if (snippetsImporting.value) return;
+  if (isTauriRuntime()) {
+    void importSnippetsFromDesktop();
+    return;
+  }
+  snippetsFileInputRef.value?.click();
+}
+
+async function importSnippetsFromDesktop() {
+  snippetsImporting.value = true;
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "VS Code Snippets", extensions: ["json", "code-snippets"] }],
+    });
+    if (typeof selected !== "string") return;
+    const { open: openFile } = await import("@tauri-apps/plugin-fs");
+    const file = await openFile(selected, { read: true });
+    try {
+      applyImportedSnippets(await readVscodeSnippetsFile(file));
+    } finally {
+      await file.close();
+    }
+  } catch (error) {
+    toast(t("settings.snippetsImportReadFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    snippetsImporting.value = false;
+  }
+}
+
+async function handleSnippetsFileInputChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  // Reject oversized files before reading them into memory.
+  if (file.size > MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES) {
+    toast(translateSnippetsImportError({ code: "too-large" }), 5000);
+    return;
+  }
+  snippetsImporting.value = true;
+  try {
+    applyImportedSnippets(parseVscodeSnippetsFile(await file.text()));
+  } catch (error) {
+    toast(t("settings.snippetsImportReadFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    snippetsImporting.value = false;
+  }
+}
+
+// Import only updates the draft; the snippets tab is Apply-based, so the dirty
+// check and Apply footer pick the change up without touching the store here.
+function applyImportedSnippets(result: VscodeSnippetsParseResult) {
+  if (!result.ok) {
+    toast(translateSnippetsImportError(result.error), 5000);
+    return;
+  }
+  const merged = mergeImportedVscodeSnippets(editSnippets.value, result.value);
+  editSnippets.value = merged.snippets;
+  toast(merged.renamedCount > 0 ? t("settings.snippetsImportSuccessRenamed", { count: merged.importedCount, renamed: merged.renamedCount }) : t("settings.snippetsImportSuccess", { count: merged.importedCount }), 2500);
+}
+
+function translateSnippetsImportError(error: VscodeSnippetsImportError): string {
+  switch (error.code) {
+    case "too-large":
+      return t("settings.snippetsImportFileTooLarge", { limit: `${MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES / (1024 * 1024)} MB` });
+    case "invalid-json":
+      return t("settings.snippetsImportInvalidJson");
+    case "invalid-structure":
+      return t("settings.snippetsImportInvalidStructure");
+    case "no-valid-snippets":
+      return t("settings.snippetsImportNoValidSnippets");
+  }
+}
+
+// --- Snippet export (VS Code snippets JSON) ---
+
+const snippetsExporting = ref(false);
+
+function onExportSnippetsClick() {
+  if (snippetsExporting.value || editSnippets.value.length === 0) return;
+  if (isTauriRuntime()) {
+    void exportSnippetsToDesktop();
+    return;
+  }
+  exportSnippetsToBrowser();
+}
+
+async function exportSnippetsToDesktop() {
+  snippetsExporting.value = true;
+  try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const target = await save({
+      defaultPath: "dbx-snippets.json",
+      filters: [{ name: "VS Code Snippets", extensions: ["json", "code-snippets"] }],
+    });
+    if (typeof target !== "string") return;
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    await writeTextFile(target, serializeVscodeSnippetsFile(editSnippets.value));
+    toast(t("settings.snippetsExportSuccess", { count: editSnippets.value.length }), 2500);
+  } catch (error) {
+    toast(t("settings.snippetsExportWriteFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    snippetsExporting.value = false;
+  }
+}
+
+function exportSnippetsToBrowser() {
+  try {
+    const blob = new Blob([serializeVscodeSnippetsFile(editSnippets.value)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "dbx-snippets.json";
+    anchor.click();
+    URL.revokeObjectURL(url);
+    toast(t("settings.snippetsExportSuccess", { count: editSnippets.value.length }), 2500);
+  } catch (error) {
+    toast(t("settings.snippetsExportWriteFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
 
 function openAddSqlShortcutDialog() {
   sqlShortcutEditingId.value = null;
@@ -2128,6 +2260,7 @@ function syncEditorSettingsDraftFromStore() {
   editAppLayout.value = settingsStore.editorSettings.appLayout;
   editWebLogoPosition.value = settingsStore.editorSettings.webLogoPosition;
   editTabLayout.value = settingsStore.editorSettings.tabLayout;
+  editTabWrapMaxRows.value = settingsStore.editorSettings.tabWrapMaxRows;
   editCrossWindowTabDragPreviewEnabled.value = settingsStore.editorSettings.crossWindowTabDragPreviewEnabled;
   editTabPlacement.value = settingsStore.editorSettings.tabPlacement;
   editColorizeConnectionTabs.value = settingsStore.editorSettings.colorizeConnectionTabs;
@@ -2326,6 +2459,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   appLayout: editAppLayout,
   webLogoPosition: editWebLogoPosition,
   tabLayout: editTabLayout,
+  tabWrapMaxRows: editTabWrapMaxRows,
   crossWindowTabDragPreviewEnabled: editCrossWindowTabDragPreviewEnabled,
   tabPlacement: editTabPlacement,
   colorizeConnectionTabs: editColorizeConnectionTabs,
@@ -2577,6 +2711,7 @@ const collapsedShortcutScopes = ref<Set<ShortcutScope>>(new Set());
 const formatterEditorShortcutIds: ShortcutActionId[] = [
   "formatSql",
   "toggleLineComment",
+  "toggleLineCommentAndAdvance",
   "find",
   "replace",
   "saveSql",
@@ -2995,6 +3130,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
     editWebLogoPosition.value = DEFAULT_EDITOR_SETTINGS.webLogoPosition;
     editTabLayout.value = DEFAULT_EDITOR_SETTINGS.tabLayout;
+    editTabWrapMaxRows.value = DEFAULT_EDITOR_SETTINGS.tabWrapMaxRows;
     editCrossWindowTabDragPreviewEnabled.value = DEFAULT_EDITOR_SETTINGS.crossWindowTabDragPreviewEnabled;
     editTabPlacement.value = DEFAULT_EDITOR_SETTINGS.tabPlacement;
     editColorizeConnectionTabs.value = DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabs;
@@ -9567,6 +9703,15 @@ onUnmounted(() => {
                     </div>
                   </Button>
                 </div>
+                <div v-if="editTabLayout === 'wrap'" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <Label for="tab-wrap-max-rows">{{ t("settings.tabWrapMaxRows") }}</Label>
+                  <Select :model-value="String(editTabWrapMaxRows)" @update:model-value="editTabWrapMaxRows = Number($event)">
+                    <SelectTrigger id="tab-wrap-max-rows" class="w-32"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="rows in TAB_WRAP_ROW_LIMITS" :key="rows" :value="String(rows)">{{ rows || t("settings.tabMaxWidthUnlimited") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
 
               <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
@@ -11948,6 +12093,16 @@ onUnmounted(() => {
                     <Trash2 class="mr-2 h-4 w-4" />
                     {{ t("settings.snippetsDeleteSelected", { count: selectedSnippetCount }) }}
                   </Button>
+                  <Button variant="outline" size="sm" :disabled="snippetsImporting" @click="onImportSnippetsClick">
+                    <Loader2 v-if="snippetsImporting" class="mr-2 h-4 w-4 animate-spin" />
+                    <Upload v-else class="mr-2 h-4 w-4" />
+                    {{ t("settings.snippetsImport") }}
+                  </Button>
+                  <Button variant="outline" size="sm" :disabled="snippetsExporting || editSnippets.length === 0" @click="onExportSnippetsClick">
+                    <Loader2 v-if="snippetsExporting" class="mr-2 h-4 w-4 animate-spin" />
+                    <Download v-else class="mr-2 h-4 w-4" />
+                    {{ t("settings.snippetsExport") }}
+                  </Button>
                   <Button variant="outline" size="sm" @click="openAddSnippetDialog">
                     <Plus class="mr-2 h-4 w-4" />
                     {{ t("settings.snippetsAdd") }}
@@ -12066,6 +12221,7 @@ LIMIT 100;</pre>
                   </tbody>
                 </table>
               </div>
+              <input ref="snippetsFileInputRef" type="file" accept=".json,.code-snippets,application/json" class="hidden" @change="handleSnippetsFileInputChange" />
             </section>
 
             <section v-else-if="activeSettingsTab === 'backups'" data-settings-search-id="backups" :class="['py-2', settingsSearchTargetClass('backups')]">

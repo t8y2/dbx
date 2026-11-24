@@ -150,7 +150,9 @@ import {
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
   isReopenClosedTabShortcut,
+  isOpenRecentTablesShortcut,
   isCloseWindowShortcut,
+  isCommitTransactionShortcut,
   isDisconnectAllActiveConnectionsShortcut,
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
@@ -185,6 +187,7 @@ import {
   isToggleZenModeShortcut,
   isZoomInShortcut,
   isZoomOutShortcut,
+  copyResultColumnIndexFromShortcut,
   saveShortcutSurface,
   switchToTabIndexFromShortcut,
   tabSwitcherDirectionFromShortcut,
@@ -262,6 +265,7 @@ import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostB
 const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAssistant.vue"));
 const PluginWorkbenchTab = defineAsyncComponent(() => import("@/components/plugins/PluginWorkbenchTab.vue"));
 const QueryHistory = defineAsyncComponent(() => import("@/components/editor/QueryHistory.vue"));
+const RecentClosedTabsDialog = defineAsyncComponent(() => import("@/components/tabs/RecentClosedTabsDialog.vue"));
 const SqlLibraryPanel = defineAsyncComponent(() => import("@/components/layout/SqlLibraryPanel.vue"));
 const SqlFilesBookmarksDock = defineAsyncComponent(() => import("@/components/layout/SqlFilesBookmarksDock.vue"));
 const DriverStorePage = defineAsyncComponent(() => import("@/components/config/DriverStoreDialog.vue"));
@@ -529,6 +533,7 @@ const isSpecialPageActive = computed(() => !isDetachedWindowContext && (driverSt
 const showQuickOpen = ref(false);
 const quickOpenForceContent = ref(false);
 const showTabSwitcher = ref(false);
+const showRecentTables = ref(false);
 const tabSwitcherIndex = ref(0);
 const agentDriverUpdateCount = ref(0);
 const showHistory = ref(false);
@@ -1160,7 +1165,8 @@ const executableSql = computed(() => {
 
 // Descendants only need to know whether there is anything to run. Handing them the SQL text itself
 // would re-render the whole editor shell on every keystroke.
-const hasExecutableSql = computed(() => executableSql.value.trim().length > 0);
+// `/\S/` stops at the first character that is not whitespace; `trim()` copied the whole script per keystroke.
+const hasExecutableSql = computed(() => /\S/.test(executableSql.value));
 
 async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot, executionTab?: QueryTab) {
   const tab = executionTab ?? activeTab.value;
@@ -1355,6 +1361,9 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   saveSql: (tabId: string) => void openSaveSqlDialog(tabId),
   saveRoutineToDatabase: (tabId: string) => void saveRoutineToDatabase(tabId),
   saveAllTabs: (tabIds?: string[]) => void handleSaveAllTabs(tabIds),
+  openRecentTables: () => {
+    showRecentTables.value = true;
+  },
   openSqlFile,
   importResultArchive,
   pasteSqlInCondition: pasteClipboardAsSqlInCondition,
@@ -5073,6 +5082,21 @@ async function handleKeydown(e: KeyboardEvent) {
     contentAreaRef.value?.refreshData();
     return;
   }
+  if (!showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
+    const target = e.target instanceof Element ? e.target : null;
+    const canUseShortcut = !target?.closest('[role="dialog"], [role="alertdialog"], input, textarea, [contenteditable="true"]:not(.cm-content)');
+    if (!e.repeat && canUseShortcut && isCommitTransactionShortcut(e, shortcuts) && contentAreaRef.value?.commitTransaction()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    const copyResultColumn = copyResultColumnIndexFromShortcut(e, shortcuts);
+    if (copyResultColumn !== null && !target?.closest('[role="dialog"], [role="alertdialog"], input, textarea') && contentAreaRef.value?.copyResultColumn(copyResultColumn)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+  }
   if (isToggleResultsPaneShortcut(e, shortcuts) && contentAreaRef.value?.toggleResultsPane()) {
     e.preventDefault();
     e.stopPropagation();
@@ -5175,6 +5199,15 @@ async function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     await closeActiveSurface();
     return;
+  }
+  if (isOpenRecentTablesShortcut(e, shortcuts) && authenticated.value && !e.isComposing && !e.repeat && (workspaceRendered() || isZenMode.value)) {
+    const target = e.target instanceof Element ? e.target : null;
+    if (!target?.closest('[role="dialog"], [role="alertdialog"]')) {
+      e.preventDefault();
+      e.stopPropagation();
+      showRecentTables.value = true;
+      return;
+    }
   }
   if (isReopenClosedTabShortcut(e, shortcuts)) {
     e.preventDefault();
@@ -6313,6 +6346,7 @@ onUnmounted(() => {
         <BackgroundTasksClosePromptDialog v-if="isDesktop && showBackgroundTasksClosePrompt" v-model:open="showBackgroundTasksClosePrompt" :count="activeBackgroundTaskCount" @cancel="cancelPendingAppClose" @quit="confirmQuitWithActiveBackgroundTasks" />
         <QuickOpenDialog :open="showQuickOpen" :initial-content-mode="quickOpenForceContent" @update:open="showQuickOpen = $event" @select="handleQuickOpenSelect" />
         <OracleTypeManagementDialog v-if="oracleTypeManagementRequest" />
+        <RecentClosedTabsDialog v-if="showRecentTables" v-model:open="showRecentTables" tables-only />
         <TabSwitcherDialog :open="showTabSwitcher" :tabs="tabSwitcherTabs" :selected-index="tabSwitcherIndex" :shortcut-hint="tabSwitcherShortcutHint" @update:open="handleTabSwitcherOpenChange" @update:selected-index="tabSwitcherIndex = $event" @select="handleTabSwitcherSelect" />
       </div>
       <Teleport to="body">

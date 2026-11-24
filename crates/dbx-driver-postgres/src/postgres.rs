@@ -5235,9 +5235,9 @@ pub async fn fetch_postgres_partition_tree(
         .collect())
 }
 
-/// Batched sibling of get_columns, fetching every relation through at most
-/// two OID-scoped catalog queries. The compatibility tier avoids PostgreSQL
-/// 12+ catalog fields so PostgreSQL 10-compatible servers remain bounded.
+/// Batched sibling of get_columns, fetching every relation through a bounded
+/// sequence of OID-scoped catalog queries. The compatibility tier avoids
+/// PostgreSQL 12+ catalog fields so PostgreSQL 10-compatible servers remain supported.
 pub async fn get_columns_for_relations(
     pool: &Pool,
     relations: &[(i64, String, String)],
@@ -5270,10 +5270,11 @@ async fn get_columns_for_relations_with_sql(
     Ok(result)
 }
 
-fn postgres_columns_for_relations_query_tiers() -> [&'static str; 3] {
+fn postgres_columns_for_relations_query_tiers() -> [&'static str; 4] {
     [
         postgres_columns_for_relations_sql(),
         postgres_columns_for_relations_compat_sql(),
+        postgres_columns_for_relations_information_schema_with_comments_sql(),
         postgres_columns_for_relations_information_schema_sql(),
     ]
 }
@@ -5431,8 +5432,10 @@ fn postgres_columns_for_relations_compat_sql() -> &'static str {
 // 42703), and referencing it failed the whole tier (#15130). Enumerated types
 // therefore degrade to the generic `USER-DEFINED` label in this last-resort
 // tier instead of aborting the column listing.
-fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
-    "SELECT c.oid::bigint AS relid, ic.column_name AS column_name, \
+macro_rules! postgres_columns_for_relations_information_schema_sql {
+    ($comment:literal) => {
+        concat!(
+            "SELECT c.oid::bigint AS relid, ic.column_name AS column_name, \
              ic.data_type AS full_type, \
              ic.is_nullable = 'YES' AS is_nullable, \
              ic.column_default AS column_default, \
@@ -5448,8 +5451,9 @@ fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
                  AND tc.table_schema = ic.table_schema \
                  AND tc.table_name = ic.table_name \
                  AND kcu.column_name = ic.column_name \
-             ) AS is_pk, \
-             NULL::text AS column_comment, \
+             ) AS is_pk, ",
+            $comment,
+            " AS column_comment, \
              NULL::text AS column_extra, \
              ic.numeric_precision::int AS numeric_precision, \
              ic.numeric_scale::int AS numeric_scale, \
@@ -5461,6 +5465,20 @@ fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
              WHERE ic.table_catalog = current_database() \
              AND c.oid = ANY($1::bigint[]) \
              ORDER BY c.oid, ic.ordinal_position"
+        )
+    };
+}
+
+fn postgres_columns_for_relations_information_schema_with_comments_sql() -> &'static str {
+    postgres_columns_for_relations_information_schema_sql!(
+        "(SELECT d.description FROM pg_catalog.pg_description d \
+          WHERE d.classoid = c.tableoid AND d.objoid = c.oid \
+            AND d.objsubid = ic.ordinal_position)"
+    )
+}
+
+fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
+    postgres_columns_for_relations_information_schema_sql!("NULL::text")
 }
 
 /// Same field layout as `column_info_from_row`, offset by one leading `relid`
@@ -8552,16 +8570,18 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
-// Last-resort single-relation tier: only `information_schema` columns, for
-// servers where the `pg_attribute` tiers yield nothing. Casts the precision,
-// scale and length with `::int` because GaussDB rejects `CAST(... AS int)`
-// with `syntax error at or near "int"` (#14613).
+// Both information_schema queries must match column_info_from_row_offset.
+// Cast precision, scale and length with `::int` because GaussDB rejects
+// `CAST(... AS int)` with `syntax error at or near "int"` (#14613).
 //
 // `full_type` is a plain `data_type` because GaussDB's `information_schema.columns`
 // has no `udt_name` column (`Column c.udt_name does not exist`, SQLSTATE 42703),
 // which used to fail this tier outright (#15130); user-defined types fall back to
 // the generic `USER-DEFINED` label rather than taking the listing down with them.
-const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
+macro_rules! information_schema_columns_sql {
+    ($comment:literal) => {
+        concat!(
+            "SELECT c.column_name, \
              c.data_type AS full_type, \
              c.is_nullable = 'YES' AS is_nullable, \
              c.column_default, \
@@ -8577,8 +8597,9 @@ const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
                  AND tc.table_schema = c.table_schema \
                  AND tc.table_name = c.table_name \
                  AND kcu.column_name = c.column_name \
-             ) AS is_pk, \
-             NULL::text AS column_comment, \
+             ) AS is_pk, ",
+            $comment,
+            " AS column_comment, \
              NULL::text AS column_extra, \
              c.numeric_precision::int AS numeric_precision, \
              c.numeric_scale::int AS numeric_scale, \
@@ -8587,7 +8608,22 @@ const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
              FROM information_schema.columns c \
              WHERE c.table_schema = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN current_schema() ELSE $1 END) \
              AND c.table_name = $2 \
-             ORDER BY c.ordinal_position";
+             ORDER BY c.ordinal_position"
+        )
+    };
+}
+
+const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = information_schema_columns_sql!("NULL::text");
+
+// openGauss can expose comments even when the compat tier cannot read pg_depend
+// (#15267). Its columns view exposes attnum as ordinal_position, including
+// gaps left by dropped columns.
+const GAUSS_COLUMNS_INFORMATION_SCHEMA_WITH_COMMENTS_SQL: &str = information_schema_columns_sql!(
+    "(SELECT d.description FROM pg_catalog.pg_class r \
+      JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace \
+      JOIN pg_catalog.pg_description d ON d.classoid = r.tableoid AND d.objoid = r.oid \
+      WHERE n.nspname = c.table_schema AND r.relname = c.table_name AND d.objsubid = c.ordinal_position)"
+);
 
 fn parse_enum_values_from_row(row: &impl ValueRow, index: usize) -> Option<Vec<String>> {
     let raw = row.try_get::<_, Option<String>>(index).ok().flatten()?;
@@ -8706,7 +8742,11 @@ fn column_metadata_tiers(modern_tier_supported: bool) -> Vec<(&'static str, &'st
             ("information_schema", POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL),
         ]
     } else {
-        vec![("compat", POSTGRES_COLUMNS_COMPAT_SQL), ("information_schema", POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL)]
+        vec![
+            ("compat", POSTGRES_COLUMNS_COMPAT_SQL),
+            ("information_schema_with_comments", GAUSS_COLUMNS_INFORMATION_SCHEMA_WITH_COMMENTS_SQL),
+            ("information_schema", POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL),
+        ]
     }
 }
 
@@ -10135,8 +10175,14 @@ async fn execute_query_with_max_rows_inner(
                 .await
         }
     } else {
-        let affected =
-            if force_unnamed { client.execute_typed(sql, &[]).await } else { client.execute(sql, &[]).await };
+        // Grid writes have no bind parameters. Sending Parse and Bind together
+        // keeps the statement on one backend when a transaction pool releases
+        // its server connection between protocol round trips.
+        let affected = if force_unnamed || starts_with_executable_sql_keyword(sql, &["INSERT", "UPDATE", "DELETE"]) {
+            client.execute_typed(sql, &[]).await
+        } else {
+            client.execute(sql, &[]).await
+        };
         affected.map_err(pg_error_to_string).map(|affected| QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -15446,9 +15492,9 @@ mod tests {
     #[test]
     fn postgres_partition_batch_metadata_uses_bounded_compat_tiers() {
         let column_tiers = postgres_columns_for_relations_query_tiers();
-        // Two `pg_attribute` tiers plus the information-schema last resort
-        // (#8728); still bounded, and a normal server stops at the first tier.
-        assert_eq!(column_tiers.len(), 3);
+        // Two `pg_attribute` tiers, a comment-preserving information-schema
+        // tier, and the final information-schema last resort (#8728).
+        assert_eq!(column_tiers.len(), 4);
         assert!(column_tiers.iter().all(|sql| sql.contains("c.oid = ANY($1::bigint[])")));
         assert!(column_tiers[0].contains("a.attgenerated"));
         assert!(!column_tiers[0].contains("information_schema.columns"));
@@ -15458,7 +15504,11 @@ mod tests {
         assert!(!column_tiers[1].contains("LEFT JOIN LATERAL"));
         assert!(!column_tiers[1].contains("information_schema.columns"));
         assert!(column_tiers[2].contains("information_schema.columns"));
+        assert!(column_tiers[2].contains("pg_catalog.pg_description"));
         assert!(!column_tiers[2].contains("pg_attribute"));
+        assert!(column_tiers[3].contains("information_schema.columns"));
+        assert!(!column_tiers[3].contains("pg_catalog.pg_description"));
+        assert!(!column_tiers[3].contains("pg_attribute"));
 
         let index_tiers = postgres_indexes_for_relations_query_tiers();
         assert_eq!(index_tiers.len(), 2);
@@ -15546,12 +15596,16 @@ mod tests {
     /// #8728: the batched (partition-tree) column path used to be the only
     /// metadata path without a catalog fallback, so a server that answers the
     /// `pg_attribute` tiers with zero rows for an existing relation still
-    /// reported no columns. It now carries the same information-schema last
-    /// resort as the single-relation path.
+    /// reported no columns. It now carries the same information-schema tiers
+    /// as the single-relation path, including the comment-preserving tier.
     #[test]
     fn postgres_batched_column_metadata_has_information_schema_fallback() {
         let tiers = postgres_columns_for_relations_query_tiers();
-        assert_eq!(tiers.len(), 3);
+        assert_eq!(tiers.len(), 4);
+
+        let comments_sql = postgres_columns_for_relations_information_schema_with_comments_sql();
+        assert!(comments_sql.contains("pg_catalog.pg_description"));
+        assert!(!comments_sql.contains("NULL::text AS column_comment"));
 
         let sql = postgres_columns_for_relations_information_schema_sql();
         assert!(sql.contains("information_schema.columns"));
@@ -15856,7 +15910,7 @@ mod tests {
         let compat_first = column_metadata_tiers(false);
         assert_eq!(
             compat_first.iter().map(|(tier, _)| *tier).collect::<Vec<_>>(),
-            vec!["compat", "information_schema"]
+            vec!["compat", "information_schema_with_comments", "information_schema"]
         );
         assert_eq!(compat_first[0].1, POSTGRES_COLUMNS_COMPAT_SQL);
     }
@@ -16024,6 +16078,44 @@ mod tests {
         assert!(sql.contains("d.deptype = 'e'"));
         assert!(sql.contains("pg_get_function_identity_arguments(p.oid)"));
         assert!(!sql.contains("d.deptype = 'x'"));
+    }
+
+    #[tokio::test]
+    async fn compat_column_fallback_preserves_visible_comments_with_restricted_catalogs() {
+        let Some(container) = start_docker_postgres().await else {
+            return;
+        };
+        let admin = connect(&container.url(), Duration::from_secs(5)).await.unwrap();
+        let client = admin.get().await.unwrap();
+        client
+            .batch_execute(
+                r#"CREATE ROLE comment_reader LOGIN PASSWORD 'reader';
+                   CREATE SCHEMA "App";
+                   CREATE TABLE "App"."Visitor" (id bigint, obsolete text, note text);
+                   ALTER TABLE "App"."Visitor" DROP COLUMN obsolete;
+                   COMMENT ON COLUMN "App"."Visitor".id IS '主键';
+                   GRANT USAGE ON SCHEMA "App" TO comment_reader;
+                   GRANT SELECT ON "App"."Visitor" TO comment_reader;
+                   REVOKE SELECT ON pg_catalog.pg_depend FROM PUBLIC;"#,
+            )
+            .await
+            .unwrap();
+        let reader_url =
+            format!("postgres://comment_reader:reader@127.0.0.1:{}/postgres?sslmode=disable", container.port);
+        let reader = connect(&reader_url, Duration::from_secs(5)).await.unwrap();
+
+        for (literal, expected) in [("'初始备注'", Some("初始备注")), ("'更新备注'", Some("更新备注")), ("NULL", None)]
+        {
+            client.batch_execute(&format!(r#"COMMENT ON COLUMN "App"."Visitor".note IS {literal}"#)).await.unwrap();
+            let columns = get_columns_compat_first(&reader, "App", "Visitor").await.unwrap();
+            let comments: Vec<_> = columns.iter().map(|c| (c.name.as_str(), c.comment.as_deref())).collect();
+            assert_eq!(comments, [("id", Some("主键")), ("note", expected)]);
+        }
+
+        client.batch_execute("REVOKE SELECT ON pg_catalog.pg_description FROM PUBLIC").await.unwrap();
+        let columns = get_columns_compat_first(&reader, "App", "Visitor").await.unwrap();
+        let comments: Vec<_> = columns.iter().map(|c| (c.name.as_str(), c.comment.as_deref())).collect();
+        assert_eq!(comments, [("id", None), ("note", None)]);
     }
 
     #[tokio::test]

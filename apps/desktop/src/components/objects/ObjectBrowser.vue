@@ -401,16 +401,22 @@ let objectBrowserUnmounted = false;
 const rows = ref<ObjectBrowserRow[]>([]);
 const rootRef = ref<HTMLElement>();
 const search = ref(props.initialSearchQuery ?? "");
-function initialObjectBrowserFilter(): ObjectFilter {
-  const preferred = props.selectedObjectFilter ?? props.initialObjectFilter;
+/**
+ * Single normalization for the first mount and for tab reuse. The sidebar sets
+ * the preferred category when a group row is double-clicked; resolving it in one
+ * place keeps that group opening the same category whether the tab already
+ * exists or is created on the spot.
+ */
+function resolvedObjectBrowserFilter(preferred: ObjectFilter | undefined): ObjectFilter {
   if (preferred === "indexes") return "indexes";
   if (props.connection.db_type === "oceanbase-oracle") return preferred ?? "tables";
   // 非 OceanBase-Oracle 连接：显式分类（表/视图/存储过程/函数/触发器/事件…）
-  // 都要生效，只有触发器仍需精确触发器读取能力才切到 triggers。
-  if (preferred === "triggers") return oracleTriggerObjectReadOptions(props.connection, ["TRIGGER"], props.catalog) ? "triggers" : "all";
+  // 都要生效。此前把「触发器」分类绑定到 Oracle 精确读取能力，会让双击
+  // MySQL 的「触发器」分组先落到「全部」；而对象列表本来就会带出触发器，
+  // 该分类可以直接生效（空分类另有「全部」入口兜底）。
   return preferred ?? "all";
 }
-const objectFilter = ref<ObjectFilter>(initialObjectBrowserFilter());
+const objectFilter = ref<ObjectFilter>(resolvedObjectBrowserFilter(props.selectedObjectFilter ?? props.initialObjectFilter));
 const userHasSelectedFilter = ref(false);
 const sortKey = ref<ObjectBrowserSortKey>("name");
 const sortDirection = ref<ObjectBrowserSortDirection>("asc");
@@ -975,29 +981,44 @@ const supportsVacuumTable = computed(() => !connectionIsEffectivelyReadOnly(prop
 const vacuumRiskMessage = computed(() => (vacuumExecuting.value ? t("contextMenu.vacuumTableRunningHint") : vacuumTableFull.value ? t("contextMenu.vacuumTableFullRisk") : vacuumTableAnalyze.value ? t("contextMenu.vacuumTableAnalyzeRisk") : t("contextMenu.vacuumTableDefaultRisk")));
 const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(effectiveDatabaseType.value));
+function objectFiltersForCounts(filters: ObjectFilter[]): ObjectFilter[] {
+  // 选中的分类必须始终可选：空分组（只有表的库里的「视图」分组）在计数为 0
+  // 时会被过滤掉，连整条分类控件都可能被判定为冗余而隐藏，用户就再也回不到
+  // 「全部」，只能看一个空列表。
+  if (objectFilter.value === "all" || filters.includes(objectFilter.value)) return filters;
+  return [filters[0], objectFilter.value, ...filters.slice(1)];
+}
+
 const objectFilters = computed<ObjectFilter[]>(() =>
-  props.connection.db_type === "oceanbase-oracle"
-    ? ["all", "tables", "views", "procedures", "functions", "triggers", "sequences", ...(supportsSchemaIndexes.value ? ["indexes" as const] : []), "packages", "types"]
-    : (
-        [
-          ["all", objectCounts.value.all],
-          ["tables", objectCounts.value.tables],
-          ["views", objectCounts.value.views],
-          ["materializedViews", objectCounts.value.materializedViews],
-          ["procedures", objectCounts.value.procedures],
-          ["functions", objectCounts.value.functions],
-          ["triggers", objectCounts.value.triggers],
-          ["events", objectCounts.value.events],
-          ["sequences", objectCounts.value.sequences],
-          ["indexes", objectCounts.value.indexes],
-          ["packages", objectCounts.value.packages],
-          ["types", objectCounts.value.types],
-        ] as Array<[ObjectFilter, number]>
-      )
-        .filter(([filter, count]) => filter === "all" || count > 0 || (filter === "triggers" && supportsExactTriggerDiscovery.value) || (filter === "indexes" && supportsSchemaIndexes.value))
-        .map(([filter]) => filter),
+  objectFiltersForCounts(
+    props.connection.db_type === "oceanbase-oracle"
+      ? ["all", "tables", "views", "procedures", "functions", "triggers", "sequences", ...(supportsSchemaIndexes.value ? ["indexes" as const] : []), "packages", "types"]
+      : (
+          [
+            ["all", objectCounts.value.all],
+            ["tables", objectCounts.value.tables],
+            ["views", objectCounts.value.views],
+            ["materializedViews", objectCounts.value.materializedViews],
+            ["procedures", objectCounts.value.procedures],
+            ["functions", objectCounts.value.functions],
+            ["triggers", objectCounts.value.triggers],
+            ["events", objectCounts.value.events],
+            ["sequences", objectCounts.value.sequences],
+            ["indexes", objectCounts.value.indexes],
+            ["packages", objectCounts.value.packages],
+            ["types", objectCounts.value.types],
+          ] as Array<[ObjectFilter, number]>
+        )
+          .filter(([filter, count]) => filter === "all" || count > 0 || (filter === "triggers" && supportsExactTriggerDiscovery.value) || (filter === "indexes" && supportsSchemaIndexes.value))
+          .map(([filter]) => filter),
+  ),
 );
-const showObjectFilter = computed(() => objectFilters.value.length > 2 || (supportsExactTriggerDiscovery.value && objectFilters.value.length > 1) || (supportsSchemaIndexes.value && objectFilters.value.includes("indexes")));
+// A category other than 全部 that happens to be empty still needs its strip: that
+// chip row is the only control that can take the user back to 全部. A non-empty
+// selection keeps the #11624 behaviour (single-kind scopes stay a plain count).
+const showObjectFilter = computed(
+  () => objectFilters.value.length > 2 || (supportsExactTriggerDiscovery.value && objectFilters.value.length > 1) || (supportsSchemaIndexes.value && objectFilters.value.includes("indexes")) || (objectFilter.value !== "all" && objectCounts.value[objectFilter.value] === 0),
+);
 // A scope that holds a single object kind makes "全部 14" and "表 14" the same number, so the
 // strip is dropped as redundant — which used to drop the only object count the toolbar could
 // show at all (t8y2/dbx#11624, the common MySQL "tables only" database). Keep that one kind's
@@ -5690,7 +5711,9 @@ function openInitialEventIfNeeded() {
 
 function finishObjectBrowserRowsLoad() {
   loadingObjects.value = false;
-  const preferredFilter = props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables");
+  // 首次加载完成后会再对齐一次分类，这里也必须走与挂载/复用相同的归一化，
+  // 否则同一个分组会因为「谁的判定生效」不同而落到不同分类。
+  const preferredFilter = props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : resolvedObjectBrowserFilter(props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables");
   if (!usesServerObjectPaging.value && !userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
     // The default table filter is a presentation choice, not a user query
     // change, so preserve the tab's saved scroll offset across remounts.
@@ -6277,7 +6300,7 @@ function onSchemaChange(value: any) {
   selectedSchema.value = typeof value === "string" && value ? value : undefined;
   emit("schemaChange", selectedSchema.value);
   userHasSelectedFilter.value = false;
-  objectFilter.value = initialObjectBrowserFilter();
+  objectFilter.value = resolvedObjectBrowserFilter(props.selectedObjectFilter ?? props.initialObjectFilter);
   void loadObjects();
 }
 
@@ -6331,8 +6354,10 @@ watch(
   (filter) => {
     if (!filter) return;
     // 复用标签页时双击另一个分组只会改 initialObjectFilter，因此除了 indexes
-    // 的既有语义，任何显式分类也要跟着切换。
-    if (filter === "indexes" || objectFilter.value === "indexes" || filter !== "all") selectObjectFilter(filter);
+    // 的既有语义，任何显式分类也要跟着切换——并且必须走与首次挂载相同的
+    // 归一化，否则同一个分组在首次打开和复用时会落到不同分类。
+    const resolved = resolvedObjectBrowserFilter(filter);
+    if (resolved === "indexes" || objectFilter.value === "indexes" || resolved !== "all") selectObjectFilter(resolved);
   },
 );
 
@@ -6414,7 +6439,7 @@ watch(
     const contextEpoch = schemaListLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
-    objectFilter.value = initialObjectBrowserFilter();
+    objectFilter.value = resolvedObjectBrowserFilter(props.selectedObjectFilter ?? props.initialObjectFilter);
     clearTableSelection();
     selectedRowId.value = null;
     // Close side panel and invalidate any pending source/table-info requests

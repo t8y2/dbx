@@ -2,7 +2,7 @@
 import { computed, ref, shallowRef, nextTick, watch, onMounted, onBeforeUnmount, toRaw } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette, Copy } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Database, Table2, Braces, X, Search, Wrench, Filter, Columns3, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette, Copy } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -24,6 +24,8 @@ import * as api from "@/lib/backend/api";
 import { SnapshotCompletionError, type ExportReadControl } from "@/lib/export/snapshotCompletion";
 import type { DynamoDbIndexInfo, DynamoDbTableDescription } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { databaseDisplayNameForTab } from "@/lib/tabs/tabPresentation";
+import { splitInsertJsonDocumentTexts, type DataGridJsonDocumentEditor } from "@/lib/dataGrid/insertJsonDocument";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import { getDataGridConditionSuggestionPosition, type DataGridConditionSuggestionPosition } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
@@ -132,6 +134,9 @@ const { t } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
+// Breadcrumb (connection / database > collection), matching the SQL data tab header.
+const breadcrumbConnectionName = computed(() => connectionStore.getConfig(props.connectionId)?.name?.trim() ?? "");
+const breadcrumbDatabaseName = computed(() => (props.database ? databaseDisplayNameForTab(props.connectionId, props.database, t) : ""));
 
 const props = defineProps<{
   connectionId: string;
@@ -262,6 +267,32 @@ type LoadedDocumentQueryTotalCountRequest = DocumentQueryTotalCountRequest & { s
 let loadedDocumentQueryTotalCountRequest: LoadedDocumentQueryTotalCountRequest | undefined;
 let documentRequestGeneration = 0;
 const documentStoreProvider = computed(() => documentStoreProviderFor(props.databaseType));
+
+// MongoDB's find/sort inputs start from `{}` so the empty state reads as a
+// query you fill in rather than a blank bar.
+const EMPTY_DOCUMENT_QUERY = "{}";
+const usesDefaultDocumentQuery = computed(() => documentStoreProvider.value.kind === "mongodb");
+function isBlankDocumentQuery(text: string): boolean {
+  return text.replace(/\s/g, "") === "" || text.replace(/\s/g, "") === EMPTY_DOCUMENT_QUERY;
+}
+function restoreDefaultDocumentQuery(target: DocumentQueryCompletionTarget) {
+  if (!usesDefaultDocumentQuery.value) return;
+  const input = target === "filter" ? filterInput : sortInput;
+  if (!input.value.trim()) input.value = EMPTY_DOCUMENT_QUERY;
+}
+function clearDocumentQueryInput(target: DocumentQueryCompletionTarget) {
+  const next = usesDefaultDocumentQuery.value ? EMPTY_DOCUMENT_QUERY : "";
+  if (target === "filter") filterInput.value = next;
+  else sortInput.value = next;
+  applyFilter();
+}
+// Focusing an empty `{}` puts the caret between the braces, ready to type.
+function onDocumentQueryFocus(event: FocusEvent) {
+  const el = event.target as HTMLTextAreaElement;
+  if (el.value === EMPTY_DOCUMENT_QUERY) requestAnimationFrame(() => el.setSelectionRange(1, 1));
+}
+restoreDefaultDocumentQuery("filter");
+restoreDefaultDocumentQuery("sort");
 const documentColumnLayoutScopeKey = computed(() =>
   documentDataGridColumnLayoutScopeKey({
     databaseType: props.databaseType ?? "mongodb",
@@ -1092,6 +1123,9 @@ function resizeDocumentQueryInput(el: HTMLTextAreaElement | undefined) {
   if (!el) return;
   el.style.height = "auto";
   el.style.height = `${Math.min(Math.max(el.scrollHeight, 20), 120)}px`;
+  // A one-line box has no room for scrollbars: with "always show scroll bars"
+  // on macOS they covered the whole input. Only scroll once it hits the cap.
+  el.style.overflowY = el.scrollHeight > 120 ? "auto" : "hidden";
 }
 
 function resizeDocumentQueryInputs() {
@@ -1400,6 +1434,7 @@ function onDocumentQueryInput(event: Event, target: DocumentQueryCompletionTarge
  */
 function onDocumentQueryBlur(target: DocumentQueryCompletionTarget) {
   if (documentQueryCompletionTarget.value === null || documentQueryCompletionTarget.value === target) dismissDocumentQueryCompletions();
+  restoreDefaultDocumentQuery(target);
 }
 
 /**
@@ -1474,7 +1509,7 @@ const documentQueryPreview = computed(() => {
   return documentStoreProvider.value.queryPreview({
     collection: props.collection,
     filterJson: filter,
-    sortJson: sortInput.value.trim(),
+    sortJson: isBlankDocumentQuery(sortInput.value) ? "" : sortInput.value.trim(),
     skip: documentStoreProvider.value.kind === "elasticsearch" ? 0 : page.value * pageSize.value,
     limit: documentRequestLimit.value,
   });
@@ -2562,6 +2597,25 @@ function resolveWriteIdentityFromEditor(doc: JsonRecord, currentId: unknown, cur
   return { writeId, writeRouting };
 }
 
+/** Replaces a stored document, moving it when the edited identity changes. Throws on failure. */
+async function replaceStoredDocument(current: JsonRecord | undefined, writeDocument: JsonRecord): Promise<void> {
+  const kind = documentStoreProvider.value.kind;
+  const currentId = current?._id;
+  if (!current || currentId === undefined || currentId === null) throw new Error("No _id field");
+  const deleteId = resolveDocumentStorePathId(currentId);
+  if (!deleteId) throw new Error("No _id field");
+  const currentRouting = documentRoutingFromDocument(current);
+  const apis = documentStoreWriteApis(kind === "elasticsearch" ? documentTypeFromDocument(current) : undefined);
+  const write = resolveWriteIdentityFromEditor(writeDocument, currentId, currentRouting);
+  if (!write) throw new Error(t("mongo.jsonIdRequired"));
+
+  const plan = planDocumentStoreIdentityMigration({
+    write: { id: write.writeId, routing: write.writeRouting },
+    current: { id: deleteId, routing: kind === "elasticsearch" ? currentRouting : undefined },
+  });
+  await applyDocumentStoreIdentityPlan({ kind, plan, document: writeDocument, apis });
+}
+
 async function saveDoc() {
   if (isSavingDocument.value || !documentStoreEditable.value) return;
   error.value = "";
@@ -2584,31 +2638,7 @@ async function saveDoc() {
         apis,
       });
     } else if (selectedIdx.value !== null) {
-      const current = documents.value[selectedIdx.value];
-      const currentId = current?._id;
-      if (currentId === undefined || currentId === null) {
-        error.value = "No _id field";
-        return;
-      }
-
-      const deleteId = resolveDocumentStorePathId(currentId);
-      if (!deleteId) {
-        error.value = "No _id field";
-        return;
-      }
-      const currentRouting = documentRoutingFromDocument(current);
-      const apis = documentStoreWriteApis(kind === "elasticsearch" ? documentTypeFromDocument(current) : undefined);
-      const write = resolveWriteIdentityFromEditor(writeDocument, currentId, currentRouting);
-      if (!write) {
-        error.value = t("mongo.jsonIdRequired");
-        return;
-      }
-
-      const plan = planDocumentStoreIdentityMigration({
-        write: { id: write.writeId, routing: write.writeRouting },
-        current: { id: deleteId, routing: kind === "elasticsearch" ? currentRouting : undefined },
-      });
-      await applyDocumentStoreIdentityPlan({ kind, plan, document: writeDocument, apis });
+      await replaceStoredDocument(documents.value[selectedIdx.value], writeDocument);
     } else {
       return;
     }
@@ -2631,6 +2661,53 @@ async function saveDoc() {
   } finally {
     isSavingDocument.value = false;
   }
+}
+
+function parseMongoJsonDocumentText(text: string): JsonRecord {
+  const parsed = parseDocumentStoreJsonDocument(text, "mongodb");
+  if (!parsed.ok) throw new Error(documentEditErrorMessage(parsed));
+  return parsed.document;
+}
+
+// Insert JSON Document / Edit Row dialogs on the MongoDB grid. Text goes
+// through the same parser as the side-panel editor, so Extended JSON and
+// large numbers keep their types.
+const mongoJsonDocumentEditor = computed<DataGridJsonDocumentEditor | undefined>(() => {
+  if (documentStoreProvider.value.kind !== "mongodb") return undefined;
+  return {
+    breadcrumb: [breadcrumbConnectionName.value, breadcrumbDatabaseName.value, props.collection].filter(Boolean),
+    insert: insertMongoJsonDocumentsFromGrid,
+    documentText: (sourceIndex) => {
+      const document = documents.value[sourceIndex];
+      return document === undefined ? undefined : stringifyDocumentStoreValue(document, "mongodb", 2);
+    },
+    update: updateMongoJsonDocumentFromGrid,
+  };
+});
+
+async function insertMongoJsonDocumentsFromGrid(text: string) {
+  if (!documentStoreEditable.value) throw new Error(t("grid.batchAppendPasteNotEditable"));
+  const documentsToInsert = splitInsertJsonDocumentTexts(text).map(parseMongoJsonDocumentText);
+  const apis = documentStoreWriteApis();
+  let inserted = 0;
+  try {
+    for (const document of documentsToInsert) {
+      await insertDocumentStoreDocumentCore({ kind: "mongodb", document, explicitId: null, apis });
+      inserted++;
+    }
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (inserted === 0) throw new Error(message);
+    throw new Error(t("grid.insertJsonPartialFailure", { inserted, total: documentsToInsert.length, message }));
+  } finally {
+    if (inserted > 0) await reloadDocumentsAfterMutationOrRefresh();
+  }
+}
+
+async function updateMongoJsonDocumentFromGrid(sourceIndex: number, text: string) {
+  if (!documentStoreEditable.value) throw new Error(t("grid.batchAppendPasteNotEditable"));
+  await replaceStoredDocument(documents.value[sourceIndex], parseMongoJsonDocumentText(text));
+  await reloadDocumentsAfterMutationOrRefresh();
 }
 
 async function applyDeleteDoc(idx: number) {
@@ -2863,6 +2940,21 @@ defineExpose({ focusSearch });
           <Table2 class="h-3 w-3" />
         </Button>
       </div>
+
+      <nav data-document-breadcrumb class="flex min-w-0 shrink items-center gap-1 overflow-hidden" :aria-label="t('mongo.breadcrumb')">
+        <template v-if="breadcrumbConnectionName">
+          <span data-document-breadcrumb-connection class="inline-flex min-w-[3.5rem] max-w-[13rem] shrink items-center gap-1 px-1 py-0.5" :title="breadcrumbConnectionName">
+            <Database class="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+            <span class="truncate">{{ breadcrumbConnectionName }}</span>
+          </span>
+          <span class="shrink-0 text-muted-foreground/40" aria-hidden="true">/</span>
+        </template>
+        <span v-if="breadcrumbDatabaseName" data-document-breadcrumb-database class="min-w-[2.5rem] max-w-[12rem] shrink truncate px-1 py-0.5" :title="breadcrumbDatabaseName">{{ breadcrumbDatabaseName }}</span>
+        <ChevronRight v-if="breadcrumbDatabaseName" class="h-3 w-3 shrink-0 text-muted-foreground/40" aria-hidden="true" />
+        <span data-document-breadcrumb-collection class="inline-flex min-w-[4rem] items-center rounded-md bg-muted/60 px-2 py-0.5 font-medium text-foreground" :title="props.collection">
+          <span class="truncate">{{ props.collection }}</span>
+        </span>
+      </nav>
 
       <span class="shrink-0 ml-1">{{ documentStoreLabels.documentsLabel }}</span>
 
@@ -3101,6 +3193,7 @@ defineExpose({ focusSearch });
       :mongo-update-target="mongoUpdateTarget"
       :editable="documentStoreEditable"
       :custom-save-handler="customSaveHandler"
+      :json-document-editor="mongoJsonDocumentEditor"
       :loading="loading"
       :sql="documentStoreLabels.queryPreview"
       :page-offset="page * pageSize"
@@ -3359,7 +3452,11 @@ defineExpose({ focusSearch });
                 </div>
               </PopoverContent>
             </Popover>
-            <label class="flex shrink-0 items-center gap-1 text-xs font-medium select-none" :class="filterEnabled ? 'text-blue-600 dark:text-blue-400' : 'text-muted-foreground'">
+            <label
+              class="flex shrink-0 items-center gap-1 text-xs font-medium select-none"
+              :class="filterEnabled ? 'text-blue-600 dark:text-blue-400' : 'text-muted-foreground'"
+              :title="usesDefaultDocumentQuery ? t('mongo.queryPlaceholderExample', { example: '{ &quot;status&quot;: &quot;active&quot; }' }) : undefined"
+            >
               <input v-model="filterEnabled" type="checkbox" class="h-3.5 w-3.5 accent-primary" :aria-label="t('grid.applyFilter')" :disabled="loading" @change="applyFilter" />
               {{ documentStoreLabels.filterInputLabel }}
             </label>
@@ -3376,6 +3473,7 @@ defineExpose({ focusSearch });
               :aria-controls="documentQueryCompletionTarget === 'filter' ? documentQueryCompletionListboxId : undefined"
               :aria-activedescendant="documentQueryCompletionTarget === 'filter' ? documentQueryCompletionActiveDescendant : undefined"
               :aria-expanded="documentQueryCompletionEnabled ? documentQueryCompletionTarget === 'filter' : undefined"
+              @focus="onDocumentQueryFocus"
               @blur="onDocumentQueryBlur('filter')"
               @click="onDocumentQueryCaretMove('filter')"
               @input="onDocumentQueryInput($event, 'filter')"
@@ -3391,18 +3489,10 @@ defineExpose({ focusSearch });
               @select="selectDocumentQueryCompletion"
               @accept="acceptDocumentQueryCompletion"
             />
-            <button v-if="filterInput.trim()" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" title="Format JSON" aria-label="Format JSON" @click="formatFilterInput">
+            <button v-if="!isBlankDocumentQuery(filterInput)" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" title="Format JSON" aria-label="Format JSON" @click="formatFilterInput">
               <Braces class="w-3 h-3" />
             </button>
-            <button
-              v-if="filterInput.trim()"
-              type="button"
-              class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground"
-              @click="
-                filterInput = '';
-                applyFilter();
-              "
-            >
+            <button v-if="!isBlankDocumentQuery(filterInput)" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" @click="clearDocumentQueryInput('filter')">
               <X class="w-3 h-3" />
             </button>
           </div>
@@ -3416,7 +3506,7 @@ defineExpose({ focusSearch });
             <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
           </button>
           <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0">
-            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">{{ documentStoreLabels.sortInputLabel }}</span>
+            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0" :title="usesDefaultDocumentQuery ? t('mongo.queryPlaceholderExample', { example: '{ &quot;created_at&quot;: -1 }' }) : undefined">{{ documentStoreLabels.sortInputLabel }}</span>
             <textarea
               ref="sortInputRef"
               v-model="sortInput"
@@ -3430,6 +3520,7 @@ defineExpose({ focusSearch });
               :aria-controls="documentQueryCompletionTarget === 'sort' ? documentQueryCompletionListboxId : undefined"
               :aria-activedescendant="documentQueryCompletionTarget === 'sort' ? documentQueryCompletionActiveDescendant : undefined"
               :aria-expanded="documentQueryCompletionEnabled ? documentQueryCompletionTarget === 'sort' : undefined"
+              @focus="onDocumentQueryFocus"
               @blur="onDocumentQueryBlur('sort')"
               @click="onDocumentQueryCaretMove('sort')"
               @input="onDocumentQueryInput($event, 'sort')"
@@ -3445,18 +3536,10 @@ defineExpose({ focusSearch });
               @select="selectDocumentQueryCompletion"
               @accept="acceptDocumentQueryCompletion"
             />
-            <button v-if="sortInput.trim()" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" title="Format JSON" aria-label="Format JSON" @click="formatSortInput">
+            <button v-if="!isBlankDocumentQuery(sortInput)" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" title="Format JSON" aria-label="Format JSON" @click="formatSortInput">
               <Braces class="w-3 h-3" />
             </button>
-            <button
-              v-if="sortInput.trim()"
-              type="button"
-              class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground"
-              @click="
-                sortInput = '';
-                applyFilter();
-              "
-            >
+            <button v-if="!isBlankDocumentQuery(sortInput)" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" @click="clearDocumentQueryInput('sort')">
               <X class="w-3 h-3" />
             </button>
           </div>
@@ -3550,7 +3633,8 @@ defineExpose({ focusSearch });
   max-height: 120px;
   line-height: 1.25rem;
   resize: none;
-  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-y: hidden;
   white-space: pre-wrap;
 }
 

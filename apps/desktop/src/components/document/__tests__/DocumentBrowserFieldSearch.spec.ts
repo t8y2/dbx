@@ -88,9 +88,7 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
-  useConnectionStore: () => ({
-    ensureConnected: backend.ensureConnected,
-  }),
+  useConnectionStore: () => ({ getConfig: () => undefined, ensureConnected: backend.ensureConnected }),
 }));
 
 vi.mock("@/stores/settingsStore", () => ({

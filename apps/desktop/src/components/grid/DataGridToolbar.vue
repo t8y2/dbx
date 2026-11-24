@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { Check, ChevronDown, Copy, Eye, Loader2, Map, Plus, RefreshCcw, RotateCcw, Rows3, Save, TableProperties, Trash2, Upload } from "@lucide/vue";
+import { Check, ChevronDown, Copy, Eye, Loader2, Map, Plus, RefreshCcw, RotateCcw, Rows3, Save, SquarePen, TableProperties, Trash2, Upload } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -33,6 +33,7 @@ const props = defineProps<{
   refresh: DataGridToolbarActionCapability;
   autoRefresh?: DataGridToolbarAutoRefreshCapability;
   addRow?: DataGridToolbarAddRowCapability;
+  editRow?: DataGridToolbarActionCapability;
   deleteRow?: DataGridToolbarActionCapability;
   copyData?: DataGridToolbarCopyCapability;
   exportData?: DataGridToolbarExportCapability;
@@ -63,6 +64,7 @@ const visibleActionOrder = computed<DataGridToolbarActionKey[]>(() => {
     autoRefresh: isDataGridToolbarCapabilityVisible(props.autoRefresh),
     copyData: isDataGridToolbarCapabilityVisible(props.copyData),
     addRow: isDataGridToolbarCapabilityVisible(props.addRow),
+    editRow: isDataGridToolbarCapabilityVisible(props.editRow),
     deleteRow: isDataGridToolbarCapabilityVisible(props.deleteRow),
     exportData: isDataGridToolbarCapabilityVisible(props.exportData),
     transpose: isDataGridToolbarCapabilityVisible(props.transpose),
@@ -194,6 +196,19 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
+
+    <Tooltip v-if="isDataGridToolbarCapabilityVisible(editRow)">
+      <TooltipTrigger as-child>
+        <!-- A disabled button swallows pointer events, so the wrapper keeps the hint reachable. -->
+        <span class="inline-flex">
+          <Button data-toolbar-action="editRow" :aria-label="editRow?.label" variant="ghost" size="sm" :class="actionButtonClass('editRow')" :disabled="isDataGridToolbarCapabilityDisabled(editRow)" @click="void triggerDataGridToolbarAction(editRow)">
+            <SquarePen class="data-grid-topbar-action-icon h-3 w-3" />
+            <span class="data-grid-topbar-action-label" :class="actionLabelClass('editRow')">{{ editRow?.label }}</span>
+          </Button>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{{ editRow?.tooltip ?? editRow?.label }}</TooltipContent>
+    </Tooltip>
 
     <Tooltip v-if="isDataGridToolbarCapabilityVisible(deleteRow)">
       <TooltipTrigger as-child>

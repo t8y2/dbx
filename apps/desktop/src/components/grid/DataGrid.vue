@@ -438,6 +438,7 @@ import { TABLE_FONT_SIZE_DEFAULT, useSettingsStore } from "@/stores/settingsStor
 import { databaseSortSupportedForDatabase, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { resolveGridFocusRestoreTarget, shouldRestoreDataGridFocusAfterEditCommit } from "@/lib/dataGrid/dataGridFocusRestore";
 import { buildOrderedGridRows, type GridInsertRowPosition, type GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
+import type { DataGridJsonDocumentEditor } from "@/lib/dataGrid/insertJsonDocument";
 import { formatQueryDuration } from "@/lib/format/duration";
 import {
   DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH,
@@ -507,6 +508,7 @@ const DataGridDetailDialogs = defineAsyncComponent(() => import("@/components/gr
 const DataGridBulkEditDialog = defineAsyncComponent(() => import("@/components/grid/DataGridBulkEditDialog.vue"));
 const DataGridCopyColumnNamesDialog = defineAsyncComponent(() => import("@/components/grid/DataGridCopyColumnNamesDialog.vue"));
 const DataGridInsertRowsDialog = defineAsyncComponent(() => import("@/components/grid/DataGridInsertRowsDialog.vue"));
+const DataGridJsonDocumentDialog = defineAsyncComponent(() => import("@/components/grid/DataGridJsonDocumentDialog.vue"));
 const ExportProgressDialog = defineAsyncComponent(() => import("@/components/export/ExportProgressDialog.vue"));
 const FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-count";
 const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 3;
@@ -750,6 +752,8 @@ interface DataGridProps {
   queryEditabilityReason?: QueryEditabilityReason;
   allowInsertRows?: boolean;
   allowDeleteRows?: boolean;
+  /** MongoDB collection grids: Insert JSON Document and Edit Row (Document JSON Editor) dialogs. */
+  jsonDocumentEditor?: DataGridJsonDocumentEditor;
   /**
    * Offers a stop action in the busy overlay. Query and data tabs pass this
    * while an execution with an id is running, so the elapsed pill can also be
@@ -1244,6 +1248,8 @@ const inlineBulkEditActive = ref(false);
 const copyColumnNamesDialogOpen = ref(false);
 const copyColumnNamesDialogColumns = ref<string[]>([]);
 const insertRowsDialogOpen = ref(false);
+const jsonDocumentDialogOpen = ref(false);
+const jsonDocumentDialog = ref<{ mode: "insert" } | { mode: "update"; sourceIndex: number; text: string }>({ mode: "insert" });
 // Configured placement for newly inserted rows; the dropdown exposes it as a
 // mutually-exclusive radio group and the main "add row" button inserts here.
 const insertPosition = ref<GridInsertRowPosition>("below");
@@ -1277,6 +1283,7 @@ const imagePreviewTitle = ref("");
 const bulkEditDialogMounted = useDataGridAsyncSurface(bulkEditDialogOpen);
 const copyColumnNamesDialogMounted = useDataGridAsyncSurface(copyColumnNamesDialogOpen);
 const insertRowsDialogMounted = useDataGridAsyncSurface(insertRowsDialogOpen);
+const jsonDocumentDialogMounted = useDataGridAsyncSurface(jsonDocumentDialogOpen);
 const cellDetailDialogMounted = useDataGridAsyncSurface(cellDetailDialogOpen);
 const { codecs: sqlPluginCodecs } = useSqlPluginCodecs();
 const cellDetailPluginDecodeRequest = ref<PluginDecodeRequest | null>(null);
@@ -5708,6 +5715,12 @@ async function handleAddRowMenuSelect(value: string) {
     insertRowsDialogOpen.value = true;
     return;
   }
+  if (value === "insert-json") {
+    if (!canInsertJsonDocuments.value) return;
+    jsonDocumentDialog.value = { mode: "insert" };
+    jsonDocumentDialogOpen.value = true;
+    return;
+  }
   if (value === "position-above") {
     insertPosition.value = "above";
     return;
@@ -5723,12 +5736,53 @@ async function handleAddRowMenuSelect(value: string) {
   insertRows(1, "end");
 }
 
+// Only MongoDB collection grids offer the Insert JSON Document / Edit Row dialogs.
+const canInsertJsonDocuments = computed(() => !!props.mongoCollectionGrid && !!props.jsonDocumentEditor);
+
+// Edit Row needs exactly one selected, already-stored row; edits to it go
+// through the Document JSON Editor, so the row must not have pending changes.
+const editRowSourceIndex = computed(() => {
+  if (!canInsertJsonDocuments.value || !effectiveEditable.value) return undefined;
+  const rowIds = selectedOrCurrentRowIds();
+  if (rowIds.length !== 1) return undefined;
+  const item = getRowItem(rowIds[0]!);
+  if (!item || item.isNew || item.isDraft || item.isDeleted || item.sourceIndex === undefined) return undefined;
+  if (item.isDirtyCol.some(Boolean)) return undefined;
+  return item.sourceIndex;
+});
+
+function openEditRowDialog() {
+  const sourceIndex = editRowSourceIndex.value;
+  if (sourceIndex === undefined || !props.jsonDocumentEditor) return;
+  const text = props.jsonDocumentEditor.documentText(sourceIndex);
+  if (text === undefined) return;
+  jsonDocumentDialog.value = { mode: "update", sourceIndex, text };
+  jsonDocumentDialogOpen.value = true;
+}
+
+async function submitJsonDocumentDialog(text: string) {
+  const editor = props.jsonDocumentEditor;
+  if (!editor) return;
+  const dialog = jsonDocumentDialog.value;
+  if (dialog.mode === "update") await editor.update(dialog.sourceIndex, text);
+  else await editor.insert(text);
+}
+
+const editRowToolbarCapability = computed<DataGridToolbarActionCapability>(() => ({
+  label: t("grid.editRow"),
+  tooltip: editRowSourceIndex.value === undefined ? t("grid.editRowSelectHint") : t("grid.editRow"),
+  visible: canInsertJsonDocuments.value && !!effectiveEditable.value,
+  disabled: editRowSourceIndex.value === undefined || isSaving.value,
+  onTrigger: openEditRowDialog,
+}));
+
 const addRowToolbarCapability = computed<DataGridToolbarAddRowCapability>(() => ({
   label: t("grid.addRow"),
   tooltip: `${t("grid.addRow")} (${shortcutMod}+N)`,
   visible: canInsertRows.value,
   items: [
     { value: "insert-multiple", label: t("grid.insertMultipleRows") },
+    ...(canInsertJsonDocuments.value ? [{ value: "insert-json", label: t("grid.insertJsonDocument"), disabled: isSaving.value }] : []),
     { value: "paste-new-rows", label: t("grid.pasteAsNewRows"), disabled: isSaving.value || isConditionalUpdateActive.value },
     {
       value: "position-above",
@@ -7945,6 +7999,21 @@ const mongoJsonPreview = computed(() => formatMongoJsonPreview(mongoJsonPreviewL
 const mongoJsonPreviewText = computed(() => mongoJsonPreview.value.slice(0, mongoJsonPreviewLimit.value));
 const mongoJsonPreviewTruncated = computed(() => mongoJsonPreviewText.value.length < mongoJsonPreview.value.length);
 const mongoJsonPreviewUsesCodeEditor = computed(() => !!mongoJsonPreviewText.value && !mongoJsonPreviewTruncated.value);
+
+// The Row Details dialog's JSON tab shows the stored MongoDB document, not the
+// grid's flattened cells; new rows have no stored document yet.
+const rowDetailMongoJson = computed(() => {
+  if (!canShowMongoJsonPreview.value || rowDetailDialogRowId.value === null) return undefined;
+  const item = getRowItem(rowDetailDialogRowId.value);
+  if (item?.sourceIndex === undefined) return undefined;
+  const document = props.result.mongo_documents?.[item.sourceIndex];
+  if (document === undefined) return undefined;
+  try {
+    return JSON.stringify(mongoDocumentRelaxedExtendedJson(document), null, 2);
+  } catch {
+    return undefined;
+  }
+});
 
 watch(canShowMongoJsonPreview, (available) => {
   if (!available) showMongoJsonPreview.value = false;
@@ -16236,6 +16305,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             :refresh="refreshToolbarCapability"
             :auto-refresh="autoRefreshToolbarCapability"
             :add-row="addRowToolbarCapability"
+            :edit-row="editRowToolbarCapability"
             :delete-row="deleteRowToolbarCapability"
             :transpose="transposeToolbarCapability"
             :layer-preview="layerPreviewToolbarCapability"
@@ -18352,6 +18422,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       :row-detail="rowDetail"
       :column-detail="columnDetail"
       :can-preview-row-json="context === 'table-data' && !usesMongoDocumentGridValues"
+      :row-document-json="rowDetailMongoJson"
       :database-type="resolvedDatabaseType"
       :type-color-class="typeColorClass"
       @navigate-row="navigateRowDetail"
@@ -18407,6 +18478,14 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       </template>
     </DataGridBulkEditDialog>
     <DataGridInsertRowsDialog v-if="insertRowsDialogMounted" v-model:open="insertRowsDialogOpen" :can-place-at-selection="canPlaceInsertAtSelection" :initial-position="insertPosition" :max-rows="availableInsertRows" @insert="insertRows" />
+    <DataGridJsonDocumentDialog
+      v-if="jsonDocumentDialogMounted && jsonDocumentEditor"
+      v-model:open="jsonDocumentDialogOpen"
+      :mode="jsonDocumentDialog.mode"
+      :initial-text="jsonDocumentDialog.mode === 'update' ? jsonDocumentDialog.text : undefined"
+      :breadcrumb="jsonDocumentEditor.breadcrumb"
+      :submit="submitJsonDocumentDialog"
+    />
     <Dialog :open="rowPreparationProgress !== null" @update:open="onRowPreparationOpenChange">
       <DialogContent data-grid-row-preparation class="sm:max-w-[420px]" :show-close-button="false" @interact-outside.prevent>
         <DialogHeader>

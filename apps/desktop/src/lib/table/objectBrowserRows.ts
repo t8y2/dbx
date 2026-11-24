@@ -11,6 +11,14 @@ export type ObjectBrowserRow = {
   id: string;
   name: string;
   displayName: string;
+  /**
+   * Which side of the server identifier carries whitespace. `displayName` is the
+   * trimmed text used for search, sorting and copying, so a padded name such as
+   * `` ` orders` `` would otherwise be indistinguishable from `orders` in the
+   * object list even though they are different tables (#14905). The name column
+   * renders these flags as visible markers.
+   */
+  nameSpaces?: ObjectBrowserNameSpaces;
   schema?: string;
   /** Server identifiers retained separately from normalized display names. */
   postgresSequenceIdentity?: { name: string; schema?: string };
@@ -41,6 +49,27 @@ export type ObjectBrowserRow = {
    * foreign table must be dropped with `DROP FOREIGN TABLE` (#14717). */
   foreignTable?: boolean;
 };
+
+/**
+ * Whitespace kept around a preserved server identifier. Only MySQL-family
+ * quoted names can carry it; `orders` and ` orders` are separate tables, so the
+ * list must show which one a row addresses before the user opens a menu.
+ */
+export interface ObjectBrowserNameSpaces {
+  leading: boolean;
+  trailing: boolean;
+}
+
+export function objectBrowserNameSpaces(name: string): ObjectBrowserNameSpaces | undefined {
+  const leading = name !== name.trimStart();
+  const trailing = name !== name.trimEnd();
+  return leading || trailing ? { leading, trailing } : undefined;
+}
+
+/** Hover text that keeps whitespace visible: the exact identifier in backticks. */
+export function objectBrowserNameTooltip(row: Pick<ObjectBrowserRow, "name" | "displayName" | "nameSpaces">): string {
+  return row.nameSpaces ? `\`${row.name}\`` : row.displayName;
+}
 
 /** True when the backend-reported object type is a PostgreSQL foreign table. */
 export function isForeignTableObjectType(objectType: string | null | undefined): boolean {
@@ -226,6 +255,7 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
     const signature = routineSignatureForDisplay(type, object.signature);
     const displayNameBase = preserveIdentifier ? name.trim() : name;
     const displayName = signature === undefined ? displayNameBase : `${displayNameBase}(${signature})`;
+    const nameSpaces = preserveIdentifier ? objectBrowserNameSpaces(name) : undefined;
     const signatureIdPart = signature === undefined ? "" : `:${signature}`;
     const baseId = postgresSequenceIdentity ? `SEQUENCE:${JSON.stringify([postgresSequenceIdentity.schema ?? options.fallbackSchema, postgresSequenceIdentity.name])}` : `${schema || options.fallbackSchema || options.database}:${name}:${type}${signatureIdPart}`;
     const index = seen.get(baseId) ?? 0;
@@ -235,6 +265,7 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
         id: `${baseId}:${index}`,
         name,
         displayName,
+        ...(nameSpaces ? { nameSpaces } : {}),
         schema,
         ...(postgresSequenceIdentity ? { postgresSequenceIdentity } : {}),
         type,

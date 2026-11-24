@@ -85,6 +85,7 @@ import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMe
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import ObjectNameLabel from "@/components/objects/ObjectNameLabel.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import { launchPlDebug } from "@/components/debug/plDebugLaunch";
@@ -7390,7 +7391,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                         <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
                         <CircleX v-if="item.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
                       </span>
-                      <span class="truncate text-[13px] font-medium text-foreground" :title="item.displayName">{{ item.displayName }}</span>
+                      <ObjectNameLabel :row="item" class="truncate text-[13px] font-medium text-foreground" />
                       <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
                         {{ t("objects.partitions", { count: item.partitionCount }) }}
                       </span>
@@ -7549,7 +7550,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <component :is="iconFor(item)" class="h-6 w-6" :class="iconClass(item.type)" />
                       <CircleX v-if="item.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-0.5 -bottom-0.5 h-4 w-4 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
                     </div>
-                    <span class="w-full truncate text-sm font-medium leading-tight text-foreground">{{ item.displayName }}</span>
+                    <ObjectNameLabel :row="item" class="w-full truncate text-sm font-medium leading-tight text-foreground" />
                     <div class="flex items-center gap-1.5">
                       <span class="text-xs text-muted-foreground">{{ typeLabel(item) }}</span>
                       <span v-if="item.valid != null" class="rounded border px-1 py-px text-[10px] font-medium" :class="item.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
@@ -7593,7 +7594,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <Square v-else class="h-3.5 w-3.5" />
                     </button>
                     <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" aria-hidden="true" />
-                    <span class="min-w-0 truncate font-medium">{{ item.displayName }}</span>
+                    <ObjectNameLabel :row="item" class="min-w-0 truncate font-medium" />
                   </div>
                 </CustomContextMenu>
               </div>

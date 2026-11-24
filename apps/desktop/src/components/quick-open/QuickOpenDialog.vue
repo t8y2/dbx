@@ -545,7 +545,7 @@ watch(selectedIndex, async () => {
 
 <template>
   <Dialog :open="dialogOpen" @update:open="dialogOpen = $event">
-    <DialogContent class="max-w-6xl p-0 gap-0 rounded-xl overflow-hidden">
+    <DialogContent class="max-w-6xl p-0 gap-0 rounded-xl overflow-hidden" :class="{ 'lg:h-[calc(var(--dbx-viewport-height)-2rem)]': contentMode && contentMatchCount > 0 }">
       <div class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] min-h-0 flex-col bg-background">
         <!-- Search Input -->
         <div class="flex shrink-0 items-center gap-3 px-4 pr-12 py-3 border-b">

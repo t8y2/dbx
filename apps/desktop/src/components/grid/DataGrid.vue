@@ -2144,7 +2144,16 @@ function resetStructuredFilters() {
   filterBuilder.reset();
 }
 
+// Structured WHERE building is async; every apply/clear entry point takes a
+// ticket so an older build resolving late cannot overwrite a newer outcome.
+let structuredFilterApplySeq = 0;
+function beginStructuredFilterApply(): () => boolean {
+  const seq = ++structuredFilterApplySeq;
+  return () => seq === structuredFilterApplySeq;
+}
+
 async function clearAllFilters() {
+  beginStructuredFilterApply();
   whereFilterInput.value = "";
   appliedStructuredWhereInput.value = "";
   appliedStructuredRules.value = undefined;
@@ -2199,9 +2208,10 @@ async function applyStructuredFilters() {
   if (!canUseWhereSearch.value) return;
   const scopeKey = structuredFilterScopeKey.value;
   const cacheKey = structuredFilterCacheKey.value;
+  const isLatestApply = beginStructuredFilterApply();
   const rules = cloneDataGridStructuredFilterRules(structuredFilterRules.value);
   const where = await buildStructuredWhereFromRules(rules);
-  if (structuredFilterScopeKey.value !== scopeKey || structuredFilterCacheKey.value !== cacheKey) return;
+  if (!isLatestApply() || structuredFilterScopeKey.value !== scopeKey || structuredFilterCacheKey.value !== cacheKey) return;
   await applyStructuredWhere(where, rules);
 }
 
@@ -2218,11 +2228,12 @@ async function applyOnlyStructuredFilter(ruleId: string) {
   const scopeKey = structuredFilterScopeKey.value;
   const cacheKey = structuredFilterCacheKey.value;
   const rulesSnapshot = JSON.stringify(structuredFilterRules.value);
+  const isLatestApply = beginStructuredFilterApply();
   try {
     // Build before changing enabled states so an invalid condition cannot clear the filter.
     const rules = [{ ...rule, disabled: false }];
     const where = await buildStructuredWhereFromRules(rules);
-    if (scopeKey !== structuredFilterScopeKey.value || cacheKey !== structuredFilterCacheKey.value || rulesSnapshot !== JSON.stringify(structuredFilterRules.value)) return;
+    if (!isLatestApply() || scopeKey !== structuredFilterScopeKey.value || cacheKey !== structuredFilterCacheKey.value || rulesSnapshot !== JSON.stringify(structuredFilterRules.value)) return;
     if (!where) {
       toast(t("grid.filterBuilderCompleteRuleFirst"));
       return;

@@ -22,8 +22,9 @@ describe("structureRowClickTargetOwnsFocus (#15585)", () => {
     expect(structureRowClickTargetOwnsFocus(element("<label><input type='checkbox' /><span>YES</span></label>").firstElementChild)).toBe(true);
   });
 
-  it("lets inert cell content hand focus to the scroller", () => {
-    const row = element("<table><tbody><tr><td class='cell'><span>REGNO</span></td><td tabindex='-1'>REGNO</td><td>REGNO</td></tr></tbody></table>").querySelector("tr");
+  it("lets inert cell content hand focus to the scroller even inside a focusable scroller ancestor", () => {
+    const wrapper = element("<div tabindex='0'><table><tbody><tr><td class='cell'><span>REGNO</span></td><td tabindex='-1'>REGNO</td><td>REGNO</td></tr></tbody></table></div>");
+    const row = wrapper.querySelector("tr");
     const cells = row?.querySelectorAll("td") ?? [];
 
     expect(structureRowClickTargetOwnsFocus(cells[0])).toBe(false);
@@ -31,6 +32,13 @@ describe("structureRowClickTargetOwnsFocus (#15585)", () => {
     expect(structureRowClickTargetOwnsFocus(cells[1])).toBe(false);
     expect(structureRowClickTargetOwnsFocus(cells[2])).toBe(false);
     expect(structureRowClickTargetOwnsFocus(element("<div class='tabular-nums'>3</div>"))).toBe(false);
+  });
+
+  it("handles label text and text-node click targets", () => {
+    const label = element("<label><input type='checkbox' /><span>Virtual</span></label>");
+    const span = label.querySelector("span")!;
+    expect(structureRowClickTargetOwnsFocus(span)).toBe(true);
+    expect(structureRowClickTargetOwnsFocus(span.firstChild)).toBe(true);
   });
 
   it("tolerates targets that are not elements", () => {

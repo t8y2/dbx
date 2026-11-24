@@ -25,6 +25,9 @@ enum RuntimeCallPolicy {
     PlDebug,
 }
 
+/// The exact read failure that means "the process died before saying ready".
+const AGENT_STARTUP_EOF_PREFIX: &str = "Failed to read startup line from agent: end of stream";
+
 const PL_DEBUG_REQUEST_QUEUED: u8 = 0;
 const PL_DEBUG_REQUEST_SENDING: u8 = 1;
 const PL_DEBUG_REQUEST_ABANDONED: u8 = 2;
@@ -134,7 +137,9 @@ impl AgentRuntimeClient {
         let mut startup_guard = RuntimeStartupGuard(deadline.map(|_| runtime.clone()));
         runtime.start_response_reader(stdout);
         let handshake_timeout = match deadline {
-            Some(deadline) => startup_remaining(deadline)?.min(Duration::from_secs(RPC_TIMEOUT_SECS)),
+            Some(deadline) => startup_remaining(deadline)
+                .map_err(|cause| with_launch_command(cause, &launch_display(&launch)))?
+                .min(Duration::from_secs(RPC_TIMEOUT_SECS)),
             None => Duration::from_secs(RPC_TIMEOUT_SECS),
         };
         let handshake = match runtime
@@ -161,7 +166,7 @@ impl AgentRuntimeClient {
             return Err("Agent runtime does not support multi_session protocol v2".to_string());
         }
         if let Some(deadline) = deadline {
-            startup_remaining(deadline)?;
+            startup_remaining(deadline).map_err(|cause| with_launch_command(cause, &launch_display(&launch)))?;
         }
         startup_guard.0.take();
         let runtime = Arc::try_unwrap(runtime).map_err(|runtime| {
@@ -2177,7 +2182,7 @@ async fn spawn_ready_agent_process_once_internal(
             // Classify the cause before the stderr tail is appended: the tail is
             // agent-controlled text, and a line from it must not decide whether
             // the process is retried.
-            let retryable = is_retryable_agent_startup_error(&cause);
+            let retryable = agent_startup_is_retryable(&cause, &stderr_tail);
             let message = child.startup_error(cause, &stderr_tail);
             return Err(startup_failure(retryable, message, launch));
         }
@@ -2220,8 +2225,22 @@ fn clean_up_failed_agent_startup(error: String, child: &mut Child, stderr_tail: 
 }
 
 fn is_retryable_agent_startup_error(error: &str) -> bool {
-    error.contains("Failed to read startup line from agent: end of stream")
-        && !error.contains(AGENT_JAVA_TOO_OLD_MESSAGE)
+    // Anchored to the prefix: a cause such as `Agent did not send ready signal,
+    // got: {"detail": "… end of stream"}` embeds agent output and must not read
+    // as a premature EOF.
+    error.starts_with(AGENT_STARTUP_EOF_PREFIX) && !error.contains(AGENT_JAVA_TOO_OLD_MESSAGE)
+}
+
+/// Decides whether one more spawn could succeed.
+///
+/// Reads the cause prefix and the fixed JVM hint only. The stderr tail and the
+/// rendered command are agent-controlled text, so neither may turn a
+/// deterministic failure into a retry.
+fn agent_startup_is_retryable(cause: &str, stderr_tail: &Arc<Mutex<StderrTail>>) -> bool {
+    if !is_retryable_agent_startup_error(cause) {
+        return false;
+    }
+    agent_process_error_hint(&stderr_tail_snapshot(stderr_tail).snapshot()).is_none()
 }
 
 /// A startup failure, classified before any diagnostic text is appended.
@@ -4249,7 +4268,7 @@ fn launch_display(launch: &AgentLaunchSpec) -> String {
             } else {
                 REDACTED_LAUNCH_VALUE.to_string()
             }
-        } else if separate_value_expected && !looks_like_launch_option(argument) {
+        } else if separate_value_expected && !keeps_a_structural_argument(argument) {
             // The previous argument is a bare option, so this one carries its
             // value. A value is a value even when it starts with `-`.
             REDACTED_LAUNCH_VALUE.to_string()
@@ -4258,7 +4277,7 @@ fn launch_display(launch: &AgentLaunchSpec) -> String {
         } else {
             redact_launch_argument(argument)
         };
-        separate_value_expected = looks_like_launch_option(argument) && !argument.contains('=');
+        separate_value_expected = takes_a_separate_value(argument);
         rendered.push(quote_launch_argument(&rendered_argument));
     }
     let command = rendered.join(" ");
@@ -4310,13 +4329,20 @@ fn looks_like_agent_jar_path(argument: &str) -> bool {
         && !argument.chars().any(char::is_control)
 }
 
-/// An argument that names an option instead of carrying a value.
-fn looks_like_launch_option(argument: &str) -> bool {
-    argument.starts_with("--")
-        || argument.starts_with("-D")
-        || argument.starts_with("-X")
-        || argument == "-jar"
-        || argument == "-cp"
+/// An option that carries its value in the next argument instead of inline.
+///
+/// `-Xmx512m`, `-ea` or `-verbose:gc` are flags, not value takers: treating one
+/// as a value taker would mask the option that follows it and lose the only
+/// diagnostic a customer has for a startup problem.
+fn takes_a_separate_value(argument: &str) -> bool {
+    !argument.contains('=') && (argument.starts_with("--") || argument.starts_with("-D") || argument == "-cp")
+}
+
+/// An argument worth keeping as a name even when the previous option takes a
+/// separate value. A value that merely looks like an option (`--password -Dsecret`)
+/// is not one of these: over-masking a name costs less than printing a credential.
+fn keeps_a_structural_argument(argument: &str) -> bool {
+    argument.contains('=') || matches!(argument, "-jar" | "-cp")
 }
 
 /// Keeps the option name and drops the value.
@@ -5884,6 +5910,41 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn launch_display_keeps_a_jvm_flag_name_after_a_plain_option() {
+        let launch = AgentLaunchSpec::new("java").with_args([
+            "-Xmx512m",
+            "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005",
+            "-ea",
+            "-jar",
+            "agent.jar",
+        ]);
+
+        let display = launch_display(&launch);
+
+        assert!(display.contains("-Xmx512m"), "{display}");
+        assert!(display.contains("-agentlib:jdwp=***"), "the jdwp name must stay readable: {display}");
+        assert!(!display.contains("dt_socket"), "{display}");
+        assert!(display.contains("-ea"), "{display}");
+    }
+
+    #[test]
+    fn launch_display_masks_a_value_that_arrives_after_a_property_option() {
+        let launch = AgentLaunchSpec::new("java").with_args([
+            "-Dkeystore.password",
+            "hunter2",
+            "-Dfile.encoding=UTF-8",
+            "-jar",
+            "agent.jar",
+        ]);
+
+        let display = launch_display(&launch);
+
+        assert!(!display.contains("hunter2"), "{display}");
+        assert!(display.contains("-Dkeystore.password ***"), "{display}");
+        assert!(display.contains("-Dfile.encoding=***"), "{display}");
+    }
+
+    #[test]
     fn launch_display_masks_a_jar_argument_that_is_not_a_jar_path() {
         // A custom `agent-launch.json` decides what follows `-jar`; only a path
         // shaped like a jar keeps its text.
@@ -5922,12 +5983,52 @@ for line in sys.stdin:
         assert!(!display.contains("p@ssw0rd"), "a separated credential leaked: {display}");
         assert!(display.contains("--password ***"), "the option name must stay readable: {display}");
         assert!(display.contains("-jar agent.jar"), "{display}");
+
+        // A value that itself looks like an option is still a value.
+        let launch = AgentLaunchSpec::new("java").with_args(["--token", "--abc", "-jar", "agent.jar"]);
+
+        let display = launch_display(&launch);
+
+        assert!(!display.contains("--abc"), "a credential shaped like an option leaked: {display}");
+        assert!(display.contains("--token ***"), "{display}");
+    }
+
+    #[tokio::test]
+    async fn startup_failure_does_not_retry_when_java_is_too_old() {
+        // The JVM fix is deterministic, so a premature EOF caused by it must not
+        // be retried: the hint lives in the stderr tail, not in the cause.
+        let test_id = uuid::Uuid::new_v4();
+        let script = std::env::temp_dir().join(format!("dbx-agent-java-old-{test_id}.py"));
+        let counter = std::env::temp_dir().join(format!("dbx-agent-java-old-{test_id}.count"));
+        std::fs::write(
+            &script,
+            "import pathlib, sys\n\
+             counter = pathlib.Path(sys.argv[1])\n\
+             counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1')\n\
+             sys.stderr.write('java.lang.UnsupportedClassVersionError: com/dbx/agent/Agent has been compiled by a more recent version of the Java Runtime (class file version 65.0), this version of the Java Runtime only recognizes class file versions up to 52.0\\n')\n\
+             sys.exit(1)\n",
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(&counter);
+        let launch = AgentLaunchSpec::new(test_python())
+            .with_args(vec![script.to_string_lossy().to_string(), counter.to_string_lossy().to_string()]);
+
+        let error = match AgentDriverClient::spawn(launch).await {
+            Ok(_) => panic!("a java-too-old agent must not start"),
+            Err(error) => error,
+        };
+
+        let attempts = std::fs::read_to_string(&counter).unwrap().trim().to_string();
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&counter);
+        assert_eq!(attempts, "1", "a deterministic JVM failure must not be retried: {error}");
     }
 
     #[tokio::test]
     async fn startup_failure_does_not_retry_because_stderr_contains_the_marker() {
-        let script = std::env::temp_dir().join("dbx_agent_marker_stderr.py");
-        let counter = std::env::temp_dir().join("dbx_agent_marker_stderr.count");
+        let test_id = uuid::Uuid::new_v4();
+        let script = std::env::temp_dir().join(format!("dbx-agent-stderr-marker-{test_id}.py"));
+        let counter = std::env::temp_dir().join(format!("dbx-agent-stderr-marker-{test_id}.count"));
         std::fs::write(
             &script,
             "import pathlib, sys\n\
@@ -5949,11 +6050,10 @@ for line in sys.stdin:
         };
 
         assert!(error.contains("launch command:"), "{error}");
-        assert_eq!(
-            std::fs::read_to_string(&counter).unwrap().trim(),
-            "1",
-            "only the cause may decide whether the agent is retried: {error}"
-        );
+        let attempts = std::fs::read_to_string(&counter).unwrap().trim().to_string();
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&counter);
+        assert_eq!(attempts, "1", "only the cause may decide whether the agent is retried: {error}");
     }
 
     #[tokio::test]

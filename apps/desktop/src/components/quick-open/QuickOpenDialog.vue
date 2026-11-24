@@ -746,7 +746,10 @@ watch(selectedIndex, async () => {
 
 <template>
   <Dialog :open="dialogOpen" @update:open="dialogOpen = $event">
-    <DialogContent :class="['max-w-6xl p-0 gap-0 rounded-xl overflow-hidden', searchSettingsOpen ? 'max-h-[min(800px,calc(var(--dbx-viewport-height)-6rem))]' : 'max-h-[calc(var(--dbx-viewport-height)-2rem)]']">
+    <DialogContent
+      class="max-w-6xl p-0 gap-0 rounded-xl overflow-hidden"
+      :class="[searchSettingsOpen ? 'max-h-[min(800px,calc(var(--dbx-viewport-height)-6rem))]' : 'max-h-[calc(var(--dbx-viewport-height)-2rem)]', { 'lg:h-[calc(var(--dbx-viewport-height)-2rem)]': !searchSettingsOpen && contentMode && contentMatchCount > 0 }]"
+    >
       <div class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] min-h-0 flex-col bg-background" @keydown.capture="handleWorkspaceKeyDown">
         <!-- Search Input -->
         <div v-if="!searchSettingsOpen" class="flex shrink-0 items-center gap-3 px-4 pr-12 py-3 border-b">

@@ -500,6 +500,8 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: dbx_core::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: dbx_core::models::connection::default_query_timeout_secs(),
+
+            write_timeout_secs: 0,
             idle_timeout_secs: dbx_core::models::connection::default_idle_timeout_secs(),
             manual_transaction_timeout_secs: dbx_core::models::connection::default_manual_transaction_timeout_secs(),
             idle_disconnect_secs: dbx_core::models::connection::default_idle_disconnect_secs(),
@@ -1762,6 +1764,17 @@ async fn test_connection_with_info_impl(
                 | DatabaseType::Questdb
                 | DatabaseType::OpenGauss => match db::postgres::connect(&url, connect_timeout).await {
                     Ok(pool) => {
+                        // Non-DWS native GaussDB reports its real version only through
+                        // `pg_settings`; surface it in the test result so the connection
+                        // dialog shows the server and hot-patch versions.
+                        if config.db_type == DatabaseType::Gaussdb
+                            && !dbx_core::query::plugin_plan::is_explicit_gaussdb_dws_profile(&config)
+                        {
+                            database_info = Some(
+                                dbx_core::connection::gaussdb_native_database_info(&pool, config.effective_database())
+                                    .await,
+                            );
+                        }
                         pool.close();
                         Ok("Connection successful".to_string())
                     }

@@ -140,22 +140,48 @@ function statementWindows(input: string, tokens: SqlSelectionToken[]): Statement
   return statements;
 }
 
-function parenthesisMaps(tokens: SqlSelectionToken[]): { opening: Map<number, number>; closing: Map<number, number> } | null {
-  const stack: number[] = [];
+const OPENING_BRACKET_BY_CLOSING: Readonly<Record<string, string>> = {
+  ")": "(",
+  "]": "[",
+  "}": "{",
+};
+
+function isOpeningBracket(token: SqlSelectionToken): boolean {
+  return (token.kind === "punctuation" && (token.text === "(" || token.text === "[")) || (token.kind === "operator" && token.text === "{");
+}
+
+function isClosingBracket(token: SqlSelectionToken): boolean {
+  return (token.kind === "punctuation" && (token.text === ")" || token.text === "]")) || (token.kind === "operator" && token.text === "}");
+}
+
+function bracketMaps(tokens: SqlSelectionToken[]): { opening: Map<number, number>; closing: Map<number, number> } | null {
+  const stack: Array<{ open: string; index: number }> = [];
   const opening = new Map<number, number>();
   const closing = new Map<number, number>();
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (!token) continue;
-    if (token.text === "(") stack.push(index);
-    if (token.text === ")") {
-      const open = stack.pop();
-      if (open == null) return null;
-      opening.set(open, index);
-      closing.set(index, open);
+    if (isOpeningBracket(token)) {
+      stack.push({ open: token.text, index });
+      continue;
     }
+    if (!isClosingBracket(token)) continue;
+    const expectedOpen = OPENING_BRACKET_BY_CLOSING[token.text];
+    if (token.text === ")") {
+      while (stack.length > 0 && stack[stack.length - 1]?.open !== "(") stack.pop();
+      const open = stack.pop();
+      if (!open) return null;
+      opening.set(open.index, index);
+      closing.set(index, open.index);
+      continue;
+    }
+    if (!expectedOpen || stack[stack.length - 1]?.open !== expectedOpen) continue;
+    const open = stack.pop();
+    if (!open) continue;
+    opening.set(open.index, index);
+    closing.set(index, open.index);
   }
-  return stack.length === 0 ? { opening, closing } : null;
+  return stack.some((entry) => entry.open === "(") ? null : { opening, closing };
 }
 
 function clauseStart(tokens: SqlSelectionToken[], index: number): number {
@@ -176,7 +202,7 @@ function rangeEndForDepth(tokens: SqlSelectionToken[], startIndex: number, state
   const depth = tokens[startIndex]?.depth ?? 0;
   for (let index = startIndex + 1; index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (token?.text === ")" && token.depth < depth) return token.from;
+    if ((token?.text === ")" || token?.text === "]") && token.depth < depth) return token.from;
   }
   return statementEnd;
 }
@@ -186,7 +212,7 @@ function queryBlockEnd(tokens: SqlSelectionToken[], startIndex: number, statemen
   for (let index = startIndex + 1; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (!token) continue;
-    if (token.text === ")" && token.depth < depth) return token.from;
+    if ((token.text === ")" || token.text === "]") && token.depth < depth) return token.from;
     if (token.depth === depth && token.kind === "word" && SET_OPERATOR_WORDS.has(token.normalized)) return token.from;
   }
   return statementEnd;
@@ -197,7 +223,7 @@ function nextClauseOrSetBoundary(tokens: SqlSelectionToken[], startIndex: number
   for (let index = startIndex + 1; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (!token) continue;
-    if (token.text === ")" && token.depth < depth) return token.from;
+    if ((token.text === ")" || token.text === "]") && token.depth < depth) return token.from;
     if (token.depth !== depth) continue;
     if (isClauseAt(tokens, index) || (token.kind === "word" && SET_OPERATOR_WORDS.has(token.normalized))) return token.from;
   }
@@ -226,7 +252,7 @@ function rangeForDirectTokens(tokens: SqlSelectionToken[], direct: number[], fro
   const first = firstIndex == null ? undefined : tokens[firstIndex];
   const last = lastIndex == null ? undefined : tokens[lastIndex];
   if (!first || !last) return null;
-  const closingIndex = last.text === "(" ? maps.opening.get(lastIndex) : undefined;
+  const closingIndex = isOpeningBracket(last) ? maps.opening.get(lastIndex) : undefined;
   return { from: first.from, to: closingIndex == null ? last.to : (tokens[closingIndex]?.to ?? last.to) };
 }
 
@@ -307,15 +333,17 @@ function collectExpressionRanges(tokens: SqlSelectionToken[], start: number, end
   for (let index = start; index < end; index += 1) {
     const token = tokens[index];
     if (!token) continue;
-    if (token.text === "(") {
+    if (isOpeningBracket(token)) {
       const close = maps.opening.get(index);
-      if (close == null || close >= end) return;
-      collectExpressionRanges(tokens, index + 1, close, maps, ranges);
-      direct.push(index);
-      index = close;
-      continue;
+      if (close != null && close < end) {
+        collectExpressionRanges(tokens, index + 1, close, maps, ranges);
+        direct.push(index);
+        index = close;
+        continue;
+      }
+      if (token.text === "(") return;
     }
-    if (token.text === ")") continue;
+    if (token.text === ")" || (isClosingBracket(token) && maps.closing.has(index))) continue;
     direct.push(index);
   }
 
@@ -340,6 +368,9 @@ function collectSqlRanges(input: string, statement: StatementWindow, maps: { ope
       const quoteLength = quote.startsWith("$") ? quote.length : 1;
       addRange(ranges, token.from + quoteLength, token.to - quoteLength);
       addRange(ranges, token.from, token.to);
+    } else if (token.kind === "quoted_identifier" && token.quote === "[" && token.closed !== false) {
+      addRange(ranges, token.from + 1, token.to - 1);
+      addRange(ranges, token.from, token.to);
     }
   }
   for (const [open, close] of maps.opening) {
@@ -347,8 +378,8 @@ function collectSqlRanges(input: string, statement: StatementWindow, maps: { ope
     const closing = tokens[close];
     if (!opening || !closing) continue;
     addRange(ranges, opening.to, closing.from);
-    const functionName = tokens[open - 1];
-    if (functionName?.kind !== "word") addRange(ranges, opening.from, closing.to);
+    const previous = tokens[open - 1];
+    if (opening.text !== "(" || previous?.kind !== "word") addRange(ranges, opening.from, closing.to);
   }
 
   for (let index = 0; index < tokens.length; index += 1) {
@@ -362,9 +393,10 @@ function collectSqlRanges(input: string, statement: StatementWindow, maps: { ope
     }
     if (isClauseAt(tokens, index)) addTrimmedRange(input, ranges, clauseStart(tokens, index), nextClauseOrSetBoundary(tokens, index, statement.end));
     if (token.kind === "word" && !isExpressionBoundary(token) && maps.opening.has(index + 1)) {
+      const opening = tokens[index + 1];
       const close = maps.opening.get(index + 1);
       const closing = close == null ? undefined : tokens[close];
-      if (closing) addTrimmedRange(input, ranges, token.from, closing.to);
+      if (opening && closing && (opening.text === "(" || token.to === opening.from)) addTrimmedRange(input, ranges, token.from, closing.to);
     }
   }
   collectExpressionRanges(tokens, 0, tokens.length, maps, ranges);
@@ -428,8 +460,9 @@ function stringContentRange(token: SqlSelectionToken, statement?: PreparedStatem
 }
 
 export function analyzeSqlSemanticSelectionRanges(doc: string, options: SqlSemanticSelectionOptions = {}): SqlSemanticSelectionAnalysis {
-  const dialect = sqlSemanticDialectFor(options).id;
-  const rawTokens = tokenizeSqlSemantic(doc, dialect);
+  const dialect = sqlSemanticDialectFor(options);
+  const bracketQuotedIdentifiers = dialect.identifierQuotes.some((quote) => quote.open === "[" && quote.close === "]");
+  const rawTokens = tokenizeSqlSemantic(doc, dialect.id, { squareBracketsAsDelimiters: !bracketQuotedIdentifiers });
   const validationTokens = rawTokens.map((token) => ({ kind: token.kind, text: token.text, normalized: token.normalized, from: token.span.start, to: token.span.end, depth: token.depth, quote: token.quote, closed: token.closed }));
   const tokens = normalizeTokens(doc, rawTokens);
   const statements: PreparedStatementWindow[] = statementWindows(doc, tokens).filter((statement) => {
@@ -486,7 +519,7 @@ function findStatement(context: SemanticSelectionContext, analysis: SqlSemanticS
 
 function statementRangeIndex(doc: string, statement: PreparedStatementWindow): SemanticSelectionRangeIndex | null {
   if (statement.ranges) return statement.ranges;
-  const maps = parenthesisMaps(statement.tokens);
+  const maps = bracketMaps(statement.tokens);
   if (!maps) return null;
   statement.ranges = createSemanticSelectionRangeIndex(collectSqlRanges(doc, statement, maps));
   return statement.ranges;

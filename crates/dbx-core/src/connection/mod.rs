@@ -1707,7 +1707,7 @@ async fn connect_bare_mysql_pool_with_setup(
     max_connections: usize,
     extra_setup_queries: &[String],
 ) -> Result<db::mysql::MySqlPool, String> {
-    if db_config.bare_mysql_uses_tls() {
+    let pool = if db_config.bare_mysql_uses_tls() {
         let idle_timeout_secs = Some(db_config.idle_timeout_secs);
         db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup(
             url,
@@ -1717,11 +1717,15 @@ async fn connect_bare_mysql_pool_with_setup(
             idle_timeout_secs,
             extra_setup_queries,
         )
-        .await
+        .await?
     } else {
         db::mysql::connect_bare_with_pool_limit_and_setup(url, connect_timeout, max_connections, extra_setup_queries)
-            .await
+            .await?
+    };
+    if db::doris::is_config(db_config) {
+        pool.set_doris_metadata_defaults();
     }
+    Ok(pool)
 }
 
 async fn connect_bare_mysql_pool_with_setup_database(
@@ -1734,7 +1738,7 @@ async fn connect_bare_mysql_pool_with_setup_database(
 ) -> Result<db::mysql::MySqlPool, String> {
     // Some MySQL proxies reject the default database in the handshake; pass it
     // separately so DB-layer setup keeps the normal charset/catalog/USE order.
-    if db_config.bare_mysql_uses_tls() {
+    let pool = if db_config.bare_mysql_uses_tls() {
         let idle_timeout_secs = Some(db_config.idle_timeout_secs);
         db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup_database(
             url,
@@ -1745,7 +1749,7 @@ async fn connect_bare_mysql_pool_with_setup_database(
             Some(setup_database),
             extra_setup_queries,
         )
-        .await
+        .await?
     } else {
         db::mysql::connect_bare_with_pool_limit_and_setup_database(
             url,
@@ -1754,8 +1758,12 @@ async fn connect_bare_mysql_pool_with_setup_database(
             Some(setup_database),
             extra_setup_queries,
         )
-        .await
+        .await?
+    };
+    if db::doris::is_config(db_config) {
+        pool.set_doris_metadata_defaults();
     }
+    Ok(pool)
 }
 
 fn mysql_metadata_fallback_url(

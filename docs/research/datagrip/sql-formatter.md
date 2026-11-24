@@ -213,8 +213,8 @@ Implementation work is tracked in issue #14961. The final PR must update this se
 | --- | --- | --- |
 | Two-tree construction and block precedence | Complete for the core and three target dialect extension points | Implemented in the DBX AST adapter and FormatBlock tree |
 | Grow/analyze/refine and shape thresholds | Complete | Implemented with cached flat text and per-block shape/wrap state |
-| Query sections, lists, JOIN, WHERE, CTE, DML | Core rules and differential corpus complete | Implemented; 38/43 corpus cases are exact DataGrip matches |
-| CREATE TABLE and alignment | Core rules and differential corpus complete | Implemented; five error-node/upsert differences are pinned explicitly |
+| Query sections, lists, JOIN, WHERE, CTE, DML | Core rules and differential corpus complete | Implemented; 37/43 corpus cases are exact DataGrip matches |
+| CREATE TABLE and alignment | Core rules and differential corpus complete | Implemented; six error-node/upsert/literal-preservation differences are pinned explicitly |
 | Case/AS/comma pre-format edits | Call chain and rule ownership complete | DBX case/comma settings are implemented; DataGrip-only AS/quote controls are not exposed |
 | Modern/Legacy and general/dialect settings | Full public-field inventory and migration chain complete | Current DBX settings are mapped; DataGrip-only settings and external scheme migration are not accepted as active options |
 | PostgreSQL routines/injected bodies | Entry points identified; not a first-phase behavior guarantee | Explicitly deferred |
@@ -222,4 +222,4 @@ Implementation work is tracked in issue #14961. The final PR must update this se
 | Arbitrary invalid SQL fragments | Error/safe-spacing blocks identified; exact DataGrip recovery must be checked case-by-case | Structured Worker parse error; existing editing/display original-text fallback |
 | UI performance | Worker required because the existing formatter parses/prints synchronously on the caller thread | Dedicated persistent Worker for AST/blocks/printing and selection mapping; cancellation, timeout, stale-result and no-main-thread-retry tests |
 
-The current differential suite has 44 passing assertions: 43 corpus cases plus the exact/documented count check. All 43 implementation results are idempotent. The five documented differences are PostgreSQL `pg_create_table` and `pg_returning`, MySQL `mysql_create_table`, and SQLite `sqlite_create_table` / `sqlite_upsert`; their reasons are stored beside the golden corpus and asserted independently from DataGrip's expected text.
+The current differential suite has 44 passing assertions: 43 corpus cases plus the exact/documented count check. All 43 implementation results are idempotent. The six documented differences are PostgreSQL `pg_create_table`, `pg_dollar_cast`, and `pg_returning`, MySQL `mysql_create_table`, and SQLite `sqlite_create_table` / `sqlite_upsert`; their reasons are stored beside the golden corpus and asserted independently from DataGrip's expected text.

@@ -23,7 +23,7 @@ export function renderDataGripInlineNodes(nodes: readonly AstNode[], settings: D
   for (const node of nodes) {
     const text = renderInlineNode(node, settings);
     if (!text) continue;
-    const separator = previous ? dataGripInlineSeparator(previous, node, settings) : "";
+    const separator = previous && !output.endsWith("\n") ? dataGripInlineSeparator(previous, node, settings) : "";
     output += separator + text;
     previous = node;
   }
@@ -31,14 +31,20 @@ export function renderDataGripInlineNodes(nodes: readonly AstNode[], settings: D
 }
 
 function renderInlineNode(node: AstNode | StatementNode, settings: DataGripLayoutSettings): string {
-  const leading = renderComments(node.leadingComments, settings, true);
+  let output = renderComments(node.leadingComments, settings, true);
+  if (output) output += hasLineComment(node.leadingComments) ? "\n" : " ";
+  output += renderInlineNodeBody(node, settings);
   const trailing = renderComments(node.trailingComments, settings, false);
-  const body = renderInlineNodeBody(node, settings);
-  return [leading, body, trailing].filter(Boolean).join(commentSeparator(leading, trailing));
+  if (trailing) output += hasLineComment(node.trailingComments) ? "\n" : " ";
+  return output + trailing;
+}
+function hasLineComment(comments: readonly CommentNode[] | undefined): boolean {
+  return comments?.some((comment) => comment.type === "line_comment") ?? false;
 }
 
-function commentSeparator(leading: string, trailing: string): string {
-  return leading || trailing ? " " : "";
+function lastInlineNode(node: AstNode | StatementNode): AstNode {
+  if ("children" in node && node.children?.length) return lastInlineNode(node.children[node.children.length - 1]);
+  return node as AstNode;
 }
 
 function renderComments(comments: readonly CommentNode[] | undefined, settings: DataGripLayoutSettings, leading: boolean): string {
@@ -66,9 +72,11 @@ function renderInlineNodeBody(node: AstNode | StatementNode, settings: DataGripL
     case "array_subscript":
       return renderInlineNodeBody(node.array, settings) + renderInlineNodeBody(node.parenthesis, settings);
     case "property_access":
-      return renderInlineNodeBody(node.object, settings) + node.operator + renderInlineNodeBody(node.property, settings);
+      return renderInlineNode(node.object, settings) + node.operator + (node.property.leadingComments?.length ? " " : "") + renderInlineNode(node.property, settings);
     case "parenthesis":
-      return node.openParen + renderDataGripInlineNodes(node.children, settings) + node.closeParen;
+      const body = renderDataGripInlineNodes(node.children, settings);
+      const needsCommentBoundary = body.length > 0 && !body.endsWith("\n") && lastInlineNode(node).type === "line_comment";
+      return node.openParen + body + (needsCommentBoundary ? "\n" : "") + node.closeParen;
     case "between_predicate":
       return joinInline(renderDataGripInlineNodes(node.expr1, settings), keywordDataGripText(node.betweenKw, settings), keywordDataGripText(node.andKw, settings), renderDataGripInlineNodes(node.expr2, settings));
     case "case_expression":
@@ -80,7 +88,7 @@ function renderInlineNodeBody(node: AstNode | StatementNode, settings: DataGripL
     case "all_columns_asterisk":
       return "*";
     case "literal":
-      return literalDataGripText(node.text, settings);
+      return node.text;
     case "identifier":
       return identifierText(node.text, node.quoted, settings);
     case "data_type":
@@ -113,14 +121,6 @@ function dataTypeText(text: string, settings: DataGripLayoutSettings): string {
   if (settings.dataTypeCase === "lower") return text.toLowerCase();
   return text;
 }
-function literalDataGripText(text: string, settings: DataGripLayoutSettings): string {
-  if (settings.dialect !== "postgres") return text;
-  const match = /^(\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$)([\s\S]*)\1$/.exec(text);
-  if (!match) return text;
-  const [, delimiter, body] = match;
-  if (!/\bBEGIN\b/i.test(body) || !/\s+END$/i.test(body)) return text;
-  return delimiter + body.replace(/\s+END$/i, "\nEND") + delimiter;
-}
 
 function joinInline(...parts: string[]): string {
   return parts.filter((part) => part.length > 0).join(" ");
@@ -141,6 +141,7 @@ export function dataGripInlineSeparator(previous: AstNode, next: AstNode, settin
 
 export class DataGripWriter {
   private lines = [""];
+  private lineEndings = [""];
   private lineCommentOpen = false;
 
   constructor(private readonly settings: DataGripLayoutSettings) {}
@@ -150,7 +151,10 @@ export class DataGripWriter {
   }
 
   get text(): string {
-    return this.lines.join("\n").replace(/^\n+|\n+$/g, "");
+    return this.lines
+      .map((line, index) => this.lineEndings[index] + line)
+      .join("")
+      .replace(/^\n+|\n+$/g, "");
   }
 
   get currentLine(): string {
@@ -161,11 +165,12 @@ export class DataGripWriter {
     if (!text) return;
     if (this.lineCommentOpen) this.newline(this.column);
     const pieces = text.split(/\r\n|\r|\n/);
+    const separators = text.match(/\r\n|\r|\n/g) ?? [];
     for (let index = 0; index < pieces.length; index++) {
-      if (index > 0) this.lines.push("");
+      if (index > 0) this.pushLine("", separators[index - 1] ?? "\n");
       this.lines[this.lines.length - 1] += pieces[index];
     }
-    if (/(?:\r\n|\r|\n)$/.test(text)) this.lines.push("");
+    if (/(?:\r\n|\r|\n)$/.test(text)) this.pushLine("");
   }
 
   space(): void {
@@ -183,7 +188,7 @@ export class DataGripWriter {
 
   newline(indent = 0): void {
     this.lines[this.lines.length - 1] = this.currentLine.trimEnd();
-    this.lines.push(this.indentation(indent));
+    this.pushLine(this.indentation(indent));
     this.lineCommentOpen = false;
   }
 
@@ -198,6 +203,11 @@ export class DataGripWriter {
 
   trimSpace(): void {
     this.lines[this.lines.length - 1] = this.currentLine.trimEnd();
+  }
+
+  private pushLine(content: string, separator = "\n"): void {
+    this.lineEndings.push(separator);
+    this.lines.push(content);
   }
 
   private indentation(column: number): string {

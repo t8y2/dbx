@@ -6,6 +6,11 @@
   },
   {
     "dialect": "postgres",
+    "name": "pg_dollar_cast",
+    "reason": "DataGrip inserts a layout newline before END in the dollar-quoted example. DBX deliberately preserves the original literal token bytes, including embedded newlines and CRLF."
+  },
+  {
+    "dialect": "postgres",
     "name": "pg_returning",
     "reason": "DataGrip separates INSERT INTO and leaves RETURNING on the FROM line in this CTE example. DBX keeps the conventional INSERT INTO and RETURNING sections."
   },

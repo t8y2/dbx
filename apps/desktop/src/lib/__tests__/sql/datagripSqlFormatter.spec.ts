@@ -57,7 +57,7 @@ describe("DataGrip SQL formatter differential corpus", () => {
   });
   it("records the exact compatibility and documented-difference counts", () => {
     expect(corpus.length).toBe(43);
-    expect(differences.length).toBe(5);
-    expect(corpus.filter((item) => !documentedDifferences.has(`${item.dialect}/${item.name}`)).length).toBe(38);
+    expect(differences.length).toBe(6);
+    expect(corpus.filter((item) => !documentedDifferences.has(`${item.dialect}/${item.name}`)).length).toBe(37);
   });
 });

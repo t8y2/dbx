@@ -56,7 +56,7 @@
   {
     "dialect": "postgres",
     "name": "pg_dollar_cast",
-    "actual": "select payload::jsonb->>'name'\nfrom events\nwhere tags @> array['sql'];\nselect $$BEGIN NULL;\nEND$$;\n",
+    "actual": "select payload::jsonb->>'name'\nfrom events\nwhere tags @> array['sql'];\nselect $$BEGIN NULL; END$$;\n",
     "idempotent": true
   },
   {

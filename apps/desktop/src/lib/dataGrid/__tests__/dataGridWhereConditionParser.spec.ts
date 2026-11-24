@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDataGridWhereCondition } from "../dataGridWhereConditionParser";
+import { parseDataGridWhereCondition, structuredImportColumnTypesFor } from "../dataGridWhereConditionParser";
 
 const columns = ["task_id", "order_no", "name", "status", "amount", "created_at", "updated_at"];
 function parse(where: string) {
@@ -60,6 +60,44 @@ describe("parseDataGridWhereCondition (#15320)", () => {
     expect(parse("name LIKE 'a_c%'")).toBeNull();
     expect(parse("name NOT LIKE 'a_c%'")).toBeNull();
     expect(parse("name LIKE 'a%c%'")).toBeNull();
+  });
+
+  it("treats only a standalone NOT between IS and NULL as negated (#15448)", () => {
+    const withNotice = ["notice", "note"];
+    function parseOn(where: string) {
+      const rules = parseDataGridWhereCondition(where, withNotice, () => "id-1");
+      return rules?.map((rule) => ({ columnName: rule.columnName, mode: rule.mode }));
+    }
+    // 列名 notice 里的 "not" 不是 IS NOT NULL 的 NOT
+    expect(parseOn("notice IS NULL")).toEqual([{ columnName: "notice", mode: "is-null" }]);
+    expect(parseOn("notice IS NOT NULL")).toEqual([{ columnName: "notice", mode: "is-not-null" }]);
+    expect(parseOn("note IS NULL")).toEqual([{ columnName: "note", mode: "is-null" }]);
+  });
+
+  it("gates LIKE by the declared column type when types are provided (#15448)", () => {
+    const typedColumns = ["name", "amount"];
+    const columnTypes = ["varchar(100)", "int"];
+    function parseTyped(where: string) {
+      const rules = parseDataGridWhereCondition(where, typedColumns, { createId: () => "id-1", columnTypes, databaseType: "mysql" });
+      return rules === null ? null : rules.map((rule) => ({ columnName: rule.columnName, mode: rule.mode }));
+    }
+    // 文本列：正常导入（含否定形态）
+    expect(parseTyped("name LIKE 'abc%'")).toEqual([{ columnName: "name", mode: "begins-with" }]);
+    expect(parseTyped("name NOT LIKE '%abc%'")).toEqual([{ columnName: "name", mode: "not-like" }]);
+    // 非文本列：LIKE 依赖方言隐式转换，拒绝导入（整句回退原 WHERE）
+    expect(parseTyped("amount LIKE '1%'")).toBeNull();
+    // 非 LIKE 条件不受列类型门控影响
+    expect(parseTyped("amount = 100")).toEqual([{ columnName: "amount", mode: "equals" }]);
+    expect(parseTyped("amount IS NULL")).toEqual([{ columnName: "amount", mode: "is-null" }]);
+    // 不传 columnTypes 时保持旧行为（无法判断类型不做门控）
+    expect(parseDataGridWhereCondition("amount LIKE '1%'", typedColumns, () => "id-1")?.[0]?.mode).toBe("begins-with");
+  });
+
+  it("maps selected columns to the driver-reported declared types by name (#15448)", () => {
+    const resultColumns = ["id", "name", "amount"];
+    const resultTypes = ["int", "varchar(100)", "decimal(10,2)"];
+    expect(structuredImportColumnTypesFor(["amount", "name", "missing"], resultColumns, resultTypes)).toEqual(["decimal(10,2)", "varchar(100)", undefined]);
+    expect(structuredImportColumnTypesFor(["name"], resultColumns, undefined)).toEqual([undefined]);
   });
 
   it("is strict about identifier case sensitivity and ambiguity (#15448)", () => {

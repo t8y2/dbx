@@ -1,6 +1,33 @@
 import { uuid } from "@/lib/common/utils";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
+import type { DatabaseType } from "@/types/database";
+
+export interface ParseDataGridWhereConditionOptions {
+  createId?: () => string;
+  /** Dialect of the grid being filtered — kept for shape decisions that are
+   * dialect-specific; LIKE templates are same-dialect by construction, so no
+   * dialect currently rejects a shape on its own. */
+  databaseType?: DatabaseType;
+  /** Declared types for `columns`, same order (drivers report them as
+   * `ResultSet.column_types`). LIKE needs a text-family column: on other or
+   * unknown types the handwritten LIKE relies on dialect implicit casts and
+   * the rebuilt rule would not round-trip (#15448 review). */
+  columnTypes?: readonly (string | undefined)[];
+}
+
+/** Text-family declared types whose LIKE behaves as plain string matching. */
+function isTextLikeColumnType(type: string | undefined): boolean {
+  if (!type) return false;
+  const normalized = type.toLowerCase().trim();
+  return /^(?:var)?char(?:2)?\b/.test(normalized) || /^n(?:var)?char(?:2)?\b/.test(normalized) || /\b(?:text|clob|string|citext|bpchar)\b/.test(normalized) || /^character\b/.test(normalized) || /^enum\b/.test(normalized);
+}
+
+function columnUsesTextFamily(column: string, columns: readonly string[], columnTypes?: ParseDataGridWhereConditionOptions["columnTypes"]): boolean {
+  if (!columnTypes) return true;
+  const index = columns.indexOf(column);
+  return index !== -1 && isTextLikeColumnType(columnTypes[index]);
+}
 
 /**
  * Conservative WHERE → structured-rules importer for the filter builder
@@ -124,11 +151,13 @@ function parseFragment(fragment: string, columns: readonly string[]): ParsedFrag
   const text = fragment.trim();
   if (!text) return null;
 
-  const nullMatch = /^(\S+)\s+IS(?:\s+NOT)?\s+NULL$/i.exec(text);
+  // The NOT must be its own keyword between IS and NULL: matching it anywhere
+  // in the fragment turned `notice IS NULL` into IS NOT NULL (#15448 review).
+  const nullMatch = /^(\S+)\s+IS(\s+NOT)?\s+NULL$/i.exec(text);
   if (nullMatch) {
     const column = sameColumn(nullMatch[1]!, columns);
     if (!column) return null;
-    return { column, mode: /NOT/i.test(nullMatch[0]!) ? "is-not-null" : "is-null", value: "", conjunction: "AND" };
+    return { column, mode: nullMatch[2] ? "is-not-null" : "is-null", value: "", conjunction: "AND" };
   }
 
   // IN / NOT IN with a literal list — the only allowed parentheses.
@@ -158,7 +187,18 @@ function parseFragment(fragment: string, columns: readonly string[]): ParsedFrag
   return { column, mode, value, conjunction: "AND" };
 }
 
-export function parseDataGridWhereCondition(where: string, columns: readonly string[], createId: () => string = uuid): DataGridStructuredFilterRule[] | null {
+/** 把「选中列名」映射到驱动上报的逐列声明类型（按结果列索引对齐），
+ *  供 LIKE 文本族门控使用（#15448 复审）。 */
+export function structuredImportColumnTypesFor(selectedColumns: readonly string[], resultColumns: readonly string[], resultColumnTypes: readonly (string | undefined)[] | undefined): Array<string | undefined> {
+  return selectedColumns.map((name) => {
+    const index = resultColumns.indexOf(name);
+    return index === -1 ? undefined : resultColumnTypes?.[index];
+  });
+}
+
+export function parseDataGridWhereCondition(where: string, columns: readonly string[], createIdOrOptions?: (() => string) | ParseDataGridWhereConditionOptions): DataGridStructuredFilterRule[] | null {
+  const options: ParseDataGridWhereConditionOptions = typeof createIdOrOptions === "function" ? { createId: createIdOrOptions } : (createIdOrOptions ?? {});
+  const createId = options.createId ?? uuid;
   const trimmed = where.trim().replace(/;+$/, "").trim();
   if (!trimmed || !columns.length) return null;
 
@@ -175,6 +215,11 @@ export function parseDataGridWhereCondition(where: string, columns: readonly str
       const literal = likeMatch[3]!.trim();
       const negative = /NOT/i.test(likeMatch[2]!);
       if (!column || !literal) return null;
+      // LIKE only round-trips where the column's declared type is textual:
+      // other types go through dialect implicit casts that the rebuilt rule
+      // reproduces only by accident (#15448 review). No type information at
+      // all keeps the previous behaviour.
+      if (!columnUsesTextFamily(column, columns, options.columnTypes)) return null;
       const like = parseLikeLiteral(literal);
       if (!like) return null;
       // Negation must keep the pattern's shape: `NOT LIKE 'abc%'` is

@@ -52,11 +52,16 @@ extension (`ALTER TABLE ... ADD PARTITION`, Oracle packages, ClickHouse DDL), an
 a statement that failed to parse must not silently fall back to the read
 deadline. The AST (`classify_sql_risk_for_database`) refines the rest.
 
-The frontend mirrors the same keyword sets in
-`apps/desktop/src/lib/sql/queryTimeout.ts`, because the two sides must agree on
-whether a statement may be cancelled. Entry points that own the client wait
-(Tauri, dbx-web, CLI) call `spawn_detached_statement` for `Detach`, so the
-deadline stops the wait without touching the running server call.
+The frontend combines the keyword check with SQL risk classification. Its read
+watchdog keeps the per-statement batch budget and leaves PostgreSQL row-stream
+timeouts to the backend.
+
+Tauri, DBX Web and local MCP can return after the write wait expires while their
+runtime continues to drive the operation. The one-shot local CLI waits for the
+write result before exiting. A transaction containing writes or DDL runs without
+a DBX read deadline, since a read timeout would otherwise roll back earlier writes
+in the same transaction. OceanBase MySQL uses the server's maximum session query
+timeout whenever DBX has no statement deadline.
 
 ## Migration
 

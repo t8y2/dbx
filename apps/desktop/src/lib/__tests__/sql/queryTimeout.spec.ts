@@ -6,6 +6,7 @@ import {
   frontendDeadlineForStatement,
   frontendQueryTimeoutDelayMs,
   frontendQueryTimeoutSecsForSql,
+  normalizeWriteTimeoutSecs,
   queryTimeoutSecsForConcurrentIndex,
   queryTimeoutSecsForConnection,
   statementOutlivesReadTimeoutBudget,
@@ -83,6 +84,31 @@ END pkg_utils;`;
   it("leaves writes unbounded by default and never cancels them", () => {
     expect(frontendDeadlineForStatement("INSERT INTO t SELECT * FROM s", "mysql", 60, 0)).toEqual({ afterSecs: 0, cancelOnTimeout: false });
     expect(frontendDeadlineForStatement("INSERT INTO t SELECT * FROM s", "mysql", 60, 5)).toEqual({ afterSecs: 5, cancelOnTimeout: false });
+  });
+
+  it.each([
+    ["WITH x AS (SELECT 1 AS id) UPDATE items SET n = 1 FROM x WHERE items.id = x.id", "postgres"],
+    ["EXPLAIN ANALYZE UPDATE items SET n = 1", "postgres"],
+    ["SELECT id INTO new_items FROM items", "sqlserver"],
+    ["BEGIN TRANSACTION; UPDATE items SET n = 1; COMMIT;", "sqlserver"],
+    ["SELECT 1\nGO\nUPDATE items SET n = 1", "sqlserver"],
+  ] as const)("never cancels a hidden write: %s", (sql, dbType) => {
+    expect(frontendDeadlineForStatement(sql, dbType, 1, 5)).toEqual({ afterSecs: 5, cancelOnTimeout: false });
+  });
+
+  it("retains per-statement batch budgets and PostgreSQL backend-owned row timeouts", () => {
+    expect(frontendDeadlineForStatement("SELECT SLEEP(0.75); SELECT SLEEP(0.75)", "mysql", 1, 5)).toEqual({ afterSecs: 2, cancelOnTimeout: true });
+    expect(frontendDeadlineForStatement("SELECT * FROM generate_series(1,1000)", "postgres", 1, 5)).toEqual({ afterSecs: 0, cancelOnTimeout: false });
+  });
+
+  it.each([
+    ["", 0],
+    [-1, 0],
+    [Number.NaN, 0],
+    [1.5, 2],
+    [9999, 3600],
+  ])("normalizes a write timeout of %s to %s", (value, expected) => {
+    expect(normalizeWriteTimeoutSecs(value)).toBe(expected);
   });
 
   it("keeps the cancellable read deadline", () => {

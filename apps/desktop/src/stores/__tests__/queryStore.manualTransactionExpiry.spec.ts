@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   beginManualTransaction: vi.fn(),
   commitManualTransaction: vi.fn(),
   rollbackManualTransaction: vi.fn(),
+  cancelQuery: vi.fn(),
   cancelQueryAndWait: vi.fn(),
   closeClientConnectionSession: vi.fn(),
   closeQuerySession: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock("@/lib/backend/api", () => ({
   beginManualTransaction: mocks.beginManualTransaction,
   commitManualTransaction: mocks.commitManualTransaction,
   rollbackManualTransaction: mocks.rollbackManualTransaction,
+  cancelQuery: mocks.cancelQuery,
   cancelQueryAndWait: mocks.cancelQueryAndWait,
   closeClientConnectionSession: mocks.closeClientConnectionSession,
   closeQuerySession: mocks.closeQuerySession,
@@ -400,6 +402,28 @@ describe("queryStore manual transaction expiry recovery", () => {
     }
     expect(tab.txnStatus).toBe("active");
     expect(tab.autoCommit).toBe(false);
+  });
+
+  it("keeps the SQL Server transaction when the client write wait expires", async () => {
+    const { store, id, tab } = await sqlServerTab();
+    mocks.getConnectionConfig.mockReturnValue({ ...mocks.getConnectionConfig(), write_timeout_secs: 1 });
+    mocks.beginManualTransaction.mockResolvedValue("sqlserver-txn-slow");
+    let finishWrite!: (results: ReturnType<typeof successfulUpdate>) => void;
+    mocks.executeInManualTransaction.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishWrite = resolve;
+      }),
+    );
+    const execution = store.executeTabSql(id, "UPDATE users SET active = 1");
+    await execution;
+    expect(mocks.executeInManualTransaction.mock.calls[0]?.[10]).toBe(0);
+    expect(mocks.cancelQuery).not.toHaveBeenCalled();
+    expect(mocks.rollbackManualTransaction).not.toHaveBeenCalled();
+    expect(tab.txnSessionId).toBe("sqlserver-txn-slow");
+    expect(tab.txnStatus).toBe("executing");
+    finishWrite(successfulUpdate());
+    await vi.waitFor(() => expect(tab.txnStatus).toBe("active"));
+    expect(tab.txnSessionId).toBe("sqlserver-txn-slow");
   });
 
   it.each([expiredTransactionError(), transactionError("DBX-TXN-1005"), transactionError("DBX-TXN-1009", "rolled_back")])("SQL Server never silently replays a failed execution (%s)", async (error) => {

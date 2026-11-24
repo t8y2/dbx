@@ -86,7 +86,7 @@ import { hasGbase8cConnectionDatabase } from "@/lib/connection/gbase8cDatabase";
 import { type GbaseProfile, gbaseProfileFromConfig, isGbaseProfile } from "@/lib/connection/gbaseProfiles";
 import { loadVisibleDatabasesPickerNames } from "@/lib/connection/visibleDatabasesPickerLoad";
 import { hasXuguConnectionDatabase } from "@/lib/connection/xuguDatabase";
-import { DEFAULT_WRITE_TIMEOUT_SECS } from "@/lib/sql/queryTimeout";
+import { DEFAULT_WRITE_TIMEOUT_SECS, normalizeWriteTimeoutSecs } from "@/lib/sql/queryTimeout";
 import {
   DEFAULT_IDLE_DISCONNECT_ENABLED_SECS,
   DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS,
@@ -4965,26 +4965,27 @@ function ensureConnectionHostResolvedFromUrl(): boolean {
 }
 
 function formValueForSubmit(): Omit<ConnectionConfig, "id"> {
+  const config = { ...form.value, write_timeout_secs: normalizeWriteTimeoutSecs(form.value.write_timeout_secs) };
   const url = connectionUrlInput.value.trim();
   if (url && url !== appliedConnectionUrlInput.value) {
     const update = parseConnectionDeepLinkUpdate(url);
     if (update) {
       if (update.connectionId !== editingId.value || props.editConfig?.one_time) throw new Error("Open the saved connection specified by this update link before applying it.");
-      return applyConnectionDeepLinkUpdate(form.value, update);
+      return applyConnectionDeepLinkUpdate(config, update);
     }
     const draft = parseConnectionDeepLink(url);
     if (draft) {
-      return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
+      return applyConnectionDraftToConfig(config, { ...draft, oneTime: undefined });
     }
 
-    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, connectionUrlPreferredProfile()));
+    return applyParsedConnectionUrl(config, parseConnectionUrl(url, connectionUrlPreferredProfile()));
   }
 
   if (form.value.db_type === "meilisearch" && hasPendingMeilisearchHostInput()) {
-    return applyParsedConnectionUrl(form.value, parseConnectionUrl(meilisearchHostInput.value.trim(), "meilisearch"));
+    return applyParsedConnectionUrl(config, parseConnectionUrl(meilisearchHostInput.value.trim(), "meilisearch"));
   }
 
-  return form.value;
+  return config;
 }
 
 function applyDremioJdbcMetadata(config: LegacyConnectionConfig) {
@@ -5133,8 +5134,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     }
     config.query_timeout_secs = form.value.query_timeout_secs;
     config.query_timeout_inherit = form.value.query_timeout_inherit;
-    const writeTimeout = Number(form.value.write_timeout_secs);
-    config.write_timeout_secs = Number.isFinite(writeTimeout) && writeTimeout >= 0 ? writeTimeout : DEFAULT_WRITE_TIMEOUT_SECS;
+    config.write_timeout_secs = normalizeWriteTimeoutSecs(form.value.write_timeout_secs);
     config.idle_timeout_secs = form.value.idle_timeout_secs;
     config.manual_transaction_timeout_secs = normalizeManualTransactionTimeoutSecs(form.value.manual_transaction_timeout_secs);
     config.idle_disconnect_secs = form.value.idle_disconnect_secs;

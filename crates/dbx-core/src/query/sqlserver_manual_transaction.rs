@@ -476,7 +476,12 @@ pub async fn execute(
         Arc::new(registered)
     });
     let token = registered.as_ref().map(|query| query.token()).unwrap_or_default();
-    let timeout = resolve_query_timeout(options.timeout_secs);
+    let timeout =
+        if batches.iter().all(|batch| statement_scope(batch, Some(DatabaseType::SqlServer)) == StatementScope::Read) {
+            resolve_query_timeout(options.timeout_secs)
+        } else {
+            None
+        };
     let agent_transport = matches!(&*conn, TxnConnection::Agent { .. });
     let run = async {
         let mut results = Vec::new();
@@ -1105,6 +1110,28 @@ for line in sys.stdin:
         assert!(!state.transaction_sessions.read().await.contains_key(&id));
         assert_eq!(events(&dir).iter().filter(|e| e["method"] == "execute_query").count(), 1);
         assert!(events(&dir).iter().all(|e| e["method"] != "rollback_manual_transaction"));
+    }
+
+    #[tokio::test]
+    async fn slow_agent_write_ignores_read_deadline_and_can_commit() {
+        let (state, id, dir) = mock_session(false, false).await;
+        let start = Instant::now();
+        execute(
+            &state,
+            &id,
+            "UPDATE t SET value = 1 /* SLOW */",
+            "db",
+            None,
+            ManualTransactionExecutionOptions { timeout_secs: Some(1), ..Default::default() },
+        )
+        .await
+        .unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(2));
+        finish(&state, &id, true).await.unwrap();
+        let events = events(&dir);
+        assert_eq!(events[0]["params"]["timeoutSecs"], 0);
+        assert_eq!(events[1]["method"], "commit_manual_transaction");
+        assert_eq!(events.len(), 2);
     }
 
     #[tokio::test]

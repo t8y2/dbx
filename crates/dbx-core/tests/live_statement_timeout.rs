@@ -153,3 +153,86 @@ async fn an_explicit_write_limit_stops_waiting_without_cancelling() {
 
     run(&state, "timeout-live-write", &database, "DROP TABLE IF EXISTS dbx_timeout_detach").await.expect("drop table");
 }
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_TIMEOUT_MYSQL_* env vars pointing at a scratch MySQL database"]
+async fn transactional_batch_commits_slow_writes_past_the_read_budget() {
+    let database = env("DBX_LIVE_TIMEOUT_MYSQL_DATABASE");
+    let state = app_state_with(live_config("batch-timeout", 1, 1)).await;
+    let table = format!("dbx_timeout_{}", uuid::Uuid::new_v4().simple());
+    run(&state, "batch-timeout", &database, &format!("CREATE TABLE {table} (n INT)")).await.unwrap();
+    let sql = format!("INSERT INTO {table} VALUES (SLEEP(2)); INSERT INTO {table} VALUES (1);");
+    let result = dbx_core::query::execute_multi_core_with_options_for_client(
+        &state,
+        "batch-timeout",
+        &database,
+        &sql,
+        None,
+        None,
+        QueryExecutionOptions { use_transaction: Some(true), timeout_secs: Some(1), ..Default::default() },
+    )
+    .await;
+    let count = run(&state, "batch-timeout", &database, &format!("SELECT COUNT(*) FROM {table}")).await.unwrap();
+    run(&state, "batch-timeout", &database, &format!("DROP TABLE {table}")).await.unwrap();
+    let results = result.unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].execution_error);
+    assert_eq!(count.rows, vec![vec![serde_json::json!("2")]]);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_TIMEOUT_H2_JAR and DBX_LIVE_TIMEOUT_JAVA"]
+async fn jdbc_write_keeps_running_past_the_read_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.path().join("dbx.db")).await.unwrap();
+    let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
+        storage,
+        dir.path().join("plugins"),
+        dir.path().join("agents"),
+        "0.6.72",
+    );
+    dbx_core::agent_service::import_agent_jar(
+        &state.agent_manager,
+        "h2",
+        std::path::Path::new(&env("DBX_LIVE_TIMEOUT_H2_JAR")),
+    )
+    .await
+    .unwrap();
+    state
+        .agent_manager
+        .mutate_state(|manager| {
+            manager.java_runtime = dbx_core::agent_manager::JavaRuntimeConfig {
+                mode: dbx_core::agent_manager::JavaRuntimeMode::Custom,
+                custom_java_path: Some(env("DBX_LIVE_TIMEOUT_JAVA")),
+            };
+        })
+        .unwrap();
+    let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+        "id": "timeout-h2", "name": "timeout-h2", "db_type": "h2",
+        "host": "localhost", "port": 9092, "username": "sa", "password": "",
+        "connection_string": "jdbc:h2:mem:dbx_timeout;DB_CLOSE_DELAY=-1",
+        "connect_timeout_secs": 10, "query_timeout_secs": 1, "write_timeout_secs": 1,
+        "keepalive_interval_secs": 0,
+    }))
+    .unwrap();
+    state.configs.write().await.insert(config.id.clone(), config.clone());
+    for sql in ["CREATE TABLE timeout_probe (n INT)", "CREATE ALIAS DBX_SLEEP FOR 'java.lang.Thread.sleep(long)'"] {
+        run(&state, &config.id, "", sql).await.unwrap();
+    }
+    let started = std::time::Instant::now();
+    let result = execute_sql_statement_with_options_typed(
+        &state,
+        &config.id,
+        "",
+        "INSERT INTO timeout_probe SELECT 1 WHERE DBX_SLEEP(2000) IS NULL",
+        None,
+        None,
+        QueryExecutionOptions { timeout_secs: Some(1), ..Default::default() },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.affected_rows, 1);
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    let count = run(&state, &config.id, "", "SELECT COUNT(*) FROM timeout_probe").await.unwrap();
+    assert_eq!(count.rows[0][0].as_i64(), Some(1));
+}

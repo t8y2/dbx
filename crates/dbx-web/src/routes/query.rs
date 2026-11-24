@@ -710,43 +710,59 @@ pub async fn execute_multi(
 
     tracing::debug!(connection_id = %req.connection_id, "execute_multi");
 
-    let core_started_at = std::time::Instant::now();
-    let result = dbx_core::query::execute_multi_core_with_options_for_client_typed(
-        &state.app,
-        &req.connection_id,
-        &database,
-        &req.sql,
-        req.schema.as_deref(),
-        Some(cancel_token),
-        dbx_core::query::QueryExecutionOptions {
-            defer_lobs: req.defer_lobs,
-            max_rows: req.max_rows,
-            fetch_size: req.fetch_size,
-            page_size: req.page_size,
-            row_offset: req.row_offset,
-            max_result_bytes: req.max_result_bytes,
-            result_key_columns: req.result_key_columns,
-            table_data_preview: req.table_data_preview,
-            catalog: req.catalog,
-            result_session_id: req.result_session_id,
-            client_session_id: req.client_session_id,
-            timeout_secs: req.timeout_secs,
-            await_cancel_completion: false,
-            execution_id: Some(execution_id),
-            use_transaction: req.use_transaction,
-            continue_on_error: req.continue_on_error.unwrap_or(false),
-            execution_mode: req.execution_mode.unwrap_or_default(),
-            preserve_explicit_transaction: req.preserve_explicit_transaction,
-            report_compilation_errors: req.report_compilation_errors,
-        },
-    )
-    .await;
-    let core_ms = core_started_at.elapsed().as_millis();
+    let deadline =
+        dbx_core::query::connection_statement_timeout(&state.app, &req.connection_id, &req.sql, req.timeout_secs).await;
+    let run = async move {
+        let core_started_at = std::time::Instant::now();
+        let result = dbx_core::query::execute_multi_core_with_options_for_client_typed(
+            &state.app,
+            &req.connection_id,
+            &database,
+            &req.sql,
+            req.schema.as_deref(),
+            Some(cancel_token),
+            dbx_core::query::QueryExecutionOptions {
+                defer_lobs: req.defer_lobs,
+                max_rows: req.max_rows,
+                fetch_size: req.fetch_size,
+                page_size: req.page_size,
+                row_offset: req.row_offset,
+                max_result_bytes: req.max_result_bytes,
+                result_key_columns: req.result_key_columns,
+                table_data_preview: req.table_data_preview,
+                catalog: req.catalog,
+                result_session_id: req.result_session_id,
+                client_session_id: req.client_session_id,
+                timeout_secs: req.timeout_secs,
+                await_cancel_completion: false,
+                execution_id: Some(execution_id),
+                use_transaction: req.use_transaction,
+                continue_on_error: req.continue_on_error.unwrap_or(false),
+                execution_mode: req.execution_mode.unwrap_or_default(),
+                preserve_explicit_transaction: req.preserve_explicit_transaction,
+                report_compilation_errors: req.report_compilation_errors,
+            },
+        )
+        .await;
+        let core_ms = core_started_at.elapsed().as_millis();
 
-    registered.finish_with_late_cancel(&result, keep_timeout_reachable);
+        registered.finish_with_late_cancel(&result, keep_timeout_reachable);
 
-    let result = result.map_err(|error| AppError::from(error.into_backend_error()))?;
-    execute_multi_response(result, core_ms)
+        let result = result.map_err(|error| AppError::from(error.into_backend_error()))?;
+        execute_multi_response(result, core_ms)
+    };
+    match deadline {
+        dbx_core::query::StatementTimeout::Detach(wait) => {
+            // Dropping the join handle only stops waiting. The task owns the
+            // registration until the query and any transaction finish.
+            match tokio::time::timeout(wait, tokio::spawn(Box::pin(run))).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(AppError::from("Statement task stopped unexpectedly")),
+                Err(_) => Err(AppError::from(dbx_core::query::detached_write_timeout_message(wait))),
+            }
+        }
+        _ => Box::pin(run).await,
+    }
 }
 
 fn execute_multi_response(

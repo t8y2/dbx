@@ -1,7 +1,8 @@
 import { splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
 import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
-import { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
+import { classifySqlRisk } from "@/lib/sql/sqlRisk";
+import { DEFAULT_QUERY_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 
 export { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
@@ -45,8 +46,12 @@ export function queryTimeoutSecsForConnection(connection?: Pick<ConnectionConfig
 }
 
 export function writeTimeoutSecsForConnection(connection?: Pick<ConnectionConfig, "write_timeout_secs"> | null): number {
-  const value = Number(connection?.write_timeout_secs);
-  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_WRITE_TIMEOUT_SECS;
+  return normalizeWriteTimeoutSecs(connection?.write_timeout_secs);
+}
+
+export function normalizeWriteTimeoutSecs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return DEFAULT_WRITE_TIMEOUT_SECS;
+  return Math.min(MAX_QUERY_TIMEOUT_SECS, Math.round(value));
 }
 
 /**
@@ -94,7 +99,9 @@ export function statementScopeForSql(sql: string, databaseType: DatabaseType | u
   for (const { sql: statement } of statements) {
     const keywordScope = statementKeywordScope(statement, databaseType);
     if (keywordScope === "schema-change") return "schema-change";
-    if (keywordScope === "write") scope = "write";
+    const risks = classifySqlRisk(statement, { dialect: databaseType }).statements;
+    if (risks.some(({ risk }) => risk === "ddl")) return "schema-change";
+    if (keywordScope === "write" || risks.some(({ risk }) => risk === "write" || risk === "transaction")) scope = "write";
   }
   return scope;
 }
@@ -125,8 +132,8 @@ export function frontendDeadlineForStatement(sql: string, databaseType: Database
   if (scope === "write") {
     return writeTimeoutSecs > 0 ? { afterSecs: writeTimeoutSecs, cancelOnTimeout: false } : { afterSecs: 0, cancelOnTimeout: false };
   }
-  if (queryTimeoutSecs === 0) return { afterSecs: 0, cancelOnTimeout: false };
-  return { afterSecs: queryTimeoutSecs, cancelOnTimeout: true };
+  const afterSecs = frontendReadTimeoutSecs(sql, databaseType, queryTimeoutSecs, parameterOptions);
+  return { afterSecs, cancelOnTimeout: afterSecs > 0 };
 }
 
 export function frontendDeadlineForConnection(
@@ -140,14 +147,11 @@ export function frontendDeadlineForConnection(
 }
 
 export function frontendQueryTimeoutSecsForSql(sql: string, databaseType: DatabaseType | undefined, queryTimeoutSecs: number, parameterOptions?: SqlParameterOptions): number {
-  if (queryTimeoutSecs === 0) return 0;
-
-  // DDL and writes must not be abandoned by the client. A production
-  // `CREATE TABLE ... PARTITION BY` / `ALTER TABLE ... ADD PARTITION` outlives any
-  // read budget, and giving up halfway leaves the server rolling back while it
-  // still holds metadata locks.
   if (statementOutlivesReadTimeoutBudget(sql, databaseType, parameterOptions)) return 0;
+  return frontendReadTimeoutSecs(sql, databaseType, queryTimeoutSecs, parameterOptions);
+}
 
+function frontendReadTimeoutSecs(sql: string, databaseType: DatabaseType | undefined, queryTimeoutSecs: number, parameterOptions?: SqlParameterOptions): number {
   // PostgreSQL applies the configured timeout while the backend receives rows
   // over a slow SSH tunnel. An absolute browser-side deadline can reject a
   // successful, steadily progressing page fetch first, so let the backend own

@@ -1,3 +1,4 @@
+use std::time::Duration;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -602,6 +603,7 @@ pub trait DbxBackend: Send + Sync {
 pub struct LocalBackend {
     state: Arc<AppState>,
     data_dir: std::path::PathBuf,
+    wait_for_writes: bool,
     transaction_owners: Arc<TransactionOwnerRegistry>,
     transaction_owner_config: TransactionOwnerConfig,
 }
@@ -884,6 +886,7 @@ impl LocalBackend {
         Self {
             state,
             data_dir,
+            wait_for_writes: false,
             transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
             transaction_owner_config: TransactionOwnerConfig::from_env(),
         }
@@ -948,9 +951,31 @@ impl LocalBackend {
         Ok(Self {
             state,
             data_dir,
+            wait_for_writes: false,
             transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
             transaction_owner_config: TransactionOwnerConfig::from_env(),
         })
+    }
+
+    /// One-shot CLI commands must keep their runtime alive until writes finish.
+    pub fn wait_for_writes(mut self) -> Self {
+        self.wait_for_writes = true;
+        self
+    }
+
+    async fn detached_write_wait(
+        &self,
+        connection_id: &str,
+        sql: &str,
+        read_override: Option<u64>,
+    ) -> Option<Duration> {
+        if self.wait_for_writes {
+            return None;
+        }
+        match dbx_core::query::connection_statement_timeout(&self.state, connection_id, sql, read_override).await {
+            dbx_core::query::StatementTimeout::Detach(wait) => Some(wait),
+            _ => None,
+        }
     }
 
     #[cfg(feature = "transaction-test-hooks")]
@@ -1530,9 +1555,7 @@ impl DbxBackend for LocalBackend {
         // A configured write limit only stops the wait; it must never cancel the
         // server statement, because then the caller cannot tell whether the rows
         // landed.
-        let decision =
-            dbx_core::query::connection_statement_timeout(&self.state, &connection.id, sql, timeout_secs).await;
-        if let (Some(wait), false) = (decision.client_wait(), decision.cancels_on_timeout()) {
+        if let Some(wait) = self.detached_write_wait(&connection.id, sql, timeout_secs).await {
             let detached = dbx_core::query::spawn_detached_statement(
                 self.state.clone(),
                 connection.id.clone(),
@@ -1570,6 +1593,30 @@ impl DbxBackend for LocalBackend {
         sql: &str,
         options: dbx_core::query::QueryExecutionOptions,
     ) -> Result<Vec<BatchStatementResult>, String> {
+        if let Some(wait) = self.detached_write_wait(&connection.id, sql, options.timeout_secs).await {
+            let state = self.state.clone();
+            let connection_id = connection.id.clone();
+            let database = database.to_owned();
+            let schema = schema.map(str::to_owned);
+            let sql = sql.to_owned();
+            let task = tokio::spawn(async move {
+                Box::pin(dbx_core::query::execute_multi_core_with_options_for_client(
+                    &state,
+                    &connection_id,
+                    &database,
+                    &sql,
+                    schema.as_deref(),
+                    None,
+                    options,
+                ))
+                .await
+            });
+            return match tokio::time::timeout(wait, task).await {
+                Ok(Ok(result)) => result.map(|rows| rows.into_iter().map(BatchStatementResult::from).collect()),
+                Ok(Err(_)) => Err("Statement task stopped unexpectedly".to_string()),
+                Err(_) => Err(dbx_core::query::detached_write_timeout_message(wait)),
+            };
+        }
         // The multi-statement executor dispatches across every database engine
         // and produces a very large future. Boxing it keeps the async-trait
         // implementation below Rust's type-layout recursion limit (query depth

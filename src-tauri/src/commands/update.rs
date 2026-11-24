@@ -345,9 +345,8 @@ impl PendingUpdateState {
     }
 
     fn cancel_download(&self, attempt_id: &str) {
-        let Ok(mut pending) = self.pending.lock() else { return };
-        let action = Self::cancel_target(pending.as_ref());
-        let Some((cancellation, clear_slot)) = action else {
+        let Ok(pending) = self.pending.lock() else { return };
+        let Some(cancellation) = Self::cancel_target(pending.as_ref()) else {
             if pending.is_none() {
                 self.remember_canceled_attempt(attempt_id.to_string());
             }
@@ -356,18 +355,17 @@ impl PendingUpdateState {
         if cancellation.attempt_id != attempt_id {
             return;
         }
+        // Keep the slot occupied until the download task has unwound. The task may
+        // still be about to clear or replace the on-disk cache after cancellation.
         cancellation.cancel();
-        if clear_slot {
-            *pending = None;
-        }
     }
 
-    /// Downloading can be dropped immediately. A commit in progress keeps the slot until
-    /// `finish_commit` has either published the package or discarded it.
-    fn cancel_target(pending: Option<&PendingUpdate>) -> Option<(Arc<DownloadCancellation>, bool)> {
+    /// Keep the slot until the canceled task has either failed or finished committing.
+    fn cancel_target(pending: Option<&PendingUpdate>) -> Option<Arc<DownloadCancellation>> {
         match pending {
-            Some(PendingUpdate::Downloading(cancellation)) => Some((Arc::clone(cancellation), true)),
-            Some(PendingUpdate::Committing(cancellation)) => Some((Arc::clone(cancellation), false)),
+            Some(PendingUpdate::Downloading(cancellation) | PendingUpdate::Committing(cancellation)) => {
+                Some(Arc::clone(cancellation))
+            }
             _ => None,
         }
     }
@@ -1276,6 +1274,8 @@ mod tests {
         let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         assert!(state.finish_download(&attempt, cached_fixture(), &root).is_err());
         assert!(!root.exists());
+        assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_err());
+        state.finish_failed_download(&attempt).unwrap();
         assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_ok());
     }
 
@@ -1573,6 +1573,8 @@ mod tests {
         let first = state.begin_download("first".into(), "99.0.0".into()).unwrap();
 
         state.cancel_download("first");
+        assert!(state.begin_download("second".into(), "99.0.0".into()).is_err());
+        state.finish_failed_download(&first).unwrap();
         let second = state.begin_download("second".into(), "99.0.0".into()).unwrap();
         state.cancel_download("first");
 
@@ -1610,6 +1612,9 @@ mod tests {
         let state = PendingUpdateState::default();
         let first = state.begin_download("test-attempt".into(), "99.0.0".into()).unwrap();
         state.cancel_download("test-attempt");
+        assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_err());
+
+        state.finish_failed_download(&first).unwrap();
         let second = state.begin_download("test-attempt".into(), "99.0.0".into()).unwrap();
 
         state.finish_failed_download(&first).unwrap();

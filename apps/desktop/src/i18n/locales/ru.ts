@@ -9946,6 +9946,11 @@ export default withEnglishFallback({
     newDatabaseFailed: "Не удалось создать базу данных: {message}",
   },
   sqlFileTree: {
+    changeConnectionForFiles: "Задать источник данных ({count} файлов)",
+    changeConnectionForFilesDescription: "Выберите подключение и его базу данных по умолчанию для следующего открытия выбранных локальных файлов SQL.",
+    changeConnectionCloseFiles: "Закройте выбранные файлы, которые уже открыты.",
+    changeConnectionLimit: "За один раз можно задать источник данных для {count} файлов или меньше.",
+    changeConnectionSaveFailed: "Не удалось сохранить источник данных для файлов.",
     searchIncompleteHelp: "Почему результаты поиска неполные:",
     searchSkippedTooLarge: "Размер больше 32 MiB: пропущено файлов — {count}.",
     searchSkippedUnreadable: "Не удалось прочитать (возможно, удалены или нет доступа): файлов или папок — {count}.",
@@ -10042,6 +10047,7 @@ export default withEnglishFallback({
     displayModeConnection: "По подключениям",
     unassociated: "Не связано",
     deletedConnection: "Подключение удалено",
+    changeConnectionCapacity: "После сохранения будет превышен лимит записей источника данных в {count} файлов. Сократите число файлов, ещё не связанных с источником данных.",
   },
   diff: {
     additionalSchemas: "Также сравнить эти схемы",

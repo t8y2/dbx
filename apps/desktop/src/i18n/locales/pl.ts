@@ -7899,6 +7899,11 @@ export default withEnglishFallback({
     totalFiles: "Pliki: {count}",
   },
   sqlFileTree: {
+    changeConnectionForFiles: "Ustaw źródło danych (pliki: {count})",
+    changeConnectionForFilesDescription: "Wybierz połączenie i jego domyślną bazę danych na potrzeby następnego otwarcia wybranych lokalnych plików SQL.",
+    changeConnectionCloseFiles: "Zamknij wybrane pliki, które są już otwarte.",
+    changeConnectionLimit: "Możesz ustawić źródło danych dla maksymalnie {count} plików naraz.",
+    changeConnectionSaveFailed: "Nie udało się zapisać źródła danych plików.",
     searchIncompleteHelp: "Dlaczego wyniki wyszukiwania są niepełne:",
     searchSkippedTooLarge: "Rozmiar ponad 32 MiB: pominięto {count} plików.",
     searchSkippedUnreadable: "Nie można odczytać (być może usunięte lub brak dostępu): {count} plików lub folderów.",

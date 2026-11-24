@@ -7054,6 +7054,11 @@ export default withEnglishFallback({
     completedWithErrors: "Çalıştırma tamamlandı: {succeeded} başarılı, {failed} başarısız",
   },
   sqlFileTree: {
+    changeConnectionForFiles: "Veri kaynağını ayarla ({count} dosya)",
+    changeConnectionForFilesDescription: "Seçili yerel SQL dosyaları bir sonraki açıldığında kullanılacak bağlantıyı ve varsayılan veritabanını seçin.",
+    changeConnectionCloseFiles: "Seçili dosyalardan açık olanları kapatın.",
+    changeConnectionLimit: "Bir seferde en fazla {count} dosya için veri kaynağı ayarlayabilirsiniz.",
+    changeConnectionSaveFailed: "Dosyaların veri kaynağı kaydedilemedi.",
     searchIncompleteHelp: "Bu aramanın eksik olmasının nedenleri:",
     searchSkippedTooLarge: "32 MiB üzeri: {count} dosya atlandı.",
     searchSkippedUnreadable: "Okunamadı (silinmiş olabilir veya erişim izni yok): {count} dosya veya klasör.",

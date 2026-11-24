@@ -11824,6 +11824,11 @@ export default withEnglishFallback({
     actionSuccess: '{action} concluído para "{name}".',
   },
   sqlFileTree: {
+    changeConnectionForFiles: "Definir fonte de dados ({count} arquivos)",
+    changeConnectionForFilesDescription: "Escolha a conexão e o banco de dados padrão a usar na próxima abertura dos arquivos SQL locais selecionados.",
+    changeConnectionCloseFiles: "Feche os arquivos selecionados que já estão abertos.",
+    changeConnectionLimit: "Você pode definir a fonte de dados de até {count} arquivos de uma vez.",
+    changeConnectionSaveFailed: "Não foi possível salvar a fonte de dados dos arquivos.",
     searchIncompleteHelp: "Por que esta pesquisa está incompleta:",
     searchSkippedTooLarge: "Maiores que 32 MiB: {count} arquivos ignorados.",
     searchSkippedUnreadable: "Não foi possível ler (talvez removidos ou sem permissão): {count} arquivos ou pastas.",
@@ -11920,6 +11925,7 @@ export default withEnglishFallback({
     displayModeConnection: "Agrupar por conexão",
     unassociated: "Não associado",
     deletedConnection: "Conexão excluída",
+    changeConnectionCapacity: "Após salvar, o limite de registros de fonte de dados de {count} arquivos será excedido; reduza os arquivos que ainda não estão associados a uma fonte de dados.",
   },
   mqTopics: {
     title: "Gerenciamento de tópicos",

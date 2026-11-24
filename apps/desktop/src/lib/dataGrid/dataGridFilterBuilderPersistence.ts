@@ -1,7 +1,7 @@
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
-import { dataGridColumnNameKey, dataGridSqlTextReferencesAnyColumn } from "@/lib/dataGrid/dataGridDropColumn";
+import { dataGridColumnNameKey, dataGridSqlTextReferencesAnyColumn, removeDroppedColumnsFromStructuredWhere } from "@/lib/dataGrid/dataGridDropColumn";
 
 export type DataGridCachedServerColumnFilter = {
   condition: string;
@@ -219,8 +219,35 @@ export function clearDataGridStructuredFilterStatesForTab(tabId: string) {
   persistToStorage();
 }
 
+type AppliedStructuredFilter = Pick<DataGridStructuredFilterCacheState, "appliedRules" | "appliedWhereInput">;
+
+export async function removeDataGridAppliedFilterColumns(state: AppliedStructuredFilter, droppedColumns: readonly string[], caseSensitive: boolean, buildWhere: (rules: DataGridStructuredFilterRule[]) => Promise<string>, dialectId?: string): Promise<AppliedStructuredFilter> {
+  const { appliedRules, appliedWhereInput } = state;
+  if (!appliedRules) {
+    // Old caches store the last applied SQL but only the current draft rules.
+    // Reading or resaving a group cannot recover the original rule values.
+    return { appliedWhereInput: removeDroppedColumnsFromStructuredWhere(appliedWhereInput, droppedColumns, caseSensitive, dialectId) };
+  }
+  const dropped = new Set(droppedColumns.map((name) => dataGridColumnNameKey(name, caseSensitive)));
+  const remaining = appliedRules.filter((rule) => !dropped.has(dataGridColumnNameKey(rule.columnName, caseSensitive)));
+  if (remaining.length === appliedRules.length) return { appliedRules, appliedWhereInput };
+  try {
+    return { appliedRules: remaining, appliedWhereInput: await buildWhere(cloneDataGridStructuredFilterRules(remaining)) };
+  } catch {
+    // The DDL has already succeeded. Preserve usable predicates if rebuilding fails.
+    return { appliedRules: remaining, appliedWhereInput: removeDroppedColumnsFromStructuredWhere(appliedWhereInput, droppedColumns, caseSensitive, dialectId) };
+  }
+}
+
 /** Migrate a table tab's filters before its metadata and refresh SQL change. */
-export async function removeDataGridStructuredFilterColumnsForTab(tabId: string, columns: readonly string[], droppedColumns: readonly string[], caseSensitive: boolean, buildWhere: (rules: DataGridStructuredFilterRule[]) => Promise<string>): Promise<DataGridStructuredFilterCacheState | undefined> {
+export async function removeDataGridStructuredFilterColumnsForTab(
+  tabId: string,
+  columns: readonly string[],
+  droppedColumns: readonly string[],
+  caseSensitive: boolean,
+  buildWhere: (rules: DataGridStructuredFilterRule[]) => Promise<string>,
+  dialectId?: string,
+): Promise<DataGridStructuredFilterCacheState | undefined> {
   ensureHydrated();
   const state = structuredFilterStateCache.get(tabId);
   if (!state || droppedColumns.length === 0) return undefined;
@@ -230,7 +257,6 @@ export async function removeDataGridStructuredFilterColumnsForTab(tabId: string,
   const keepRules = (rules: DataGridStructuredFilterRule[]) => rules.filter((rule) => !dropped.has(key(rule.columnName)));
   const rules = keepRules(state.rules);
   const groups = state.groups && { active: state.groups.active, inactive: state.groups.inactive.map((group) => ({ ...group, rules: keepRules(group.rules) })) };
-  const appliedRules = state.appliedRules && keepRules(state.appliedRules);
   const manualWhereInput = dataGridSqlTextReferencesAnyColumn(state.manualWhereInput, droppedColumns, caseSensitive) ? "" : state.manualWhereInput;
   const serverColumnFilters: Record<number, DataGridCachedServerColumnFilter> = {};
   for (const [indexText, filter] of Object.entries(state.serverColumnFilters)) {
@@ -238,12 +264,7 @@ export async function removeDataGridStructuredFilterColumnsForTab(tabId: string,
     if (!column || dropped.has(key(column)) || dataGridSqlTextReferencesAnyColumn(filter.condition, droppedColumns, caseSensitive)) continue;
     serverColumnFilters[remainingColumns.indexOf(column)] = filter;
   }
-  let appliedWhereInput = state.appliedWhereInput;
-  if (dataGridSqlTextReferencesAnyColumn(appliedWhereInput, droppedColumns, caseSensitive)) {
-    // Older entries have only one rule list. Group-aware entries may contain unapplied drafts.
-    const remainingAppliedRules = appliedRules ?? (state.groups ? [] : rules);
-    appliedWhereInput = await buildWhere(cloneDataGridStructuredFilterRules(remainingAppliedRules));
-  }
+  const applied = await removeDataGridAppliedFilterColumns(state, droppedColumns, caseSensitive, buildWhere, dialectId);
   // The last scope component is the column list; preserve the tab's own schema
   // and connection components instead of reconstructing them from another pane.
   const scopeParts = state.scopeKey.split("\u0001");
@@ -253,9 +274,8 @@ export async function removeDataGridStructuredFilterColumnsForTab(tabId: string,
     scopeKey: scopeParts.join("\u0001"),
     rules,
     ...(groups ? { groups } : {}),
-    ...(appliedRules ? { appliedRules } : {}),
+    ...applied,
     manualWhereInput,
-    appliedWhereInput,
     serverColumnFilters,
   };
   structuredFilterStateCache.set(tabId, cloneState(next));

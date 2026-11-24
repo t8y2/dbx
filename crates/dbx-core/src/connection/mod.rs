@@ -338,6 +338,63 @@ fn postgres_family_product_name(server_version: &str) -> Option<&str> {
     lower.contains("postgresql").then_some("PostgreSQL")
 }
 
+/// Combine the GaussDB (non-DWS) server version with its hot-patch version for
+/// display. The `product_version` `pg_settings` value is the server version and
+/// the `hotpatch_version` value is the running hot patch; the hot-patch part is
+/// shown only when the server reports one.
+fn gaussdb_native_product_version(server_version: &str, hotpatch_version: Option<&str>) -> Option<String> {
+    let server_version = server_version.trim();
+    if server_version.is_empty() {
+        return None;
+    }
+    match hotpatch_version.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(hotpatch) => Some(format!("{server_version} ({hotpatch})")),
+        None => Some(server_version.to_string()),
+    }
+}
+
+/// GaussDB (non-DWS) native server version, read from `pg_settings` instead of
+/// `version()` because `version()` only reports the PostgreSQL compatibility
+/// layer. `product_version` is the server version and `hotpatch_version` is the
+/// hot-patch version (omitted when the server does not report one).
+async fn gaussdb_native_product_version_from_pool(pool: &deadpool_postgres::Pool) -> Option<String> {
+    let sql = "SELECT name, setting FROM pg_settings WHERE name IN ('product_version', 'hotpatch_version')";
+    let result =
+        tokio::time::timeout(Duration::from_secs(5), db::postgres::execute_query_with_max_rows(pool, sql, Some(2)))
+            .await
+            .ok()?
+            .ok()?;
+    let mut server_version = None;
+    let mut hotpatch_version = None;
+    for row in &result.rows {
+        let [name, setting] = row.as_slice() else { continue };
+        match name.as_str() {
+            Some("product_version") => server_version = setting.as_str(),
+            Some("hotpatch_version") => hotpatch_version = setting.as_str(),
+            _ => {}
+        }
+    }
+    gaussdb_native_product_version(server_version?, hotpatch_version)
+}
+
+/// Database metadata for a native (non-DWS, non-JDBC) GaussDB pool. The server
+/// version comes from `pg_settings.product_version` and the hot-patch version
+/// from `pg_settings.hotpatch_version`; versionless info is returned (instead
+/// of `None`) when the settings are unavailable so callers still present the
+/// connection as GaussDB.
+pub async fn gaussdb_native_database_info(
+    pool: &deadpool_postgres::Pool,
+    current_database: Option<&str>,
+) -> DatabaseConnectionInfo {
+    DatabaseConnectionInfo {
+        product_name: Some("GaussDB".to_string()),
+        product_version: gaussdb_native_product_version_from_pool(pool).await,
+        current_database: current_database.map(str::to_string),
+        driver_name: Some("DBX PostgreSQL driver".to_string()),
+        ..Default::default()
+    }
+}
+
 /// Held connection for a manual transaction session
 pub enum TxnConnection {
     /// Isolated native SQL Server client, discarded after an interrupted stream.
@@ -6997,30 +7054,41 @@ impl AppState {
                 // `product_version` because engine sniffing (Greenplum /
                 // Cloudberry, whose AO tables reject system-column locators)
                 // depends on the product keywords it carries (#14745).
-                let product_version = db::postgres::execute_query_with_max_rows(&pool, "SELECT version()", Some(1))
-                    .await
-                    .ok()
-                    .and_then(|result| {
-                        result
-                            .rows
-                            .first()
-                            .and_then(|row| row.first())
-                            .and_then(|value| value.as_str())
+                //
+                // Non-DWS GaussDB reports its real version only through
+                // `pg_settings` (`product_version` / `hotpatch_version`), so
+                // read those instead and surface the hot-patch version when the
+                // server runs one.
+                if config.db_type == DatabaseType::Gaussdb {
+                    let current_database =
+                        database.map(str::to_string).or_else(|| config.effective_database().map(str::to_string));
+                    Ok(Some(gaussdb_native_database_info(&pool, current_database.as_deref()).await))
+                } else {
+                    let product_version = db::postgres::execute_query_with_max_rows(&pool, "SELECT version()", Some(1))
+                        .await
+                        .ok()
+                        .and_then(|result| {
+                            result
+                                .rows
+                                .first()
+                                .and_then(|row| row.first())
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string)
+                        });
+                    Ok(Some(DatabaseConnectionInfo {
+                        product_name: product_version
+                            .as_deref()
+                            .and_then(postgres_family_product_name)
                             .map(str::to_string)
-                    });
-                Ok(Some(DatabaseConnectionInfo {
-                    product_name: product_version
-                        .as_deref()
-                        .and_then(postgres_family_product_name)
-                        .map(str::to_string)
-                        .or_else(|| Some("PostgreSQL".to_string())),
-                    product_version,
-                    current_database: database
-                        .map(str::to_string)
-                        .or_else(|| config.effective_database().map(str::to_string)),
-                    driver_name: Some("DBX PostgreSQL driver".to_string()),
-                    ..Default::default()
-                }))
+                            .or_else(|| Some("PostgreSQL".to_string())),
+                        product_version,
+                        current_database: database
+                            .map(str::to_string)
+                            .or_else(|| config.effective_database().map(str::to_string)),
+                        driver_name: Some("DBX PostgreSQL driver".to_string()),
+                        ..Default::default()
+                    }))
+                }
             }
             Some(ConnectionDatabaseInfoSource::NativeHBase(client)) => {
                 db::hbase_driver::database_connection_info(&client).await
@@ -9389,17 +9457,17 @@ mod tests {
         connection_configs_session_credentials_compatible, connection_probe_endpoints, connection_remote_endpoint,
         connection_url_for_endpoint, consul_config_for_endpoint, database_connection_config,
         database_connection_config_with_catalog, gaussdb_identifier_quote_from_query_result,
-        gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, kafka_loopback_local_port_error,
-        kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
-        metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
-        postgres_family_product_name, prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port,
-        redact_transport_url, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
-        redis_sentinel_transport_prefix, report_connection_liveness_lost, sqlserver_legacy_agent_config,
-        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, ssh_local_port_config_error,
-        task_client_session_id, transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool,
-        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
-        TxnConnection, CLOUDFLARE_D1_LOCAL_PORT_ERROR, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
-        PRESTOSQL_JDBC_DRIVER_CLASS,
+        gaussdb_m_jdbc_config_for_endpoint, gaussdb_native_product_version, gaussdb_uses_m_jdbc_driver,
+        kafka_loopback_local_port_error, kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead,
+        metadata_connection_config, metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries,
+        oceanbase_mysql_setup_queries, postgres_family_product_name, prestosql_jdbc_config_for_endpoint,
+        primary_tunnel_fixed_local_port, redact_transport_url, redacted_connection_url_for_endpoint,
+        redis_sentinel_transport_id, redis_sentinel_transport_prefix, report_connection_liveness_lost,
+        sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
+        ssh_local_port_config_error, task_client_session_id, transport_layers_through_last_ssh,
+        upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe, validate_connection_url_params,
+        validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection, CLOUDFLARE_D1_LOCAL_PORT_ERROR,
+        GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -9426,6 +9494,20 @@ mod tests {
             "https://example.test/tunnel.php"
         );
         assert_eq!(redact_transport_url("https://alice:secret@%/"), "<invalid-url>");
+    }
+
+    #[test]
+    fn gaussdb_native_product_version_combines_server_and_hotpatch_versions() {
+        // `pg_settings.product_version` is the server version; a non-empty
+        // `hotpatch_version` is appended in parentheses, and an empty one is
+        // omitted entirely.
+        assert_eq!(gaussdb_native_product_version("9.1.1", None), Some("9.1.1".to_string()));
+        assert_eq!(gaussdb_native_product_version("9.1.1", Some("1.0.0")), Some("9.1.1 (1.0.0)".to_string()));
+        assert_eq!(gaussdb_native_product_version(" 9.1.1 ", Some(" 1.0.0 ")), Some("9.1.1 (1.0.0)".to_string()));
+        assert_eq!(gaussdb_native_product_version("9.1.1", Some("")), Some("9.1.1".to_string()));
+        assert_eq!(gaussdb_native_product_version("9.1.1", Some("   ")), Some("9.1.1".to_string()));
+        assert_eq!(gaussdb_native_product_version("", Some("1.0.0")), None);
+        assert_eq!(gaussdb_native_product_version("   ", None), None);
     }
 
     #[tokio::test]

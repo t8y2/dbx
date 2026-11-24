@@ -426,7 +426,16 @@ import type { PluginDecodeRequest } from "@/lib/dataGrid/sqlPluginCodec";
 import { createDataGridFilterConditionCache, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import { DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT, useDataGridDistinctValueLoader } from "@/composables/useDataGridDistinctValueLoader";
 import { dataGridDistinctValueKey, dataGridNullSuggestionFilterMode, toggleAllDataGridDistinctValueOptions, type DataGridDistinctValueSource, type DataGridDistinctValueSuggestionState, type DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
-import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, removeDataGridStructuredFilterColumnsForTab, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
+import {
+  cloneDataGridStructuredFilterRules,
+  loadDataGridStructuredFilterState,
+  removeDataGridAppliedFilterColumns,
+  removeDataGridStructuredFilterColumnsForTab,
+  saveDataGridStructuredFilterState,
+  type DataGridCachedServerColumnFilter,
+  type DataGridStructuredFilterCacheState,
+} from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { createDataGridSearchScopeKey } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
@@ -1568,7 +1577,8 @@ const filterBuilderOpen = filterBuilder.open;
 const filterWorkbenchRef = ref<{ focusRuleValue: (ruleId: string) => void }>();
 const filterBuilderColumnSearch = filterBuilder.columnSearch;
 const filteredFilterBuilderColumnOptions = filterBuilder.filteredColumns;
-const appliedStructuredWhereInput = filterBuilder.appliedWhereInput;
+// Keep the applied WHERE independent from edits to the active draft.
+const appliedStructuredWhereInput = ref("");
 const appliedStructuredRules = shallowRef<StructuredFilterRule[]>();
 const filterValueSuggestionRuleId = ref<string>();
 const filterValueSuggestionTarget = ref<DataGridDistinctValueSuggestionTarget>();
@@ -2132,11 +2142,12 @@ function updateTextFilterPanelHeight(height: number) {
 function resetStructuredFilters() {
   closeFilterValueSuggestions();
   filterBuilder.reset();
-  appliedStructuredRules.value = undefined;
 }
 
 async function clearAllFilters() {
   whereFilterInput.value = "";
+  appliedStructuredWhereInput.value = "";
+  appliedStructuredRules.value = undefined;
   resetStructuredFilters();
   clearLocalFilter(undefined, false);
   if (canUseWhereSearch.value) await applyWhereFilter();
@@ -5988,16 +5999,11 @@ async function forgetDroppedColumnQueryState(names: string[]): Promise<boolean> 
     structuredFilterRules.value = remainingRules.length > 0 ? remainingRules : [defaultStructuredFilterRule()];
   }
   inactiveFilterGroupRules.value = new Map([...inactiveFilterGroupRules.value].map(([number, rules]) => [number, keepRules(rules)]));
-  if (dataGridSqlTextReferencesAnyColumn(appliedStructuredWhereInput.value, names, dropColumnCaseSensitive())) {
-    const remainingAppliedRules = keepRules(appliedStructuredRules.value ?? []);
-    try {
-      appliedStructuredWhereInput.value = await buildStructuredWhereFromRules(remainingAppliedRules);
-    } catch {
-      appliedStructuredWhereInput.value = "";
-    }
-    appliedStructuredRules.value = remainingAppliedRules;
-    cleared = true;
-  }
+  const previousAppliedWhere = appliedStructuredWhereInput.value;
+  const applied = await removeDataGridAppliedFilterColumns({ appliedWhereInput: previousAppliedWhere, appliedRules: appliedStructuredRules.value }, names, dropColumnCaseSensitive(), buildStructuredWhereFromRules, resolveSqlDialectId({ databaseType: resolvedDatabaseType.value }));
+  appliedStructuredWhereInput.value = applied.appliedWhereInput;
+  appliedStructuredRules.value = applied.appliedRules;
+  if (applied.appliedWhereInput !== previousAppliedWhere) cleared = true;
   if (sortCol.value && dropped.has(dropColumnKey(sortCol.value))) {
     clearSort();
     syncOrderByInputWithSort(null, null);
@@ -6041,6 +6047,7 @@ async function patchOpenDataTabsAfterColumnDrop(target: DropColumnTarget, names:
       names,
       dropColumnCaseSensitive(),
       buildStructuredWhereFromRules,
+      resolveSqlDialectId({ databaseType: resolvedDatabaseType.value }),
     );
     if (cached) tab.whereInput = combineWhereInputs(cached.manualWhereInput, cached.appliedWhereInput) ?? "";
     if (tab.result?.local_column_filters) {

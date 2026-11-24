@@ -188,3 +188,106 @@ async fn live_mysql_object_statistics_match_space_padded_object_list() {
     );
     cleanup.expect("drop the live padded statistics fixture table");
 }
+
+/// ` orders` and `orders` are two different tables. DDL generated from a row must
+/// address only the row the user picked, and the refreshed list must keep showing
+/// both rows with their own metadata (#14905 review).
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_MYSQL_HOST/PORT/USER/PASSWORD/DATABASE pointing at a writable MySQL 8 server"]
+async fn live_mysql_ddl_targets_only_the_selected_space_padded_table() {
+    let database = std::env::var("DBX_LIVE_MYSQL_DATABASE").expect("DBX_LIVE_MYSQL_DATABASE");
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-padded-ddl-{suffix}");
+    let plain_table = format!("dbx_pad_{}", &suffix[..12]);
+    // MySQL forbids a trailing space in a table name; a leading space is
+    // significant inside backticks and is the shape reported in #14905.
+    let padded_table = format!(" {plain_table}");
+    let dir = std::env::temp_dir().join(format!("dbx-live-mysql-padded-ddl-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    state.configs.write().await.insert(connection_id.clone(), live_mysql_config(&connection_id, &database));
+
+    for table in [&padded_table, &plain_table] {
+        execute_sql_statement(
+            &state,
+            &connection_id,
+            &database,
+            &format!("DROP TABLE IF EXISTS `{table}`"),
+            None,
+            None,
+        )
+        .await
+        .expect("clean the live padded DDL fixture tables");
+        execute_sql_statement(
+            &state,
+            &connection_id,
+            &database,
+            &format!(
+                "CREATE TABLE `{table}` (id INT PRIMARY KEY AUTO_INCREMENT, label VARCHAR(32) NOT NULL) ENGINE=InnoDB"
+            ),
+            None,
+            None,
+        )
+        .await
+        .expect("create the live padded DDL fixture tables");
+    }
+
+    let objects = dbx_core::schema::list_objects_core(
+        &state,
+        &connection_id,
+        &database,
+        "",
+        None,
+        None,
+        None,
+        Some(&["TABLE".to_string()]),
+        None,
+    )
+    .await
+    .expect("object list for a live MySQL schema");
+    let object_names = objects.iter().map(|object| object.name.clone()).collect::<Vec<_>>();
+
+    // Exactly what the desktop does when the user changes the engine of the
+    // padded row: one statement, addressed by the row's exact identifier.
+    let alter = execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("ALTER TABLE `{database}`.`{padded_table}` ENGINE = MyISAM"),
+        None,
+        None,
+    )
+    .await;
+
+    let statistics = dbx_core::schema::list_object_statistics_core(&state, &connection_id, &database, "")
+        .await
+        .expect("object statistics for a live MySQL schema");
+    let engine_of =
+        |name: &str| statistics.iter().find(|entry| entry.name == name).and_then(|entry| entry.engine.clone());
+    let padded_engine = engine_of(&padded_table);
+    let plain_engine = engine_of(&plain_table);
+
+    let mut cleanup_failures = Vec::new();
+    for table in [&padded_table, &plain_table] {
+        if let Err(error) = execute_sql_statement(
+            &state,
+            &connection_id,
+            &database,
+            &format!("DROP TABLE IF EXISTS `{table}`"),
+            None,
+            None,
+        )
+        .await
+        {
+            cleanup_failures.push(format!("{table}: {error}"));
+        }
+    }
+
+    assert!(object_names.contains(&padded_table), "the object list must keep the leading space of the padded table");
+    assert!(object_names.contains(&plain_table), "the trimmed table must stay in the object list");
+    alter.expect("altering the padded table engine must succeed on its exact identifier");
+    assert_eq!(padded_engine.as_deref(), Some("MyISAM"), "the selected table must be the one whose engine changed");
+    assert_eq!(plain_engine.as_deref(), Some("InnoDB"), "the neighbouring table must keep its engine");
+    assert!(cleanup_failures.is_empty(), "cleanup must drop both fixture tables: {cleanup_failures:?}");
+}

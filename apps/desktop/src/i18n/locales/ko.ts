@@ -6575,6 +6575,8 @@ export default withEnglishFallback({
     defaultAction: "기본",
     transwarpPartitionColumns: "파티션 열",
     transwarpBucketColumns: "버킷 열",
+    addProperty: "속성 추가",
+    removeProperty: "속성 삭제",
     transwarpBucketCount: "버킷 수",
     transwarpStorageFormat: "저장 형식",
     transwarpTransactional: "트랜잭션 테이블",

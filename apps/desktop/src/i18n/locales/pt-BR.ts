@@ -6303,6 +6303,8 @@ export default withEnglishFallback({
     defaultAction: "Padrão",
     transwarpPartitionColumns: "Colunas de partição",
     transwarpBucketColumns: "Colunas de distribuição",
+    addProperty: "Adicionar propriedade",
+    removeProperty: "Remover propriedade",
     transwarpBucketCount: "Número de buckets",
     transwarpStorageFormat: "Formato de armazenamento",
     transwarpTransactional: "Tabela transacional",

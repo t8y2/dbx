@@ -21,7 +21,9 @@ import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.Locale;
 
 // Spark Thrift Server speaks the HiveServer2 protocol, so the Spark agent reuses
@@ -167,8 +169,15 @@ public final class SparkAgent extends AbstractJdbcAgent {
     public List<ColumnInfo> getColumns(String schema, String table) {
         return unchecked(() -> {
             try {
-                return getColumnsFromDescribe(schema, table);
-            } catch (Exception ignored) {
+                List<ColumnInfo> columns = getColumnsFromDescribe(schema, table);
+                if (configuredCatalog != null) {
+                    readPrimaryKeys(schema, table, columns);
+                }
+                return columns;
+            } catch (Exception describeError) {
+                if (configuredCatalog != null) {
+                    throw describeError;
+                }
                 return getColumnsFromMetadata(requireConnected(), schema, table);
             }
         });
@@ -229,6 +238,11 @@ public final class SparkAgent extends AbstractJdbcAgent {
         return "USE " + JdbcIdentifiers.INSTANCE.backtick(schema);
     }
 
+    @Override
+    public String resetSchemaSQL() {
+        return setSchemaSQL(configuredCatalog == null ? "default" : configuredCatalog);
+    }
+
     private static String extractCatalogParam(String urlParams) {
         if (urlParams == null || urlParams.isEmpty()) {
             return null;
@@ -278,17 +292,19 @@ public final class SparkAgent extends AbstractJdbcAgent {
              ResultSet rs = stmt.executeQuery("DESCRIBE " + describeTarget)) {
             while (rs.next()) {
                 String colName = trimToNull(rs.getString(1));
-                if (colName == null || colName.startsWith("#")) {
-                    continue;
+                if (colName == null || colName.startsWith("# Partition Information")
+                    || colName.startsWith("# Detailed Table Information")) {
+                    break;
                 }
+                String comment = optionalComment(rs);
                 result.add(new ColumnInfo(
                     colName,
                     trimToEmpty(rs.getString(2)),
                     true,
                     null,
                     false,
-                    null,
-                    optionalComment(rs),
+                    comment != null && comment.startsWith("dbx:time-partition:") ? comment : null,
+                    comment,
                     null,
                     null,
                     null
@@ -296,6 +312,37 @@ public final class SparkAgent extends AbstractJdbcAgent {
             }
         }
         return result;
+    }
+
+    private void readPrimaryKeys(String schema, String table, List<ColumnInfo> columns) {
+        String sql = "SHOW TBLPROPERTIES " + qualifiedTableReference(schema, table);
+        Set<String> keys = new HashSet<>();
+        try (java.sql.Statement stmt = requireConnected().createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                if ("primary-key".equalsIgnoreCase(rs.getString(1))) {
+                    String value = rs.getString(2);
+                    if (value != null) {
+                        for (String key : value.split(",")) {
+                            keys.add(key.trim());
+                        }
+                    }
+                    break;
+                }
+            }
+        } catch (Exception unavailable) {
+            // Views and some Spark catalog implementations do not expose table properties.
+            return;
+        }
+        if (keys.isEmpty() || keys.stream().anyMatch(key -> columns.stream().noneMatch(c -> key.equals(c.getName())))) {
+            return;
+        }
+        for (ColumnInfo column : columns) {
+            if (keys.contains(column.getName())) {
+                column.setIs_primary_key(true);
+                column.setIs_nullable(false);
+            }
+        }
     }
 
     private String qualifiedTableReference(String schema, String table) {

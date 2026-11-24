@@ -7114,6 +7114,8 @@ export default withEnglishFallback({
     defaultAction: "По умолчанию",
     transwarpPartitionColumns: "Столбцы секционирования",
     transwarpBucketColumns: "Столбцы распределения",
+    addProperty: "Добавить свойство",
+    removeProperty: "Удалить свойство",
     transwarpBucketCount: "Число корзин",
     transwarpStorageFormat: "Формат хранения",
     transwarpTransactional: "Транзакционная таблица",

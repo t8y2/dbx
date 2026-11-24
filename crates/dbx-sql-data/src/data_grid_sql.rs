@@ -1530,6 +1530,16 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
                     source_column,
                     row.get(column_index).unwrap_or(&Value::Null),
                 ) {
+                    if options.database_type == Some(DatabaseType::Spark) {
+                        let info = options.table_meta.columns.as_deref().unwrap_or(&[]);
+                        if source_column.and_then(|name| column_info_for(info, name))
+                            .and_then(spark_time_partition_rule)
+                            .and_then(|(_, source)| save_columns.iter().position(|name| name.as_deref() == Some(source)))
+                            .and_then(|index| row.get(index))
+                            .is_some_and(|value| !value.is_null()) {
+                            continue;
+                        }
+                    }
                     return Some(null_write_error(source_column.unwrap_or_default()));
                 }
             }
@@ -2036,12 +2046,12 @@ fn build_data_grid_save_statements(
             }
             continue;
         }
-        let columns = insert_pairs
+        let mut columns = insert_pairs
             .iter()
             .map(|(column, _)| data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()))
             .collect::<Vec<_>>()
             .join(", ");
-        let values = insert_pairs
+        let mut values = insert_pairs
             .iter()
             .map(|(column, value)| {
                 // A new-row NULL means unset. Keep StarRocks defaulted keys in the
@@ -2080,6 +2090,26 @@ fn build_data_grid_save_statements(
             })
             .collect::<Vec<_>>()
             .join(", ");
+        if options.database_type == Some(DatabaseType::Spark) {
+            for target in column_info {
+                let Some((mode, source)) = spark_time_partition_rule(target) else { continue };
+                if insert_pairs.iter().any(|(name, _)| *name == target.name) { continue }
+                let Some((_, value)) = insert_pairs.iter().find(|(name, _)| *name == source) else { continue };
+                let literal = format_grid_save_sql_literal(value, options.database_type,
+                    column_info_for(column_info, source), options.identifier_quote.as_deref());
+                let date = format!("CAST({literal} AS DATE)");
+                let expression = match mode {
+                    "day" => date,
+                    "month" => format!("TRUNC({date}, 'MONTH')"),
+                    "year" => format!("YEAR({date})"),
+                    _ => continue,
+                };
+                columns.push_str(", ");
+                columns.push_str(&data_grid_identifier(options.database_type, &target.name, options.identifier_quote.as_deref()));
+                values.push_str(", ");
+                values.push_str(&expression);
+            }
+        }
         statements.push(data_grid_save_statement(
             options.database_type,
             if options.database_type == Some(DatabaseType::Transwarp) {
@@ -3072,7 +3102,7 @@ pub fn format_grid_sql_literal_with_spatial(
     if database_type == Some(DatabaseType::SqlServer) {
         return format_sqlserver_unicode_literal(&literal_text);
     }
-    let escaped_text = if database_type == Some(DatabaseType::Neo4j) {
+    let escaped_text = if matches!(database_type, Some(DatabaseType::Neo4j | DatabaseType::Spark)) {
         literal_text.replace('\\', "\\\\").replace('\'', "\\'")
     } else if is_sqlite_literal_database(database_type) || keeps_literal_backslashes(database_type) {
         // These engines keep backslashes literal in ordinary string literals,
@@ -5211,6 +5241,11 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
     )
 }
 
+fn spark_time_partition_rule(column: &DataGridColumnInfo) -> Option<(&str, &str)> {
+    let (mode, source) = column.extra.as_deref()?.strip_prefix("dbx:time-partition:")?.split_once(':')?;
+    matches!(mode, "day" | "month" | "year").then_some((mode, source))
+}
+
 pub fn column_info_for<'a>(columns: &'a [DataGridColumnInfo], name: &str) -> Option<&'a DataGridColumnInfo> {
     let normalized = normalize_column_name(name);
     columns.iter().find(|column| normalize_column_name(&column.name) == normalized)
@@ -5277,6 +5312,26 @@ mod tests {
             new_rows: vec![],
             include_database_name: false,
         }
+    }
+
+    #[test]
+    fn spark_insert_derives_month_only_when_unset() {
+        let mut options = mysql_people_save_options(0);
+        options.database_type = Some(DatabaseType::Spark);
+        options.columns = vec!["create_date".into(), "p_month".into()];
+        options.table_meta.primary_keys.clear();
+        options.table_meta.columns = Some(vec![
+            column("create_date", "date", false, None),
+            column("p_month", "date", false, Some("dbx:time-partition:month:create_date")),
+        ]);
+        options.new_rows = vec![
+            vec![json!("2026-11-23"), Value::Null],
+            vec![json!("2026-11-23"), json!("2026-10-01")],
+        ];
+        let plan = prepare_data_grid_save(options);
+        assert_eq!(plan.validation_error, None);
+        assert!(plan.statements[0].contains("TRUNC(CAST('2026-11-23' AS DATE), 'MONTH')"));
+        assert!(plan.statements[1].contains("'2026-10-01'"));
     }
 
     #[test]

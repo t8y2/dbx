@@ -16,6 +16,7 @@ fn is_schema_qualifying_dialect(dialect: StructureDialect) -> bool {
             | StructureDialect::H2
             | StructureDialect::Informix
             | StructureDialect::Sqlite
+            | StructureDialect::Spark
     )
 }
 
@@ -53,6 +54,7 @@ pub(super) fn quote_ident(dialect: StructureDialect, name: &str) -> String {
         | StructureDialect::Doris
         | StructureDialect::GaussdbM
         | StructureDialect::ManticoreSearch
+        | StructureDialect::Spark
         | StructureDialect::Questdb => {
             format!("`{}`", name.replace('`', "``"))
         }
@@ -133,6 +135,10 @@ const ORACLE_RESERVED_WORDS_MISSING_FROM_SQLPARSER: &[&str] =
 fn is_oracle_reserved_identifier(name: &str) -> bool {
     sqlparser::keywords::ALL_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(name))
         || ORACLE_RESERVED_WORDS_MISSING_FROM_SQLPARSER.iter().any(|keyword| keyword.eq_ignore_ascii_case(name))
+}
+
+pub(super) fn spark_string(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
 pub(super) fn quote_string(value: &str) -> String {

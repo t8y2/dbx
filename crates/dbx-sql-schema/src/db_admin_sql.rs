@@ -412,6 +412,7 @@ pub fn supports_create_database_target(database_type: Option<DatabaseType>, _dri
                 | DatabaseType::Kingbase
                 | DatabaseType::Yashandb
                 | DatabaseType::Transwarp
+                | DatabaseType::Spark
         )
     )
 }
@@ -1070,7 +1071,7 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     if database_type == DatabaseType::SqlServer {
         return true;
     }
-    if matches!(database_type, DatabaseType::Transwarp | DatabaseType::StarRocks) {
+    if matches!(database_type, DatabaseType::Transwarp | DatabaseType::StarRocks | DatabaseType::Spark) {
         return object_type == DatabaseObjectType::Table;
     }
     if database_type == DatabaseType::SapHana {
@@ -1135,7 +1136,7 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
         ));
     }
 
-    if database_type == Some(DatabaseType::Transwarp) {
+    if matches!(database_type, Some(DatabaseType::Transwarp | DatabaseType::Spark)) {
         return Ok(format!(
             "ALTER TABLE {} RENAME TO {};",
             qualified_name(database_type, options.schema.as_deref(), &options.old_name),

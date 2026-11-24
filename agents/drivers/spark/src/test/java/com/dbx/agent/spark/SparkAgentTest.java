@@ -78,6 +78,24 @@ class SparkAgentTest {
         );
     }
 
+    @Test
+    void readsPaimonPrimaryKeysFromTheConfiguredCatalog() throws Exception {
+        List<String> sql = new ArrayList<>();
+        SparkAgent agent = new SparkAgent();
+        setConfiguredCatalog(agent, "lake");
+        TestSupport.setPrivateConnection(agent, connection(sql, null, false));
+
+        var columns = agent.getColumns("analytics", "events");
+
+        Assertions.assertEquals(2, columns.size());
+        Assertions.assertTrue(columns.get(0).getIs_primary_key());
+        Assertions.assertFalse(columns.get(1).getIs_primary_key());
+        Assertions.assertEquals(List.of(
+            "DESCRIBE `lake`.`analytics`.`events`",
+            "SHOW TBLPROPERTIES `lake`.`analytics`.`events`"
+        ), sql);
+    }
+
     private static Connection connection(List<String> sql, String nativeDdl, boolean failShowCreate) {
         Statement statement = proxy(Statement.class, (method, args) -> {
             if ("execute".equals(method.getName())) {
@@ -95,6 +113,9 @@ class SparkAgentTest {
                         new String[]{"createtab_stmt"},
                         new Object[][]{{nativeDdl}}
                     );
+                }
+                if (query.startsWith("SHOW TBLPROPERTIES")) {
+                    return resultSet(new String[]{"key", "value"}, new Object[][]{{"primary-key", "id"}});
                 }
                 if (query.startsWith("DESCRIBE")) {
                     return resultSet(

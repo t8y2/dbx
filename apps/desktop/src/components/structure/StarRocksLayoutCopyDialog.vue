@@ -4,6 +4,9 @@ import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import TablePhysicalOptionsEditor from "./TablePhysicalOptionsEditor.vue";
+import { emptyTablePhysicalOptions, PAIMON_PHYSICAL_OPTIONS, paimonWriteExpression } from "@/lib/table/tablePhysicalOptions";
+import { readPaimonCopySource, paimonCopyDdl } from "@/lib/table/starrocksLayoutCopy";
 import StarRocksPhysicalOptionsEditor from "./StarRocksPhysicalOptionsEditor.vue";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import { buildStarRocksDialectOptions, emptyStarRocksPhysicalOptions } from "@/lib/table/starrocksPhysicalOptions";
@@ -14,12 +17,67 @@ import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import type { EditableStructureColumn } from "@/lib/table/tableStructureEditorSql";
 import * as api from "@/lib/backend/api";
 
-const props = defineProps<{ open: boolean; connectionId: string; database: string; schema?: string; catalog?: string; tableName: string; serverVersion?: string; timeoutSecs?: number; authorize: (sql: string) => Promise<boolean> }>();
-const emit = defineEmits<{ "update:open": [open: boolean]; created: [tableName: string] }>();
+const props = defineProps<{ open: boolean; inline?: boolean; disabled?: boolean; paimon?: boolean; connectionId: string; database: string; schema?: string; catalog?: string; tableName: string; serverVersion?: string; timeoutSecs?: number; authorize: (sql: string) => Promise<boolean> }>();
+const emit = defineEmits<{ "update:open": [open: boolean]; created: [tableName: string, completed: boolean] }>();
 const { t } = useI18n();
 const targetName = ref("");
 const transferData = ref(false);
 const keepPartition = ref(true);
+const paimonPhysical = ref(emptyTablePhysicalOptions());
+const savedProperties = ref(new Map<string, string>());
+const propertyError = ref("");
+const propertiesLoaded = ref(false);
+const propertyPlan = computed(() => {
+  const current = new Map<string, string>();
+  for (const [rawKey, value] of paimonPhysical.value.propertyRows ?? []) {
+    const key = rawKey.trim();
+    if (!key && !value) continue;
+    if (!key || current.has(key) || /^(bucket|bucket-key|primary-key|comment|location|path)$/i.test(key)) {
+      return { error: t("structureEditor.invalidPropertyKey", { key }), changes: [] };
+    }
+    current.set(key, value);
+  }
+  const table = [props.catalog, props.schema || props.database, props.tableName]
+    .filter(Boolean)
+    .map((name) => "`" + name!.replaceAll("`", "``") + "`")
+    .join(".");
+  const literal = (value: string) => "'" + value.replaceAll("\\", "\\\\").replaceAll("'", "\\'") + "'";
+  const updates = [...current].filter(([key, value]) => savedProperties.value.get(key) !== value);
+  const removals = [...savedProperties.value.keys()].filter((key) => !current.has(key));
+  const changes = [];
+  if (updates.length)
+    changes.push({
+      sql: `ALTER TABLE ${table} SET TBLPROPERTIES (${updates.map(([k, v]) => literal(k) + " = " + literal(v)).join(", ")});`,
+      apply: () => updates.forEach(([k, v]) => savedProperties.value.set(k, v)),
+    });
+  if (removals.length)
+    changes.push({
+      sql: `ALTER TABLE ${table} UNSET TBLPROPERTIES IF EXISTS (${removals.map(literal).join(", ")});`,
+      apply: () => removals.forEach((key) => savedProperties.value.delete(key)),
+    });
+  return { error: "", changes };
+});
+
+async function saveProperties() {
+  const { changes, error } = propertyPlan.value;
+  if (locked.value || error || !changes.length) return;
+  const { connectionId, database, schema, timeoutSecs } = props;
+  running.value = true;
+  propertyError.value = "";
+  try {
+    if (!(await props.authorize(changes.map((change) => change.sql).join("\n")))) return;
+    for (const change of changes) {
+      await api.executeBatch(connectionId, database, [change.sql], schema, timeoutSecs, false);
+      change.apply();
+    }
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    const immutable = /UnsupportedOperationException:\s*Cannot change ([\w.-]+) from /i.exec(message);
+    propertyError.value = immutable ? t("structureEditor.immutableProperty", { key: immutable[1] }) : message;
+  } finally {
+    running.value = false;
+  }
+}
 const physical = ref(emptyStarRocksPhysicalOptions());
 const columns = ref<EditableStructureColumn[]>([]);
 const sourceDdl = ref("");
@@ -32,10 +90,11 @@ const loading = ref(false);
 const previewLoading = ref(false);
 const running = ref(false);
 const attempted = ref(false);
+const generatedColumnsRejected = ref(false);
 const stage = ref<StarRocksCopyStage>();
 let loadRequest = 0;
 let previewRequest = 0;
-const locked = computed(() => loading.value || running.value || attempted.value);
+const locked = computed(() => props.disabled || loading.value || running.value || attempted.value);
 const canSubmit = computed(() => !!plan.value && !locked.value && !previewLoading.value && !warnings.value.length && !error.value);
 function close(open: boolean) {
   if (!running.value) emit("update:open", open);
@@ -52,7 +111,12 @@ watch(
     previewRequest++;
     if (!open) return;
     loading.value = true;
+    propertyError.value = "";
+    propertiesLoaded.value = false;
+    paimonPhysical.value = emptyTablePhysicalOptions();
+    savedProperties.value = new Map();
     attempted.value = false;
+    generatedColumnsRejected.value = false;
     stage.value = undefined;
     plan.value = undefined;
     preview.value = "";
@@ -72,6 +136,35 @@ watch(
         api.getColumns(props.connectionId, props.database, props.schema ?? props.database, props.tableName, props.catalog),
       ]);
       if (id !== loadRequest) return;
+      if (props.paimon) {
+        const source = readPaimonCopySource(ddl.ddl);
+        const properties = source.properties;
+        const keys = properties
+          .get("primary-key")
+          ?.split(",")
+          .map((name) => name.trim());
+        columns.value = createColumnDrafts(metadata, "spark").map((column) => ({ ...column, isPrimaryKey: keys ? keys.includes(column.name) : column.isPrimaryKey }));
+        if (!columns.value.length || keys?.some((key) => !columns.value.some((column) => column.name === key))) throw new Error(t("starrocksLayout.copyMetadataUnavailable"));
+        const bucketIds = (properties.get("bucket-key") || "")
+          .split(",")
+          .filter(Boolean)
+          .map((name) => {
+            const column = columns.value.find((c) => c.name === name.trim());
+            if (!column) throw new Error(t("starrocksLayout.copyMetadataUnavailable"));
+            return column.id;
+          });
+        const partitionIds = source.partitionNames.map((name) => {
+          const column = columns.value.find((c) => c.name === name);
+          if (!column) throw new Error(t("starrocksLayout.copyMetadataUnavailable"));
+          return column.id;
+        });
+        paimonPhysical.value = { ...emptyTablePhysicalOptions(), partitionColumnIds: partitionIds, distributionColumnIds: bucketIds, bucketCount: properties.get("bucket") ?? "", propertyRows: [...properties].filter(([key]) => !["bucket", "bucket-key", "primary-key", "comment"].includes(key)) };
+        savedProperties.value = new Map(paimonPhysical.value.propertyRows);
+        propertiesLoaded.value = true;
+        keepPartition.value = false;
+        sourceDdl.value = ddl.ddl;
+        return;
+      }
       context.value = starRocksAlterOptionsFromDdl(ddl.ddl, props.serverVersion);
       if (!context.value.model || !context.value.distribution) throw new Error(t("starrocksLayout.copyMetadataUnavailable"));
       sourceDdl.value = ddl.ddl;
@@ -88,6 +181,25 @@ watch(
       };
     } catch (e) {
       if (id === loadRequest) error.value = e instanceof Error ? e.message : String(e);
+      if (id === loadRequest && props.inline && props.paimon) {
+        const table = [props.catalog, props.schema || props.database, props.tableName]
+          .filter(Boolean)
+          .map((name) => "`" + name!.replaceAll("`", "``") + "`")
+          .join(".");
+        try {
+          const result = await api.executeQuery(props.connectionId, props.database, "SHOW TBLPROPERTIES " + table, props.schema);
+          if (id !== loadRequest) return;
+          const rows: [string, string][] = [];
+          for (const [key, value] of result.rows) {
+            if (typeof key === "string" && typeof value === "string" && !/^(bucket|bucket-key|primary-key|comment|location|path)$/i.test(key)) rows.push([key, value]);
+          }
+          paimonPhysical.value.propertyRows = rows;
+          savedProperties.value = new Map(rows);
+          propertiesLoaded.value = true;
+        } catch (cause) {
+          if (id === loadRequest) propertyError.value = cause instanceof Error ? cause.message : String(cause);
+        }
+      }
     } finally {
       if (id === loadRequest) loading.value = false;
     }
@@ -105,6 +217,45 @@ async function refreshPreview() {
   try {
     const target = targetName.value.trim();
     if (!target || target.toLowerCase() === props.tableName.toLowerCase() || target.includes("\0")) throw new Error(t("starrocksLayout.copyNameRequired"));
+    if (props.paimon) {
+      const draft = paimonPhysical.value;
+      if (draft.propertyRows?.some(([key]) => /^(path|location)$/i.test(key.trim()))) throw new Error("A layout copy requires a new managed table location.");
+      const mode = draft.partitionMode ?? "value";
+      const derived = mode !== "none" && mode !== "value";
+      const quote = (name: string) => "`" + name.replaceAll("`", "``") + "`";
+      const namespace = [props.catalog, props.schema || props.database].filter((v): v is string => !!v).map(quote);
+      const qualified = (name: string) => [...namespace, quote(name)].join(".");
+      const sourceColumn = columns.value.find((column) => column.id === draft.partitionColumnIds[0]);
+      const expr = sourceColumn ? paimonWriteExpression(draft, quote(sourceColumn.name)) : "";
+      const hasPrimaryKey = columns.value.some((column) => column.isPrimaryKey);
+      const source = readPaimonCopySource(sourceDdl.value);
+      const partitionName = draft.partitionTarget?.trim() || "p_" + mode;
+      const existingPartition = derived && source.partitionNames.includes(partitionName) && sourceColumn?.name !== partitionName ? partitionName : undefined;
+      const retainedColumns = columns.value.filter((column) => column.name !== existingPartition);
+      if (existingPartition && hasPrimaryKey && !retainedColumns.some((column) => column.isPrimaryKey)) {
+        throw new Error("Choose a different partition name to preserve the existing primary key.");
+      }
+      const copyColumns = retainedColumns.map((column) => ({
+        ...column,
+        isPrimaryKey: column.isPrimaryKey || (hasPrimaryKey && mode === "value" && draft.partitionColumnIds.includes(column.id)),
+      }));
+      const result = await api.buildCreateTableSql({ databaseType: "spark", tableName: target, schema: props.schema, columns: copyColumns, indexes: [], foreignKeys: [], triggers: [], tableComment: "", partitioned: false }, props.serverVersion, {
+        paimon: { ...draft, bucketColumnIds: draft.distributionColumnIds, propertyRows: draft.propertyRows ?? [] },
+      });
+      if (id !== previewRequest) return;
+      if (result.warnings.length || result.statements.length !== 1) throw new Error(result.warnings.join("\n") || t("starrocksLayout.copyMetadataUnavailable"));
+      const createSql = paimonCopyDdl(source, result.statements[0], qualified(target), derived, existingPartition);
+      const names = retainedColumns.map((column) => quote(column.name));
+      const selections = [...names];
+      if (derived && (!draft.generatePartition || mode === "group" || mode === "range")) {
+        names.push(quote(draft.partitionTarget?.trim() || "p_" + mode));
+        selections.push(expr);
+      }
+      const insertSql = transferData.value ? `INSERT INTO ${qualified(target)} (${names.join(", ")}) SELECT ${selections.join(", ")} FROM ${qualified(props.tableName)};` : undefined;
+      plan.value = { createSql, insertSql, targetName: target };
+      preview.value = [createSql, insertSql].filter(Boolean).join("\n\n");
+      return;
+    }
     const result = await api.buildCreateTableSql({ databaseType: "starrocks", tableName: target, schema: props.schema, columns: columns.value, indexes: [], foreignKeys: [], triggers: [], tableComment: "", partitioned: false }, props.serverVersion, buildStarRocksDialectOptions(physical.value));
     if (id !== previewRequest) return;
     if (result.warnings.length || result.statements.length !== 1) {
@@ -130,7 +281,7 @@ async function refreshPreview() {
 }
 
 watch(
-  [targetName, transferData, keepPartition, physical, sourceDdl, columns],
+  [targetName, transferData, keepPartition, physical, paimonPhysical, sourceDdl, columns],
   () => {
     void refreshPreview();
   },
@@ -162,20 +313,41 @@ async function submit() {
     );
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    if (props.paimon && stage.value === "creating" && paimonPhysical.value.generatePartition && /UNSUPPORTED_FEATURE\.TABLE_OPERATION/.test(message) && /does not support generated columns/i.test(message)) {
+      generatedColumnsRejected.value = true;
+      attempted.value = false;
+      stage.value = undefined;
+      plan.value = undefined;
+      preview.value = "";
+      paimonPhysical.value = { ...paimonPhysical.value, generatePartition: false };
+      return;
+    }
     error.value = t(stage.value === "transferring" || stage.value === "created" ? "starrocksLayout.copyTransferFailed" : "starrocksLayout.copyCreateFailed", { table: snapshot.targetName, message });
   } finally {
     running.value = false;
-    if (created) emit("created", snapshot.targetName);
+    if (created) {
+      const completed = stage.value === "complete";
+      if (completed) close(false);
+      emit("created", snapshot.targetName, completed);
+    }
   }
 }
 </script>
 <template>
-  <Dialog :open="open" @update:open="close">
-    <DialogContent data-starrocks-layout-copy-dialog class="flex max-h-[90vh] flex-col sm:max-w-[900px]" :show-close-button="!running" @escape-key-down="preventDismiss" @interact-outside="preventDismiss">
-      <DialogHeader
+  <component :is="inline ? 'section' : Dialog" :open="open" @update:open="close">
+    <component :is="inline ? 'div' : DialogContent" data-starrocks-layout-copy-dialog :class="inline ? 'space-y-2' : 'flex max-h-[90vh] flex-col sm:max-w-[900px]'" :show-close-button="!running" @escape-key-down="preventDismiss" @interact-outside="preventDismiss">
+      <DialogHeader v-if="!inline"
         ><DialogTitle>{{ t("starrocksLayout.copyTitle") }}</DialogTitle></DialogHeader
       >
       <div class="min-h-0 space-y-3 overflow-y-auto">
+        <TablePhysicalOptionsEditor v-if="inline && paimon" v-model="paimonPhysical" :config="PAIMON_PHYSICAL_OPTIONS" :columns="columns" section="properties" :disabled="locked || !propertiesLoaded" />
+        <div v-if="inline && paimon" class="space-y-1">
+          <Button size="sm" :disabled="locked || !!propertyPlan.error || !propertyPlan.changes.length" @click="saveProperties">{{ t("structureEditor.saveProperties") }}</Button>
+          <p v-if="propertyPlan.error || propertyError" role="alert" class="text-sm text-destructive">{{ propertyPlan.error || propertyError }}</p>
+          <pre v-if="propertyPlan.changes.length" class="whitespace-pre-wrap text-xs">{{ propertyPlan.changes.map((change) => change.sql).join("\n") }}</pre>
+        </div>
+        <TablePhysicalOptionsEditor v-if="paimon && sourceDdl" v-model="paimonPhysical" :config="PAIMON_PHYSICAL_OPTIONS" :columns="columns" :section="inline ? 'layout' : undefined" :generated-columns-unavailable="generatedColumnsRejected" :disabled="locked" />
+        <p v-if="generatedColumnsRejected" role="status" class="text-sm">{{ t("structureEditor.partitionGeneratedRejected") }}</p>
         <p class="text-sm text-muted-foreground">{{ t("starrocksLayout.copyHint", { table: tableName }) }}</p>
         <p v-if="loading" class="text-sm">{{ t("starrocksLayout.copyLoading") }}</p>
         <label class="block space-y-1"
@@ -184,9 +356,10 @@ async function submit() {
         /></label>
         <label class="flex items-center gap-2 text-sm"><input v-model="transferData" type="checkbox" :disabled="locked" />{{ t("starrocksLayout.copyTransferData") }}</label>
         <p v-if="transferData" class="text-xs text-muted-foreground">{{ t("starrocksLayout.copyTransferHint") }}</p>
-        <label class="flex items-center gap-2 text-sm"><input v-model="keepPartition" type="checkbox" :disabled="locked" />{{ t("starrocksLayout.copyKeepPartition") }}</label>
+        <label v-if="!paimon" class="flex items-center gap-2 text-sm"><input v-model="keepPartition" type="checkbox" :disabled="locked" />{{ t("starrocksLayout.copyKeepPartition") }}</label>
         <pre v-if="keepPartition && context?.partitionClause" class="overflow-auto whitespace-pre-wrap rounded border p-2 text-xs">{{ context.partitionClause }}</pre>
-        <StarRocksPhysicalOptionsEditor v-if="sourceDdl" v-model="physical" :columns="columns" :server-version="serverVersion" :disabled="locked" :hide-partition="keepPartition" hide-sorting />
+
+        <StarRocksPhysicalOptionsEditor v-if="!paimon && sourceDdl" v-model="physical" :columns="columns" :server-version="serverVersion" :disabled="locked" :hide-partition="keepPartition" hide-sorting />
         <p v-if="context?.colocated" class="text-xs text-muted-foreground">{{ t("starrocksLayout.copyColocationHint") }}</p>
         <p v-if="!keepPartition" class="text-xs text-muted-foreground">{{ t("starrocksLayout.copyPartitionHint") }}</p>
         <p v-if="stage && !error" class="text-sm" role="status">{{ t(`starrocksLayout.copyStage_${stage}`, { table: plan?.targetName }) }}</p>
@@ -194,15 +367,15 @@ async function submit() {
         <ul v-if="warnings.length" class="space-y-1 text-sm text-amber-600">
           <li v-for="warning in warnings" :key="warning">{{ warning }}</li>
         </ul>
-        <details v-if="preview" open>
+        <details v-if="preview" :open="!inline">
           <summary class="cursor-pointer text-sm">{{ t("structureEditor.sqlPreview") }}</summary>
           <pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded border bg-muted/20 p-3 text-xs">{{ preview }}</pre>
         </details>
       </div>
-      <DialogFooter>
-        <Button variant="outline" :disabled="running" @click="close(false)">{{ t("common.close") }}</Button>
+      <component :is="inline ? 'div' : DialogFooter">
+        <Button v-if="!inline" variant="outline" :disabled="running" @click="close(false)">{{ t("common.close") }}</Button>
         <Button :disabled="!canSubmit" @click="submit">{{ running ? t("starrocksLayout.copyRunning") : t("starrocksLayout.copyExecute") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
+      </component>
+    </component>
+  </component>
 </template>

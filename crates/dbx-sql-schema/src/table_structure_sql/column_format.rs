@@ -111,6 +111,9 @@ pub(super) fn column_definition(
     {
         parts.push(format!("COMMENT {}", quote_string(&clean(&column.comment))));
     }
+    if dialect == StructureDialect::Spark && !clean(&column.comment).is_empty() {
+        parts.push(format!("COMMENT {}", super::util::spark_string(&clean(&column.comment))));
+    }
     parts.join(" ")
 }
 
@@ -368,6 +371,19 @@ pub(super) fn column_data_type(
     }
     if dialect == StructureDialect::Questdb {
         return questdb_column_type(column);
+    }
+    if dialect == StructureDialect::Spark {
+        let data_type = column.data_type.trim();
+        if let Some((base, args)) = data_type.split_once('(') {
+            let base = base.trim();
+            if matches!(
+                base.to_ascii_lowercase().as_str(),
+                "bigint" | "int" | "integer" | "smallint" | "tinyint" | "string"
+            ) && args.strip_suffix(')').is_some_and(|width| width.trim().parse::<u32>().is_ok())
+            {
+                return base.to_string();
+            }
+        }
     }
     let normalized = normalize_column_data_type(dialect, &column.data_type);
     // Dameng only recognizes its built-in type keywords in the canonical

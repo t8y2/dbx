@@ -149,6 +149,13 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       transaction: false,
     },
   },
+  spark: {
+    tableData: {
+      ...DEFAULT_TABLE_DATA_CAPABILITY,
+      insert: true,
+      transaction: false,
+    },
+  },
   transwarp: {
     tableData: {
       insert: true,

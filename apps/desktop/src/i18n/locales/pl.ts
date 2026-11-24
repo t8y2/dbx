@@ -5794,6 +5794,8 @@ export default withEnglishFallback({
     mysqlTableEngineLoadFailed: "Nie udało się załadować silników pamięci: {message}",
     transwarpPartitionColumns: "Kolumny partycji",
     transwarpBucketColumns: "Kolumny zasobników (Bucket)",
+    addProperty: "Dodaj właściwość",
+    removeProperty: "Usuń właściwość",
     transwarpBucketCount: "Liczba zasobników",
     transwarpStorageFormat: "Format przechowywania",
     transwarpTransactional: "Tabela transakcyjna",

@@ -320,6 +320,9 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
         }
 
         match dialect {
+            StructureDialect::Spark => {
+                statements.extend(super::column_alter::build_spark_column_sql(&table, column, warnings))
+            }
             StructureDialect::Mysql => {
                 let rewritten;
                 let effective_column = if clears_orphaned_auto_increment {
@@ -724,7 +727,7 @@ pub(super) fn build_add_column_sql(
     driver_profile: Option<&str>,
 ) -> Vec<String> {
     let definition = column_definition(dialect, column, database_type);
-    let mut statements = if database_type == Some(DatabaseType::Transwarp) {
+    let mut statements = if matches!(database_type, Some(DatabaseType::Transwarp | DatabaseType::Spark)) {
         vec![format!("ALTER TABLE {table} ADD COLUMNS ({definition});")]
     } else if is_oracle_like(dialect) || matches!(dialect, StructureDialect::Informix | StructureDialect::SapHana) {
         vec![format!("ALTER TABLE {table} ADD ({definition});")]

@@ -167,6 +167,7 @@ function withPostgresArrayTypes(types: readonly string[]): string[] {
 }
 
 export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
+  spark: ["STRING", "BOOLEAN", "TINYINT", "SMALLINT", "INT", "BIGINT", "FLOAT", "DOUBLE", "DECIMAL(10,2)", "DATE", "TIMESTAMP", "TIMESTAMP_NTZ", "BINARY"],
   // Use complete nested declarations so selecting a complex type produces valid SQL.
   starrocks: STARROCKS_DATA_TYPES,
   mysql: [
@@ -1815,6 +1816,7 @@ export interface DataTypeDefaultOptions {
 
 export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string, options: DataTypeDefaultOptions = {}): string {
   const key = baseType.trim().toLowerCase();
+  if (_dbType === "spark" && isDataTypeLengthDisabled(_dbType, baseType)) return "";
   if (_dbType === "starrocks" && isDataTypeLengthDisabled(_dbType, baseType)) return "";
   if ((_dbType === "oracle" || _dbType === "oceanbase-oracle") && key === "float") return "";
   if (_dbType === "duckdb" && (key === "float" || isDataTypeLengthDisabled(_dbType, baseType))) return "";
@@ -1895,6 +1897,7 @@ function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {
 
 export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, baseType: string): boolean {
   const key = baseType.trim().toLowerCase();
+  if (_dbType === "spark") return !["char", "varchar", "decimal", "numeric"].includes(key);
   if (_dbType === "starrocks") {
     return !["tinyint", "smallint", "int", "integer", "bigint", "largeint", "char", "varchar", "binary", "varbinary", "decimal", "decimal32", "decimal64", "decimal128", "decimal256"].includes(key);
   }

@@ -151,6 +151,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
     }
 
     match dialect {
+        StructureDialect::Spark => statements.extend(build_spark_column_sql(&table, &options.column, &mut warnings)),
         StructureDialect::Mysql => statements.extend(build_mysql_existing_column_sql(&table, &options.column, "")),
         StructureDialect::Doris => statements.extend(build_doris_existing_column_sql(&table, &options.column, "")),
         StructureDialect::Postgres => statements.extend(build_postgres_existing_column_sql(&table, &options.column)),
@@ -499,6 +500,39 @@ pub(super) fn build_mysql_existing_column_clause(column: &EditableStructureColum
         )
     };
     format!("{operation}{position_clause}")
+}
+
+pub(super) fn build_spark_column_sql(
+    table: &str,
+    column: &EditableStructureColumn,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    let Some(original) = &column.original else { return Vec::new() };
+    if column.is_nullable != original.is_nullable
+        || normalize_default(Some(&column.default_value)) != original_default(column)
+    {
+        warnings.push(format!(
+            "Spark table editing cannot change nullability or the default for column {}.",
+            original.name
+        ));
+        return Vec::new();
+    }
+    let dialect = StructureDialect::Spark;
+    let name = quote_ident(dialect, column.name.trim());
+    let mut statements = Vec::new();
+    if column.name.trim() != original.name {
+        let old = quote_ident(dialect, &original.name);
+        statements.push(format!("ALTER TABLE {table} RENAME COLUMN {old} TO {name};"));
+    }
+    if column.data_type.trim() != original.data_type.trim() {
+        let data_type = column_data_type(dialect, column, Some(crate::models::connection::DatabaseType::Spark));
+        statements.push(format!("ALTER TABLE {table} ALTER COLUMN {name} TYPE {data_type};"));
+    }
+    if clean(&column.comment) != original_comment(column) {
+        let comment = super::util::spark_string(&clean(&column.comment));
+        statements.push(format!("ALTER TABLE {table} ALTER COLUMN {name} COMMENT {comment};"));
+    }
+    statements
 }
 
 pub(super) fn build_transwarp_existing_column_clause(column: &EditableStructureColumn) -> String {

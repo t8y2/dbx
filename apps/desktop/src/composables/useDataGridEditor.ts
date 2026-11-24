@@ -1964,11 +1964,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function saveStatementOptions(snapshot = snapshotPendingSaveChanges()) {
     if (!tableMeta.value) return null;
+    const meta = tableMeta.value;
+    // Older Spark agents expose the partition rule only through DESCRIBE's comment.
+    const saveMeta = resolvedDatabaseType.value === "spark" && snapshot.newRows.length ? { ...meta, columns: meta.columns.map((column) => (!column.extra && column.comment?.startsWith("dbx:time-partition:") ? { ...column, extra: column.comment } : column)) } : meta;
     return {
       databaseType: resolvedDatabaseType.value,
       serverVersion: connectionStore.getConfig(connectionId.value ?? "")?.database_info?.productVersion,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId.value),
-      tableMeta: tableMeta.value,
+      tableMeta: saveMeta,
       columns: result.value.columns,
       sourceColumns: sourceColumns.value,
       rows: result.value.rows,

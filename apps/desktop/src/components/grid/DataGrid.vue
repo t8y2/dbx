@@ -5243,6 +5243,7 @@ function canEditCellItem(item: RowItem | undefined, columnIndex: number): boolea
     // A new Salesforce record cannot carry non-createable fields (Id, CreatedDate, …).
     if (isSalesforceNewRowReadonlyColumn(props.databaseType, sourceColumn, props.tableMeta?.columns ?? [])) return false;
   } else {
+    if (props.databaseType === "spark" && props.tableMeta?.primaryKeys.some((key) => key.toLowerCase() === sourceColumn.toLowerCase())) return false;
     if (isClickHouseExistingRowReadonlyColumn(props.databaseType, sourceColumn, props.tableMeta?.primaryKeys ?? [], props.tableMeta?.columns ?? [])) return false;
     if (isTdengineExistingRowReadonlyColumn(props.databaseType, column, props.tableMeta?.columns ?? [])) return false;
     if (isSalesforceExistingRowReadonlyColumn(props.databaseType, sourceColumn, props.tableMeta?.primaryKeys ?? [], props.tableMeta?.columns ?? [])) return false;

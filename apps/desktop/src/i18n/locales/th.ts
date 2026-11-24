@@ -7343,6 +7343,8 @@ export default withEnglishFallback({
     mysqlTableEngineLoadFailed: "โหลด Storage Engine ไม่สำเร็จ: {message}",
     transwarpPartitionColumns: "Columns ของ Partition",
     transwarpBucketColumns: "Columns ของ Bucket",
+    addProperty: "เพิ่มคุณสมบัติ",
+    removeProperty: "ลบคุณสมบัติ",
     transwarpBucketCount: "Buckets",
     transwarpStorageFormat: "รูปแบบ Storage",
     transwarpTransactional: "Table แบบ Transactional",

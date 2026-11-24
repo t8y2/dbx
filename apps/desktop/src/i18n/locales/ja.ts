@@ -6357,6 +6357,8 @@ export default withEnglishFallback({
     defaultAction: "デフォルト",
     transwarpPartitionColumns: "パーティション列",
     transwarpBucketColumns: "バケット列",
+    addProperty: "プロパティを追加",
+    removeProperty: "プロパティを削除",
     transwarpBucketCount: "バケット数",
     transwarpStorageFormat: "保存形式",
     transwarpTransactional: "トランザクションテーブル",

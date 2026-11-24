@@ -124,6 +124,7 @@ export interface PersistedEditorGroup {
 export interface OpenTabsStatePayload {
   tabs: unknown[];
   activeTabId: string | null;
+  closedQueryDrafts?: unknown[];
   groups?: PersistedEditorGroup[];
   focusedGroupId?: string;
   orientation?: "vertical" | "horizontal";

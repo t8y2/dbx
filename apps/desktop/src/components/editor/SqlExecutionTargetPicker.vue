@@ -31,6 +31,11 @@ const pickerStyle = computed(() => {
 });
 
 function displayLabel(candidate: SqlExecutionCandidate) {
+  // Nested candidates all share one label; the level suffix tells sibling rows
+  // apart when the cursor sits several brackets deep (#15213).
+  if (candidate.kind === "nested" && (candidate.level ?? 1) > 1) {
+    return t("editor.executionPicker.nestedStatementLevel", { level: candidate.level });
+  }
   return t(`editor.executionPicker.${candidate.label}`);
 }
 

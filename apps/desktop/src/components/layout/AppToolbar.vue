@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { TOOLBAR_ITEM_GROUPS, toolbarGroupOrder, orderToolbarItems } from "@/lib/settings/toolbarCustomization";
+import { TOOLBAR_ITEM_GROUPS, isToolbarMenuItem, toolbarGroupOrder, orderToolbarItems } from "@/lib/settings/toolbarCustomization";
 import { computed, defineAsyncComponent, ref, shallowRef, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
@@ -133,7 +133,7 @@ const settingsStore = useSettingsStore();
 const CONSOLIDATE_WORKSPACE_WINDOWS = "__consolidate-workspace-windows__";
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const orderedToolbarKeys = computed(() => ({
-  primary: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "primary"),
+  primary: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "left").filter((key) => !isToolbarMenuItem(key) || toolbarItems.value.pinnedMenuItems.includes(key)),
   menu: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "menu"),
   right: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "right"),
   controls: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "controls"),
@@ -721,6 +721,7 @@ onBeforeUnmount(() => {
 type ToolbarMenuItem = LightDropdownItem & { action: () => void };
 
 const toolbarMenuItemKeys: Record<string, string> = {
+  "recent-closed-tabs": "recentClosedTabs",
   "open-sql-editor-file": "openSql",
   transfer: "dataTransfer",
   "driver-store": "driverManager",
@@ -743,7 +744,7 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
   const items: ToolbarMenuItem[] = [];
   items.push({ value: "bookmarks", label: t("editor.bookmarks.workspaceTitle"), icon: BookMarked, action: () => emit("open-bookmarks"), disabled: false });
 
-  if (props.hasClosedTabs) {
+  if (props.hasClosedTabs && toolbarItems.value.recentClosedTabs) {
     items.push({
       value: "recent-closed-tabs",
       label: t("tabs.recentClosedTitle"),
@@ -850,7 +851,17 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
   return orderToolbarItems(orderedPrimary, orderedToolbarKeys.value.controls, toolbarMenuItemKey);
 }
 
-const moreItems = computed(() => buildToolbarMenuItems(false));
+const visibleMenuActions = computed(() => buildToolbarMenuItems(false));
+const pinnedMenuActions = computed(() => {
+  const actions = new Map<string, ToolbarMenuItem>();
+  for (const item of visibleMenuActions.value) {
+    const key = toolbarMenuItemKey(item);
+    if (isToolbarMenuItem(key) && toolbarItems.value.pinnedMenuItems.includes(key)) actions.set(key, item);
+  }
+  return actions;
+});
+const primaryToolbarEntries = computed(() => orderedToolbarKeys.value.primary.map((key) => ({ key, menuAction: pinnedMenuActions.value.get(key) })));
+const moreItems = computed(() => visibleMenuActions.value.filter((item) => !pinnedMenuActions.value.has(toolbarMenuItemKey(item))));
 
 const showMoreDropdown = computed(() => moreItems.value.length > 0);
 
@@ -920,7 +931,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
       </TooltipTrigger>
       <TooltipContent>{{ sidebarExpandTooltip }}</TooltipContent>
     </Tooltip>
-    <template v-for="toolbarKey in orderedToolbarKeys.primary" :key="toolbarKey">
+    <template v-for="{ key: toolbarKey, menuAction } in primaryToolbarEntries" :key="toolbarKey">
       <Button data-toolbar-item="newConnection" v-if="toolbarKey === 'newConnection' && toolbarItems.newConnection !== false" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
         <span class="inline-flex items-center gap-1">
           <DatabaseZap class="h-3.5 w-3.5" />
@@ -953,6 +964,9 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
         </Button>
         <PluginShortcutToolbar v-if="showPluginCenterShortcuts" dropdown-only :menu-anchor="pluginCenterGroup" @layout-change="handlePluginToolbarLayout" />
       </div>
+      <Button v-if="menuAction && !toolbarCollapsed" :data-toolbar-item="toolbarKey" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :disabled="menuAction.disabled" :title="menuAction.label" :aria-label="menuAction.label" @click="menuAction.action">
+        <component :is="menuAction.icon" class="size-3.5" />
+      </Button>
     </template>
     <PluginShortcutToolbar v-if="toolbarCollapsed && showPluginCenterShortcuts" dropdown-only @layout-change="handlePluginToolbarLayout" />
     <LightDropdown

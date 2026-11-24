@@ -126,6 +126,22 @@ describe("QueryEditor batch selection ownership", () => {
     expect(batch.expandedRendering).toBe(false);
   });
 
+  it("lets a same-row double-click reach single-completion handling", () => {
+    const { session, row } = createHarness();
+    const { label } = row(1);
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(label);
+
+    const firstMouseDown = new MouseEvent("mousedown", { button: 0, detail: 1, bubbles: true, cancelable: true });
+    label.dispatchEvent(firstMouseDown);
+    expect(firstMouseDown.defaultPrevented).toBe(true);
+    expect(session.selectedKeys).toEqual(new Set([session.candidates[1].key]));
+
+    const secondMouseDown = new MouseEvent("mousedown", { button: 0, detail: 2, bubbles: true, cancelable: true });
+    label.dispatchEvent(secondMouseDown);
+    expect(secondMouseDown.defaultPrevented).toBe(false);
+    expect(session.selectedKeys).toEqual(new Set([session.candidates[1].key]));
+  });
+
   it("uses the live selected completion and inserts fields in candidate order", () => {
     const { batch, session, runtime, currentView, completion } = createHarness();
     runtime.codeMirrorSelectedCompletion = () => completion(2);
@@ -161,6 +177,36 @@ describe("QueryEditor batch selection ownership", () => {
     batch.toggleAllBatchColumnSelection(currentView, session.key);
     expect(batch.applySelectedBatchColumnSelection(currentView)).toBe(true);
     expect(currentView.state.doc.toString()).toBe("SELECT t.id, -- 编号\n  t.name -- 名称\nFROM users");
+  });
+
+  // #11330 / #15190: the repeated qualifier must be the text already in the
+  // document. Re-quoting an Oracle alias (`ap` -> `"ap"`) breaks the statement.
+  it("repeats an unquoted qualifier without adding quotes", () => {
+    const doc = "SELECT ap. FROM orders ap";
+    const from = "SELECT ap.".length;
+    const items: SqlCompletionItem[] = [
+      { label: "ID", apply: "ID", type: "column", batchSelectionMode: "select", batchSelectionQualifier: "ap" },
+      { label: "STATUS", apply: "STATUS", type: "column", batchSelectionMode: "select", batchSelectionQualifier: "ap" },
+    ];
+    const { batch, session, currentView, settingsStore } = createHarness(doc, "select", items, from);
+    settingsStore.editorSettings.batchColumnSelectionIncludeComments = false;
+    batch.toggleAllBatchColumnSelection(currentView, session.key);
+    expect(batch.applySelectedBatchColumnSelection(currentView)).toBe(true);
+    expect(currentView.state.doc.toString()).toBe("SELECT ap.ID, ap.STATUS FROM orders ap");
+  });
+
+  it("keeps the quotes of a quoted qualifier", () => {
+    const doc = 'SELECT "ap". FROM orders "ap"';
+    const from = 'SELECT "ap".'.length;
+    const items: SqlCompletionItem[] = [
+      { label: "ID", apply: "ID", type: "column", batchSelectionMode: "select", batchSelectionQualifier: '"ap"' },
+      { label: "STATUS", apply: "STATUS", type: "column", batchSelectionMode: "select", batchSelectionQualifier: '"ap"' },
+    ];
+    const { batch, session, currentView, settingsStore } = createHarness(doc, "select", items, from);
+    settingsStore.editorSettings.batchColumnSelectionIncludeComments = false;
+    batch.toggleAllBatchColumnSelection(currentView, session.key);
+    expect(batch.applySelectedBatchColumnSelection(currentView)).toBe(true);
+    expect(currentView.state.doc.toString()).toBe('SELECT "ap".ID, "ap".STATUS FROM orders "ap"');
   });
 
   it("moves existing trailing comma before comment when inserting commented columns (#11354)", () => {

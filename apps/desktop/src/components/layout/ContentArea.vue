@@ -216,7 +216,7 @@ import type { ExportReadControl } from "@/lib/export/snapshotCompletion";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { promptExportSavePath } from "@/lib/export/exportPath";
 import { queryResultExportBaseName } from "@/lib/export/saveTextFile";
-import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, serializeMongoDeleteId, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { buildMongoQueryResultOperations, formatMongoQueryResultOperationPreview } from "@/lib/mongo/mongoQueryResultEditing";
 import { buildInfluxDbV1DeleteStatements, canDeleteInfluxDbV1Row, resolveInfluxDbV1DeleteTarget } from "@/lib/influxdb/influxDbV1Delete";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
@@ -413,6 +413,10 @@ const { tier: dataToolbarTier } = useToolbarOverflow(dataToolbarRef, [
   // action set grows at that point, so the row must be re-measured.
   () => !!dataGridRef.value?.canOpenTableStructureEditor,
   () => !!dataGridRef.value?.goToColumnToolbarCapability?.visible,
+  // Hidden labels remove text without resizing the row; the breadcrumb shows
+  // the connection name, whose width can change on rename.
+  () => hideToolbarLabels.value,
+  () => props.activeConnection?.name,
 ]);
 const dataToolbarCompact = computed(() => dataToolbarTier.value >= 1);
 const showDataColumnsChip = computed(() => dataToolbarTier.value < 2);
@@ -457,11 +461,18 @@ const activeResultDatabase = computed(() => activeResultExecutionTarget.value?.d
 const activeResultSchema = computed(() => activeResultExecutionTarget.value?.schema ?? props.activeTab.schema);
 const graphViewKey = computed(() => JSON.stringify([props.activeTab.id, props.activeTab.resultViewGeneration, props.activeTab.activeResultRunId, props.activeTab.activeResultIndex, activeResultConnectionId.value, activeResultDatabase.value]));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
+const debugRoutine = computed(() => {
+  const { objectSource, sql, originalSql } = props.activeTab;
+  if (!objectSource || sql !== originalSql) return undefined;
+  const { schema, name, objectType } = objectSource;
+  if (objectType === "PROCEDURE" || objectType === "FUNCTION") return { schema, name, objectType };
+  return undefined;
+});
 const managedTypeSource = computed(() => isOracleFamilyTypeSource(effectiveDatabaseTypeForConnection(props.activeConnection), props.activeTab.objectSource?.objectType));
-const showOraclePackageMembers = computed(() => {
+const showPackageMembers = computed(() => {
   const type = effectiveDatabaseTypeForConnection(props.activeConnection);
   const source = props.activeTab.objectSource?.objectType ?? props.activeTab.objectDetails?.objectType;
-  return (type === "oracle" || type === "oceanbase-oracle") && (source === "PACKAGE" || source === "PACKAGE_BODY");
+  return (type === "oracle" || type === "oceanbase-oracle" || type === "dameng") && (source === "PACKAGE" || source === "PACKAGE_BODY");
 });
 const unfinishedTypeChange = computed(() => !!props.activeTab.typeManagementDraft && props.activeTab.typeManagementDraft.state !== "complete");
 const verifiedTypeDeletion = computed(() => props.activeTab.typeManagementDraft?.state === "complete" && props.activeTab.typeManagementDraft.operation.startsWith("delete"));
@@ -1116,6 +1127,10 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
   if (!tab.result.columns.includes(target.idColumn)) return undefined;
 
   const editTarget = { idColumn: target.idColumn, documentAt: (rowIdx: number) => tab.result?.mongo_documents?.[rowIdx] };
+  function deleteIdForRow(id: unknown, rowIndex: number) {
+    const canonicalDocument = tab.result?.mongo_copy_documents?.[rowIndex] as Record<string, unknown> | undefined;
+    return serializeMongoDeleteId(id, canonicalDocument?._id);
+  }
 
   const save: CustomSaveHandler["save"] = async (changes: MongoQueryGridChanges) => {
     if (changes.newRows.length > 0) {
@@ -1123,16 +1138,16 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
     }
     if (!changes.columns.includes(target.idColumn)) throw new Error("No _id column");
     for (const operation of buildMongoQueryResultOperations(changes, editTarget)) {
-      const id = serializeMongoDocumentId(operation.id);
       if (operation.kind === "delete") {
-        await api.mongoDeleteDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, id);
+        await api.mongoDeleteDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, deleteIdForRow(operation.id, operation.rowIndex));
       } else {
-        await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, id, JSON.stringify(operation.update));
+        await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, serializeMongoDocumentId(operation.id), JSON.stringify(operation.update));
       }
     }
   };
 
-  const preview: CustomSaveHandler["preview"] = async (changes: MongoQueryGridChanges) => buildMongoQueryResultOperations(changes, editTarget).map((operation) => formatMongoQueryResultOperationPreview(target.collection, operation));
+  const preview: CustomSaveHandler["preview"] = async (changes: MongoQueryGridChanges) =>
+    buildMongoQueryResultOperations(changes, editTarget).map((operation) => formatMongoQueryResultOperationPreview(target.collection, operation, operation.kind === "delete" ? deleteIdForRow(operation.id, operation.rowIndex) : undefined));
 
   const applySavedChanges: NonNullable<CustomSaveHandler["applySavedChanges"]> = ({ dirtyRows, columns }) => {
     const documents = tab.result?.mongo_documents;
@@ -2417,12 +2432,12 @@ defineExpose({
                   {{ t("common.retry") }}
                 </Button>
               </div>
-              <div v-else :class="showOraclePackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
-                <OraclePackageMembers v-if="showOraclePackageMembers" :key="activeTab.id" :source="activeTab.sql" @navigate="queryEditorRef?.focusPackageMember($event)" />
+              <div v-else :class="showPackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
+                <OraclePackageMembers v-if="showPackageMembers" :key="activeTab.id" :source="activeTab.sql" @navigate="queryEditorRef?.focusPackageMember($event)" />
                 <QueryEditor
                   ref="queryEditorRef"
                   class="relative z-0 flex-1"
-                  :class="{ 'min-w-0': showOraclePackageMembers }"
+                  :class="{ 'min-w-0': showPackageMembers }"
                   :auto-focus="sourceSectionActive && autoFocus !== false"
                   :model-value="activeTab.sql"
                   :tab-id="activeTab.id"
@@ -2431,6 +2446,7 @@ defineExpose({
                   :catalog="activeTab.catalog"
                   :database="activeTab.database"
                   :schema="activeTab.schema"
+                  :debug-routine="debugRoutine"
                   :client-session-id="activeTab.id"
                   :completion-context-version="activeTab.completionContextVersion"
                   :database-type="activeEffectiveDatabaseType"
@@ -3395,7 +3411,7 @@ defineExpose({
     <!-- Data mode: full-height grid -->
     <template v-else-if="activeTab.mode === 'data'">
       <div class="flex-1 min-h-0 flex flex-col">
-        <div ref="dataToolbarRef" class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs overflow-hidden">
+        <div ref="dataToolbarRef" data-toolbar-row class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs overflow-hidden">
           <!-- Context breadcrumb. The connection and database segments are
                capped so a long connection name can never eat half the row;
                the table name gets the remaining room and is the only filled

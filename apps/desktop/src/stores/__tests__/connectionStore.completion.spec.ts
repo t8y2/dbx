@@ -828,6 +828,31 @@ describe("connectionStore completion assistant", () => {
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
   });
 
+  // #14075: a busy metadata pool made completion give up on the first failure,
+  // so one large-schema load left the editor without columns.
+  it("retries a busy metadata pool instead of returning no columns", async () => {
+    const getColumns = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("DBX metadata pool is busy; please retry"))
+      .mockResolvedValueOnce([{ name: "REPORT_ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+
+    const columns = await store.listCompletionColumns("oracle-1", "ORCL", "ORDERS", undefined, { clientSessionId: "tab-a", version: 0 });
+
+    expect(getColumns).toHaveBeenCalledTimes(2);
+    expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS" })]);
+  });
+
   it("passes OceanBase synonym lookup context separately and isolates selected schemas", async () => {
     const getColumns = vi.fn().mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_nullable: false }]);
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));

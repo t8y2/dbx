@@ -8,12 +8,13 @@ import type { QueryResult } from "@/types/database";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import { buildMongoUpdateDocument } from "@/lib/mongo/mongoDocumentValues";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { readTextFromClipboard } from "@/lib/common/clipboard";
+import { canReadClipboardText, readTextFromClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
 
 vi.mock("@/lib/common/clipboard", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/common/clipboard")>()),
   readTextFromClipboard: vi.fn(),
+  canReadClipboardText: vi.fn(() => true),
 }));
 
 // DataGrid.vue imports RecycleScroller directly (no global registration),
@@ -231,6 +232,7 @@ afterEach(() => {
     host.remove();
   }
   vi.mocked(readTextFromClipboard).mockReset();
+  vi.mocked(canReadClipboardText).mockReturnValue(true);
 });
 
 async function pasteAsNewRows(host: HTMLElement) {
@@ -306,6 +308,40 @@ describe("DataGrid paste as new rows", () => {
       ["2", "Ada", "Lovelace"],
       ["3", "Grace", "Hopper"],
     ]);
+  });
+
+  it("asks for a native paste when the runtime cannot read the clipboard", async () => {
+    const { host } = mountGrid({ hideNullColumns: true });
+    await settle();
+    vi.mocked(canReadClipboardText).mockReturnValue(false);
+
+    await pasteAsNewRows(host);
+
+    expect(readTextFromClipboard).not.toHaveBeenCalled();
+    expect(useToast().message.value).toBe(i18n.global.t("grid.pasteAsNewRowsAwaitingPaste"));
+
+    // The armed grid must not swallow Ctrl+V, otherwise the browser never emits
+    // the paste event this wait depends on.
+    const chord = new KeyboardEvent("keydown", { key: "v", ctrlKey: true, bubbles: true, cancelable: true });
+    gridRoot(host).dispatchEvent(chord);
+    expect(chord.defaultPrevented).toBe(false);
+
+    await paste(host, "2\tAda\tLovelace");
+
+    expect(pendingRows(host).map(visibleCellTexts)).toEqual([["2", "Ada", "Lovelace"]]);
+  });
+
+  it("cancels the waiting paste on Escape and appends nothing", async () => {
+    const { host } = mountGrid({ hideNullColumns: true });
+    await settle();
+    vi.mocked(canReadClipboardText).mockReturnValue(false);
+
+    await pasteAsNewRows(host);
+    gridRoot(host).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await settle();
+    await paste(host, "2\tAda\tLovelace");
+
+    expect(pendingRows(host)).toHaveLength(0);
   });
 
   it("drops a delayed clipboard read when the result is replaced", async () => {
@@ -613,17 +649,82 @@ describe("DataGrid multi-row paste from a blank cell", () => {
     expect(visibleCellTexts(rows.at(-1)!)[2]).toBe("5");
   });
 
-  it("keeps existing rows on the ordinary bounded paste path", async () => {
-    const { host } = mountGrid();
+  it("appends clipboard rows that overflow the existing result as new rows (#15263)", async () => {
+    const save = vi.fn<CustomSaveHandler["save"]>().mockResolvedValue();
+    const result = { ...defaultResult(), rows: Array.from({ length: 5 }, (_, i) => [i + 1, null, `seed-${i}`, "x"]) };
+    const { host } = mountGrid({ result, customSaveHandler: { canInsert: true, save } });
     await settle();
 
     const [row] = displayRows(host);
     await selectCell(visibleCells(row!)[2]!);
-    await paste(host, "first\nsecond");
+    await paste(host, Array.from({ length: 8 }, (_, i) => `v${i + 1}`).join("\n"));
 
     const rows = displayRows(host);
-    expect(rows).toHaveLength(1);
-    expect(visibleCellTexts(rows[0]!)[2]).toBe("first");
+    expect(rows).toHaveLength(8);
+    expect(visibleCellTexts(rows[0]!)[2]).toBe("v1");
+    expect(visibleCellTexts(rows[4]!)[2]).toBe("v5");
+    expect(visibleCellTexts(rows[5]!)[2]).toBe("v6");
+    expect(visibleCellTexts(rows[7]!)[2]).toBe("v8");
+
+    host.querySelector<HTMLElement>("[data-toolbar-action='save']")!.click();
+    await settle();
+    expect(save).toHaveBeenCalledOnce();
+    expect(save.mock.calls[0]![0].dirtyRows.size).toBe(5);
+    expect(save.mock.calls[0]![0].newRows).toHaveLength(3);
+    expect(save.mock.calls[0]![0].newRows[0]![2]).toBe("v6");
+  });
+
+  it("undoes the overwrite and appended rows together in one step (#15263)", async () => {
+    const result = { ...defaultResult(), rows: Array.from({ length: 5 }, (_, i) => [i + 1, null, `seed-${i}`, "x"]) };
+    const { host } = mountGrid({ result, customSaveHandler: { canInsert: true, save: vi.fn<CustomSaveHandler["save"]>().mockResolvedValue() } });
+    await settle();
+
+    await selectCell(visibleCells(displayRows(host)[0]!)[2]!);
+    await paste(host, "v1\nv2\nv3\nv4\nv5\nv6\nv7\nv8");
+    expect(displayRows(host)).toHaveLength(8);
+    expect(visibleCellTexts(displayRows(host)[0]!)[2]).toBe("v1");
+
+    gridRoot(host).dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, key: "z" }));
+    await settle();
+    expect(displayRows(host)).toHaveLength(5);
+    expect(visibleCellTexts(displayRows(host)[0]!)[2]).toBe("seed-0");
+
+    gridRoot(host).dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, shiftKey: true, key: "z" }));
+    await settle();
+    expect(displayRows(host)).toHaveLength(8);
+    expect(visibleCellTexts(displayRows(host)[0]!)[2]).toBe("v1");
+  });
+
+  it("appends overflow from a large async paste through preparation (#15263)", { timeout: 30000 }, async () => {
+    const save = vi.fn<CustomSaveHandler["save"]>().mockResolvedValue();
+    const result = { ...defaultResult(), rows: Array.from({ length: 5 }, (_, i) => [i + 1, null, `seed-${i}`, "x"]) };
+    const { host } = mountGrid({ result, customSaveHandler: { canInsert: true, save } });
+    await settle();
+
+    await selectCell(visibleCells(displayRows(host)[0]!)[2]!);
+    await paste(host, Array.from({ length: 5000 }, (_, i) => `row-${i}`).join("\n"));
+    await vi.waitFor(() => expect(document.querySelector("[data-grid-row-preparation]")).toBeNull(), { timeout: 5000, interval: 10 });
+
+    const rows = displayRows(host);
+    expect(rows).toHaveLength(5000);
+    expect(visibleCellTexts(rows[0]!)[2]).toBe("row-0");
+    expect(visibleCellTexts(rows[4]!)[2]).toBe("row-4");
+    expect(visibleCellTexts(rows[5]!)[2]).toBe("row-5");
+    expect(visibleCellTexts(rows[4999]!)[2]).toBe("row-4999");
+  });
+
+  it("rejects overflow with an explicit toast when insert is not supported (#15263)", async () => {
+    const result = { ...defaultResult(), rows: Array.from({ length: 5 }, (_, i) => [i + 1, null, `seed-${i}`, "x"]) };
+    const customSaveHandler: CustomSaveHandler = { supportsInsert: false, save: vi.fn<CustomSaveHandler["save"]>().mockResolvedValue() };
+    const { host } = mountGrid({ result, databaseType: "mongodb", customSaveHandler });
+    await settle();
+
+    await selectCell(visibleCells(displayRows(host)[0]!)[2]!);
+    await paste(host, "v1\nv2\nv3\nv4\nv5\nv6\nv7\nv8");
+
+    expect(displayRows(host)).toHaveLength(5);
+    expect(visibleCellTexts(displayRows(host)[0]!)[2]).toBe("v1");
+    expect(useToast().message.value).toBe(i18n.global.t("grid.pasteRowsTruncated", { applied: 5, dropped: 3 }));
   });
 
   it("expands a multi-cell range on a blank new row without losing clipboard rows", async () => {

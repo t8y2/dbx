@@ -125,7 +125,10 @@ func isAgentJDBCURL(value string) bool {
 
 func isAgentNativeURL(value string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(value))
-	return strings.HasPrefix(normalized, "postgres://") || strings.HasPrefix(normalized, "postgresql://")
+	return strings.HasPrefix(normalized, "postgres://") ||
+		strings.HasPrefix(normalized, "postgresql://") ||
+		strings.HasPrefix(normalized, "opengauss://") ||
+		strings.HasPrefix(normalized, "mogdb://")
 }
 
 func normalizeAgentObjectSource(source string) string {
@@ -201,7 +204,8 @@ func nativeURLParam(key, value string) (string, string, bool) {
 		return "search_path", value, true
 	case "loggerlevel":
 		return "loggerLevel", value, true
-	case "autosave", "enable_ce", "db_compatibility", "loadbalancehosts", "autobalance",
+	case "client_encoding", "clientencoding", "characterencoding", "useunicode",
+		"autosave", "enable_ce", "db_compatibility", "loadbalancehosts", "autobalance",
 		"protocolversion", "preparethreshold", "preparedstatementcachequeries",
 		"databasemetadatacachefields", "databasemetadatacachefieldsmib", "stringtype",
 		"batchmode", "fetchsize", "defaultrowfetchsize", "rewritebatchedinserts", "unknownlength",

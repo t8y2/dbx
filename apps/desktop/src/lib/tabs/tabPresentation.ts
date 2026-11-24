@@ -554,6 +554,14 @@ export interface StatementExecutionMarker {
   runningCount?: number;
 }
 
+export function sameStatementExecutionMarkers(a: readonly StatementExecutionMarker[], b: readonly StatementExecutionMarker[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((marker, index) => {
+    const other = b[index];
+    return marker.from === other.from && marker.status === other.status && marker.successCount === other.successCount && marker.errorCount === other.errorCount && (marker.runningCount ?? 0) === (other.runningCount ?? 0);
+  });
+}
+
 function lineStartOffset(sql: string, from: number): number {
   return sql.lastIndexOf("\n", Math.max(0, from - 1)) + 1;
 }

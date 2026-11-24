@@ -25,6 +25,9 @@ pub const MINIMUM_JAVA_MAJOR_VERSION: u32 = 21;
 pub const AGENT_JAVA_TOO_OLD_MESSAGE: &str =
     "Agent requires Java 21, but DBX started it with an older Java runtime. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager.";
 pub const SQLITE_WORKER_DRIVER_KEY: &str = "sqlite-worker";
+/// Appended to driver-jar rejection messages so users learn what the check
+/// actually requires: a readable manifest whose `Main-Class` exists in the jar.
+pub const AGENT_JAR_INVALID_HINT: &str = " (a driver jar must contain the class its manifest declares as Main-Class)";
 pub const SQLITE_WORKER_NATIVE_PLATFORMS: &[&str] = &["linux-x64", "linux-aarch64"];
 pub const DOWNLOAD_CACHE_DIR_NAME: &str = "download-cache";
 /// `java -version` is only needed for runtimes without a `release` file; the
@@ -113,6 +116,15 @@ fn strip_utf8_bom(value: &str) -> &str {
 }
 
 fn is_valid_jar_file(path: &Path) -> bool {
+    // Both the install boundary (before a downloaded jar is committed) and the
+    // launch/health checks below use this, so a jar is only "valid" when the
+    // class its manifest names is actually present. Checking just for a
+    // readable manifest let truncated jars through and surfaced as
+    // "Could not find or load main class" at connect time (#15330).
+    is_valid_agent_jar_file(path)
+}
+
+pub(crate) fn is_valid_agent_jar_file(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
@@ -120,21 +132,85 @@ fn is_valid_jar_file(path: &Path) -> bool {
     // buffer on the stack. Run it on a dedicated thread so it gets a full, fresh
     // stack instead of whatever headroom is left at the bottom of a deep async
     // call chain (that chain can already consume most of a tokio worker stack).
-    std::thread::scope(|scope| scope.spawn(|| read_jar_manifest(path)).join().unwrap_or(false))
+    std::thread::scope(|scope| scope.spawn(|| archive_declares_its_main_class(path)).join().unwrap_or(false))
 }
 
-fn read_jar_manifest(path: &Path) -> bool {
+fn archive_declares_its_main_class(path: &Path) -> bool {
     let Some(file) = File::open(path).ok() else {
         return false;
     };
     let Some(mut archive) = zip::ZipArchive::new(file).ok() else {
         return false;
     };
-    let Some(mut manifest) = archive.by_name("META-INF/MANIFEST.MF").ok() else {
+    let Some(manifest_text) = read_jar_manifest_text(&mut archive) else {
         return false;
     };
+    archive_declares_main_class(&mut archive, &manifest_text)
+}
+
+/// Whether the archive really contains the class its manifest names. Split out
+/// so the offline export path applies the same rule as the install boundary.
+pub(crate) fn archive_declares_main_class(archive: &mut zip::ZipArchive<File>, manifest_text: &str) -> bool {
+    let Some(main_class) = manifest_attribute(manifest_text, "Main-Class") else {
+        return false;
+    };
+    let entry = format!("{}.class", main_class.trim().replace('.', "/"));
+    if archive.by_name(&entry).is_ok() {
+        return true;
+    }
+    let multi_release = manifest_attribute(manifest_text, "Multi-Release")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"));
+    if !multi_release {
+        return false;
+    }
+    // Multi-release jars keep the entry class outside the root. Everything after
+    // "META-INF/versions/<n>/" has to be exactly the entry the JVM resolves, so
+    // "META-INF/versions/9/extra/com/x/C.class" is not mistaken for it.
+    (0..archive.len()).any(|index| {
+        archive.by_index(index).is_ok_and(|file| {
+            file.name()
+                .strip_prefix("META-INF/versions/")
+                .and_then(|rest| rest.split_once('/'))
+                .is_some_and(|(_, path)| path == entry)
+        })
+    })
+}
+
+fn read_jar_manifest_text(archive: &mut zip::ZipArchive<File>) -> Option<String> {
+    let mut manifest = archive.by_name("META-INF/MANIFEST.MF").ok()?;
     let mut manifest_text = String::new();
-    manifest.read_to_string(&mut manifest_text).is_ok() && manifest_text.contains("Main-Class:")
+    manifest.read_to_string(&mut manifest_text).ok()?;
+    Some(manifest_text)
+}
+
+/// Reads one main-section attribute of a jar manifest, joining the
+/// continuation lines the spec wraps values with (a line starting with a
+/// single space continues the previous value). It stops at the first empty
+/// line, which is where the main section ends and per-entry sections begin.
+pub(crate) fn manifest_attribute(manifest: &str, key: &str) -> Option<String> {
+    let mut value: Option<String> = None;
+    for line in manifest.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+        if let Some(continuation) = line.strip_prefix(' ') {
+            if let Some(current) = value.as_mut() {
+                current.push_str(continuation);
+            }
+            continue;
+        }
+        if value.is_some() {
+            break;
+        }
+        let Some((name, rest)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case(key) {
+            value = Some(rest.trim_start().to_string());
+        }
+    }
+    value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1252,7 +1328,7 @@ impl AgentManager {
             let java = self.resolve_java_runtime(state, jre_key)?;
             if !is_valid_jar_file(&jar_path) {
                 return Err(format!(
-                    "{driver_key} driver jar is invalid or corrupt. Please reinstall it from the Driver Manager."
+                    "{driver_key} driver jar is invalid or corrupt{AGENT_JAR_INVALID_HINT}. Please reinstall it from the Driver Manager."
                 ));
             }
             return Ok(AgentLaunchSpec::java_jar_with_extra_args(java, jar_path, extra_java_args)

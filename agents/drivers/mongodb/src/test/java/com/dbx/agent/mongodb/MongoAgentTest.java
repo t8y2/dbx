@@ -44,6 +44,7 @@ import com.mongodb.client.model.ReplaceOneModel;
 import com.mongodb.client.model.UpdateManyModel;
 import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.WriteModel;
+import com.mongodb.client.result.DeleteResult;
 import com.mongodb.client.result.UpdateResult;
 import java.io.FileInputStream;
 import java.io.InputStream;
@@ -552,6 +553,65 @@ class MongoAgentTest {
             MongoAgent.parseId("{\"$numberLong\":\"2048938405781032962\",\"tenant\":1}")
         );
         assertEquals("{\"$numberLong\":\"invalid\"}", MongoAgent.parseId("{\"$numberLong\":\"invalid\"}"));
+    }
+
+    @Test
+    void parsesPlainNumericDocumentIdsAsNumbers() {
+        // The grid sends number _id values as plain text; string IDs carry the string-id marker.
+        assertEquals(108L, MongoAgent.parseId("108"));
+        assertEquals(-7L, MongoAgent.parseId("-7"));
+        assertEquals(1.5, MongoAgent.parseId("1.5"));
+        assertEquals(new ObjectId("123456789012345678901234"), MongoAgent.parseId("123456789012345678901234"));
+        assertEquals("1e400", MongoAgent.parseId("1e400"));
+        assertEquals(" 108", MongoAgent.parseId(" 108"));
+        assertEquals("customer-42", MongoAgent.parseId("customer-42"));
+        assertEquals(List.of(108L, "108"), MongoAgent.parseIdCandidates("108"));
+        assertEquals(List.of("customer-42"), MongoAgent.parseIdCandidates("customer-42"));
+    }
+
+    @Test
+    void updateDocumentRpcRetriesStringIdAfterNumericIdMiss() {
+        List<Document> filters = new ArrayList<>();
+        MongoClient client = recordingIdFallbackMongoClient(filters);
+        JsonObject params = new JsonObject();
+        params.addProperty("database", "app");
+        params.addProperty("collection", "orders");
+        params.addProperty("id", "108");
+        params.addProperty("doc_json", "{\"$set\":{\"status\":\"done\"}}");
+
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", 24);
+        request.addProperty("method", "update_document");
+        request.add("params", params);
+
+        JsonObject response = JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(1, response.getAsJsonObject("result").get("modified_count").getAsLong());
+        assertEquals(List.of(new Document("_id", 108L), new Document("_id", "108")), filters);
+    }
+
+    @Test
+    void deleteDocumentRpcRetriesStringIdAfterNumericIdMiss() {
+        List<Document> filters = new ArrayList<>();
+        MongoClient client = recordingIdFallbackMongoClient(filters);
+        JsonObject params = new JsonObject();
+        params.addProperty("database", "app");
+        params.addProperty("collection", "orders");
+        params.addProperty("id", "108");
+
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", 25);
+        request.addProperty("method", "delete_document");
+        request.add("params", params);
+
+        JsonObject response = JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(1, response.getAsJsonObject("result").get("deleted_count").getAsLong());
+        assertEquals(List.of(new Document("_id", 108L), new Document("_id", "108")), filters);
     }
 
     @Test
@@ -2537,6 +2597,46 @@ class MongoAgentTest {
             (proxy, method, args) -> {
                 if ("getDatabase".equals(method.getName())) {
                     calls.add("getDatabase:" + args[0]);
+                    return database;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private static MongoClient recordingIdFallbackMongoClient(List<Document> filters) {
+        int[] calls = {0};
+        MongoCollection<Document> collection = (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("updateOne".equals(method.getName()) || "deleteOne".equals(method.getName())) {
+                    filters.add(new Document((Document) args[0]));
+                    boolean matched = calls[0]++ > 0;
+                    if ("updateOne".equals(method.getName())) {
+                        return UpdateResult.acknowledged(matched ? 1 : 0, matched ? 1L : 0L, null);
+                    }
+                    return DeleteResult.acknowledged(matched ? 1 : 0);
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoDatabase database = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("getCollection".equals(method.getName())) {
+                    return collection;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        return (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("getDatabase".equals(method.getName())) {
                     return database;
                 }
                 throw new UnsupportedOperationException(method.getName());

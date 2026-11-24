@@ -1,5 +1,5 @@
 import { computed, onScopeDispose, ref, watch, type Ref } from "vue";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, TreeNode } from "@/types/database";
 import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog } from "@/lib/database/databaseCapabilities";
@@ -794,12 +794,38 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     }
   }
 
+  const databaseTreeNodesByConnection = computed(() => {
+    const roots = connectionStore.treeNodes;
+    const byConnection = new Map<string, TreeNode[]>();
+    // Keep supporting metadata trees that expose database nodes at the root.
+    for (const node of roots) {
+      if (!node.connectionId) continue;
+      const fallback = byConnection.get(node.connectionId);
+      if (fallback) fallback.push(node);
+      else byConnection.set(node.connectionId, [node]);
+    }
+
+    const seenConnections = new Set<string>();
+    function indexConnectionNodes(nodes: TreeNode[]) {
+      for (const node of nodes) {
+        const connectionId = node.connectionId;
+        if (node.type === "connection" && connectionId && !seenConnections.has(connectionId)) {
+          seenConnections.add(connectionId);
+          if (node.children) byConnection.set(connectionId, node.children);
+        }
+        if (node.children?.length) indexConnectionNodes(node.children);
+      }
+    }
+
+    indexConnectionNodes(roots);
+    return byConnection;
+  });
+
   const allItems = computed((): QuickOpenItem[] => {
     const items: QuickOpenItem[] = [];
     // A narrowed scope hides unselected connections and everything beneath them,
     // keeping local tree entries in sync with the remote search pool.
     const connections = connectionStore.connections.filter((conn) => quickOpenScopeIncludes(conn.id));
-    const treeNodes = connectionStore.treeNodes;
 
     // Add connections
     for (const conn of connections) {
@@ -817,16 +843,10 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     // reachable in the no-query list before the (much longer) tree items.
     items.push(...pluginWorkbenchItems.value);
 
-    // Add databases and tables from tree nodes
-    // Filter tree nodes by connection
+    const databaseTreeNodes = databaseTreeNodesByConnection.value;
     for (const conn of connections) {
-      // Connections may live under sidebar groups, so locate their tree recursively.
-      const connectionTreeNode = findConnectionTreeNode(treeNodes, conn.id);
-      const connectionTreeNodes = connectionTreeNode?.children || treeNodes.filter((node) => node.connectionId === conn.id);
-      if (connectionTreeNodes.length === 0) continue;
-
-      // Process tree nodes to extract databases and tables
-      processDatabaseTreeNodes(connectionTreeNodes, conn, items);
+      const nodes = databaseTreeNodes.get(conn.id);
+      if (nodes?.length) processDatabaseTreeNodes(nodes, conn, items);
     }
 
     return items;
@@ -1083,24 +1103,13 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
 
   const liveMetadataItemsForPersistence = computed<QuickOpenItem[]>(() => {
     const items: QuickOpenItem[] = [];
+    const databaseTreeNodes = databaseTreeNodesByConnection.value;
     for (const conn of connectionStore.connections) {
-      const connectionTreeNode = findConnectionTreeNode(connectionStore.treeNodes, conn.id);
-      const connectionTreeNodes = connectionTreeNode?.children || connectionStore.treeNodes.filter((node) => node.connectionId === conn.id);
-      if (connectionTreeNodes.length > 0) processDatabaseTreeNodes(connectionTreeNodes, conn, items);
+      const nodes = databaseTreeNodes.get(conn.id);
+      if (nodes?.length) processDatabaseTreeNodes(nodes, conn, items);
     }
     return items;
   });
-
-  function findConnectionTreeNode(nodes: any[], connectionId: string): any | undefined {
-    for (const node of nodes) {
-      if (node.type === "connection" && node.connectionId === connectionId) return node;
-      if (node.children) {
-        const match = findConnectionTreeNode(node.children, connectionId);
-        if (match) return match;
-      }
-    }
-    return undefined;
-  }
 
   function quickOpenItemKey(item: QuickOpenItem): string {
     if (item.type === "sql_file" && item.filePath) return JSON.stringify(["file", item.filePath]);

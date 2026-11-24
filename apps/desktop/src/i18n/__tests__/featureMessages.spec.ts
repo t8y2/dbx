@@ -58,6 +58,10 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     translated: true,
   },
   { feature: "plugin AI conversation", keys: ["ai.pluginHttpModelOnly", "ai.pluginWelcome", "ai.pluginFollowUp"] },
+  {
+    feature: "plugin update blocked by the host engine requirement",
+    keys: under("pluginPlatform", ["marketplaceStatus.requires-newer-dbx", "marketplaceStatus.incompatible", "requiresNewerDbx", "requiresNewerDbxWithRequirement", "pluginVersionIncompatible", "updateBlockedByNewerDbx", "upgradeDbx"]),
+  },
   { feature: "editor find whole word (#13287)", keys: ["editor.search.wholeWord"], translated: true },
   { feature: "quick open", keys: ["quickOpen.*", "settings.shortcutGlobalSearch"] },
   {
@@ -175,6 +179,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "SQL formatter layout style", keys: under("settings", ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic"]) },
   { feature: "sidebar table structure shortcut", keys: ["settings.shortcutEditSidebarTableStructure"], locales: ALL_LOCALES.filter((locale) => locale !== "th") },
   { feature: "MySQL AUTO_INCREMENT warnings", keys: under("structureEditor", ["mysqlAutoIncrementSingleColumn", "mysqlAutoIncrementRequiresIndex", "mysqlAutoIncrementRequiresNativeColumn"]) },
+  { feature: "MySQL system database visibility", keys: under("connection", ["showSystemDatabases", "showSystemDatabasesHint"]), translated: true },
 ];
 
 function lookup(messages: unknown, path: string): unknown {

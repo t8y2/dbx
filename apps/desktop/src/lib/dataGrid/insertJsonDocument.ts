@@ -6,7 +6,8 @@ export type InsertJsonParseResult = { ok: true; documents: JsonDocument[] } | { 
 
 export type InsertJsonParseError = { kind: "empty" } | { kind: "syntax"; message: string; line?: number; column?: number } | { kind: "not-object" } | { kind: "empty-array" };
 
-export const EMPTY_INSERT_JSON_DOCUMENT = "{\n  \n}";
+// The middle line stays empty: a line of only spaces collapses to zero height in the editor.
+export const EMPTY_INSERT_JSON_DOCUMENT = "{\n\n}";
 
 function isJsonDocument(value: unknown): value is JsonDocument {
   return typeof value === "object" && value !== null && !Array.isArray(value);

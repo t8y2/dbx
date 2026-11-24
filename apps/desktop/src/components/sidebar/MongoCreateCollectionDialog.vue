@@ -99,107 +99,110 @@ const selectClass = "h-8 w-full rounded-md border border-input bg-background px-
         </nav>
       </DialogHeader>
 
-      <div class="grid grid-cols-[auto_1fr] items-center gap-2">
-        <label for="mongo-create-collection-name" class="text-xs font-medium">{{ t("mongo.createCollectionNameLabel") }}</label>
-        <Input id="mongo-create-collection-name" v-model="form.name" :placeholder="t('mongo.createCollectionNamePlaceholder')" :disabled="loading" autofocus class="h-8" @keydown.enter.prevent="confirm" />
-      </div>
+      <!-- flex-auto keeps the content's own height and only shrinks (scrolls) past the dialog cap. -->
+      <div class="-mx-1 flex min-h-0 flex-auto flex-col gap-3 overflow-y-auto px-1">
+        <div class="grid grid-cols-[auto_1fr] items-center gap-2">
+          <label for="mongo-create-collection-name" class="text-xs font-medium">{{ t("mongo.createCollectionNameLabel") }}</label>
+          <Input id="mongo-create-collection-name" v-model="form.name" :placeholder="t('mongo.createCollectionNamePlaceholder')" :disabled="loading" autofocus class="h-8" @keydown.enter.prevent="confirm" />
+        </div>
 
-      <Tabs v-model="activeTab" class="flex min-h-0 flex-1 flex-col">
-        <TabsList class="shrink-0">
-          <TabsTrigger value="options">{{ t("mongo.createCollectionTabOptions") }}</TabsTrigger>
-          <TabsTrigger value="validator">{{ t("mongo.createCollectionTabValidator") }}</TabsTrigger>
-          <TabsTrigger value="collation">{{ t("mongo.createCollectionTabCollation") }}</TabsTrigger>
-        </TabsList>
+        <Tabs v-model="activeTab" class="flex shrink-0 flex-col">
+          <TabsList class="shrink-0">
+            <TabsTrigger value="options">{{ t("mongo.createCollectionTabOptions") }}</TabsTrigger>
+            <TabsTrigger value="validator">{{ t("mongo.createCollectionTabValidator") }}</TabsTrigger>
+            <TabsTrigger value="collation">{{ t("mongo.createCollectionTabCollation") }}</TabsTrigger>
+          </TabsList>
 
-        <TabsContent value="options" class="min-h-0 space-y-3 overflow-y-auto rounded-md border p-3" data-tab="options">
-          <template v-for="kind in KINDS" :key="kind">
+          <TabsContent value="options" class="space-y-3 rounded-md border p-3" data-tab="options">
+            <template v-for="kind in KINDS" :key="kind">
+              <label class="flex items-center gap-2 text-sm">
+                <input v-model="form.kind" type="radio" :value="kind" class="h-3.5 w-3.5 accent-primary" :disabled="loading" />
+                {{ t(`mongo.createCollectionKind.${kind}`) }}
+              </label>
+              <div v-if="kind === 'capped'" class="grid grid-cols-[11rem_1fr] items-center gap-2 pl-6" :class="{ 'opacity-50': form.kind !== 'capped' }">
+                <span class="text-xs">{{ t("mongo.createCollectionCappedSize") }}</span>
+                <Input v-model="form.cappedSize" inputmode="numeric" :class="fieldClass" :disabled="loading || form.kind !== 'capped'" />
+                <span class="text-xs">{{ t("mongo.createCollectionCappedMax") }}</span>
+                <Input v-model="form.cappedMax" inputmode="numeric" :placeholder="t('mongo.createCollectionOptional')" :class="fieldClass" :disabled="loading || form.kind !== 'capped'" />
+              </div>
+              <div v-else-if="kind === 'timeseries'" class="grid grid-cols-[11rem_1fr] items-center gap-2 pl-6" :class="{ 'opacity-50': form.kind !== 'timeseries' }">
+                <span class="text-xs">{{ t("mongo.createCollectionTimeField") }}</span>
+                <Input v-model="form.timeField" :class="fieldClass" :disabled="loading || form.kind !== 'timeseries'" />
+                <span class="text-xs">{{ t("mongo.createCollectionMetaField") }}</span>
+                <Input v-model="form.metaField" :placeholder="t('mongo.createCollectionOptional')" :class="fieldClass" :disabled="loading || form.kind !== 'timeseries'" />
+                <span class="text-xs">{{ t("mongo.createCollectionGranularity") }}</span>
+                <select v-model="form.granularity" :class="selectClass" :disabled="loading || form.kind !== 'timeseries'">
+                  <option value="seconds">seconds</option>
+                  <option value="minutes">minutes</option>
+                  <option value="hours">hours</option>
+                </select>
+                <span class="text-xs">{{ t("mongo.createCollectionExpireAfter") }}</span>
+                <Input v-model="form.expireAfterSeconds" inputmode="numeric" :placeholder="t('mongo.createCollectionOptional')" :class="fieldClass" :disabled="loading || form.kind !== 'timeseries'" />
+              </div>
+              <div v-else-if="kind === 'clustered'" class="grid grid-cols-[11rem_1fr] items-center gap-2 pl-6" :class="{ 'opacity-50': form.kind !== 'clustered' }">
+                <span class="text-xs">{{ t("mongo.createCollectionClusteredIndexName") }}</span>
+                <Input v-model="form.clusteredIndexName" :placeholder="t('mongo.createCollectionOptional')" :class="fieldClass" :disabled="loading || form.kind !== 'clustered'" />
+              </div>
+            </template>
+          </TabsContent>
+
+          <TabsContent value="validator" class="space-y-3 rounded-md border p-3" data-tab="validator">
+            <div class="grid grid-cols-2 gap-3">
+              <label class="space-y-1 text-xs">
+                <span>{{ t("mongo.createCollectionValidationLevel") }}</span>
+                <select v-model="form.validationLevel" :class="selectClass" :disabled="loading">
+                  <option value="strict">strict</option>
+                  <option value="moderate">moderate</option>
+                  <option value="off">off</option>
+                </select>
+              </label>
+              <label class="space-y-1 text-xs">
+                <span>{{ t("mongo.createCollectionValidationAction") }}</span>
+                <select v-model="form.validationAction" :class="selectClass" :disabled="loading">
+                  <option value="error">error</option>
+                  <option value="warn">warn</option>
+                </select>
+              </label>
+            </div>
+            <p class="text-xs text-muted-foreground">{{ t("mongo.createCollectionValidatorHint") }}</p>
+            <div class="h-48 overflow-hidden rounded border bg-background">
+              <RedisJsonEditor v-model="form.validator" class="h-full" :read-only="loading" />
+            </div>
+          </TabsContent>
+
+          <TabsContent value="collation" class="space-y-3 rounded-md border p-3" data-tab="collation">
             <label class="flex items-center gap-2 text-sm">
-              <input v-model="form.kind" type="radio" :value="kind" class="h-3.5 w-3.5 accent-primary" :disabled="loading" />
-              {{ t(`mongo.createCollectionKind.${kind}`) }}
+              <input v-model="form.useCollation" type="checkbox" class="h-3.5 w-3.5 accent-primary" :disabled="loading" />
+              {{ t("mongo.createCollectionUseCollation") }}
             </label>
-            <div v-if="kind === 'capped'" class="grid grid-cols-[11rem_1fr] items-center gap-2 pl-6" :class="{ 'opacity-50': form.kind !== 'capped' }">
-              <span class="text-xs">{{ t("mongo.createCollectionCappedSize") }}</span>
-              <Input v-model="form.cappedSize" inputmode="numeric" :class="fieldClass" :disabled="loading || form.kind !== 'capped'" />
-              <span class="text-xs">{{ t("mongo.createCollectionCappedMax") }}</span>
-              <Input v-model="form.cappedMax" inputmode="numeric" :placeholder="t('mongo.createCollectionOptional')" :class="fieldClass" :disabled="loading || form.kind !== 'capped'" />
-            </div>
-            <div v-else-if="kind === 'timeseries'" class="grid grid-cols-[11rem_1fr] items-center gap-2 pl-6" :class="{ 'opacity-50': form.kind !== 'timeseries' }">
-              <span class="text-xs">{{ t("mongo.createCollectionTimeField") }}</span>
-              <Input v-model="form.timeField" :class="fieldClass" :disabled="loading || form.kind !== 'timeseries'" />
-              <span class="text-xs">{{ t("mongo.createCollectionMetaField") }}</span>
-              <Input v-model="form.metaField" :placeholder="t('mongo.createCollectionOptional')" :class="fieldClass" :disabled="loading || form.kind !== 'timeseries'" />
-              <span class="text-xs">{{ t("mongo.createCollectionGranularity") }}</span>
-              <select v-model="form.granularity" :class="selectClass" :disabled="loading || form.kind !== 'timeseries'">
-                <option value="seconds">seconds</option>
-                <option value="minutes">minutes</option>
-                <option value="hours">hours</option>
+            <div class="grid grid-cols-[11rem_1fr] items-center gap-2" :class="{ 'opacity-50': !form.useCollation }">
+              <span class="text-xs">{{ t("mongo.createCollectionLocale") }}</span>
+              <Input v-model="form.collationLocale" placeholder="en, th, en_US, simple" :class="fieldClass" :disabled="loading || !form.useCollation" />
+              <span class="text-xs">{{ t("mongo.createCollectionStrength") }}</span>
+              <select v-model="form.collationStrength" :class="selectClass" :disabled="loading || !form.useCollation">
+                <option value="">{{ t("mongo.createCollectionNotSet") }}</option>
+                <option v-for="level in ['1', '2', '3', '4', '5']" :key="level" :value="level">{{ level }}</option>
               </select>
-              <span class="text-xs">{{ t("mongo.createCollectionExpireAfter") }}</span>
-              <Input v-model="form.expireAfterSeconds" inputmode="numeric" :placeholder="t('mongo.createCollectionOptional')" :class="fieldClass" :disabled="loading || form.kind !== 'timeseries'" />
-            </div>
-            <div v-else-if="kind === 'clustered'" class="grid grid-cols-[11rem_1fr] items-center gap-2 pl-6" :class="{ 'opacity-50': form.kind !== 'clustered' }">
-              <span class="text-xs">{{ t("mongo.createCollectionClusteredIndexName") }}</span>
-              <Input v-model="form.clusteredIndexName" :placeholder="t('mongo.createCollectionOptional')" :class="fieldClass" :disabled="loading || form.kind !== 'clustered'" />
-            </div>
-          </template>
-        </TabsContent>
-
-        <TabsContent value="validator" class="min-h-0 space-y-3 rounded-md border p-3" data-tab="validator">
-          <div class="grid grid-cols-2 gap-3">
-            <label class="space-y-1 text-xs">
-              <span>{{ t("mongo.createCollectionValidationLevel") }}</span>
-              <select v-model="form.validationLevel" :class="selectClass" :disabled="loading">
-                <option value="strict">strict</option>
-                <option value="moderate">moderate</option>
+              <span class="text-xs">{{ t("mongo.createCollectionCaseFirst") }}</span>
+              <select v-model="form.collationCaseFirst" :class="selectClass" :disabled="loading || !form.useCollation">
+                <option value="">{{ t("mongo.createCollectionNotSet") }}</option>
+                <option value="upper">upper</option>
+                <option value="lower">lower</option>
                 <option value="off">off</option>
               </select>
-            </label>
-            <label class="space-y-1 text-xs">
-              <span>{{ t("mongo.createCollectionValidationAction") }}</span>
-              <select v-model="form.validationAction" :class="selectClass" :disabled="loading">
-                <option value="error">error</option>
-                <option value="warn">warn</option>
-              </select>
-            </label>
-          </div>
-          <p class="text-xs text-muted-foreground">{{ t("mongo.createCollectionValidatorHint") }}</p>
-          <div class="h-48 overflow-hidden rounded border bg-background">
-            <RedisJsonEditor v-model="form.validator" class="h-full" :read-only="loading" />
-          </div>
-        </TabsContent>
+              <span class="text-xs">{{ t("mongo.createCollectionNumericOrdering") }}</span>
+              <label class="flex items-center gap-2 text-xs">
+                <input v-model="form.collationNumericOrdering" type="checkbox" class="h-3.5 w-3.5 accent-primary" :disabled="loading || !form.useCollation" />
+                {{ t("mongo.createCollectionNumericOrderingHint") }}
+              </label>
+            </div>
+          </TabsContent>
+        </Tabs>
 
-        <TabsContent value="collation" class="min-h-0 space-y-3 rounded-md border p-3" data-tab="collation">
-          <label class="flex items-center gap-2 text-sm">
-            <input v-model="form.useCollation" type="checkbox" class="h-3.5 w-3.5 accent-primary" :disabled="loading" />
-            {{ t("mongo.createCollectionUseCollation") }}
-          </label>
-          <div class="grid grid-cols-[11rem_1fr] items-center gap-2" :class="{ 'opacity-50': !form.useCollation }">
-            <span class="text-xs">{{ t("mongo.createCollectionLocale") }}</span>
-            <Input v-model="form.collationLocale" placeholder="en, th, en_US, simple" :class="fieldClass" :disabled="loading || !form.useCollation" />
-            <span class="text-xs">{{ t("mongo.createCollectionStrength") }}</span>
-            <select v-model="form.collationStrength" :class="selectClass" :disabled="loading || !form.useCollation">
-              <option value="">{{ t("mongo.createCollectionNotSet") }}</option>
-              <option v-for="level in ['1', '2', '3', '4', '5']" :key="level" :value="level">{{ level }}</option>
-            </select>
-            <span class="text-xs">{{ t("mongo.createCollectionCaseFirst") }}</span>
-            <select v-model="form.collationCaseFirst" :class="selectClass" :disabled="loading || !form.useCollation">
-              <option value="">{{ t("mongo.createCollectionNotSet") }}</option>
-              <option value="upper">upper</option>
-              <option value="lower">lower</option>
-              <option value="off">off</option>
-            </select>
-            <span class="text-xs">{{ t("mongo.createCollectionNumericOrdering") }}</span>
-            <label class="flex items-center gap-2 text-xs">
-              <input v-model="form.collationNumericOrdering" type="checkbox" class="h-3.5 w-3.5 accent-primary" :disabled="loading || !form.useCollation" />
-              {{ t("mongo.createCollectionNumericOrderingHint") }}
-            </label>
-          </div>
-        </TabsContent>
-      </Tabs>
-
-      <p v-if="formError" class="text-xs text-destructive" data-form-error>{{ formError }}</p>
-      <pre v-else-if="preview" class="max-h-28 min-w-0 max-w-full shrink-0 overflow-auto rounded bg-muted p-2 text-[11px] whitespace-pre-wrap" data-preview>{{ preview }}</pre>
-      <p v-if="error" class="min-w-0 max-w-full overflow-x-auto text-sm text-destructive">{{ error }}</p>
+        <p v-if="formError" class="text-xs text-destructive" data-form-error>{{ formError }}</p>
+        <pre v-else-if="preview" class="max-h-28 min-w-0 max-w-full shrink-0 overflow-auto rounded bg-muted p-2 text-[11px] whitespace-pre-wrap" data-preview>{{ preview }}</pre>
+        <p v-if="error" class="min-w-0 max-w-full overflow-x-auto text-sm text-destructive">{{ error }}</p>
+      </div>
 
       <DialogFooter>
         <Button variant="outline" :disabled="loading" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>

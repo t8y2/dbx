@@ -101,7 +101,7 @@ function onColumnDetailKeydown(event: KeyboardEvent) {
         </div>
         <Button v-if="canPreviewRowJson" :variant="showRowJsonPreview ? 'secondary' : 'outline'" size="sm" class="h-7 text-xs" :aria-pressed="showRowJsonPreview" @click="rowJsonPreview = !rowJsonPreview"> <Code2 class="mr-1.5 h-3 w-3" />{{ t("grid.rowJsonPreview") }} </Button>
       </div>
-      <div v-if="showRowDocumentJson" data-row-detail-document-json class="h-[60vh] min-h-0 flex-1 overflow-hidden rounded-md border bg-background">
+      <div v-if="showRowDocumentJson" data-row-detail-document-json class="h-[60vh] min-h-48 shrink overflow-hidden rounded-md border bg-background">
         <RedisJsonEditor :key="rowDetail.rowId" :model-value="rowDocumentJson ?? ''" read-only class="h-full" />
       </div>
       <div v-else-if="showRowJsonPreview" class="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/20">

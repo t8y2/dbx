@@ -4473,11 +4473,11 @@ mod tests {
         agent_proxy_env_vars, agent_schema_params, agent_schema_table_params, agent_supports_capability,
         agent_transaction_params, append_legacy_error_context, decode_agent_response, format_agent_process_error,
         format_agent_startup_error, is_agent_rpc_response_error, is_retryable_agent_startup_error,
-        is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params, mongo_database_params,
-        mongo_document_id_params, parse_agent_java_opts, read_agent_json_response, read_agent_line,
-        read_agent_line_with_limit, start_stderr_collector, validate_dameng_java_system_properties, AgentCallError,
-        AgentCapability, AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake,
-        AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient,
+        is_unsupported_handshake_error, launch_display, legacy_agent_call_error, mongo_collection_params,
+        mongo_database_params, mongo_document_id_params, parse_agent_java_opts, read_agent_json_response,
+        read_agent_line, read_agent_line_with_limit, start_stderr_collector, validate_dameng_java_system_properties,
+        AgentCallError, AgentCapability, AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage,
+        AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient,
         AgentSessionDisposition, AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams,
         MongoAgentMethod, StderrTail, AGENT_JAVA_TOO_OLD_MESSAGE, AGENT_PROTOCOL_VERSION,
         AGENT_STDOUT_NOISE_SAMPLE_CHARS, MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES,
@@ -5586,6 +5586,52 @@ for line in sys.stdin:
         assert!(command.starts_with(test_python()), "command should start with the agent program: {command}");
         assert!(command.contains("-c"), "command should keep the agent arguments: {command}");
         assert!(error.contains("com.dbx.agent.iris.IrisAgent"), "stderr tail should still be reported: {error}");
+    }
+
+    #[test]
+    fn launch_display_masks_credentials_but_keeps_the_diagnosis() {
+        let launch = AgentLaunchSpec::new("java").with_args([
+            "-Dkeystore.password=hunter2",
+            "-Ddbx.token=abc123",
+            "--api-key=xyz",
+            "--passphrase",
+            "topsecret",
+            "-Dfile.encoding=UTF-8",
+            "-jar",
+            "agent.jar",
+        ]);
+
+        let display = launch_display(&launch);
+
+        for secret in ["hunter2", "abc123", "xyz", "topsecret"] {
+            assert!(!display.contains(secret), "credential leaked into {display}");
+        }
+        assert!(display.contains("-Dkeystore.password=***"), "{display}");
+        assert!(display.contains("-Ddbx.token=***"), "{display}");
+        assert!(display.contains("--api-key=***"), "{display}");
+        assert!(display.contains("--passphrase ***"), "{display}");
+        assert!(display.contains("-Dfile.encoding=UTF-8"), "{display}");
+        assert!(display.contains("-jar agent.jar"), "{display}");
+    }
+
+    #[test]
+    fn launch_display_quotes_paths_with_spaces_and_names_the_working_directory() {
+        let launch = AgentLaunchSpec::new("C:\\Program Files\\Java\\bin\\java.exe")
+            .with_args(["-jar", "C:\\data dir\\agents\\agent.jar"])
+            .with_working_dir("C:\\data dir\\agents");
+
+        assert_eq!(
+            launch_display(&launch),
+            "\"C:\\Program Files\\Java\\bin\\java.exe\" -jar \"C:\\data dir\\agents\\agent.jar\" \
+             (working directory: \"C:\\data dir\\agents\")"
+        );
+    }
+
+    #[test]
+    fn launch_display_names_the_working_directory_of_a_relative_jar() {
+        let launch = AgentLaunchSpec::new("java").with_args(["-jar", "agent.jar"]).with_working_dir("drivers/iris");
+
+        assert_eq!(launch_display(&launch), "java -jar agent.jar (working directory: drivers/iris)");
     }
 
     #[tokio::test]

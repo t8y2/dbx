@@ -1474,12 +1474,31 @@ fn single_statement_scope(sql: &str, db_type: Option<DatabaseType>) -> Statement
         if WRITE_KEYWORDS.contains(&keyword.as_str()) {
             return StatementScope::Write;
         }
+        if db_type == Some(DatabaseType::SqlServer) && keyword == "WAITFOR" && sqlserver_waitfor_is_read_only(sql) {
+            return StatementScope::Read;
+        }
     }
     match db_type.map(|db_type| classify_sql_risk_for_database(sql, db_type)) {
         Some(Ok(SqlRisk::Ddl)) => StatementScope::SchemaChange,
         Some(Ok(SqlRisk::Write | SqlRisk::Transaction)) => StatementScope::Write,
         _ => StatementScope::Read,
     }
+}
+
+// WAITFOR DELAY/TIME with a literal only waits. Other forms can consume
+// Service Broker messages or contain more SQL in the same batch.
+fn sqlserver_waitfor_is_read_only(sql: &str) -> bool {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+
+    let Ok(tokens) = Tokenizer::new(&MsSqlDialect {}, sql).tokenize() else {
+        return false;
+    };
+    let tokens = tokens.into_iter().filter(|token| !matches!(token, Token::Whitespace(_))).collect::<Vec<_>>();
+    let tokens = tokens.strip_suffix(&[Token::SemiColon]).unwrap_or(&tokens);
+    matches!(tokens, [Token::Word(waitfor), Token::Word(mode), Token::SingleQuotedString(_)]
+        if waitfor.quote_style.is_none() && waitfor.value.eq_ignore_ascii_case("WAITFOR")
+            && mode.quote_style.is_none()
+            && (mode.value.eq_ignore_ascii_case("DELAY") || mode.value.eq_ignore_ascii_case("TIME")))
 }
 
 /// True when `sql` is a schema change or a data write.
@@ -8500,6 +8519,8 @@ mod tests {
             "BEGIN TRANSACTION; UPDATE t SET a = 1; COMMIT;",
             "SELECT 1\nGO\nUPDATE t SET a = 1",
             "SELECT a INTO t2 FROM t",
+            "WAITFOR DELAY '00:00:02'; INSERT INTO t VALUES (1);",
+            "WAITFOR (RECEIVE TOP(1) * FROM queue), TIMEOUT 2000",
         ] {
             assert_eq!(statement_scope(sql, sqlserver), StatementScope::Write, "{sql}");
             assert_eq!(statement_server_budget(Some(1), Some(1), sqlserver, sql), None, "{sql}");
@@ -8509,6 +8530,7 @@ mod tests {
             StatementScope::SchemaChange
         );
         assert_eq!(statement_scope("SELECT 1\nGO\nSELECT 2", sqlserver), StatementScope::Read);
+        assert_eq!(statement_scope("WAITFOR DELAY '00:00:10'; SELECT 1", sqlserver), StatementScope::Read);
     }
 
     #[test]

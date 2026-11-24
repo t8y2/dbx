@@ -82,6 +82,14 @@ function statementKeywordScope(statement: string, databaseType: DatabaseType | u
   const tokens = tokenizeSqlSemantic(statement, databaseType ?? "mysql");
   const firstKeyword = tokens.find((token) => token.kind === "word" && token.depth === 0)?.normalized;
   if (!firstKeyword) return undefined;
+  if (databaseType === "sqlserver" && firstKeyword === "waitfor") {
+    const significant = tokens.filter((token) => token.kind !== "comment");
+    if (significant.at(-1)?.text === ";") significant.pop();
+    const [verb, mode, time] = significant;
+    const literalWait = significant.length === 3 && verb.kind === "word" && verb.normalized === "waitfor" && mode.kind === "word" && ["delay", "time"].includes(mode.normalized) && time.kind === "string" && time.quote === "'" && time.closed;
+    // A bare delay only waits. WAITFOR (RECEIVE ...) consumes queue messages.
+    return literalWait ? "read" : "write";
+  }
   if (SCHEMA_CHANGE_KEYWORDS.has(firstKeyword)) return "schema-change";
   if (WRITE_KEYWORDS.has(firstKeyword)) return "write";
   return undefined;

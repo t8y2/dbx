@@ -92,8 +92,13 @@ END pkg_utils;`;
     ["SELECT id INTO new_items FROM items", "sqlserver"],
     ["BEGIN TRANSACTION; UPDATE items SET n = 1; COMMIT;", "sqlserver"],
     ["SELECT 1\nGO\nUPDATE items SET n = 1", "sqlserver"],
+    ["WAITFOR (RECEIVE TOP(1) * FROM queue), TIMEOUT 2000", "sqlserver"],
   ] as const)("never cancels a hidden write: %s", (sql, dbType) => {
     expect(frontendDeadlineForStatement(sql, dbType, 1, 5)).toEqual({ afterSecs: 5, cancelOnTimeout: false });
+  });
+
+  it("applies the read deadline to a SQL Server delay followed by a read", () => {
+    expect(frontendDeadlineForStatement("WAITFOR DELAY '00:00:02'; SELECT 1", "sqlserver", 1, 5).cancelOnTimeout).toBe(true);
   });
 
   it("retains per-statement batch budgets and PostgreSQL backend-owned row timeouts", () => {

@@ -1140,7 +1140,7 @@ for line in sys.stdin:
         let error = execute(
             &state,
             &id,
-            "SHORT_SLOW\nGO\nSHORT_SLOW",
+            "SELECT 1 /* SHORT_SLOW */\nGO\nSELECT 2 /* SHORT_SLOW */",
             "db",
             None,
             ManualTransactionExecutionOptions { timeout_secs: Some(1), ..Default::default() },

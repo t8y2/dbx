@@ -147,6 +147,48 @@ const NEGATED_LIKE_MODES: Record<string, DataGridContextFilterMode> = {
   "ends-with": "not-ends-with",
 };
 
+/**
+ * Values the rule builder can reproduce byte-for-byte. The rebuilt condition
+ * quotes the value as a string literal (`parseFilterValue` unwraps the user's
+ * quotes and re-emits one), so only an already-quoted string or a numeric
+ * literal round-trips. A bare identifier (`a = b`) compares two columns in
+ * the hand-written SQL but becomes the constant `'b'` after the rebuild — a
+ * different result set, so it must not be imported (#15448 review).
+ */
+function isLosslessComparisonValue(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) return true;
+  return /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmed);
+}
+
+/** Splits an IN list on top-level commas (commas inside quotes stay put). */
+function splitInListItems(raw: string): string[] | null {
+  const items: string[] = [];
+  let current = "";
+  let inQuote = false;
+  for (const ch of raw) {
+    if (inQuote) {
+      current += ch;
+      if (ch === "'") inQuote = false;
+      continue;
+    }
+    if (ch === "'") {
+      inQuote = true;
+      current += ch;
+      continue;
+    }
+    if (ch === ",") {
+      items.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (inQuote) return null;
+  items.push(current.trim());
+  return items.filter((item) => item.length > 0);
+}
+
 function parseFragment(fragment: string, columns: readonly string[]): ParsedFragment | null {
   const text = fragment.trim();
   if (!text) return null;
@@ -167,6 +209,8 @@ function parseFragment(fragment: string, columns: readonly string[]): ParsedFrag
     if (!column) return null;
     const rawValue = inMatch[3]!.trim();
     if (!rawValue) return null;
+    const items = splitInListItems(rawValue);
+    if (!items?.length || !items.every((item) => isLosslessComparisonValue(item))) return null;
     return { column, mode: inMatch[2] ? "not-in" : "in", value: rawValue, conjunction: "AND" };
   }
 
@@ -184,6 +228,10 @@ function parseFragment(fragment: string, columns: readonly string[]): ParsedFrag
   // `= NULL` in SQL is never true; the meaningful form is IS NULL. Conservative
   // import rejects the literal so it is not silently turned into `= 'NULL'`.
   if (/^null$/i.test(value) && !value.startsWith("'")) return null;
+  // Only quoted strings and numeric literals survive the rebuild unchanged; a
+  // bare identifier would turn a column-to-column comparison into a constant
+  // comparison and change the result set (#15448 review).
+  if (!isLosslessComparisonValue(value)) return null;
   return { column, mode, value, conjunction: "AND" };
 }
 

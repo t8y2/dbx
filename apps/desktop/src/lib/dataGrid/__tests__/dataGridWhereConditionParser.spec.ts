@@ -62,6 +62,27 @@ describe("parseDataGridWhereCondition (#15320)", () => {
     expect(parse("name LIKE 'a%c%'")).toBeNull();
   });
 
+  it("imports only values the rebuilt condition reproduces unchanged (#15448)", () => {
+    function parseValue(where: string) {
+      const rules = parseDataGridWhereCondition(where, ["a", "b", "name"], () => "id-1");
+      return rules === null ? null : rules.map((rule) => ({ columnName: rule.columnName, mode: rule.mode, rawValue: rule.rawValue }));
+    }
+    // 引号字符串与数字字面量：重建后逐字节相同
+    expect(parseValue("a = 'x'")).toEqual([{ columnName: "a", mode: "equals", rawValue: "'x'" }]);
+    expect(parseValue("a = 1")).toEqual([{ columnName: "a", mode: "equals", rawValue: "1" }]);
+    expect(parseValue("a = -1.5")).toEqual([{ columnName: "a", mode: "equals", rawValue: "-1.5" }]);
+    // 裸标识符是列间比较，重建会变成常量比较：拒绝导入
+    expect(parseValue("a = b")).toBeNull();
+    expect(parseValue("a > b")).toBeNull();
+    // 关键字同样不是可无损表达的值
+    expect(parseValue("a = true")).toBeNull();
+    expect(parseValue("a = CURRENT_TIMESTAMP")).toBeNull();
+    // IN 列表逐元素判定
+    expect(parseValue("a IN ('x', 2)")).toEqual([{ columnName: "a", mode: "in", rawValue: "'x', 2" }]);
+    expect(parseValue("a IN (b)")).toBeNull();
+    expect(parseValue("a IN ('x', b)")).toBeNull();
+  });
+
   it("treats only a standalone NOT between IS and NULL as negated (#15448)", () => {
     const withNotice = ["notice", "note"];
     function parseOn(where: string) {

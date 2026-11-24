@@ -12,10 +12,13 @@ interface ObjectSourceTabSaveContext {
   queryStore: Pick<ReturnType<typeof useQueryStore>, "tabs" | "getObjectSourceIdentitySnapshot" | "markTabClean" | "runOracleTriggerSourceAction">;
   t: (key: string, values?: Record<string, unknown>) => string;
   toast: (message: string, duration?: number) => void;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (GaussDB M/B/MYSQL mode reports a backtick). */
+  identifierQuote?: string;
 }
 
 /** App's source-tab Save/Save-and-close handler, including confirmation and clean timing. */
-export async function saveObjectSourceTab(tab: QueryTab, { connection, queryStore, t, toast }: ObjectSourceTabSaveContext): Promise<boolean> {
+export async function saveObjectSourceTab(tab: QueryTab, { connection, queryStore, t, toast, identifierQuote }: ObjectSourceTabSaveContext): Promise<boolean> {
   const source = tab.objectSource;
   if (!connection || !source) return false;
   let save: Awaited<ReturnType<typeof prepareObjectSourceSave>> | undefined;
@@ -44,7 +47,7 @@ export async function saveObjectSourceTab(tab: QueryTab, { connection, queryStor
     const schema = source.schema || tab.schema || database;
     const sql = tab.sql;
     if (source.objectType === "TRIGGER" && ["oracle", "oceanbase-oracle", "dameng"].includes(databaseType)) return await queryStore.runOracleTriggerSourceAction(tab.id);
-    const statements = await buildExecutableObjectSourceStatements({ databaseType, objectType: source.objectType, schema, name: source.name, source: sql });
+    const statements = await buildExecutableObjectSourceStatements({ databaseType, objectType: source.objectType, schema, name: source.name, source: sql, identifierQuote });
     save = await prepareObjectSourceSave(connectionId, database, databaseType, statements, schema, { objectType: source.objectType, name: source.name });
     const preparedSave = save;
     const targetIsCurrent = () => queryStore.tabs.includes(tab) && tab.objectSource === source && tab.connectionId === connectionId && tab.database === database && (source.schema || tab.schema || database) === schema;

@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.71"
+version = "0.6.73"
 dependencies = [
  "anyhow",
  "axum",
@@ -2178,6 +2178,7 @@ dependencies = [
  "dbx-tauri-consul",
  "dbx-tauri-schema",
  "deadpool-postgres",
+ "dirs",
  "font-kit",
  "futures",
  "grep",
@@ -2188,6 +2189,7 @@ dependencies = [
  "log",
  "minisign-verify",
  "mongodb",
+ "notify",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -2252,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.144"
+version = "0.4.145"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2595,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.144"
+version = "0.4.145"
 dependencies = [
  "async-trait",
  "axum",
@@ -2781,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.71"
+version = "0.6.73"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -9870,8 +9872,6 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-single-instance"
 version = "2.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3214becf9ef5783c0ae99a3bb25adf5353a7a16ebf53e74b909e29205735c6c"
 dependencies = [
  "serde",
  "serde_json",

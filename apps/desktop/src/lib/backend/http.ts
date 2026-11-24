@@ -1,3 +1,5 @@
+import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
+import type { MongoDeleteId } from "@/lib/mongo/mongoDocumentValues";
 import type { SqlFileEncoding } from "./tauri";
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
@@ -2116,7 +2118,7 @@ export async function buildRenameObjectSql(options: BuildRenameObjectSqlOptions)
   return post("/api/query/build-rename-object-sql", { options });
 }
 
-export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean }): Promise<string> {
+export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean; identifierQuote?: string }): Promise<string> {
   return post("/api/query/build-rename-database-sql", options);
 }
 
@@ -2793,7 +2795,7 @@ export async function loadEditorSettings(): Promise<unknown | null> {
   return loadBrowserAppState("editor_settings");
 }
 
-export async function saveEditorSettings(settings: unknown): Promise<void> {
+export async function saveEditorSettings(settings: unknown, _patch?: unknown): Promise<void> {
   await saveBrowserAppState("editor_settings", settings);
 }
 
@@ -2827,6 +2829,7 @@ export async function loadOpenTabsState(): Promise<OpenTabsStatePayload | null> 
     ? {
         tabs: payload.tabs,
         activeTabId: typeof payload.activeTabId === "string" ? payload.activeTabId : null,
+        ...(Array.isArray(payload.closedQueryDrafts) ? { closedQueryDrafts: payload.closedQueryDrafts } : {}),
         ...(payload.groups !== undefined ? { groups: payload.groups } : {}),
         ...(typeof payload.focusedGroupId === "string" ? { focusedGroupId: payload.focusedGroupId } : {}),
         ...(payload.orientation === "vertical" || payload.orientation === "horizontal" ? { orientation: payload.orientation } : {}),
@@ -2870,7 +2873,11 @@ export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
   await saveBrowserAppState("transfer_task_library", library);
 }
 
-export async function completeAppClose(_action: "quit" | "hide"): Promise<void> {
+export async function completeAppClose(_action: "quit" | "hide", _quitRequestId?: string): Promise<void> {
+  return undefined;
+}
+
+export async function completeWindowClose(): Promise<void> {
   return undefined;
 }
 
@@ -3103,7 +3110,7 @@ export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassp
   return post("/api/cloud-sync/snippet/inspect", { config, snippetPassphrase, secretsPassphrase });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string, automatic = false): Promise<SnippetSyncSummary> {
   return post("/api/cloud-sync/snippet/upload", {
     config,
     editorSettings,
@@ -3111,7 +3118,8 @@ export async function snippetSyncUpload(config: SnippetSyncConfig, editorSetting
     includeSecrets,
     secretsPassphrase,
     selection,
-    expectedRemoteContentHash,
+    expectedRemoteContentHash: expectedRemoteContentHash ?? (config.snippetId?.trim() ? readSnippetRemoteContentHash(config.provider, config.instanceUrl, config.snippetId) : undefined),
+    automatic,
   });
 }
 
@@ -3332,6 +3340,14 @@ export async function renameSqlFileInFolder(_rootPath: string, _filePath: string
 
 export async function deleteSqlFileInFolder(_rootPath: string, _filePath: string): Promise<void> {
   throw new Error("Managing SQL files in folders is only available in the desktop app");
+}
+
+export async function moveSqlFileInFolder(_rootPath: string, _filePath: string, _targetRootPath: string, _directoryPath: string): Promise<string> {
+  throw new Error("Managing SQL files in folders is only available in the desktop app");
+}
+
+export async function watchSqlFileFolder(_folderPath: string, _recursive: boolean, _onChange: () => void): Promise<() => Promise<void>> {
+  throw new Error("Watching SQL folders is only available in the desktop app");
 }
 
 export async function createSqlFolderInFolder(_rootPath: string, _directoryPath: string, _folderName: string): Promise<string> {
@@ -4174,8 +4190,8 @@ export async function redisGetTtl(connectionId: string, db: number, keyRaw: stri
   return post("/api/redis/get-ttl", { connectionId, db, keyRaw });
 }
 
-export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string): Promise<RedisStreamPage> {
-  return post("/api/redis/get-stream-entries", { connectionId, db, keyRaw, cursor });
+export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string, newestFirst?: boolean): Promise<RedisStreamPage> {
+  return post("/api/redis/get-stream-entries", { connectionId, db, keyRaw, cursor, ...(newestFirst ? { newestFirst } : {}) });
 }
 
 export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {
@@ -5638,11 +5654,11 @@ export async function mongoUpdateDocuments(connectionId: string, database: strin
   });
 }
 
-export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string): Promise<number> {
+export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: MongoDeleteId, routing?: string): Promise<number> {
   return documentDeleteDocument(connectionId, database, collection, id, routing);
 }
 
-export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string, documentType?: string): Promise<number> {
+export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: MongoDeleteId, routing?: string, documentType?: string): Promise<number> {
   return post("/api/document-store/delete-document", {
     connectionId,
     database,

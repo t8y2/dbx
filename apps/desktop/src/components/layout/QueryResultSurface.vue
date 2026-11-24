@@ -6,8 +6,8 @@ import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, QueryResultSurfa
 
 defineOptions({ inheritAttrs: false });
 
-const props = defineProps<ContentAreaSurfaceProps>();
-const emit = defineEmits<ContentAreaSurfaceEmits>();
+const props = defineProps<ContentAreaSurfaceProps & { fullscreen?: boolean }>();
+const emit = defineEmits<ContentAreaSurfaceEmits & { toggleResultFullscreen: [button: HTMLElement] }>();
 
 const attrs = useAttrs();
 const resultClass = computed(() => (typeof attrs.class === "string" ? attrs.class : undefined));
@@ -41,6 +41,6 @@ defineExpose<QueryResultSurfaceHandle>({
 
 <template>
   <div class="min-h-0 overflow-hidden" :class="resultClass">
-    <ContentArea ref="contentAreaRef" v-bind="bindings" result-only class="h-full" />
+    <ContentArea ref="contentAreaRef" v-bind="bindings" result-only :result-fullscreen="fullscreen" class="h-full" @toggle-result-fullscreen="emit('toggleResultFullscreen', $event)" />
   </div>
 </template>

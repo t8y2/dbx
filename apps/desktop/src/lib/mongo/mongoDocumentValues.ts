@@ -296,7 +296,7 @@ function mongoDocumentGridEscapedString(value: unknown): string | undefined {
   return typeof value === "string" && value.startsWith(MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX) ? value.slice(MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX.length) : undefined;
 }
 
-function mongoDocumentGridJson(value: unknown): string | undefined {
+export function mongoDocumentGridJson(value: unknown): string | undefined {
   return typeof value === "string" && value.startsWith(MONGO_DOCUMENT_GRID_JSON_PREFIX) ? value.slice(MONGO_DOCUMENT_GRID_JSON_PREFIX.length) : undefined;
 }
 
@@ -354,7 +354,13 @@ function validMongoDisplayTimeZone(timeZone: string | undefined): boolean {
 
 function formatMongoDocumentDates(value: unknown, formatter: MongoDateTimeFormatter): { value: unknown; changed: boolean } {
   const date = mongoExtendedJsonDateValue(value);
-  if (date !== undefined) return { value: applyColumnFormatter(date, formatter), changed: true };
+  if (date !== undefined) {
+    // Canonical Extended JSON stores dates as epoch milliseconds, even near
+    // the epoch where generic timestamp detection would infer seconds.
+    const epochMilliseconds = typeof date === "number" || /^-?\d+$/.test(date);
+    const dateFormatter = formatter.unit === "auto" && epochMilliseconds ? { ...formatter, unit: "milliseconds" as const } : formatter;
+    return { value: applyColumnFormatter(date, dateFormatter), changed: true };
+  }
   if (Array.isArray(value)) {
     let changed = false;
     const items = value.map((item) => {
@@ -726,6 +732,32 @@ export function serializeMongoDocumentId(value: unknown): string {
   if (typeof value === "string") return `__dbx_mongo_string_id__${JSON.stringify(value)}`;
   if (isMongoExtendedJsonId(value)) return JSON.stringify(value);
   return String(value);
+}
+
+function hasReorderedMongoIdKeys(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasReorderedMongoIdKeys);
+  if (!value || typeof value !== "object") return false;
+  // JavaScript enumerates array-index keys in numeric order, which can change BSON equality.
+  return Object.entries(value).some(([key, nested]) => (String(Number(key) >>> 0) === key && key !== "4294967295") || hasReorderedMongoIdKeys(nested));
+}
+
+export type MongoDeleteId = string | { bsonDocument: Record<string, unknown> };
+
+function isEmbeddedMongoId(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value) && !Object.keys(value).some((key) => key.startsWith("$"));
+}
+
+export function serializeMongoDeleteId(value: unknown, canonicalId: unknown): MongoDeleteId {
+  if (isEmbeddedMongoId(canonicalId)) {
+    if (hasReorderedMongoIdKeys(canonicalId)) throw new Error("Cannot preserve the MongoDB document ID's field order.");
+    return { bsonDocument: canonicalId };
+  }
+  if (isEmbeddedMongoId(value)) throw new Error("Cannot delete a MongoDB document without its canonical BSON ID.");
+  return serializeMongoDocumentId(value);
+}
+
+export function formatMongoDeleteIdCondition(value: unknown, deleteId?: MongoDeleteId): string {
+  return deleteId && typeof deleteId !== "string" ? `{$eq: ${formatMongoShellLiteral(deleteId.bsonDocument)}}` : formatMongoShellLiteral(value);
 }
 
 export function mongoDocumentIdForGrid(value: unknown): MongoInputValue {

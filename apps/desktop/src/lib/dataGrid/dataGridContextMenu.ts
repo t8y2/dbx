@@ -264,10 +264,13 @@ export function createDataGridCellContextMenuItems(options: {
   labels: Record<"cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose", string>;
   icons: Pick<DataGridContextMenuIcons, "cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose">;
   actions: Record<"cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose", () => void>;
+  binaryTextPreviewItem?: DataGridContextMenuItem | null;
+  pluginDecodeItem?: DataGridContextMenuItem | null;
   importItem?: DataGridContextMenuItem | null;
   downloadItem?: DataGridContextMenuItem | null;
   foreignKeyItem?: DataGridContextMenuItem | null;
   copySubmenu: DataGridContextMenuItem;
+  pasteCellItem?: DataGridContextMenuItem | null;
   clearSelectionItem?: DataGridContextMenuItem;
   generateSubmenu?: DataGridContextMenuItem;
 }): DataGridContextMenuItem[] {
@@ -275,6 +278,8 @@ export function createDataGridCellContextMenuItems(options: {
   if (options.hasCell) {
     if (options.hasColumn) {
       items.push({ label: options.labels.cellDetails, action: options.actions.cellDetails, icon: options.icons.cellDetails });
+      if (options.binaryTextPreviewItem) items.push(options.binaryTextPreviewItem);
+      if (options.pluginDecodeItem) items.push(options.pluginDecodeItem);
       if (options.importItem) items.push(options.importItem);
       if (options.downloadItem) items.push(options.downloadItem);
       if (options.foreignKeyItem) items.push(options.foreignKeyItem);
@@ -283,6 +288,7 @@ export function createDataGridCellContextMenuItems(options: {
     items.push({ label: options.labels.rowDetails, action: options.actions.rowDetails, icon: options.icons.rowDetails }, { label: "", separator: true });
   }
   if (!options.headerColumn) items.push(options.copySubmenu);
+  if (options.pasteCellItem) items.push(options.pasteCellItem);
   if (options.editable && options.hasCellSelection) {
     if (!options.headerColumn) items.push({ label: options.labels.setNull, action: options.actions.setNull, disabled: !options.hasEditableSelection, icon: options.icons.setNull });
     items.push({ label: options.labels.bulkEdit, action: options.actions.bulkEdit, disabled: !options.hasEditableSelection, icon: options.icons.bulkEdit });

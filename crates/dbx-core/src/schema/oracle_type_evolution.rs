@@ -135,6 +135,7 @@ where
                 schema: Some(target.owner.clone()),
                 name: target.name.clone(),
                 source: source.into(),
+                identifier_quote: None,
             })
             .map(|(_, fingerprint)| fingerprint)
         };

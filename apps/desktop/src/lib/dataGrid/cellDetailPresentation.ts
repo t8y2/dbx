@@ -3,7 +3,7 @@ import { isBooleanColumnType } from "@/lib/dataGrid/dataGridBooleanColumn";
 import { isHexGeometry, looksLikeWkt, parseWktGeometry } from "@/lib/dataGrid/geometryPreview";
 import type { DatabaseType } from "@/types/database";
 
-export type CellDetailTab = "details" | "hexViewer" | "valueEditor";
+export type CellDetailTab = "details" | "hexViewer" | "valueEditor" | "foreignKey";
 export type ValueEditorAction = "formatJson" | "compactJson" | "setNull" | "restoreOriginal";
 
 export const CELL_DETAIL_JSON_FORMAT_MAX_LENGTH = 500_000;
@@ -11,6 +11,8 @@ export const CELL_DETAIL_JSON_FORMAT_MAX_LENGTH = 500_000;
 export interface CellDetailPresentationOptions {
   isEditable: boolean;
   hasBinaryHexViewer?: boolean;
+  /** The selected cell belongs to a foreign key and has a value to look up. */
+  hasForeignKeyPreview?: boolean;
 }
 
 export interface LinkedCellDetailOptions {
@@ -36,6 +38,9 @@ export function visibleCellDetailTabs(options: CellDetailPresentationOptions): C
   }
   if (options.isEditable) {
     tabs.push("valueEditor");
+  }
+  if (options.hasForeignKeyPreview) {
+    tabs.push("foreignKey");
   }
   return tabs;
 }

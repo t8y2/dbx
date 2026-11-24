@@ -56,4 +56,25 @@ describe("executionCandidateForMode", () => {
     expect(executionCandidateForMode([current, all], "current")).toBe(current);
     expect(executionCandidateForMode([current, all], "all")).toBe(all);
   });
+
+  // #15213: nested candidates arrive innermost-first, but "current" mode must
+  // keep its historical meaning — the outermost statement at the cursor.
+  it("keeps current mode on the outermost statement when nested candidates exist", () => {
+    const nestedInner = candidate("nested", ["nested"]);
+    nestedInner.sql = "SELECT 1";
+    const nestedMiddle = candidate("nested", ["nested"]);
+    nestedMiddle.sql = "SELECT * FROM (SELECT 1)";
+    const outer = candidate("cursor", ["cursor"]);
+    outer.sql = "INSERT INTO t SELECT * FROM (SELECT 1) s";
+
+    const candidates = [nestedInner, nestedMiddle, outer];
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(outer.sql);
+    expect(executionCandidateForMode(candidates, "all")).toBeNull();
+  });
+
+  it("keeps the historical single-candidate current behavior without nesting", () => {
+    const both = candidate("cursor", ["cursor", "all"]);
+    expect(executionCandidateForMode([both], "current")).toBe(both);
+    expect(executionCandidateForMode([both], "all")).toBe(both);
+  });
 });

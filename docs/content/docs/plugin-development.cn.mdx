@@ -144,6 +144,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 - `host.clipboard:read` 允许工作台 UI 读取系统剪贴板（见 [系统剪贴板](#系统剪贴板)）。写剪贴板不需要权限；读取会把用户数据（密码、令牌）交给插件代码，因此需要门控。
 - `host.data:read` 允许 `window.dbxPlugin.queryData` 在用户授权给插件的连接上执行一条只读 SQL（见 [只读数据查询](#只读数据查询)）。每个连接都需要用户同意；它不会授予写入、DDL 或重连。
 - `host.connections:read` 允许通过 `window.dbxPlugin.getConnections()` 或 `window.dbxPlugin.connections.list()` 获取当前所有已配置连接的只读脱敏信息（见 [连接信息读取](#连接信息读取)）。
+- `host.connections:edit` 允许工作台[预填已保存连接的编辑表单](#预填已保存连接的编辑表单)，由用户确认保存。
 - `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 64 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
 - `host.openUrl:http(s)://host[:port]` 允许请求打开指定站点，最多 8 个精确 origin；与网络权限独立，不允许路径、凭据、通配符或尾部斜杠。使用标准化的 `URL.origin`（默认端口应省略）；IPv6 地址使用方括号。
 
@@ -583,6 +584,29 @@ if (window.dbxPlugin.capabilities.connectionsApi) {
 - `database` / `schema`: 默认数据库或模式（如有）。
 
 > **安全边界**：返回列表完全脱敏，不包含密码、用户名、主机、端口或连接串等敏感凭据。
+
+### 预填已保存连接的编辑表单
+
+工作台可以打开已保存连接的 DBX 编辑表单，并预填编辑草稿。在 manifest 中声明 `host.connections:edit`。如果工作台需要列出目标连接，另行声明 `host.connections:read`。这两个方法属于 Host API 1.5（`"engines": { "host_api": "^1.5" }`）。在桌面主窗口的工作台中，等待 `ready` 后检查 `capabilities.connectionEditApi`。
+
+```js
+const { dbxPlugin } = window;
+await dbxPlugin.ready;
+if (dbxPlugin.capabilities.connectionEditApi) {
+  const editable = await dbxPlugin.connections.getEditFields(selectedConnectionId);
+  const fields = { name: "报表只读副本" };
+  if (editable.some(({ key }) => key === "port")) fields.port = 15432;
+  await dbxPlugin.connections.openEdit({ connectionId: selectedConnectionId, fields });
+}
+```
+
+`getEditFields(connectionId)` 返回目标在当前表单和模式下的字段描述。文本、主机、颜色和密码字段提供 `key`、`type`、`maxLength` 和 `allowEmpty`。整数字段提供 `key`、`type`、`min` 和 `max`。响应只包含字段描述。请使用已保存连接的准确 ID，临时连接不适用。
+
+- 所有已保存连接的草稿都支持 `name`（名称）、`note`（备注）和 `color`（颜色）。
+- MySQL、PostgreSQL、SQL Server、Redshift、ClickHouse 和普通 MongoDB 字段模式还支持 `host`、`port`、`database`、`username` 和 `password`。Redis 允许预填用户名和密码，独立模式还支持主机和端口。
+- 请在运行时查询可用字段。不同驱动、连接串模式和专用表单可开放不同字段。驱动、连接标识、本地文件路径、原始连接串、传输层、TLS、凭证存储策略和保护设置由 DBX 管理。
+
+`openEdit()` 按目标连接校验整份补丁，然后打开表单。省略 `fields` 可按原样打开。省略的键保留原值，允许清空的字段可传 `""`。`host` 接受主机名或 IP 地址，端口单独通过整数 `port` 指定。宿主桥在内存中直接传递草稿。`{ opened: true }` 表示已打开，用户需在编辑器确认保存，深链自动保存设置对插件草稿不适用。关闭表单会丢弃草稿。目标或字段无效、或者已有编辑器打开时，调用会被拒绝。
 
 ### 系统剪贴板
 

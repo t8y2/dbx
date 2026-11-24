@@ -1,6 +1,7 @@
 import type { QueryResultSourceLabelKind, QueryTab, TabOutputView } from "@/types/database";
 import { sanitizeTabUiState } from "@/lib/tabs/tabUiState";
 import { restoreOracleTypeManagementDraft } from "@/lib/table/oracleTypeManagement";
+import { normalizePersistedBookmarks } from "@/lib/editor/workspaceBookmarks";
 
 export const OPEN_TABS_STORAGE_KEY = "dbx-open-tabs";
 export const ACTIVE_TAB_STORAGE_KEY = "dbx-active-tab";
@@ -56,6 +57,7 @@ export interface SavedOpenTab {
   sqlRecoveryPath?: string;
   editorViewport?: QueryTab["editorViewport"];
   editorSelection?: QueryTab["editorSelection"];
+  editorBookmarks?: number[];
   originalSql?: string;
   savedSqlId?: string;
   isDefaultQuery?: boolean;
@@ -122,6 +124,7 @@ export interface PersistedEditorGroup {
 export interface OpenTabsStatePayload {
   tabs: unknown[];
   activeTabId: string | null;
+  closedQueryDrafts?: unknown[];
   groups?: PersistedEditorGroup[];
   focusedGroupId?: string;
   orientation?: "vertical" | "horizontal";
@@ -233,6 +236,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
       ...(persistedSql.sqlRecoveryPath ? { sqlRecoveryPath: persistedSql.sqlRecoveryPath } : {}),
       ...(tab.editorViewport ? { editorViewport: tab.editorViewport } : {}),
       ...(tab.editorSelection ? { editorSelection: tab.editorSelection } : {}),
+      ...(tab.editorBookmarks?.length ? { editorBookmarks: normalizePersistedBookmarks(tab.editorBookmarks) } : {}),
       // File-backed drafts retain their baseline, including when the edited SQL is empty.
       // Clean file-backed tabs omit it so startup can hydrate the current file content.
       ...(tab.originalSql !== undefined && ((!tab.savedSqlId && !tab.externalSqlPath) || tab.sql !== tab.originalSql) ? { originalSql: tab.originalSql } : {}),
@@ -366,6 +370,7 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         executingResultRunId: undefined,
         editorViewport: restoredEditorViewport(tab),
         editorSelection: restoredEditorSelection(tab, typeof tab.sql === "string" ? tab.sql.length : 0),
+        editorBookmarks: normalizePersistedBookmarks(tab.editorBookmarks),
         isExplaining: false,
         originalSql: restoredOriginalSql(tab, mode, typeof tab.sql === "string" ? tab.sql : ""),
         resultEvicted: mode === "data" ? undefined : tab.resultEvicted,

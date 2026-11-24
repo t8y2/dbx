@@ -85,7 +85,7 @@ describe("EditorToolbar commit/rollback visibility", () => {
     });
   });
 
-  async function mountToolbar(props: { dbType: string; stickyProvenReadOnlyState: boolean; txnPossiblyDirty?: boolean; txnSessionId?: string; txnStatus?: string; isExecuting?: boolean }) {
+  async function mountToolbar(props: { dbType: string; stickyProvenReadOnlyState: boolean; txnPossiblyDirty?: boolean; txnSessionId?: string; txnStatus?: string; isExecuting?: boolean; onCommit?: () => void }) {
     const connectionStore = useConnectionStore();
     connectionStore.connections = [
       {
@@ -98,6 +98,7 @@ describe("EditorToolbar commit/rollback visibility", () => {
 
     const host = createHost();
     const app = createApp(EditorToolbar, {
+      onCommit: props.onCommit,
       activeTab: {
         id: "tab-1",
         title: "SQL",
@@ -125,13 +126,23 @@ describe("EditorToolbar commit/rollback visibility", () => {
     });
     app.use(pinia);
     app.use(i18n);
-    app.mount(host);
+    const toolbar = app.mount(host) as InstanceType<typeof EditorToolbar>;
     await nextTick();
-    return host;
+    return Object.assign(host, { toolbar });
   }
 
   const commitSelector = `button[aria-label="toolbar.commit"]`;
   const rollbackSelector = `button[aria-label="toolbar.rollback"]`;
+
+  it.each([false, true])("uses the toolbar commit guard while isExecuting=%s", async (isExecuting) => {
+    const onCommit = vi.fn();
+    const host = await mountToolbar({ dbType: "mysql", stickyProvenReadOnlyState: true, txnPossiblyDirty: true, txnSessionId: "txn-1", isExecuting, onCommit });
+
+    expect(host.querySelector<HTMLButtonElement>(commitSelector)?.disabled).toBe(isExecuting);
+    expect(host.toolbar.commitFromToolbar()).toBe(!isExecuting);
+    expect(onCommit).toHaveBeenCalledTimes(isExecuting ? 0 : 1);
+    host.remove();
+  });
 
   it.each([undefined, "active-session"])("only opens independent multi-db transactions when the source has no active session (%s)", async (txnSessionId) => {
     const host = await mountToolbar({ dbType: "oceanbase-oracle", stickyProvenReadOnlyState: true, txnSessionId });

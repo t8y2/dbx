@@ -16,6 +16,8 @@ function snapshot(overrides: Record<string, unknown> = {}) {
     targetTable: "users",
     detailPreviewLimit: "100",
     keyColumnsByTable: { users: ["user_id"] },
+    globalIgnoredColumns: ["updated_at"],
+    ignoredColumnsByTable: { orders: ["amount"] },
     ...overrides,
   };
 }
@@ -38,6 +40,27 @@ describe("useDataCompareConfig", () => {
     expect(stored).toHaveLength(1);
     expect(stored[0]!.selectedSourceTables).toEqual(["users", "orders"]);
     expect(stored[0]!.keyColumnsByTable).toEqual({ users: ["user_id"] });
+    expect(stored[0]!.globalIgnoredColumns).toEqual(["updated_at"]);
+    expect(stored[0]!.ignoredColumnsByTable).toEqual({ orders: ["amount"] });
+  });
+
+  it("reloads persisted ignored columns and drops malformed entries from storage", async () => {
+    localStorage.setItem(
+      CONFIG_KEY,
+      JSON.stringify([
+        {
+          ...snapshot(),
+          name: "Nightly",
+          globalIgnoredColumns: ["updated_at", 42, ""],
+          ignoredColumnsByTable: { orders: ["amount"], logs: "not-an-array" },
+        },
+      ]),
+    );
+    const { useDataCompareConfig } = await import("../useDataCompareConfig");
+    const state = useDataCompareConfig();
+
+    expect(state.configs.value[0]!.globalIgnoredColumns).toEqual(["updated_at"]);
+    expect(state.configs.value[0]!.ignoredColumnsByTable).toEqual({ orders: ["amount"] });
   });
 
   it("keeps config names unique instead of silently overwriting", async () => {

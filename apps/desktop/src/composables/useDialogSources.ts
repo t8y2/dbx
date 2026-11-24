@@ -50,7 +50,7 @@ const configConnectionSelectLayout = ref<SidebarLayout | null>(null);
 const configConnectionSelectSortMode = ref<ConnectionListSortMode>("manual");
 const pendingExportConnectionIds = ref<string[]>([]);
 const pendingImportPreview = ref<ConnectionConfigBundle | null>(null);
-const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis">("dbx");
+const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis">("dbx");
 const applyingImportSelection = ref(false);
 
 const transferPrefillConnectionId = ref("");
@@ -58,6 +58,7 @@ const transferPrefillDatabase = ref("");
 const transferPrefillCatalog = ref("");
 const transferPrefillSchema = ref("");
 const transferPrefillTables = ref<string[]>([]);
+const transferPrefillViews = ref<string[]>([]);
 const transferPrefillTargetConnectionId = ref("");
 const transferPrefillTargetDatabase = ref("");
 const transferPrefillTargetSchema = ref("");
@@ -126,6 +127,7 @@ function clearTransferPrefill() {
   transferPrefillCatalog.value = "";
   transferPrefillSchema.value = "";
   transferPrefillTables.value = [];
+  transferPrefillViews.value = [];
   transferPrefillTargetConnectionId.value = "";
   transferPrefillTargetDatabase.value = "";
   transferPrefillTargetSchema.value = "";
@@ -185,6 +187,7 @@ export function useDialogSources() {
           transferPrefillCatalog.value = v.catalog ?? "";
           transferPrefillSchema.value = v.schema ?? "";
           transferPrefillTables.value = v.tables ?? [];
+          transferPrefillViews.value = v.views ?? [];
           transferPrefillTargetConnectionId.value = v.targetConnectionId ?? "";
           transferPrefillTargetDatabase.value = v.targetDatabase ?? "";
           transferPrefillTargetSchema.value = v.targetSchema ?? "";
@@ -457,15 +460,16 @@ export function useDialogSources() {
     showConfigConnectionSelectDialog.value = true;
   }
 
-  function importSuccessMessage(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis", count: number, keychainFilled = 0) {
+  function importSuccessMessage(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis", count: number, keychainFilled = 0) {
     if (count <= 0) return t("configExport.importNone");
     if (source === "navicat") return t("configExport.importNavicatSuccess", { count });
     if (source === "dbeaver") return t("configExport.importDbeaverSuccess", { count });
     if (source === "datagrip") return t("configExport.importDatagripSuccess", { count, filled: keychainFilled });
+    if (source === "sqlark") return t("configExport.importSqlarkSuccess", { count, passwords: connectionStore.lastSqlarkImportStats?.passwords ?? 0 });
     return t("configExport.importSuccess", { count });
   }
 
-  async function finishImport(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis", count: number, layout?: SidebarLayout) {
+  async function finishImport(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis", count: number, layout?: SidebarLayout) {
     let keychainFilled = 0;
     if (source === "datagrip" && count > 0) {
       keychainFilled = await connectionStore.applyDataGripKeychainPasswords();
@@ -473,6 +477,10 @@ export function useDialogSources() {
     toast(importSuccessMessage(source, count, keychainFilled), source === "dbx" ? 2000 : 4000);
     if (source === "datagrip" && (connectionStore.lastDataGripFallbackUsernamesCount ?? 0) > 0) {
       toast(t("configExport.importDatagripUsernamesFallbackWarning"), 5000);
+    }
+    const sqlarkSkipped = source === "sqlark" ? (connectionStore.lastSqlarkImportStats?.skipped ?? 0) : 0;
+    if (sqlarkSkipped > 0) {
+      toast(t("configExport.importSqlarkSkipped", { count: sqlarkSkipped }), 5000);
     }
     if (hasSidebarLayoutEntries(layout)) {
       pendingImportLayout.value = layout;
@@ -549,7 +557,7 @@ export function useDialogSources() {
     if (!open) showConfigPassphraseDialog.value = true;
   }
 
-  async function onImportClick(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis" = "dbx") {
+  async function onImportClick(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis" = "dbx") {
     try {
       const result = await connectionStore.readImportFile(source);
       if (!result) return;
@@ -672,6 +680,7 @@ export function useDialogSources() {
     transferPrefillCatalog,
     transferPrefillSchema,
     transferPrefillTables,
+    transferPrefillViews,
     transferPrefillTargetConnectionId,
     transferPrefillTargetDatabase,
     transferPrefillTargetSchema,

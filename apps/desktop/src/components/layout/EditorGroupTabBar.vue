@@ -28,6 +28,7 @@ const TAB_DRAG_HORIZONTAL_THRESHOLD = 24;
 
 <script setup lang="ts">
 import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
+import { blockTabDragTextSelection } from "@/lib/tabs/tabDragSelection";
 import type { Component, CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
@@ -43,6 +44,7 @@ import {
   Copy,
   Crosshair,
   Database,
+  ExternalLink,
   FoldHorizontal,
   ListFilter,
   ListOrdered,
@@ -86,6 +88,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { EditorSettings } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
+import { TAB_WINDOW_TRANSFER } from "@/composables/useTabWindowTransfer";
 import { useTabTitleTruncation } from "@/composables/useTabTitleTruncation";
 import { useToast } from "@/composables/useToast";
 import { hexToRgba } from "@/lib/common/color";
@@ -164,6 +167,8 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
 const toolbar = inject(EDITOR_TOOLBAR_ACTIONS, null);
+const tabWindowTransfer = inject(TAB_WINDOW_TRANSFER, null);
+let releaseTabDragSelection: (() => void) | undefined;
 const canNewQuery = computed(() => toolbar?.canNewQuery.value ?? false);
 const { toast } = useToast();
 const tabsContainerRef = ref<HTMLElement | null>(null);
@@ -221,7 +226,8 @@ const isVerticalLayout = computed(() => settingsStore.editorSettings.tabPlacemen
 // the strip below rendering only the selected group's tabs (issue #10034).
 // Meaningless without grouping, so it silently falls back to the single row.
 const isTwoRowLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabGroupRows === "two-row" && settingsStore.editorSettings.tabGroupMode !== "none");
-const isWrapLayout = computed(() => !isVerticalLayout.value && !isTwoRowLayout.value && settingsStore.editorSettings.tabLayout === "wrap");
+const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabLayout === "wrap");
+const hasWrapRowLimit = computed(() => isWrapLayout.value && settingsStore.editorSettings.tabWrapMaxRows > 0);
 // The icon-only collapse only exists in the vertical toolbar; horizontal
 // placements must ignore the persisted collapse state entirely.
 const isTabBarCollapsed = computed(() => isVerticalLayout.value && !!props.tabBarCollapsed);
@@ -238,6 +244,7 @@ const tabBarStyle = computed<CSSProperties | undefined>(() => {
   if (!isVerticalLayout.value && settingsStore.editorSettings.tabMaxWidth > 0) {
     styles["--tab-max-width"] = `${settingsStore.editorSettings.tabMaxWidth}px`;
   }
+  if (hasWrapRowLimit.value) styles["--tab-wrap-max-rows"] = settingsStore.editorSettings.tabWrapMaxRows;
   return Object.keys(styles).length > 0 ? styles : undefined;
 });
 const tabBarCollapseIcon = computed(() => {
@@ -1019,9 +1026,28 @@ function selectTabOrganizationItem(value: string) {
   else if (section === "maxwidth") updateTabMaxWidth(Number(option));
 }
 
+function getTabGroupWindowMenuItems(tabIds: readonly string[]): ContextMenuItem[] {
+  const tabs = [...new Set(tabIds)].map((id) => props.tabs.find((tab) => tab.id === id)).filter((tab): tab is QueryTab => !!tab);
+  const enabled = !!props.canDetachTabs && !!tabWindowTransfer && tabs.length > 0;
+  return [
+    { label: t("contextMenu.openTabGroupInNewWindow"), action: () => void tabWindowTransfer?.openTabsInNewWindow(tabs), icon: ExternalLink, visible: enabled },
+    {
+      label: t("contextMenu.moveTabGroupToAnotherWindow"),
+      icon: ExternalLink,
+      visible: enabled && !!tabWindowTransfer?.otherTabWindows.value.length,
+      children: tabWindowTransfer?.otherTabWindows.value.map((window) => ({
+        label: tabWindowTransfer.tabWindowTargetLabel(window),
+        action: () => void tabWindowTransfer.moveTabsToWindow(tabs, window.label),
+      })),
+    },
+    { label: "", separator: true, visible: enabled },
+  ];
+}
+
 function getTabGroupMenuItems(tab: QueryTab): ContextMenuItem[] {
   const customization = tabGroupCustomization(tab);
   return [
+    ...getTabGroupWindowMenuItems(tabsInSemanticGroup(tab).map((member) => member.id)),
     {
       label: t("contextMenu.editTabGroup"),
       action: () => openTabGroupEditor(tab),
@@ -1068,6 +1094,7 @@ function getTabGroupHeaderMenuItems(entry: Extract<StripEntry, { kind: "header" 
         ]
       : [];
   return [
+    ...getTabGroupWindowMenuItems(entry.tabIds),
     ...customizationItems,
     { label: t("contextMenu.collapseAll"), action: collapseAllTabGroups, icon: ChevronsDownUp },
     { label: t("contextMenu.expandAll"), action: () => expandAllTabGroups(), icon: ChevronsUpDown },
@@ -1076,9 +1103,12 @@ function getTabGroupHeaderMenuItems(entry: Extract<StripEntry, { kind: "header" 
   ];
 }
 
-function openTabGroupContextMenu(event: MouseEvent, open: (event: MouseEvent) => void) {
+async function openTabGroupContextMenu(event: MouseEvent, open: (event: MouseEvent) => void) {
   event.preventDefault();
+  event.stopPropagation();
   document.getSelection()?.removeAllRanges();
+  await tabWindowTransfer?.refreshOtherTabWindows();
+  await nextTick();
   open(event);
 }
 
@@ -1315,6 +1345,7 @@ const twoRowTabEntries = computed<StripEntry[]>(() => {
 function getTwoRowGroupMenuItems(group: TwoRowGroupItem): ContextMenuItem[] {
   const customization = group.key ? tabGroupCustomization(group.tab) : undefined;
   return [
+    ...getTabGroupWindowMenuItems(group.tabIds),
     { label: t("contextMenu.editTabGroup"), action: () => openTabGroupEditor(group.tab), icon: Pencil, visible: !!group.key },
     { label: t("contextMenu.resetTabGroup"), action: () => resetTabGroupCustomization(group.tab), icon: RotateCcw, visible: !!group.key && !!(customization?.name || customization?.color) },
     { label: "", separator: true, visible: !!group.key },
@@ -1495,7 +1526,10 @@ function handleTabPointerDown(event: PointerEvent, tab: QueryTab) {
   if ((event.buttons & 1) !== 1) {
     return;
   }
+  releaseTabDragSelection?.();
+  releaseTabDragSelection = blockTabDragTextSelection();
   groupTabDragSourceEl = event.currentTarget as HTMLElement | null;
+  void tabWindowTransfer?.refreshOtherTabWindows();
   groupTabDrag.active = false;
   groupTabDrag.tabId = tab.id;
   groupTabDrag.sourceGroupId = props.groupId;
@@ -1663,6 +1697,14 @@ function handleSaveAllTabs() {
   emit("save-all-tabs");
 }
 
+async function openTabContextMenu(event: MouseEvent, open: (event: MouseEvent) => void) {
+  event.preventDefault();
+  event.stopPropagation();
+  await tabWindowTransfer?.refreshOtherTabWindows();
+  await nextTick();
+  open(event);
+}
+
 function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
   const items: ContextMenuItem[] = [
     ...createRenameDuplicateTabItems({
@@ -1692,9 +1734,18 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
     },
     {
       label: t("tabs.openInNewWindow"),
-      action: () => emit("detach-tab", tab),
-      icon: Maximize2,
-      visible: !!props.canDetachTabs && isDetachableTab(tab),
+      action: () => (tabWindowTransfer ? void tabWindowTransfer.openTabInNewWindow(tab) : emit("detach-tab", tab)),
+      icon: ExternalLink,
+      visible: !!props.canDetachTabs && (!!tabWindowTransfer || isDetachableTab(tab)),
+    },
+    {
+      label: t("contextMenu.moveTabToAnotherWindow"),
+      icon: ExternalLink,
+      visible: !!tabWindowTransfer?.otherTabWindows.value.length,
+      children: tabWindowTransfer?.otherTabWindows.value.map((window) => ({
+        label: tabWindowTransfer.tabWindowTargetLabel(window),
+        action: () => void tabWindowTransfer.moveTabToWindow(tab, window.label),
+      })),
     },
     // Split actions stay visible but render disabled when they cannot produce
     // a new layout — at the four-group cap, or with a single open tab (the
@@ -1754,6 +1805,15 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.reopenClosedTab ?? "Shift+Mod+T"),
       onReopen: () => queryStore.reopenClosedTab(),
     }),
+    ...(toolbar?.openRecentTables
+      ? [
+          {
+            label: `${t("tabs.recentTablesTitle")}…`,
+            shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.openRecentTables ?? ""),
+            action: toolbar.openRecentTables,
+          },
+        ]
+      : []),
     createCloseTabMenuItem({
       label: t("contextMenu.closeTab"),
       onClose: () => closeTab(tab),
@@ -1859,9 +1919,12 @@ function cleanupTabDrag(event?: Event) {
   window.removeEventListener("pointerup", handleTabPointerUp);
   window.removeEventListener("pointercancel", cleanupTabDrag);
   window.removeEventListener("blur", cleanupTabDrag);
+  releaseTabDragSelection?.();
+  releaseTabDragSelection = undefined;
   // The shared drag session belongs to the bar that started it: another
   // group's tab bar unmounting mid-drag must not kill the source's drag.
   if (groupTabDrag.sourceGroupId === props.groupId) {
+    if (event?.type === "pointercancel") tabWindowTransfer?.cancel();
     groupTabDrag.active = false;
     groupTabDrag.tabId = null;
     groupTabDrag.sourceGroupId = null;
@@ -1873,7 +1936,6 @@ function cleanupTabDrag(event?: Event) {
     groupTabDragSourceEl = null;
     removeTabDragGhost();
     document.body.style.cursor = "";
-    document.body.style.userSelect = "";
   }
 }
 
@@ -1904,9 +1966,16 @@ function handleTabPointerMove(event: PointerEvent) {
       groupTabDragGhost = createTabDragGhost(groupTabDragSourceEl, event.clientX, event.clientY);
     }
     document.body.style.cursor = "grabbing";
-    document.body.style.userSelect = "none";
   }
   event.preventDefault();
+  const sourceBar = groupTabDragSourceEl?.closest<HTMLElement>("[data-main-tab-bar]");
+  if (sourceBar && tabWindowTransfer?.move(drag.tabId, event, () => cleanupTabDrag())) {
+    removeTabDragGhost();
+    drag.targetTabId = null;
+    drag.targetGroupId = null;
+    drag.position = null;
+    return;
+  }
   moveTabDragGhost(event.clientX, event.clientY);
 
   const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
@@ -1936,7 +2005,12 @@ function handleTabPointerUp(event: PointerEvent) {
     targetTabId: groupTabDrag.targetTabId,
     position: groupTabDrag.position,
   };
+  const transferred = drag.active && drag.tabId ? tabWindowTransfer?.end(drag.tabId, event) : false;
   cleanupTabDrag();
+  if (transferred) {
+    event.preventDefault();
+    return;
+  }
   if (!drag.active) {
     return;
   }
@@ -1974,6 +2048,7 @@ function handleTabPointerUp(event: PointerEvent) {
 }
 
 onUnmounted(() => {
+  if (groupTabDrag.sourceGroupId === props.groupId) tabWindowTransfer?.cancel();
   cleanupTabDrag();
   tabGroupCollapseTimers.forEach((timer) => window.clearTimeout(timer));
   tabGroupCollapseTimers.clear();
@@ -1998,7 +2073,7 @@ watch(
       }
     }
     nextTick(() => {
-      if (!isWrapLayout.value) {
+      if (!isWrapLayout.value || hasWrapRowLimit.value) {
         const container = tabsContainerRef.value;
         if (container) {
           const activeEl = container.querySelector('[data-active-tab="true"]');
@@ -2040,6 +2115,7 @@ watch(
     props.specialPageTabs?.settingsOpen,
     props.specialPageTabs?.driverStoreOpen,
     settingsStore.editorSettings.tabLayout,
+    settingsStore.editorSettings.tabWrapMaxRows,
     settingsStore.editorSettings.tabGroupMode,
     settingsStore.editorSettings.tabMaxWidth,
     compactTabTitle.value,
@@ -2258,11 +2334,12 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
             isVerticalLayout ? 'flex-col items-stretch overflow-y-auto overflow-x-hidden py-1' : isClassicLayout ? 'h-full items-center overflow-x-auto' : 'h-full items-center gap-0 overflow-x-auto py-1.5',
             isWrapLayout ? 'wrap-mode' : '',
             isWrapLayout && isClassicLayout ? 'classic-wrap' : '',
+            hasWrapRowLimit ? 'wrap-mode--limited' : '',
             hasHorizontalFixedRows ? 'horizontal-fixed-tabs-scroll' : '',
           ]"
-          :style="tabsContainerStyle"
+          :style="hasWrapRowLimit ? undefined : tabsContainerStyle"
           @scroll="!isVerticalLayout && !hasHorizontalFixedRows && updateScrollButtons()"
-          @wheel="!isVerticalLayout && !hasHorizontalFixedRows && onTabsWheel($event)"
+          @wheel="!isVerticalLayout && !hasHorizontalFixedRows && !hasWrapRowLimit && onTabsWheel($event)"
         >
           <template v-for="section in stripSections" :key="section.key">
             <div
@@ -2328,7 +2405,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                       :style="tabGroupTreeRowStyle(entry)"
                       :aria-hidden="entry.grouping && !tabSearchQuery.trim() && isEntryHidden(entry)"
                       :inert="entry.grouping && !tabSearchQuery.trim() && isEntryHidden(entry)"
-                      @contextmenu="onContextMenu"
+                      @contextmenu="openTabContextMenu($event, onContextMenu)"
                       @transitionend.self="handleTabGroupTransitionEnd"
                     >
                       <TabGroupTreeGuides v-if="showTabTreeGuides" :guides="entry.treeGuides ?? []" />
@@ -2545,7 +2622,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                     activateTab(tab.id);
                     tabOverflowOpen = false;
                   "
-                  @contextmenu="onContextMenu"
+                  @contextmenu="openTabContextMenu($event, onContextMenu)"
                   @keydown.enter.prevent="
                     activateTab(tab.id);
                     tabOverflowOpen = false;

@@ -190,4 +190,31 @@ describe("keepGuttersAttachedDuringSync", () => {
     expect(gutters.hasAttribute("data-scrolled-x")).toBe(false);
     expect(gutters.classList.contains("cm-gutters-scrolled-x")).toBe(false);
   });
+
+  it("applies the scroll flag to a replaced gutter element without reading the scroll offset on update", () => {
+    const { ViewPlugin } = fakeViewPlugin();
+    const spec = keepGuttersAttachedDuringSync(ViewPlugin) as unknown as { create: (view: EditorView) => FakeInstance };
+    const scrollDOM = document.createElement("div");
+    const gutters = document.createElement("div");
+    gutters.className = "cm-gutters";
+    scrollDOM.appendChild(gutters);
+    const gutter = fakeGutterHost();
+    const view = { plugins: [{ value: gutter.host }], scrollDOM };
+    const instance = spec.create(view as unknown as EditorView);
+    scrollDOM.scrollLeft = 50;
+    scrollDOM.dispatchEvent(new Event("scroll"));
+
+    const scrollLeft = vi.spyOn(scrollDOM, "scrollLeft", "get");
+    instance.update({ view: view as unknown as EditorView });
+    expect(scrollLeft).not.toHaveBeenCalled();
+
+    const replaced = document.createElement("div");
+    replaced.className = "cm-gutters";
+    gutters.replaceWith(replaced);
+    instance.update({ view: view as unknown as EditorView });
+    expect(scrollLeft).not.toHaveBeenCalled();
+    expect(replaced.hasAttribute("data-scrolled-x")).toBe(true);
+    expect(replaced.classList.contains("cm-gutters-scrolled-x")).toBe(true);
+    instance.destroy();
+  });
 });

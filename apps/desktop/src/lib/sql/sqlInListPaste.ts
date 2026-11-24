@@ -60,7 +60,7 @@ export function insertTextForSqlInCondition(condition: string, prefix: string): 
 }
 
 function parsePastedValues(source: string): ParsedPasteValues {
-  const sourceText = source.replace(/\r\n?/g, "\n").trim();
+  const sourceText = source.trim();
   const withoutInKeyword = stripLeadingInKeyword(sourceText);
   const explicitSource = withoutInKeyword.trim();
   const explicitList = explicitSource.startsWith("(") && explicitSource.endsWith(")") && hasSingleWrappingParentheses(explicitSource);
@@ -109,7 +109,7 @@ function splitPasteTokens(source: string): string[] {
       continue;
     }
 
-    if (char === "," || char === "\n" || char === "\t" || (slashIsDelimiter && char === "/")) {
+    if (char === "," || char === "\r" || char === "\n" || char === "\t" || (slashIsDelimiter && char === "/")) {
       tokens.push(current);
       current = "";
       continue;
@@ -124,7 +124,7 @@ function splitPasteTokens(source: string): string[] {
 
 function shouldSplitSlashSeparatedValues(source: string): boolean {
   const trimmed = source.trim();
-  if (!trimmed.includes("/") || /[,\n\t]/.test(trimmed)) return false;
+  if (!trimmed.includes("/") || /[,\r\n\t]/.test(trimmed)) return false;
   if (trimmed.includes("'") || trimmed.includes('"')) return false;
   if (trimmed.startsWith("/") || /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return false;
   if (/^\d{4}\/\d{1,2}\/\d{1,2}(?:\D|$)/.test(trimmed) || /^\d{1,2}\/\d{1,2}\/\d{4}(?:\D|$)/.test(trimmed)) return false;
@@ -151,8 +151,6 @@ function normalizePastedToken(token: string): ParsedPasteValue | null {
     value = first === "'" ? value.replace(/''/g, "'") : value.replace(/""/g, '"');
   }
 
-  value = value.trim();
-  if (!value) return null;
   return { value, quoted };
 }
 

@@ -87,18 +87,132 @@ describe("sqlParenthesisContentRangeAt", () => {
     const script = "select (1;\nselect (a) from t";
     expect(contentAt(script, script.indexOf("(a"), 1)).toBe("a");
   });
+
+  it("selects the text inside square brackets and curly braces from either end and side", () => {
+    const arrayDoc = "select array[a + b] from t";
+    const sqOpen = arrayDoc.indexOf("[");
+    const sqClose = arrayDoc.indexOf("]");
+    expect(contentAt(arrayDoc, sqOpen, 1)).toBe("a + b");
+    expect(contentAt(arrayDoc, sqOpen + 1, -1)).toBe("a + b");
+    expect(contentAt(arrayDoc, sqClose, 1)).toBe("a + b");
+    expect(contentAt(arrayDoc, sqClose + 1, -1)).toBe("a + b");
+
+    const objectDoc = "select object{a: 1} from t";
+    const braceOpen = objectDoc.indexOf("{");
+    const braceClose = objectDoc.indexOf("}");
+    expect(contentAt(objectDoc, braceOpen, 1)).toBe("a: 1");
+    expect(contentAt(objectDoc, braceOpen + 1, -1)).toBe("a: 1");
+    expect(contentAt(objectDoc, braceClose, 1)).toBe("a: 1");
+    expect(contentAt(objectDoc, braceClose + 1, -1)).toBe("a: 1");
+  });
+
+  it("pairs nested square brackets, curly braces, and mixed bracket types on their own level", () => {
+    const nestedBrackets = "a[[b], [c]] + [d]";
+    expect(contentAt(nestedBrackets, nestedBrackets.indexOf("[[b"), 1)).toBe("[b], [c]");
+    expect(contentAt(nestedBrackets, nestedBrackets.indexOf("[b"), 1)).toBe("b");
+    expect(contentAt(nestedBrackets, nestedBrackets.indexOf("[c"), 1)).toBe("c");
+    expect(contentAt(nestedBrackets, nestedBrackets.indexOf("[d"), 1)).toBe("d");
+
+    const nestedBraces = "a{{b}, {c}} + {d}";
+    expect(contentAt(nestedBraces, nestedBraces.indexOf("{{b"), 1)).toBe("{b}, {c}");
+    expect(contentAt(nestedBraces, nestedBraces.indexOf("{b"), 1)).toBe("b");
+    expect(contentAt(nestedBraces, nestedBraces.indexOf("{c"), 1)).toBe("c");
+    expect(contentAt(nestedBraces, nestedBraces.indexOf("{d"), 1)).toBe("d");
+
+    const mixed = "fn(array[obj{a: (1 + 2)}])";
+    expect(contentAt(mixed, mixed.indexOf("(array"), 1)).toBe("array[obj{a: (1 + 2)}]");
+    expect(contentAt(mixed, mixed.indexOf("[obj"), 1)).toBe("obj{a: (1 + 2)}");
+    expect(contentAt(mixed, mixed.indexOf("{a:"), 1)).toBe("a: (1 + 2)");
+    expect(contentAt(mixed, mixed.indexOf("(1 + 2"), 1)).toBe("1 + 2");
+    expect(contentAt(mixed, mixed.indexOf("}"), 1)).toBe("a: (1 + 2)");
+    expect(contentAt(mixed, mixed.indexOf("]"), 1)).toBe("obj{a: (1 + 2)}");
+  });
+
+  it("spans lines for square brackets and curly braces", () => {
+    const multiArray = "select array[\n  a + b\n]";
+    expect(contentAt(multiArray, multiArray.indexOf("["), 1)).toBe("\n  a + b\n");
+    expect(contentAt(multiArray, multiArray.indexOf("]"), 1)).toBe("\n  a + b\n");
+
+    const multiObject = "select object{\n  a: 1\n}";
+    expect(contentAt(multiObject, multiObject.indexOf("{"), 1)).toBe("\n  a: 1\n");
+    expect(contentAt(multiObject, multiObject.indexOf("}"), 1)).toBe("\n  a: 1\n");
+  });
+
+  it("ignores square brackets and curly braces inside strings, quoted identifiers and comments", () => {
+    const tricky = "select array['[', a], object{'{', b}, \"c]\", \"d}\" /* ] } */ from t -- [ {\nwhere [x] and {y}";
+    expect(contentAt(tricky, tricky.indexOf("array[") + "array".length, 1)).toBe("'[', a");
+    expect(contentAt(tricky, tricky.indexOf("a]") + 1, 1)).toBe("'[', a");
+    expect(contentAt(tricky, tricky.indexOf("object{") + "object".length, 1)).toBe("'{', b");
+    expect(contentAt(tricky, tricky.indexOf("b}") + 1, 1)).toBe("'{', b");
+    expect(contentAt(tricky, tricky.indexOf("'['") + 1, 1)).toBeNull();
+    expect(contentAt(tricky, tricky.indexOf("'{'") + 1, 1)).toBeNull();
+    expect(contentAt(tricky, tricky.indexOf("c]") + 1, 1)).toBeNull();
+    expect(contentAt(tricky, tricky.indexOf("d}") + 1, 1)).toBeNull();
+    expect(contentAt(tricky, tricky.indexOf("/* ]") + 3, 1)).toBeNull();
+    expect(contentAt(tricky, tricky.indexOf("} */"), 1)).toBeNull();
+    expect(contentAt(tricky, tricky.indexOf("-- [") + 3, 1)).toBeNull();
+    expect(contentAt(tricky, tricky.indexOf("[ {\n") + 2, 1)).toBeNull();
+    expect(contentAt(tricky, tricky.indexOf("[x"), 1)).toBe("x");
+    expect(contentAt(tricky, tricky.indexOf("{y"), 1)).toBe("y");
+
+    const oracleQ = "select q'[a + b]', q'{c: 1}' from dual";
+    expect(contentAt(oracleQ, oracleQ.indexOf("["), 1, { databaseType: "oracle" })).toBeNull();
+    expect(contentAt(oracleQ, oracleQ.indexOf("{"), 1, { databaseType: "oracle" })).toBeNull();
+
+    const dollarQuoted = "select $$[a + b] {c: 1}$$";
+    expect(contentAt(dollarQuoted, dollarQuoted.indexOf("["), 1, { dialect: "postgres" })).toBeNull();
+    expect(contentAt(dollarQuoted, dollarQuoted.indexOf("{"), 1, { dialect: "postgres" })).toBeNull();
+  });
+
+  it("handles SQL Server and SQLite bracket-quoted identifiers without breaking parenthesis pairing", () => {
+    const sqlServerDoc = "select ([a)b]), [Order Details], object{a: 1} from [dbo].[Orders]";
+    expect(contentAt(sqlServerDoc, sqlServerDoc.indexOf("("), 1, { databaseType: "sqlserver" })).toBe("[a)b]");
+    expect(contentAt(sqlServerDoc, sqlServerDoc.indexOf("[Order"), 1, { databaseType: "sqlserver" })).toBe("Order Details");
+    expect(contentAt(sqlServerDoc, sqlServerDoc.indexOf("Details]") + "Details".length, 1, { databaseType: "sqlserver" })).toBe("Order Details");
+    expect(contentAt(sqlServerDoc, sqlServerDoc.indexOf("{"), 1, { databaseType: "sqlserver" })).toBe("a: 1");
+    expect(contentAt("select []", "select ".length, 1, { databaseType: "sqlserver" })).toBeNull();
+    expect(contentAt("select [Order", "select ".length, 1, { databaseType: "sqlserver" })).toBeNull();
+    expect(contentAt("select [col]", "select ".length, 1, { databaseType: "sqlite" })).toBe("col");
+  });
+
+  it("falls back for empty, unmatched, or crossed square brackets and curly braces", () => {
+    expect(contentAt("select []", "select ".length)).toBeNull();
+    expect(contentAt("select {}", "select ".length)).toBeNull();
+    expect(contentAt("select [a + b", "select ".length)).toBeNull();
+    expect(contentAt("select a + b]", "select a + b".length)).toBeNull();
+    expect(contentAt("select {a: 1", "select ".length)).toBeNull();
+    expect(contentAt("select a: 1}", "select a: 1".length)).toBeNull();
+    expect(contentAt("[1]", 0, -1)).toBeNull();
+    expect(contentAt("{1}", 0, -1)).toBeNull();
+    expect(contentAt("select ([1)", "select ".length)).toBeNull();
+  });
+
+  it("does not let an unmatched bracket in an earlier statement break later pairs", () => {
+    const script = "select [1;\nselect {2;\nselect (3;\nselect [a + b], {c: 1}, (d) from t";
+    expect(contentAt(script, script.indexOf("[a + b"), 1)).toBe("a + b");
+    expect(contentAt(script, script.indexOf("{c: 1"), 1)).toBe("c: 1");
+    expect(contentAt(script, script.indexOf("(d"), 1)).toBe("d");
+  });
 });
 
 describe("createQueryEditorParenthesisMouseSelection", () => {
-  const doc = "select * from t where id in (1, 2) and y = 3";
+  const doc = "select * from t where id in (1, 2) and arr = array[a + b] and obj = object{a: 1}";
   const state = EditorState.create({ doc });
   const open = doc.indexOf("(1");
+  const squareOpen = doc.indexOf("[a");
+  const curlyOpen = doc.indexOf("{a");
 
-  it("selects the content between the parentheses on a double click", () => {
-    const style = createQueryEditorParenthesisMouseSelection(fakeView(state), eventAt(open));
-    expect(style).not.toBeNull();
-    const selection = style!.get(eventAt(open), false, false);
-    expect(doc.slice(selection.main.from, selection.main.to)).toBe("1, 2");
+  it("selects the content between parentheses, square brackets, or curly braces on a double click", () => {
+    for (const [pos, expected] of [
+      [open, "1, 2"],
+      [squareOpen, "a + b"],
+      [curlyOpen, "a: 1"],
+    ] as const) {
+      const style = createQueryEditorParenthesisMouseSelection(fakeView(state), eventAt(pos));
+      expect(style).not.toBeNull();
+      const selection = style!.get(eventAt(pos), false, false);
+      expect(doc.slice(selection.main.from, selection.main.to)).toBe(expected);
+    }
   });
 
   it("adds to the selection with a multi-cursor click and extends it with shift", () => {
@@ -108,6 +222,10 @@ describe("createQueryEditorParenthesisMouseSelection", () => {
     expect(added.ranges.map((range) => doc.slice(range.from, range.to))).toEqual(["", "1, 2"]);
     const extended = style.get(eventAt(open), true, false);
     expect(doc.slice(extended.main.from, extended.main.to)).toBe(doc.slice(0, doc.indexOf("2)") + 1));
+
+    const squareStyle = createQueryEditorParenthesisMouseSelection(fakeView(base), eventAt(squareOpen))!;
+    const squareAdded = squareStyle.get(eventAt(squareOpen), false, true);
+    expect(squareAdded.ranges.map((range) => doc.slice(range.from, range.to))).toEqual(["", "a + b"]);
   });
 
   it("keeps the default double click for everything else", () => {
@@ -119,5 +237,7 @@ describe("createQueryEditorParenthesisMouseSelection", () => {
     expect(createQueryEditorParenthesisMouseSelection(view, eventAt(open, 1, { altKey: true }))).toBeNull();
     expect(createQueryEditorParenthesisMouseSelection(view, eventAt(open), { composing: true })).toBeNull();
     expect(createQueryEditorParenthesisMouseSelection(view, eventAt(open), { language: "text" })).toBeNull();
+    expect(createQueryEditorParenthesisMouseSelection(view, eventAt(squareOpen), { language: "text" })).toBeNull();
+    expect(createQueryEditorParenthesisMouseSelection(view, eventAt(curlyOpen), { language: "text" })).toBeNull();
   });
 });

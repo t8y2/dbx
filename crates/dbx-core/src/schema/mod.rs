@@ -1993,7 +1993,30 @@ async fn external_driver_oracle_columns_via_sql(
     oracle_columns_via_metadata_query(&mut query, schema, table).await
 }
 
+fn oracle_column_lookup_table_candidates(table: &str) -> Vec<String> {
+    let exact = table.to_string();
+    let uppercase = table.trim().to_uppercase();
+    if uppercase.is_empty() || uppercase == exact {
+        return vec![exact];
+    }
+    vec![exact, uppercase]
+}
+
 async fn oracle_columns_via_metadata_query(
+    query: &mut OracleMetadataQuery<'_>,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<db::ColumnInfo>, String> {
+    for candidate in oracle_column_lookup_table_candidates(table) {
+        let columns = oracle_columns_via_metadata_query_exact(query, schema, &candidate).await?;
+        if !columns.is_empty() {
+            return Ok(columns);
+        }
+    }
+    Ok(Vec::new())
+}
+
+async fn oracle_columns_via_metadata_query_exact(
     query: &mut OracleMetadataQuery<'_>,
     schema: &str,
     table: &str,
@@ -7019,6 +7042,13 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn oracle_column_lookup_table_candidates_try_exact_then_uppercase_fallback() {
+        assert_eq!(super::oracle_column_lookup_table_candidates("EMP"), vec!["EMP"]);
+        assert_eq!(super::oracle_column_lookup_table_candidates("emp"), vec!["emp", "EMP"]);
+        assert_eq!(super::oracle_column_lookup_table_candidates("MixedCase"), vec!["MixedCase", "MIXEDCASE"]);
+    }
+
+    #[test]
     fn oracle_columns_sql_first_handles_explicit_schema_editor_sessions() {
         assert!(should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, Some("tab-1")));
         assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, None));
@@ -8461,6 +8491,10 @@ pub async fn completion_assistant_search_core(
                 PoolKind::Mysql(pool, mode) if *mode != MysqlMode::OceanBaseOracle => Some(pool.clone()),
                 _ => None,
             }) {
+                let db_config = connection_config(state, &request.connection_id).await;
+                if db_config.as_ref().is_some_and(db::doris::is_config) {
+                    pool.set_doris_metadata_defaults();
+                }
                 return db::mysql::completion_assistant_search(&pool, &request).await;
             }
         }
@@ -13268,6 +13302,7 @@ pub async fn get_oracle_type_management_snapshot_with_objects_core(
                         schema: Some(object_owner.clone()),
                         name: object_name.clone(),
                         source: source.clone(),
+                        identifier_quote: None,
                     },
                 )
                 .ok()
@@ -13464,6 +13499,7 @@ pub fn build_oracle_type_management_sql(
             schema: Some(owner.clone()),
             name: name.clone(),
             source,
+            identifier_quote: None,
         };
         let (sql, fingerprint) = if object_type == db::ObjectSourceKind::Trigger {
             dbx_sql::object_source_sql::build_oracle_type_management_trigger_source(
@@ -13505,6 +13541,7 @@ pub fn build_oracle_type_management_sql(
                 schema: Some(input.owner.clone()),
                 name: input.name.clone(),
                 source,
+                identifier_quote: None,
             })?;
             let quoted = |value: &str| format!("\"{}\"", value.replace('"', "\"\""));
             return Ok(db::OracleTypeManagementSqlResult {

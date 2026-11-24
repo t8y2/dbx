@@ -39,6 +39,7 @@ import type {
 } from "@/types/database";
 import {
   inheritNaturalTreeNodeOrder,
+  hasExplicitTreeLayoutOrder,
   isPinnedKeyPresent,
   migrateLegacyPinnedTreeNodeOrder,
   normalizePinnedTreeNodeOrder,
@@ -77,11 +78,17 @@ import {
   connectionGroupDestinationRows,
   connectionGroupIdForSelection,
   connectionSidebarSearchAliases,
+  findEntryParentGroupId,
   type DropPosition,
   type ReorderEntriesOptions,
 } from "@/lib/sidebar/sidebarLayout";
 import {
   applyTableVGroupsToChildren,
+  databaseVGroupMembers,
+  moveDatabaseVGroupMember,
+  type DatabaseVGroupPlacement,
+  isDatabaseVGroupContainer,
+  resolveDatabaseVGroupScope,
   collectTableTreeNames,
   createTableVGroup as createTableVGroupOp,
   deleteTableVGroups as deleteTableVGroupsOp,
@@ -125,9 +132,10 @@ import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } fr
 import * as api from "@/lib/backend/api";
 import { oracleDatabaseLinksFromResult, oracleDatabaseLinksSql, supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { shouldStartSidebarLayoutAutoSync } from "@/lib/sidebar/sidebarLayoutAutoSync";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, schemaNodeHasLoadableName, shouldShowDorisCatalogTree, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
-import { canClearDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { canClearDefaultDatabase, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { invalidateSchemaOptionsCache } from "@/lib/database/schemaOptionsCache";
 import {
   connectionDatabaseMetadataSchema,
@@ -143,13 +151,15 @@ import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, compareSidebarN
 import { spannerDisplayDatabase, spannerSchemaDisplayName } from "@/lib/connection/spannerResourcePath";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
 import { collapseExpandedTreeNodes, collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
-import { findNodePathByIdentity, nodeMatchesRegexScopeIdentity, type SidebarRegexScopeIdentity } from "@/lib/sidebar/sidebarSearchTree";
-import { findSidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
+import { buildSidebarIndexedTableNodes, findNodePathByIdentity, nodeMatchesRegexScopeIdentity, type SidebarRegexScopeIdentity } from "@/lib/sidebar/sidebarSearchTree";
+import { createSidebarTableCommentUpdates, patchSidebarTableComments, patchSidebarTableCommentIndex, type SidebarTableCommentUpdate } from "@/lib/sidebar/sidebarTableCommentUpdates";
+import { createSidebarActionTarget, findSidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import { sidebarIndexedObjectGroupTypes } from "@/lib/sidebar/sidebarGlobalSearchIndex";
 import { invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex } from "@/lib/sidebar/sidebarTableSearchIndex";
 import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
 import { simpleModeEmptyShellNeedsConfirmedLoad, treeNodeLoadedChildrenContentPresent } from "@/lib/sidebar/treeLoadedChildrenMarker";
 import { shouldMarkDisconnected } from "@/lib/connection/connectionHealth";
+import { notifyConnectionStateChanged } from "@/lib/connection/connectionStateEvents";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
 import { loadTimeoutInheritanceBackup, saveTimeoutInheritanceBackup } from "@/lib/connection/timeoutInheritanceBackup";
 import { migrateSqlServerLegacyCompatibilityConfig, requiresSqlServerLegacyCompatibilityComponent, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
@@ -184,6 +194,7 @@ import { invalidateQuickOpenMetadataCache, quickOpenMetadataCacheKey } from "@/l
 import { sortSidebarTreeChildrenByNameKeepingTableVGroups, sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
 import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
+import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { mergeRedisCommandDocumentation, parseRedisCommandCatalog, parseRedisCommandDocumentation, type RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -218,13 +229,15 @@ import { driverProfileObjectTreeProfileForConnection } from "@/lib/database/driv
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
 import { MetadataResultCache, type MetadataCacheInvalidation } from "@/lib/metadata/metadataResultCache";
-import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
+import { invalidateTableMetadataCache, loadTableIndexes } from "@/lib/metadata/tableMetadataCache";
+import { buildColumnIndexMap, columnIndexNameKey } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { cancelObjectDdlLoadsForConnection, cancelObjectDdlLoadsForDatabase, invalidateObjectDdlCache } from "@/lib/metadata/objectDdlCache";
 import { cancelObjectMetadataLoadsForConnection, cancelObjectMetadataLoadsForDatabase } from "@/lib/metadata/objectMetadataCache";
 import { metadataLoadBudgetMs } from "@/lib/metadata/metadataLoadBudget";
 import { clearMetadataRuntimeCacheForConnection, clearMetadataRuntimeCacheForDatabase } from "@/lib/metadata/metadataRuntimeCache";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
+import { retryCompletionMetadata } from "@/lib/metadata/completionMetadataRetry";
 import { buildCustomTypeTreeChildren } from "@/lib/sidebar/customTypeTree";
 import { TreeNodeLoadRegistry, type TreeNodeLoadHandle } from "@/lib/metadata/treeNodeLoadHandle";
 import { buildXuguTablespaceChildren } from "@/lib/sidebar/xuguTablespaces";
@@ -364,7 +377,7 @@ function isFlatMqConnection(config: ConnectionConfig | undefined): boolean {
   return kind === "kafka" || kind === "rocketmq" || kind === "rabbitmq";
 }
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis";
 
 interface LocateTableTarget {
   catalog?: string;
@@ -442,6 +455,13 @@ export type TreeClipboard =
   | {
       kind: "table-copy";
       tables: TreeClipboardTableEntry[];
+    }
+  | {
+      kind: "view-copy";
+      connectionId: string;
+      database: string;
+      schema?: string;
+      viewName: string;
     }
   | {
       kind: "connection-copy";
@@ -633,6 +653,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const sidebarTableSearchIndexDeletedConnections = new Set<string>();
   const sidebarTableSearchIndexScopeGenerations = new Map<string, number>();
   const sidebarTableSearchIndexPersistenceQueues = new Map<string, Promise<void>>();
+  const sidebarTableCommentUpdate = ref<SidebarTableCommentUpdate | null>(null);
+  const sidebarTableCommentUpdates = createSidebarTableCommentUpdates();
   const sidebarTableSearchIndexInvalidation = ref<{
     revision: number;
     scopes: Array<SidebarRegexScopeIdentity & { parentNodeId: string }>;
@@ -658,6 +680,7 @@ export const useConnectionStore = defineStore("connection", () => {
     catalog?: string;
     schema?: string;
     tables?: string[];
+    views?: string[];
     targetConnectionId?: string;
     targetDatabase?: string;
     targetSchema?: string;
@@ -742,6 +765,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
   const tableVGroupLayouts = ref<Record<string, TableVGroupLayout>>({});
   const lastDataGripFallbackUsernamesCount = ref(0);
+  /** Recovered SQLark passwords / skipped connection count from the last SQLark import. */
+  const lastSqlarkImportStats = ref({ passwords: 0, skipped: 0 });
   const dirtyTableVGroupScopeKeys = new Set<string>();
   let tableVGroupPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const connectionGroupPaths = computed(() => buildConnectionGroupPathMap(sidebarLayout.value));
@@ -802,6 +827,7 @@ export const useConnectionStore = defineStore("connection", () => {
   // 每个连接最近一次「建立会话」的本地墙钟时间（Unix 毫秒）。用于识别后端空闲自动断开
   // 事件的迟到：若连接时间晚于事件里的 `closedAtMs`，说明事件描述的是上一个会话。
   const connectionConnectedAtMs = new Map<string, number>();
+  const sharedConnectionStateRequests = new Map<string, number>();
   const connectionErrorRevisions = new Map<string, number>();
   const tableListSourceRevisions = new Map<string, number>();
   // TDengine and native PostgreSQL reuse persisted snapshots without a background
@@ -2110,7 +2136,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function hasConnectionMetadataChildren(children: TreeNode[] | undefined): boolean {
-    return connectionMetadataChildren(children).length > 0;
+    return connectionMetadataChildren(stripTableVGroupsFromChildren(children || [])).length > 0;
   }
 
   // `trustEmptyMetadataChildren` distinguishes two very different reasons this
@@ -2231,6 +2257,11 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function setChildren(parent: TreeNode, children: TreeNode[], options?: { trustEmptyConnectionChildren?: boolean }) {
+    // Merge real database siblings before reapplying folders, preserving loaded subtrees.
+    if (isDatabaseVGroupContainer(parent)) {
+      if (parent.children) parent.children = stripTableVGroupsFromChildren(parent.children);
+      children = stripTableVGroupsFromChildren(children);
+    }
     // Compare markers against the resolved child list (after connection preserve), not the raw loader payload.
     children = preserveExistingConnectionMetadataChildren(parent, children, options?.trustEmptyConnectionChildren === true);
     children = decorateDatabaseSavedSqlTreeNodes(children, savedSqlFilesByDatabase, parent.children);
@@ -2324,6 +2355,10 @@ export const useConnectionStore = defineStore("connection", () => {
       }
     } else if (children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) {
       children = stripTableVGroupsFromChildren(children);
+    }
+    if (isDatabaseVGroupContainer(parent) && parent.connectionId) {
+      const scope: TableVGroupScope = { connectionId: parent.connectionId, catalog: parent.type === "doris-catalog" ? parent.catalog : undefined, objectType: "databases" };
+      children = applyTableVGroupsToChildren(children, tableVGroupLayouts.value[tableVGroupScopeKey(scope)!], scope);
     }
     parent.children = markRawLeafTreeNodes(children);
     loadedTreeNodeChildrenIds.value.add(parent.id);
@@ -4152,7 +4187,8 @@ export const useConnectionStore = defineStore("connection", () => {
     await sidebarTableSearchIndexManifestWriteQueue;
   }
 
-  async function readSidebarTableSearchIndexCache(cacheKey: string, connectionId: string): Promise<SidebarTableSearchIndexCacheEntry> {
+  async function readSidebarTableSearchIndexCache(cacheKey: string, scope: SidebarRegexScopeIdentity): Promise<SidebarTableSearchIndexCacheEntry> {
+    const { connectionId } = scope;
     if (sidebarTableSearchIndexDeletedConnections.has(connectionId)) return { entries: null, stale: false, staleAt: Date.now() };
     const cached = getSidebarTableSearchIndexMemoryCache(cacheKey);
     if (cached !== undefined) return cached;
@@ -4160,7 +4196,10 @@ export const useConnectionStore = defineStore("connection", () => {
     if (pending) return pending;
     const connectionGeneration = sidebarTableSearchIndexConnectionGeneration(connectionId);
     const scopeGeneration = sidebarTableSearchIndexScopeGeneration(cacheKey);
+    const updates = sidebarTableCommentUpdates.begin();
     const read = (async () => {
+      // Reads started after a comment update must see its queued persisted row.
+      await sidebarTableSearchIndexPersistenceQueues.get(cacheKey)?.catch(() => undefined);
       const decoded = decodeSchemaTreeCache<TreeNode[]>(await api.loadSchemaCache<unknown>(cacheKey).catch(() => null));
       const index = decoded?.tableSearchIndex;
       const entries = index
@@ -4174,7 +4213,7 @@ export const useConnectionStore = defineStore("connection", () => {
           }))
         : null;
       const indexedAt = index ? Date.parse(index.indexedAt) : Number.NaN;
-      const value = { entries, stale: decoded?.isStale ?? false, staleAt: Number.isFinite(indexedAt) ? indexedAt + SCHEMA_TREE_CACHE_TTL_MS : Date.now() };
+      const value = { entries: entries && updates.patchEntries(scope, entries), stale: decoded?.isStale ?? false, staleAt: Number.isFinite(indexedAt) ? indexedAt + SCHEMA_TREE_CACHE_TTL_MS : Date.now() };
       if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return { entries: null, stale: false, staleAt: Date.now() };
       setSidebarTableSearchIndexMemoryCache(cacheKey, value);
       return value;
@@ -4183,6 +4222,7 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       return await read;
     } finally {
+      updates.finish();
       if (sidebarTableSearchIndexInFlight.get(cacheKey) === read) sidebarTableSearchIndexInFlight.delete(cacheKey);
     }
   }
@@ -4199,20 +4239,31 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!parent) return null;
     const cacheKey = sidebarTableSearchIndexCacheKey(parent);
     if (!cacheKey) return null;
-    const { entries } = await readSidebarTableSearchIndexCache(cacheKey, parent.connectionId || "");
-    if (entries) await registerSidebarTableSearchIndexScope(parent, cacheKey);
-    return entries;
+    const scope = { connectionId: parent.connectionId || "", database: parent.database ?? "", schema: parent.schema, catalog: parent.catalog, nodeType: parent.type };
+    const updates = sidebarTableCommentUpdates.begin();
+    try {
+      const { entries } = await readSidebarTableSearchIndexCache(cacheKey, scope);
+      if (entries) await registerSidebarTableSearchIndexScope(parent, cacheKey);
+      return entries && updates.patchEntries(scope, entries);
+    } finally {
+      updates.finish();
+    }
   }
 
   async function loadSidebarTableSearchIndexScopes(includeScope: (scope: TableSearchIndexManifestEntry) => boolean = () => true): Promise<Array<{ scope: TableSearchIndexManifestEntry; entries: TableInfo[]; stale: boolean }>> {
-    const manifest = await loadSidebarTableSearchIndexManifest();
-    const scopes: Array<{ scope: TableSearchIndexManifestEntry; entries: TableInfo[]; stale: boolean }> = [];
-    for (const scope of manifest) {
-      if (!includeScope(scope)) continue;
-      const cached = await readSidebarTableSearchIndexCache(scope.cacheKey, scope.connectionId);
-      if (cached.entries) scopes.push({ scope, entries: cached.entries, stale: cached.stale });
+    const updates = sidebarTableCommentUpdates.begin();
+    try {
+      const manifest = await loadSidebarTableSearchIndexManifest();
+      const scopes: Array<{ scope: TableSearchIndexManifestEntry; entries: TableInfo[]; stale: boolean }> = [];
+      for (const scope of manifest) {
+        if (!includeScope(scope)) continue;
+        const cached = await readSidebarTableSearchIndexCache(scope.cacheKey, scope);
+        if (cached.entries) scopes.push({ scope, entries: cached.entries, stale: cached.stale });
+      }
+      return scopes.map((result) => ({ ...result, entries: updates.patchEntries(result.scope, result.entries) }));
+    } finally {
+      updates.finish();
     }
-    return scopes;
   }
 
   async function ensureSidebarTableSearchIndex(parentNodeId: string, query: string, identity?: SidebarRegexScopeIdentity, options?: { refresh?: boolean; connectedOnly?: boolean }): Promise<TableInfo[] | null> {
@@ -4234,9 +4285,11 @@ export const useConnectionStore = defineStore("connection", () => {
     const scope = parent && sidebarTableSearchIndexScopeForNode(parent);
     if (!scope) return null;
     sidebarTableSearchBuildingScopes.set(scope.cacheKey, scope);
+    const updates = sidebarTableCommentUpdates.begin();
     try {
-      return await buildSidebarTableSearchIndex(parentNodeId, identity);
+      return await buildSidebarTableSearchIndex(parentNodeId, identity, updates);
     } finally {
+      updates.finish();
       if (sidebarTableSearchBuildingScopes.get(scope.cacheKey) === scope) sidebarTableSearchBuildingScopes.delete(scope.cacheKey);
     }
   }
@@ -4293,10 +4346,11 @@ export const useConnectionStore = defineStore("connection", () => {
     return [{ querySchema: parent.database, ...(databaseIsSchema ? { attribution: parent.database } : {}) }];
   }
 
-  async function buildSidebarTableSearchIndex(parentNodeId: string, identity?: SidebarRegexScopeIdentity): Promise<TableInfo[] | null> {
+  async function buildSidebarTableSearchIndex(parentNodeId: string, identity: SidebarRegexScopeIdentity | undefined, updates: ReturnType<typeof sidebarTableCommentUpdates.begin>): Promise<TableInfo[] | null> {
     const parent = identity ? findSidebarTreeNodeByIdentity(parentNodeId, identity) : findNode(treeNodes.value, parentNodeId);
     if (!parent?.connectionId || !hasTreeNodeDatabaseContext(parent)) return [];
     const connectionId = parent.connectionId;
+    const commentScope = { connectionId, database: parent.database, schema: parent.schema, catalog: parent.catalog };
     // 搜索是后台投影，不得替用户建连：用户在侧栏显式关闭过的连接在这里直接放弃索引
     // （返回 null，UI 退回"只过滤已加载的表"），而不是把它连回来。这里不能抛
     // `skipIfClosedByUser` 那个错误——输入路径（loadLocalTableSearchResults）没有 catch，
@@ -4357,7 +4411,7 @@ export const useConnectionStore = defineStore("connection", () => {
     let indexIsCurrent = false;
     await serializeSidebarTableSearchIndexPersistence(cacheKey, async () => {
       if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return;
-      await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache<TreeNode[]>([], Date.now(), tableSearchIndex)).catch(() => undefined);
+      await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache<TreeNode[]>([], Date.now(), updates.patchIndex(commentScope, tableSearchIndex))).catch(() => undefined);
       if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) {
         await api.deleteSchemaCachePrefix(cacheKey).catch(() => undefined);
         return;
@@ -4365,9 +4419,11 @@ export const useConnectionStore = defineStore("connection", () => {
       indexIsCurrent = true;
     });
     if (!indexIsCurrent || !sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
-    setSidebarTableSearchIndexMemoryCache(cacheKey, { entries: deduped, stale: false, staleAt: Date.now() + SCHEMA_TREE_CACHE_TTL_MS });
     await registerSidebarTableSearchIndexScope(parent, cacheKey);
-    return deduped;
+    if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
+    const updatedEntries = updates.patchEntries(commentScope, deduped);
+    setSidebarTableSearchIndexMemoryCache(cacheKey, { entries: updatedEntries, stale: false, staleAt: Date.now() + SCHEMA_TREE_CACHE_TTL_MS });
+    return updatedEntries;
   }
 
   async function savePersistedConnectionTreeChildren(cacheKey: string, children: TreeNode[]) {
@@ -4382,8 +4438,11 @@ export const useConnectionStore = defineStore("connection", () => {
     if (connectionUsesVisibleSchemaFilter(config)) {
       return schemaCacheKey(connectionId, config.database || "", config.db_type === "oracle" ? "schemas-v2" : "schemas", config.show_system_schemas === true ? "show-system" : "hide-system");
     }
-    // v3 includes per-database compatibilityMode used by openGauss A-mode capabilities.
-    return schemaCacheKey(connectionId, "databases-v3");
+    // v4 includes per-database compatibilityMode used by openGauss A-mode
+    // capabilities, and keys the "show system databases" flag: MySQL-family
+    // connections lift the frontend database blacklist with it, so a cached
+    // (filtered) child list must not be served after the setting changes.
+    return schemaCacheKey(connectionId, "databases-v4", config.show_system_schemas === true ? "show-system" : "hide-system");
   }
 
   async function hydrateTreeNodeFromCache(node: TreeNode | null, cacheKey: string | null): Promise<boolean> {
@@ -4780,10 +4839,27 @@ export const useConnectionStore = defineStore("connection", () => {
   function reorderPinnedTreeNodes(draggedKey: string, targetKey: string, position: DropPosition): boolean {
     if (position === "inside" || !canReorderPinnedTreeNodes(draggedKey, targetKey)) return false;
     const next = reorderPinnedTreeNodeOrder(pinnedTreeNodeOrder.value, draggedKey, targetKey, position);
-    if (next.length === pinnedTreeNodeOrder.value.length && next.every((key, index) => key === pinnedTreeNodeOrder.value[index])) return false;
-    setPinnedTreeNodeOrder(next);
+    const pinOrderChanged = next.length !== pinnedTreeNodeOrder.value.length || next.some((key, index) => key !== pinnedTreeNodeOrder.value[index]);
+    const source = findPinnedTreeNodeLocation(treeNodes.value, draggedKey);
+    const target = findPinnedTreeNodeLocation(treeNodes.value, targetKey);
+    let layoutChanged = false;
+    // Ordinary row dragging can change the visible layout without changing pin
+    // order. Evaluate both independently before deciding this drop is a no-op.
+    if (source && target && hasExplicitTreeLayoutOrder(source.siblings)) {
+      const scope = resolveDatabaseVGroupScope(treeNodes.value, source.node, tableVGroupLayouts.value);
+      const scopeKey = scope ? tableVGroupScopeKey(scope) : null;
+      const layout = scopeKey ? tableVGroupLayouts.value[scopeKey] : undefined;
+      const container = scope ? findTableVGroupContainerNode(treeNodes.value, scope) : null;
+      if (scope && scopeKey && layout && container?.children) {
+        const nextLayout = moveDatabaseVGroupMember(layout, source.node, { target: target.node, position }, container.children);
+        layoutChanged = JSON.stringify(nextLayout) !== JSON.stringify(layout);
+        if (layoutChanged) updateTableVGroupLayout(scope, scopeKey, nextLayout);
+      }
+    }
+    if (!pinOrderChanged && !layoutChanged) return false;
+    if (pinOrderChanged) setPinnedTreeNodeOrder(next);
     syncPinnedTreeState(treeNodes.value);
-    persistPinnedTreeNodeIds();
+    if (pinOrderChanged) persistPinnedTreeNodeIds();
     return true;
   }
 
@@ -5363,6 +5439,14 @@ export const useConnectionStore = defineStore("connection", () => {
     await reloadConnectionDatabaseChildren(connectionId);
   }
 
+  function pruneDatabaseVGroups(scope: TableVGroupScope, names: readonly string[]) {
+    const key = tableVGroupScopeKey(scope);
+    const current = key ? tableVGroupLayouts.value[key] : undefined;
+    if (!key || !current) return;
+    const next = pruneTableVGroupMembersOp(current, new Set(names));
+    if (next !== current) updateTableVGroupLayout(scope, key, next);
+  }
+
   function recordPrimaryVisibleObjectNames(connectionId: string, objectNames: readonly string[]) {
     const names = [...objectNames];
     const existing = primaryVisibleObjectNames.value[connectionId];
@@ -5472,12 +5556,32 @@ export const useConnectionStore = defineStore("connection", () => {
     rebuildTreeNodes();
   }
 
+  async function updateSidebarPreferencesAfterSchemaRename(connectionId: string, database: string, oldName: string, newName: string) {
+    const index = connections.value.findIndex((connection) => connection.id === connectionId);
+    const config = connections.value[index];
+    if (!config) return;
+    const visibleSchemas = config.visible_schemas?.[database];
+    const renamedVisibleSchemas = visibleSchemas?.includes(oldName) ? [...new Set(visibleSchemas.map((name) => (name === oldName ? newName : name)))] : undefined;
+    const updateDefaultSchema = config.default_schema === oldName && resolveDefaultDatabase(config, []) === database;
+    if (!renamedVisibleSchemas && !updateDefaultSchema) return;
+
+    const updated = [...connections.value];
+    updated[index] = {
+      ...config,
+      default_schema: updateDefaultSchema ? newName : config.default_schema,
+      visible_schemas: renamedVisibleSchemas ? { ...config.visible_schemas, [database]: renamedVisibleSchemas } : config.visible_schemas,
+    };
+    await persistConnections(updated);
+    connections.value = updated;
+    rebuildTreeNodes();
+  }
+
   // Catalog-less generic JDBC servers (e.g. Zenith / GaussDB 100) only report the
   // placeholder default database, so a collapsed node would hide every schema.
   // Open it right away so the schema list shows when the connection is opened.
   async function expandCatalogLessJdbcDefaultDatabase(connectionNode: TreeNode | null, config: ConnectionConfig | undefined) {
     if (!connectionNode || config?.db_type !== "jdbc" || !connectionShouldDiscoverJdbcSchemas(config)) return;
-    const databaseNodes = (connectionNode.children ?? []).filter((child) => child.type === "database");
+    const databaseNodes = stripTableVGroupsFromChildren(connectionNode.children ?? []).filter((child) => child.type === "database");
     if (databaseNodes.length !== 1 || databaseNodes[0].database !== "") return;
     const defaultNodeId = databaseNodes[0].id;
     try {
@@ -5850,9 +5954,44 @@ export const useConnectionStore = defineStore("connection", () => {
    * 所有「连上」的路径都必须走这里，否则 `handleConnectionIdleClosed` 无法判断后端事件是否
    * 早于当前会话（见该函数的「迟到事件」说明）。
    */
-  function markConnectionConnected(connectionId: string): void {
+  function markConnectionConnected(connectionId: string, notifyOtherWindows = true): void {
     connectedIds.value.add(connectionId);
     connectionConnectedAtMs.set(connectionId, Date.now());
+    if (notifyOtherWindows) void notifyConnectionStateChanged({ connectionId });
+  }
+
+  async function syncSharedConnectionState(connectionId: string, closedByUser = false): Promise<void> {
+    const config = getConfig(connectionId);
+    if (!config || connectingIds.value.has(connectionId) || hasDisconnectInFlight(connectionId)) return;
+    const revision = connectionStateRevision(connectionId);
+    const fingerprint = connectionConfigFingerprint(config);
+    const request = (sharedConnectionStateRequests.get(connectionId) ?? 0) + 1;
+    sharedConnectionStateRequests.set(connectionId, request);
+    let open: boolean;
+    try {
+      open = await api.connectionIsOpen(connectionId);
+    } catch (error) {
+      console.warn("[DBX][connection:state-confirm]", error);
+      return;
+    }
+    const current = getConfig(connectionId);
+    if (!current || connectionConfigFingerprint(current) !== fingerprint || !isCurrentConnectionStateRevision(connectionId, revision) || sharedConnectionStateRequests.get(connectionId) !== request || connectingIds.value.has(connectionId) || hasDisconnectInFlight(connectionId)) return;
+    // Remote notifications are hints. Read the shared backend pool without
+    // connecting, closing tabs, expanding the tree, or changing the selection.
+    if (open) {
+      if (!connectedIds.value.has(connectionId)) {
+        markConnectionConnected(connectionId, false);
+        clearConnectionError(connectionId);
+        clearAutomaticReconnectCooldown(connectionId);
+      }
+      clearConnectionClosedByUser(connectionId);
+    } else {
+      if (connectedIds.value.has(connectionId)) {
+        bumpConnectionStateRevision(connectionId);
+        markConnectionOffline(connectionId);
+      }
+      if (closedByUser) markConnectionClosedByUser(connectionId);
+    }
   }
 
   /**
@@ -5982,6 +6121,7 @@ export const useConnectionStore = defineStore("connection", () => {
     await disconnectRequest;
     if (isCurrentConnectionStateRevision(connectionId, stateRevision)) {
       clearConnectionError(connectionId);
+      void notifyConnectionStateChanged({ connectionId, closedByUser: options.markClosedByUser !== false });
     }
     if (shouldRemoveOneTimeConnection && isCurrentConnectionStateRevision(connectionId, stateRevision)) {
       await removeConnection(connectionId);
@@ -6529,6 +6669,7 @@ export const useConnectionStore = defineStore("connection", () => {
             if (isSidebarSearchQueryChanged(options)) return;
             const targetNode = treeNodeLoadTarget(load);
             if (!targetNode) return;
+            pruneDatabaseVGroups({ connectionId, objectType: "databases" }, databaseNames);
             recordPrimaryVisibleObjectNames(connectionId, databaseNames);
             setChildren(targetNode, children, { trustEmptyConnectionChildren: databaseNames.length > 0 && visibleNames.length === 0 });
             await savePersistedConnectionTreeChildren(cacheKey, targetNode.children || children);
@@ -6602,8 +6743,10 @@ export const useConnectionStore = defineStore("connection", () => {
               setChildren(targetNode, children);
               await savePersistedConnectionTreeChildren(cacheKey, targetNode.children || children);
             } else {
-              // v3 persists per-database compatibilityMode for openGauss A-mode features.
-              const cacheKey = schemaCacheKey(connectionId, "databases-v3");
+              // v4 persists per-database compatibilityMode for openGauss A-mode
+              // features and keys the "show system databases" flag so toggling it
+              // re-fetches instead of replaying the filtered cache.
+              const cacheKey = schemaCacheKey(connectionId, "databases-v4", config?.show_system_schemas === true ? "show-system" : "hide-system");
               if (!options?.force) {
                 const cached = await loadPersistedTreeChildren(node, cacheKey, load);
                 if (cached.hit) {
@@ -6651,6 +6794,10 @@ export const useConnectionStore = defineStore("connection", () => {
               if (isSidebarSearchQueryChanged(options)) return;
               const targetNode = treeNodeLoadTarget(load);
               if (!targetNode) return;
+              pruneDatabaseVGroups(
+                { connectionId, objectType: "databases" },
+                databases.map((database) => database.name),
+              );
               recordPrimaryVisibleObjectNames(
                 connectionId,
                 databases.map((database) => database.name),
@@ -7012,6 +7159,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const visibleDbs = filterDatabaseNamesForConnection(dbs, config);
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
+      pruneDatabaseVGroups({ connectionId, objectType: "databases" }, dbs);
       recordPrimaryVisibleObjectNames(connectionId, dbs);
       setChildren(
         targetNode,
@@ -7182,6 +7330,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const dbs = await withMetadataLoadTimeout(connectionId, api.documentListDatabases(connectionId), "Milvus databases");
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
+      pruneDatabaseVGroups({ connectionId, objectType: "databases" }, dbs);
       setChildren(
         targetNode,
         withSavedSqlRoot(
@@ -7581,6 +7730,10 @@ export const useConnectionStore = defineStore("connection", () => {
       if (isSidebarSearchQueryChanged(options)) return;
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
+      pruneDatabaseVGroups(
+        { connectionId, catalog, objectType: "databases" },
+        databases.map((database) => database.name),
+      );
       setChildren(targetNode, databaseNodes);
       targetNode.isExpanded = true;
     } catch (e) {
@@ -8360,7 +8513,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
         if (simpleObjectDisplay) {
           const schemaParents = target.schema
-            ? [findNode(treeNodes.value, `${target.connectionId}:${target.database}:${target.schema}`)]
+            ? [
+                findNode(treeNodes.value, `${target.connectionId}:${target.database}:${target.schema}`) ??
+                  findTreeNodes(treeNodes.value, (node) => node.type === "schema" && node.connectionId === target.connectionId && sameSidebarObjectName(node.database, target.database) && sameSidebarObjectName(node.schema || node.label, target.schema))[0],
+              ]
             : findTreeNodes(treeNodes.value, (node) => node.type === "schema" && node.connectionId === target.connectionId && sameSidebarObjectName(node.database, target.database));
           const parents = schemaParents.filter((node): node is TreeNode => !!node);
           if (!parents.length) {
@@ -8794,22 +8950,39 @@ export const useConnectionStore = defineStore("connection", () => {
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       const connConfig = getConfig(connectionId);
-      const isGaussdbM = effectiveDatabaseTypeForConnection(connConfig) === "gaussdb" && connConfig?.driver_profile?.toLowerCase() === "gaussdb-m";
-      setLoadedTableMetadataChildren(
-        targetNode,
-        columns.map((col) => ({
-          id: `${parentId}:${col.name}`,
-          label: `${col.name} (${isGaussdbM ? gaussdbMTypeDisplayName(col.data_type) : col.data_type})`,
-          type: "column" as const,
-          connectionId,
-          database,
-          schema,
-          catalog: catalog || targetNode.catalog,
-          tableName: table,
-          meta: col,
-        })),
-      );
+      const databaseType = effectiveDatabaseTypeForConnection(connConfig);
+      const isGaussdbM = databaseType === "gaussdb" && connConfig?.driver_profile?.toLowerCase() === "gaussdb-m";
+      const columnNodes: TreeNode[] = columns.map((col) => ({
+        id: `${parentId}:${col.name}`,
+        label: `${col.name} (${isGaussdbM ? gaussdbMTypeDisplayName(col.data_type) : col.data_type})`,
+        type: "column",
+        connectionId,
+        database,
+        schema,
+        catalog: catalog || targetNode.catalog,
+        tableName: table,
+        meta: col,
+        columnIndexKind: col.is_primary_key ? "primary" : undefined,
+      }));
+      setLoadedTableMetadataChildren(targetNode, columnNodes);
       if (!options?.preserveExpansion) targetNode.isExpanded = true;
+
+      if (databaseType && columns.length && getTableMetadataCapabilities(databaseType).indexes) {
+        void loadTableIndexes({ connectionId, database, schema: querySchema, catalog, tableName: table, databaseType, driverProfile: connConfig?.driver_profile })
+          .then((indexes) => {
+            const current = treeNodeLoadTarget(load);
+            if (!current || !indexes.length) return;
+            const indexByName = buildColumnIndexMap(indexes);
+            const indexedColumns = columnNodes.map((node, index) => {
+              const indexKind = node.columnIndexKind ?? indexByName.get(columnIndexNameKey(columns[index].name));
+              return indexKind && indexKind !== "none" ? { ...node, columnIndexKind: indexKind } : node;
+            });
+            setLoadedTableMetadataChildren(current, indexedColumns);
+          })
+          .catch(() => {
+            // Index visibility and permissions vary. The column list is already usable.
+          });
+      }
     } catch (e) {
       recordMetadataLoadError(connectionId, e, load);
       throw e;
@@ -9180,8 +9353,135 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  /** Table-like nodes reload their detail groups on refresh; their caret must stay as the user left it (#14919). */
-  const isTableLikeNode = (node: TreeNode) => node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection";
+  function tableCommentListParent(target: TreeNode): TreeNode | null {
+    const visited = new WeakSet<TreeNode>();
+    const visit = (nodes: TreeNode[], listParent: TreeNode | null): TreeNode | null => {
+      for (const current of nodes) {
+        if (current === target) return listParent;
+        if (visited.has(current)) continue;
+        visited.add(current);
+        const parent = sidebarTableSearchTreeCacheKey(current) ? current : listParent;
+        const found = visit(current.children ?? [], parent) ?? visit(current.hiddenChildren ?? [], parent);
+        if (found) return found;
+      }
+      return null;
+    };
+    const parent = visit(treeNodes.value, null);
+    if (parent) return parent;
+
+    // An indexed search hit may not be among the loaded pages. Reuse the index
+    // builder's identity rules rather than guessing its parent from a colon ID.
+    // Visible index results have already registered their scope in memory.
+    const scopes = [...(sidebarTableSearchIndexManifest ?? []), ...sidebarTableSearchBuildingScopes.values()];
+    for (const scope of scopes) {
+      if (scope.connectionId !== target.connectionId || scope.database !== target.database || scope.catalog !== target.catalog) continue;
+      if (scope.schema !== undefined && scope.schema !== target.schema) continue;
+      const entries: TableInfo[] = [{ name: target.label, table_type: target.type.toUpperCase(), schema: target.schema }];
+      if (!findSidebarActionTarget(buildSidebarIndexedTableNodes({ ...scope, entries }), target)) continue;
+      return findSidebarTreeNodeByIdentity(scope.parentNodeId, scope) ?? { id: scope.parentNodeId, type: scope.nodeType as TreeNode["type"], label: "", connectionId: scope.connectionId, database: scope.database, schema: scope.schema, catalog: scope.catalog };
+    }
+    return null;
+  }
+
+  function tableCommentTreeCacheKey(parent: TreeNode): string | null {
+    if (!parent.connectionId || !hasTreeNodeDatabaseContext(parent)) return null;
+    if (sidebarIndexedObjectGroupTypes.has(parent.type)) return objectGroupCacheKey(parent);
+    const config = getConfig(parent.connectionId);
+    if (parent.type === "database" && parent.catalog && connectionIsDorisFamilyCatalogCapable(config)) return schemaCacheKey(parent.connectionId, `doris-catalog:${parent.catalog}`, parent.database, "objects-simple-v6");
+    if (parent.type !== "database" && parent.type !== "schema") return null;
+    const simple = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
+    const baseVersion = objectTreeCacheVersion(config, parent.database, parent.schema, simple ? "objects-simple-v9" : "objects-grouped-v9");
+    const profileKey = driverProfileObjectTreeProfileForConnection(config)?.cacheKey;
+    return schemaCacheKey(parent.connectionId, parent.database, parent.schema || "", !simple && profileKey ? `${baseVersion}:${profileKey}` : baseVersion);
+  }
+
+  async function updateSidebarTableSearchComment(target: TreeNode, comment: string | null, parent: TreeNode | null, isCurrent: () => boolean) {
+    const manifest = await loadSidebarTableSearchIndexManifest();
+    if (!isCurrent() || !target.connectionId || !hasTreeNodeDatabaseContext(target)) return;
+    const update: SidebarTableCommentUpdate = { revision: (sidebarTableCommentUpdate.value?.revision ?? 0) + 1, connectionId: target.connectionId, database: target.database, schema: target.schema, catalog: target.catalog, tableName: target.label, comment };
+    const parentScope = parent && sidebarTableSearchIndexScopeForNode(parent);
+    const scopes = [...new Map([...manifest, ...sidebarTableSearchBuildingScopes.values(), ...(parentScope ? [parentScope] : [])].map((scope) => [scope.cacheKey, scope])).values()].filter(
+      (scope) => scope.connectionId === update.connectionId && scope.database === update.database && scope.catalog === update.catalog && (scope.schema === undefined || scope.schema === update.schema),
+    );
+    sidebarTableCommentUpdates.record(update);
+    const writes = scopes.map((scope) => {
+      const cached = sidebarTableSearchIndexCache.get(scope.cacheKey);
+      if (cached?.entries) setSidebarTableSearchIndexMemoryCache(scope.cacheKey, { ...cached, entries: patchSidebarTableComments(scope, cached.entries, [update]) });
+      const connectionGeneration = sidebarTableSearchIndexConnectionGeneration(scope.connectionId);
+      const scopeGeneration = sidebarTableSearchIndexScopeGeneration(scope.cacheKey);
+      const canWrite = () => isCurrent() && sidebarTableSearchIndexGenerationIsCurrent(scope.connectionId, scope.cacheKey, connectionGeneration, scopeGeneration);
+      // Read inside the queue: simultaneous refreshes of different tables in
+      // one index must preserve each other's rows, as well as any newer build.
+      return serializeSidebarTableSearchIndexPersistence(scope.cacheKey, async () => {
+        if (!canWrite()) return;
+        const payload = await api.loadSchemaCache<Record<string, unknown>>(scope.cacheKey).catch(() => null);
+        const index = decodeSchemaTreeCache(payload)?.tableSearchIndex;
+        if (!payload || !index || !canWrite()) return;
+        const nextIndex = patchSidebarTableCommentIndex(scope, index, [update]);
+        if (nextIndex !== index) await api.saveSchemaCache(scope.cacheKey, { ...payload, tableSearchIndex: nextIndex }).catch(() => undefined);
+      });
+    });
+    // Updating a row is not a scope invalidation: keep complete indexes and
+    // expanded search details, including results in unrelated scopes.
+    sidebarTableCommentUpdate.value = update;
+    await Promise.all(writes);
+  }
+
+  async function refreshTableNodeComment(node: TreeNode, isCurrent: () => boolean) {
+    if (node.type !== "table" || !node.connectionId || !hasTreeNodeDatabaseContext(node) || parseSqlServerLinkedSchema(node.schema)) return;
+    const config = getConfig(node.connectionId);
+    if (!getTableStructureCapabilities(effectiveDatabaseTypeForConnection(config), config?.db_type, config?.database_info?.productVersion).comment) return;
+    const identity = createSidebarActionTarget(node);
+    const findTarget = () => findSidebarActionTarget(treeNodes.value, identity) ?? findSidebarSearchDetailNode(identity);
+    const target = findTarget();
+    if (!target || !isCurrent()) return;
+    const searchDetail = findSidebarSearchDetailNode(identity);
+    let comment: string | null;
+    try {
+      comment = await api.getTableComment(node.connectionId, node.database, metadataQuerySchema(node.connectionId, node.database, node.schema), node.label, node.catalog);
+    } catch {
+      // Optional metadata may be unsupported or denied. Keep the old comment
+      // without preventing the table's columns/indexes from refreshing.
+      return;
+    }
+    // A parent reload can replace a same-id node while this request is pending.
+    // Do not let that old response overwrite the replacement's metadata.
+    const canUpdate = () => isCurrent() && connectedIds.value.has(node.connectionId!) && findTarget() === target;
+    if (!canUpdate()) return;
+    target.comment = comment;
+    // A search result expanded before its page arrived can still be on screen.
+    if (searchDetail && searchDetail !== target && findSidebarSearchDetailNode(identity) === searchDetail) searchDetail.comment = comment;
+
+    // The comment belongs to the containing list's cached row, not the table's
+    // child groups. Invalidate that list without resetting its pages or caret.
+    const parent = tableCommentListParent(target);
+    const cacheKey = parent && tableCommentTreeCacheKey(parent);
+    if (parent && cacheKey) {
+      const scope = { connectionId: node.connectionId, database: node.database, schema: metadataQuerySchema(node.connectionId, node.database, parent.schema) };
+      metadataListPageCache.invalidate({ ...scope, kind: "table-list-page" });
+      metadataListPageCache.invalidate({ ...scope, kind: "object-list-page" });
+      const pending = (reusableTreeCacheWrites.get(cacheKey) ?? Promise.resolve())
+        .catch(() => undefined)
+        .then(async () => {
+          if (!canUpdate()) return;
+          reusableTreeCacheSavedRevisions.set(cacheKey, -1);
+          // Null is a miss for the tree decoder. Write only this exact key:
+          // deleting its prefix would also remove the complete search index.
+          await api.saveSchemaCache(cacheKey, null).catch(() => undefined);
+        });
+      reusableTreeCacheWrites.set(cacheKey, pending);
+      try {
+        await pending;
+      } finally {
+        if (reusableTreeCacheWrites.get(cacheKey) === pending) reusableTreeCacheWrites.delete(cacheKey);
+      }
+    }
+    await updateSidebarTableSearchComment(target, comment, parent, canUpdate);
+  }
+
+  /** Database, schema, catalog and table-like nodes keep their caret state as the user left it on refresh (#14919, #15079). */
+  const shouldPreserveCollapsedState = (node: TreeNode) =>
+    node.type === "database" || node.type === "schema" || node.type === "mongo-db" || node.type === "vector-database" || node.type === "doris-catalog" || node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection";
 
   async function refreshTreeNode(node: TreeNode, options?: { skipObjectCacheInvalidation?: boolean; sidebarSearch?: boolean }): Promise<void> {
     if (options?.sidebarSearch) {
@@ -9223,12 +9523,23 @@ export const useConnectionStore = defineStore("connection", () => {
     }
 
     if (node.connectionId && !connectedIds.value.has(node.connectionId)) return;
+    if (node.type === "table") {
+      // The child loaders prefer the live table once its page arrives. Refresh
+      // that same instance so an expanded search detail keeps its children.
+      const live = findSidebarActionTarget(treeNodes.value, node);
+      if (live) {
+        node = live;
+      } else {
+        retainSidebarSearchDetailTable(node);
+        node = resolveSidebarSearchDetailTable(node);
+      }
+    }
     const expandedIds = collectExpandedNodeIds([node]);
     expandedIds.add(node.id);
     const previousChildren = node.children;
     const previousHiddenChildren = node.hiddenChildren;
     const previousObjectCount = node.objectCount;
-    const previousExpanded = node.isExpanded;
+    const previousExpanded = Boolean(treeNodeInSidebarTree(node)?.isExpanded ?? node.isExpanded);
     const previousLoadedIds = [...loadedTreeNodeChildrenIds.value].filter((id) => id === node.id || id.startsWith(`${node.id}:`));
     const previousConfirmedEmptyIds = [...confirmedEmptyTreeNodeIds.value].filter((id) => id === node.id || id.startsWith(`${node.id}:`));
     const connectionRevision = node.connectionId ? connectionStateRevision(node.connectionId) : undefined;
@@ -9247,17 +9558,16 @@ export const useConnectionStore = defineStore("connection", () => {
       if (isCurrentRefresh()) {
         await restoreExpandedChildren(node, expandedIds, { force: true }, isCurrentRefresh);
         if (isCurrentRefresh()) {
-          // Table nodes load their detail groups (columns/indexes/…) on refresh; the
-          // loaders mark the node expanded for a first expand, so refreshing a
-          // collapsed table used to pop it open as if its caret had been clicked
-          // (#14919). Other node types keep the existing load-marks-expanded
-          // behaviour that container/type refreshes rely on.
-          if (!previousExpanded && isTableLikeNode(node)) {
+          // Database, schema, and table nodes keep their caret state as the user left
+          // it; refreshing a collapsed node must not pop it open (#14919, #15079).
+          // Other node types (e.g. connections, custom types) keep the load-marks-expanded behaviour.
+          if (!previousExpanded && shouldPreserveCollapsedState(node)) {
             node.isExpanded = false;
             const target = treeNodeInSidebarTree(node);
             if (target && target !== node) target.isExpanded = false;
           }
-          await invalidateSidebarTableSearchIndexesForTreeRefresh(node);
+          await refreshTableNodeComment(node, isCurrentRefresh);
+          if (isCurrentRefresh()) await invalidateSidebarTableSearchIndexesForTreeRefresh(node);
         }
       }
     } catch (error) {
@@ -9410,7 +9720,8 @@ export const useConnectionStore = defineStore("connection", () => {
       const identifiers = damengCompletionColumnIdentifiers(config, table, schema, context);
       return `${connectionId}:${database}:${catalog ?? ""}:${identifiers.schema ?? ""}:${identifiers.table}`;
     }
-    if (databaseType === "oracle" || databaseType === "oceanbase-oracle") {
+    const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+    if (effectiveDbType === "oracle" || effectiveDbType === "oceanbase-oracle") {
       const normalizedTable = context?.tableQuoted === false ? table.toUpperCase() : table;
       const normalizedSchema = schema && context?.schemaQuoted === false ? schema.toUpperCase() : (schema ?? "");
       return `${connectionId}:${database}:${catalog ?? ""}:${normalizedSchema}:${normalizedTable}`;
@@ -9505,7 +9816,18 @@ export const useConnectionStore = defineStore("connection", () => {
   function withCompletionInFlight<T>(key: string, load: () => Promise<T>, limit?: { scope: string; kind: string }): Promise<T> {
     const existing = completionInFlight.get(key) as Promise<T> | undefined;
     if (existing) return existing;
-    const promise = (limit ? completionMetadataLimiter.run(limit.scope, limit.kind, load) : load()).finally(() => {
+    const run = () => (limit ? completionMetadataLimiter.run(limit.scope, limit.kind, load) : load());
+    // A busy metadata pool is transient: retry the read instead of returning an
+    // empty candidate list, which would leave completion dead until the next
+    // keystroke (#14075). Non-busy failures still surface on the first attempt.
+    const promise = (
+      limit
+        ? retryCompletionMetadata(run, {
+            kind: limit.kind,
+            onRetry: (event) => console.debug("[DBX][completion-metadata:retry]", { ...event, scope: limit.scope }),
+          })
+        : run()
+    ).finally(() => {
       if (completionInFlight.get(key) === promise) completionInFlight.delete(key);
     });
     completionInFlight.set(key, promise);
@@ -11283,11 +11605,13 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  /** Watch for layout changes made outside the app. The interval only runs while
-   *  the window is visible, and a focus change syncs immediately, so a hidden
-   *  window or the web build does not poll in the background forever. */
+  /** Watch for layout changes made outside the app (Desktop MCP / CLI / another
+   *  window). The interval only runs while the window is visible, and a focus
+   *  change syncs immediately, so a hidden window does not poll forever. Web
+   *  skips auto-sync so shared Docker layouts do not overwrite each browser's
+   *  connection-group collapse state; use the sidebar refresh action instead. */
   function startSidebarLayoutSync(intervalMs = 1500) {
-    if (import.meta.env.MODE === "test") return;
+    if (!shouldStartSidebarLayoutAutoSync()) return;
     if (sidebarLayoutSyncTimer) return;
     const tick = () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
@@ -11362,12 +11686,16 @@ export const useConnectionStore = defineStore("connection", () => {
   function reprojectTableVGroupScope(scope: TableVGroupScope, scopeKey: string, tableName?: string, rowType?: string) {
     const container = findTableVGroupContainerNode(treeNodes.value, scope, tableName, rowType);
     if (!container?.children) return;
+    if (scope.objectType === "databases") {
+      container.children = applyTableVGroupsToChildren(stripTableVGroupsFromChildren(container.children), tableVGroupLayouts.value[scopeKey], scope);
+      return;
+    }
     if (container.children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) {
       container.children = stripTableVGroupsFromChildren(container.children);
       return;
     }
     const parent = findParentNode(treeNodes.value, container.id);
-    if (parent?.children && parent.children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) {
+    if (parent?.children && !isDatabaseVGroupContainer(parent) && parent.children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) {
       parent.children = stripTableVGroupsFromChildren(parent.children);
     }
     container.children = applyTableVGroupsToChildren(stripTableVGroupsFromChildren(container.children), tableVGroupLayouts.value[scopeKey], scope);
@@ -11476,6 +11804,7 @@ export const useConnectionStore = defineStore("connection", () => {
             ...existing,
             label: node.label,
             comment: node.comment,
+            sidebarColor: node.sidebarColor,
             searchAliases: node.searchAliases,
             pinned: node.pinned,
             children: withSavedSqlRoot(node.connectionId!, existing.children || [], existing),
@@ -11833,7 +12162,45 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  async function readSqlarkImportFile(): Promise<{ content: string; encrypted: boolean } | null> {
+    let zipBase64: string;
+
+    if (isTauriRuntime()) {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+      const path = await open({
+        filters: [{ name: "SQLark 配置备份", extensions: ["zip"] }],
+        multiple: false,
+      });
+      if (!path) return null;
+      // The backup is a ZIP, so it must be read as bytes: the parser needs the
+      // raw member bytes, not a decoded text form.
+      zipBase64 = bytesToBase64(await readFile(path as string));
+    } else {
+      zipBase64 = await new Promise<string>((resolve, reject) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".zip";
+        input.onchange = () => {
+          const file = input.files?.[0];
+          if (!file) {
+            reject(new Error("No file selected"));
+            return;
+          }
+          file
+            .arrayBuffer()
+            .then((buffer) => resolve(bytesToBase64(new Uint8Array(buffer))))
+            .catch(reject);
+        };
+        input.click();
+      });
+    }
+
+    return { content: JSON.stringify({ format: "sqlark-import", zipBase64 }), encrypted: false };
+  }
+
   async function readImportFile(source: ImportSource = "dbx"): Promise<{ content: string; encrypted: boolean } | null> {
+    if (source === "sqlark") return readSqlarkImportFile();
     if (source === "dbeaver") return readDbeaverImportFile();
     if (source === "datagrip") return readDataGripImportFile();
 
@@ -11900,6 +12267,12 @@ export const useConnectionStore = defineStore("connection", () => {
         if (!("content" in payload) || typeof payload.content !== "string") throw new Error("RedisDesktopManager: invalid import payload.");
         const { parseRedisDesktopManagerImport } = await import("@/lib/imports/redisDesktopManagerImport");
         return parseRedisDesktopManagerImport(payload.content);
+      }
+      const { isSqlarkImportPayload, parseSqlarkImport } = await import("@/lib/imports/sqlarkImport");
+      if (isSqlarkImportPayload(payload)) {
+        const result = await parseSqlarkImport(payload);
+        lastSqlarkImportStats.value = { passwords: result.passwordCount, skipped: result.skippedCount };
+        return { connections: result.connections, layout: result.layout };
       }
       const { isDbeaverImportPayload, parseDbeaverImport } = await import("@/lib/imports/dbeaverImport");
       const { isDataGripImportPayload, parseDataGripImport } = await import("@/lib/imports/datagripImport");
@@ -12087,6 +12460,17 @@ export const useConnectionStore = defineStore("connection", () => {
           sidebarLayoutPersisted = JSON.stringify(sidebarLayout.value);
         }
         rebuildTreeNodes();
+        // Reloaded layouts must also replace projections retained by connection state merging.
+        const reprojectDatabases = (nodes: TreeNode[]) => {
+          for (const node of nodes) {
+            if (isDatabaseVGroupContainer(node) && node.connectionId && node.children) {
+              const scope: TableVGroupScope = { connectionId: node.connectionId, catalog: node.type === "doris-catalog" ? node.catalog : undefined, objectType: "databases" };
+              node.children = applyTableVGroupsToChildren(stripTableVGroupsFromChildren(node.children), tableVGroupLayouts.value[tableVGroupScopeKey(scope)!], scope);
+            }
+            if (node.children) reprojectDatabases(node.children);
+          }
+        };
+        reprojectDatabases(treeNodes.value);
       })().finally(() => {
         initFromDiskPromise = null;
       });
@@ -12195,6 +12579,7 @@ export const useConnectionStore = defineStore("connection", () => {
     clearVisibleDatabases,
     ensureVisibleDatabase,
     setVisibleSchemas,
+    updateSidebarPreferencesAfterSchemaRename,
     clearVisibleSchemas,
     recordPrimaryVisibleObjectNames,
     getSidebarVisibleFilterSummary,
@@ -12216,6 +12601,7 @@ export const useConnectionStore = defineStore("connection", () => {
     handleConnectionLivenessMessage,
     handleConnectionIdleClosed,
     markConnectionConnected,
+    syncSharedConnectionState,
     metadataGenerationFor,
     disconnectAndForgetConnectionPassword,
     retirePasswordAfterChange,
@@ -12323,6 +12709,7 @@ export const useConnectionStore = defineStore("connection", () => {
     importConnectionsFromFile,
     applyDataGripKeychainPasswords,
     lastDataGripFallbackUsernamesCount,
+    lastSqlarkImportStats,
     applySidebarLayout,
     transferSource,
     schemaDiffSource,
@@ -12347,6 +12734,7 @@ export const useConnectionStore = defineStore("connection", () => {
     clearSidebarSearchDetailTables,
     sidebarTableSearchQueries,
     sidebarTableSearchIndexInvalidation,
+    sidebarTableCommentUpdate,
     sidebarTableNameFilters,
     tableNameFilterScopeKey,
     tableNameFilterForScope,
@@ -12367,6 +12755,10 @@ export const useConnectionStore = defineStore("connection", () => {
     },
     renameConnectionGroup(groupId: string, name: string) {
       updateLayoutAndRebuild(renameGroupOp(sidebarLayout.value, groupId, name));
+    },
+    setConnectionGroupColor(groupId: string, color: string) {
+      const layout = sidebarLayout.value;
+      updateLayoutAndRebuild({ ...layout, groups: layout.groups.map((group) => (group.id === groupId ? { ...group, color: color || undefined } : group)) });
     },
     async deleteConnectionGroup(groupId: string) {
       await removeConnectionGroups([groupId]);
@@ -12394,6 +12786,9 @@ export const useConnectionStore = defineStore("connection", () => {
     groupIdForConnection(connectionId: string): string | null {
       return findConnectionLocation(sidebarLayout.value, connectionId)?.groupId ?? null;
     },
+    parentGroupIdForSidebarEntry(entryId: string): string | null {
+      return findEntryParentGroupId(sidebarLayout.value.order, entryId) ?? null;
+    },
     reorderSidebarEntry(draggedId: string, targetId: string, position: DropPosition) {
       markSidebarLayoutPlacementsEdited([draggedId]);
       updateLayoutAndRebuild(reorderEntryOp(sidebarLayout.value, draggedId, targetId, position));
@@ -12404,6 +12799,17 @@ export const useConnectionStore = defineStore("connection", () => {
       if (layout !== sidebarLayout.value) updateLayoutAndRebuild(layout);
     },
     tableVGroupLayouts,
+    updateDatabaseVGroupMember(node: TreeNode, newName?: string) {
+      const scope = resolveDatabaseVGroupScope(treeNodes.value, node);
+      if (!scope) return;
+      const update = (entries: TableVGroupLayout["order"]): TableVGroupLayout["order"] =>
+        entries.flatMap<TableVGroupLayout["order"][number]>((entry) => {
+          if (entry.type === "group") return [{ ...entry, children: update(entry.children ?? []) }];
+          if (entry.name !== node.database || (entry.rowType && entry.rowType !== node.type)) return [entry];
+          return newName ? [{ ...entry, name: newName }] : [];
+        });
+      updateTableVGroupLayoutFor(scope, (layout) => ({ ...layout, order: update(layout.order) }));
+    },
     resolveTableVGroupScope,
     tableVGroupLayoutFor(scope: TableVGroupScope) {
       const resolved = resolveTableVGroupScope(scope);
@@ -12422,7 +12828,17 @@ export const useConnectionStore = defineStore("connection", () => {
     deleteTableVGroups(scope: TableVGroupScope, groupIds: Iterable<string>) {
       updateTableVGroupLayoutFor(scope, (layout) => deleteTableVGroupsOp(layout, groupIds));
     },
-    moveTableToVGroup(scope: TableVGroupScope, tableName: string, groupId: string | null, rowType?: string) {
+    moveTableToVGroup(scope: TableVGroupScope, tableName: string, groupId: string | null, rowType?: string, placement?: DatabaseVGroupPlacement) {
+      if (placement) {
+        const resolved = resolveTableVGroupScope(scope);
+        if (resolved?.scope.objectType !== "databases") return;
+        const container = findTableVGroupContainerNode(treeNodes.value, resolved.scope);
+        const source = databaseVGroupMembers(container?.children ?? []).find((node) => node.database === tableName && node.type === rowType);
+        const targetScope = resolveDatabaseVGroupScope(treeNodes.value, placement.target, tableVGroupLayouts.value);
+        if (!source || !container?.children || !targetScope || tableVGroupScopeKey(targetScope) !== resolved.scopeKey) return;
+        updateTableVGroupLayoutFor(resolved.scope, (layout) => moveDatabaseVGroupMember(layout, source, placement, container.children!), tableName, rowType);
+        return;
+      }
       updateTableVGroupLayoutFor(scope, (layout) => moveTableToVGroupOp(layout, tableName, groupId, rowType), tableName, rowType);
     },
     reorderTableVGroupEntry(scope: TableVGroupScope, draggedEntryId: string, targetEntryId: string, position: TableVGroupDropPosition) {

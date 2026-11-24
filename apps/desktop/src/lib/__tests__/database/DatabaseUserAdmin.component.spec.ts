@@ -133,7 +133,23 @@ vi.mock("@/components/ui/popover", () => ({
   PopoverTrigger: passthrough("div"),
 }));
 vi.mock("@/components/ui/select", () => ({
-  Select: passthrough("div"),
+  Select: defineComponent({
+    inheritAttrs: false,
+    setup(_, { attrs, slots }) {
+      return () =>
+        h("div", [
+          slots.default?.(),
+          h(
+            "select",
+            {
+              "data-test-select-model": "",
+              onChange: (event: Event) => (attrs["onUpdate:modelValue"] as (value: string) => void)((event.target as HTMLSelectElement).value),
+            },
+            ["all", "locked", "unlocked"].map((value) => h("option", { value }, value)),
+          ),
+        ]);
+    },
+  }),
   SelectContent: passthrough("div"),
   SelectItem: passthrough("div"),
   SelectTrigger: passthrough("div"),
@@ -1252,6 +1268,55 @@ async function mountNativeMysqlUserAdmin() {
   await nextTick();
 }
 
+describe("DatabaseUserAdmin account status", () => {
+  it.each([false, true])("displays and filters locked accounts (OceanBase: %s)", async (oceanbase) => {
+    const metadata = oceanbase ? [] : ["password_expired", "password_last_changed"];
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery
+      .mockResolvedValueOnce({
+        columns: ["user", "host", "plugin", "account_locked", ...metadata],
+        rows: [
+          ["app", "%", "mysql_native_password", "Y", ...(oceanbase ? [] : ["Y", "2026-10-01 12:00:00"])],
+          ["reader", "%", "mysql_native_password", "N"],
+          ["unknown", "%", "mysql_native_password", null],
+        ],
+      })
+      .mockResolvedValue({ columns: ["Grants"], rows: [] });
+    const current = { ...nativeMysqlConnection, driver_profile: oceanbase ? "oceanbase" : "mysql" };
+    mountWithReactiveConnection(current);
+    await vi.waitFor(() => expect(root?.querySelector("dd")?.textContent).toBe("userAdmin.accountLocked"));
+    expect(mocks.executeQuery.mock.calls[0][2]).toContain("account_locked");
+    expect(mocks.executeQuery.mock.calls[0][2].includes("password_expired")).toBe(!oceanbase);
+    expect(root?.textContent?.includes("2026-10-01 12:00:00")).toBe(!oceanbase);
+
+    const select = root!.querySelector<HTMLSelectElement>("aside select[data-test-select-model]")!;
+    select.value = "unlocked";
+    select.dispatchEvent(new Event("change"));
+    await nextTick();
+    const list = root!.querySelector("aside")!;
+    expect(list.textContent).toContain("reader@%");
+    expect(list.textContent).not.toContain("unknown@%");
+    expect(list.textContent).not.toContain("app@%");
+    select.value = "locked";
+    select.dispatchEvent(new Event("change"));
+    await nextTick();
+    expect(list.textContent).toContain("app@%");
+    expect(list.textContent).not.toContain("reader@%");
+  });
+
+  it("retries the old listing when status columns are missing and never marks missing status as unlocked", async () => {
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery
+      .mockRejectedValueOnce(new Error("ERROR 1054 (42S22): Unknown column 'account_locked'"))
+      .mockResolvedValueOnce({ columns: ["user", "host", "plugin"], rows: [["legacy", "%", "mysql_native_password"]] })
+      .mockResolvedValue({ columns: ["Grants"], rows: [] });
+    mountWithReactiveConnection(nativeMysqlConnection);
+    await vi.waitFor(() => expect(root?.querySelector("dd")?.textContent).toBe("userAdmin.accountUnknown"));
+    expect(mocks.executeQuery.mock.calls[1][2]).toBe("SELECT User AS user, Host AS host, plugin AS plugin FROM mysql.user ORDER BY User, Host;");
+    expect(root?.querySelector('[aria-label="userAdmin.accountStatus"]')).toBeNull();
+  });
+});
+
 describe("DatabaseUserAdmin MySQL account Host changes", () => {
   it("shows the action only for native MySQL and validates the replacement Host", async () => {
     await mountNativeMysqlUserAdmin();
@@ -1307,7 +1372,7 @@ describe("DatabaseUserAdmin MySQL account Host changes", () => {
     await vi.waitFor(() => expect(mocks.executeQuery.mock.calls.some((call) => call[2] === "SHOW GRANTS FOR 'same-user'@'new-host';")).toBe(true));
     expect(mocks.executeMulti.mock.calls[0][2]).toBe("RENAME USER 'same-user'@'old-host' TO 'same-user'@'new-host';");
     expect(mocks.productionGuard).toHaveBeenCalledWith(expect.objectContaining({ connection: nativeMysqlConnection, sql: "RENAME USER 'same-user'@'old-host' TO 'same-user'@'new-host';" }));
-    expect(mocks.executeQuery.mock.calls.slice(2).map((call) => call[2])).toEqual(["SELECT User AS user, Host AS host, plugin AS plugin FROM mysql.user ORDER BY User, Host;", "SHOW GRANTS FOR 'same-user'@'new-host';"]);
+    expect(mocks.executeQuery.mock.calls.slice(2).map((call) => call[2])).toEqual(["SELECT User AS user, Host AS host, plugin, account_locked, password_expired, password_last_changed FROM mysql.user ORDER BY User, Host;", "SHOW GRANTS FOR 'same-user'@'new-host';"]);
     expect(root?.textContent).toContain("same-user@new-host");
     expect(root?.querySelector('input[placeholder="userAdmin.newHost"]')).toBeNull();
   });

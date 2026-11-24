@@ -406,6 +406,12 @@ const showOverflowControl = computed(() => {
   const hasHiddenTab = hasHorizontalFixedRows.value ? fixedTabsScroll.hasTabOverflow.value || regularTabsScroll.hasTabOverflow.value || hasHorizontalRowOverflow() : hasTabOverflow.value || hasTruncatedTabTitle.value;
   return props.tabs.length > 0 && hasHiddenTab && !isWrapLayout.value && !isVerticalLayout.value;
 });
+// The custom horizontal drag scrollbar only makes sense for a single-row
+// horizontally scrollable strip that actually overflows. Two-row mode keeps
+// showOverflowControl enabled for the tab-list menu even when tabs fit or wrap,
+// so deriving the scrollbar from showOverflowControl would reveal a stale
+// full-width bar on hover (#15619).
+const showTabScrollbar = computed(() => !isVerticalLayout.value && !isWrapLayout.value && !hasHorizontalFixedRows.value && hasTabOverflow.value);
 const tabTailDragRegionClass = computed(() => {
   if (isWrapLayout.value || isVerticalLayout.value) return "w-0 flex-none self-stretch";
   // Keep a constant footprint. Letting this spacer (and the strip's reserved
@@ -2102,6 +2108,7 @@ watch(isVerticalLayout, (vertical) => {
 watch(twoRowSelectedKey, () => {
   nextTick(() => {
     twoRowRailRef.value?.querySelector(".tab-group-header--active")?.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: "nearest" });
+    updateScrollButtons();
   });
 });
 
@@ -2117,6 +2124,7 @@ watch(
     settingsStore.editorSettings.tabLayout,
     settingsStore.editorSettings.tabWrapMaxRows,
     settingsStore.editorSettings.tabGroupMode,
+    settingsStore.editorSettings.tabGroupRows,
     settingsStore.editorSettings.tabMaxWidth,
     compactTabTitle.value,
     Array.from(collapsedTabGroups.value).sort().join("|"),
@@ -2324,7 +2332,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
         @update:model-value="selectTabOrganizationItem"
       />
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
-        <div v-if="showOverflowControl && !hasHorizontalFixedRows" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
+        <div v-if="showTabScrollbar" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
           <div class="app-tab-scrollbar__thumb" :style="tabScrollbarThumbStyle" />
         </div>
         <div
@@ -2339,7 +2347,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
           ]"
           :style="hasWrapRowLimit ? undefined : tabsContainerStyle"
           @scroll="!isVerticalLayout && !hasHorizontalFixedRows && updateScrollButtons()"
-          @wheel="!isVerticalLayout && !hasHorizontalFixedRows && !hasWrapRowLimit && onTabsWheel($event)"
+          @wheel="!isVerticalLayout && !hasHorizontalFixedRows && !isWrapLayout && onTabsWheel($event)"
         >
           <template v-for="section in stripSections" :key="section.key">
             <div
@@ -2350,7 +2358,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
               ]"
             >
               <div
-                v-if="hasHorizontalFixedRows && (tabSectionScroll(section.key).hasTabOverflow.value || tabSectionHasOverflow(section.key))"
+                v-if="!isWrapLayout && hasHorizontalFixedRows && (tabSectionScroll(section.key).hasTabOverflow.value || tabSectionHasOverflow(section.key))"
                 class="app-tab-scrollbar"
                 :class="[section.pinned ? 'app-tab-scrollbar--bottom' : '', { 'app-tab-scrollbar--dragging': tabSectionScroll(section.key).isScrollbarDragging.value }]"
                 @pointerdown="tabSectionScroll(section.key).startScrollbarDrag($event)"

@@ -87,6 +87,7 @@ import { hasGbase8cConnectionDatabase } from "@/lib/connection/gbase8cDatabase";
 import { type GbaseProfile, gbaseProfileFromConfig, isGbaseProfile } from "@/lib/connection/gbaseProfiles";
 import { loadVisibleDatabasesPickerNames } from "@/lib/connection/visibleDatabasesPickerLoad";
 import { hasXuguConnectionDatabase } from "@/lib/connection/xuguDatabase";
+import { DEFAULT_WRITE_TIMEOUT_SECS, normalizeWriteTimeoutSecs } from "@/lib/sql/queryTimeout";
 import {
   DEFAULT_IDLE_DISCONNECT_ENABLED_SECS,
   DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS,
@@ -472,6 +473,7 @@ const defaultForm = (): ConnectionForm => ({
   connect_timeout_inherit: true,
   query_timeout_secs: settingsStore.editorSettings.globalQueryTimeoutSecs,
   query_timeout_inherit: true,
+  write_timeout_secs: DEFAULT_WRITE_TIMEOUT_SECS,
   idle_timeout_secs: 60,
   manual_transaction_timeout_secs: DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS,
   // 空闲自动断开默认不启用（0）。
@@ -3364,6 +3366,7 @@ watch(
         connect_timeout_inherit: config.connect_timeout_inherit === true,
         query_timeout_secs: config.query_timeout_inherit === true ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? DEFAULT_QUERY_TIMEOUT_SECS),
         query_timeout_inherit: config.query_timeout_inherit === true,
+        write_timeout_secs: config.write_timeout_secs ?? DEFAULT_WRITE_TIMEOUT_SECS,
         idle_timeout_secs: config.idle_timeout_secs ?? 60,
         manual_transaction_timeout_secs: normalizeManualTransactionTimeoutSecs(config.manual_transaction_timeout_secs),
         idle_disconnect_secs: config.idle_disconnect_secs ?? 0,
@@ -4980,26 +4983,27 @@ function ensureConnectionHostResolvedFromUrl(): boolean {
 }
 
 function formValueForSubmit(): Omit<ConnectionConfig, "id"> {
+  const config = { ...form.value, write_timeout_secs: normalizeWriteTimeoutSecs(form.value.write_timeout_secs) };
   const url = connectionUrlInput.value.trim();
   if (url && url !== appliedConnectionUrlInput.value) {
     const update = parseConnectionDeepLinkUpdate(url);
     if (update) {
       if (update.connectionId !== editingId.value || props.editConfig?.one_time) throw new Error("Open the saved connection specified by this update link before applying it.");
-      return applyConnectionDeepLinkUpdate(form.value, update);
+      return applyConnectionDeepLinkUpdate(config, update);
     }
     const draft = parseConnectionDeepLink(url);
     if (draft) {
-      return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
+      return applyConnectionDraftToConfig(config, { ...draft, oneTime: undefined });
     }
 
-    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, connectionUrlPreferredProfile()));
+    return applyParsedConnectionUrl(config, parseConnectionUrl(url, connectionUrlPreferredProfile()));
   }
 
   if (form.value.db_type === "meilisearch" && hasPendingMeilisearchHostInput()) {
-    return applyParsedConnectionUrl(form.value, parseConnectionUrl(meilisearchHostInput.value.trim(), "meilisearch"));
+    return applyParsedConnectionUrl(config, parseConnectionUrl(meilisearchHostInput.value.trim(), "meilisearch"));
   }
 
-  return form.value;
+  return config;
 }
 
 function applyDremioJdbcMetadata(config: LegacyConnectionConfig) {
@@ -5148,6 +5152,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     }
     config.query_timeout_secs = form.value.query_timeout_secs;
     config.query_timeout_inherit = form.value.query_timeout_inherit;
+    config.write_timeout_secs = normalizeWriteTimeoutSecs(form.value.write_timeout_secs);
     config.idle_timeout_secs = form.value.idle_timeout_secs;
     config.manual_transaction_timeout_secs = normalizeManualTransactionTimeoutSecs(form.value.manual_transaction_timeout_secs);
     config.idle_disconnect_secs = form.value.idle_disconnect_secs;
@@ -7049,6 +7054,15 @@ function validateTransportLayers(config: LegacyConnectionConfig) {
       if (localPortState === "valid" && !sshLocalPortSupportedForConnection(config, mqSystemKind.value, selectedPluginProvider.value?.contribution.proxy_route)) throw new Error(t("connection.sshHopLocalPortUnsupported", { hop: label }));
     }
   });
+}
+
+function clampWriteTimeoutInput(event: Event) {
+  const input = event.target as HTMLInputElement;
+  if (input.value === "") return;
+  const value = Number(input.value);
+  if (!Number.isFinite(value) || value <= MAX_QUERY_TIMEOUT_SECS) return;
+  input.value = String(MAX_QUERY_TIMEOUT_SECS);
+  form.value.write_timeout_secs = MAX_QUERY_TIMEOUT_SECS;
 }
 
 function clampQueryTimeoutInput(event: Event, target: "global" | "connection") {
@@ -10983,6 +10997,17 @@ function openExternalUrl(url: string) {
                         <Input v-model.number="form.query_timeout_secs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="h-7 min-w-20 flex-[1_0_5rem]" :disabled="form.query_timeout_inherit === true" @input="clampQueryTimeoutInput($event, 'connection')" />
                       </div>
                     </div>
+                  </div>
+                  <div v-if="!isPluginConnection" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                    <Label for="connection-write-timeout" :class="connectionLabelSmallClass">{{ t("connection.writeTimeout") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <Input id="connection-write-timeout" v-model.number="form.write_timeout_secs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="w-full" @input="clampWriteTimeoutInput($event)" />
+                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.writeTimeoutHint") }}</p>
+                    </div>
+                  </div>
+                  <div v-if="!isPluginConnection" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.schemaChangeTimeout") }}</Label>
+                    <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.schemaChangeTimeoutHint") }}</p>
                   </div>
                   <div v-show="supportsIdleTimeoutSetting" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
                     <Label for="connection-idle-timeout" :class="connectionLabelSmallClass">{{ t("connection.idleTimeout") }}</Label>

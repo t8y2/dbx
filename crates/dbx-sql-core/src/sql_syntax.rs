@@ -116,7 +116,7 @@ fn database_type_for_dialect(dialect: &str) -> DatabaseType {
 fn diagnostic_for_error(sql: &str, dialect: &str, error: &str) -> SqlSyntaxDiagnostic {
     let message = error.strip_prefix("sql parser error: ").unwrap_or(error).to_string();
     let location = parser_location(&message).unwrap_or_else(|| end_location(sql));
-    let span = token_span_for_location(sql, dialect, location).unwrap_or_else(|| SqlTextSpan {
+    let span = token_span_for_location(sql, dialect, location).unwrap_or(SqlTextSpan {
         start_line: location.line as usize,
         start_column: location.column as usize,
         end_line: location.line as usize,

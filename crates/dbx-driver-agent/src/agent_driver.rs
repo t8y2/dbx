@@ -2139,6 +2139,10 @@ async fn spawn_ready_agent_process_once_internal(
     let child_stderr = child.stderr.take().ok_or("Failed to capture agent stderr")?;
     let stderr_tail = Arc::new(Mutex::new(StderrTail::default()));
     start_stderr_collector(child_stderr, stderr_tail.clone());
+    // A startup failure is only actionable when the report says which program
+    // and which jar actually ran: a stale jar, a custom launch config and a
+    // second data directory all look identical from the stderr tail alone.
+    let launch_command = launch_display(launch);
 
     let startup_timeout = match deadline {
         Some(deadline) => startup_remaining(deadline)?.min(Duration::from_secs(STARTUP_TIMEOUT_SECS)),
@@ -2164,19 +2168,23 @@ async fn spawn_ready_agent_process_once_internal(
 
     let stdout = match startup_result {
         Ok(Ok(Ok(stdout))) => stdout,
-        Ok(Ok(Err(error))) => return Err(child.startup_error(error, &stderr_tail)),
+        Ok(Ok(Err(error))) => {
+            return Err(with_launch_command(child.startup_error(error, &stderr_tail), &launch_command));
+        }
         Ok(Err(error)) => {
-            return Err(child.startup_error(format!("Agent startup task failed: {error}"), &stderr_tail));
+            let error = child.startup_error(format!("Agent startup task failed: {error}"), &stderr_tail);
+            return Err(with_launch_command(error, &launch_command));
         }
         Err(_) => {
-            return Err(child.startup_error(
+            let error = child.startup_error(
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     "Agent startup deadline exceeded".to_string()
                 } else {
                     format!("Agent startup timed out ({STARTUP_TIMEOUT_SECS}s)")
                 },
                 &stderr_tail,
-            ));
+            );
+            return Err(with_launch_command(error, &launch_command));
         }
     };
 
@@ -4165,13 +4173,104 @@ fn agent_jar_path_matches_key(jar_path: &str, key: &str) -> bool {
     Path::new(jar_path).components().any(|component| component.as_os_str().to_string_lossy() == key)
 }
 
+/// Placeholder that replaces credential values in diagnostic output.
+const REDACTED_LAUNCH_VALUE: &str = "***";
+
+/// Option names whose values are credentials and must not reach logs or errors.
+///
+/// The agent launch is assembled from `DBX_AGENT_JAVA_OPTS`, per-connection
+/// `agent_java_options` and, for custom launches, an arbitrary
+/// `agent-launch.json` argument list, so keystore passwords, tokens and API keys
+/// can end up in the command line.
+const SENSITIVE_LAUNCH_OPTION_MARKERS: &[&str] = &[
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "token",
+    "credential",
+    "apikey",
+    "api_key",
+    "api-key",
+    "accesskey",
+    "access_key",
+    "access-key",
+    "privatekey",
+    "private_key",
+    "private-key",
+    "passphrase",
+    "keystore",
+    "truststore",
+];
+
+/// Renders a launch for the debug log and for startup errors.
+///
+/// What makes the report actionable is which program, which jar and which
+/// working directory were used, so those stay verbatim, arguments are quoted
+/// when they contain whitespace, and credential values are replaced with
+/// [`REDACTED_LAUNCH_VALUE`].
 fn launch_display(launch: &AgentLaunchSpec) -> String {
-    let mut parts = vec![launch.program.to_string_lossy().to_string()];
-    parts.extend(launch.args.iter().cloned());
-    parts.join(" ")
+    let mut rendered = Vec::with_capacity(launch.args.len() + 2);
+    rendered.push(quote_launch_argument(&launch.program.to_string_lossy()));
+    let mut redact_next_argument = false;
+    for argument in &launch.args {
+        if redact_next_argument {
+            rendered.push(quote_launch_argument(REDACTED_LAUNCH_VALUE));
+            redact_next_argument = false;
+            continue;
+        }
+        // `--api-key secret` carries the value in the next argument; only flags
+        // without an inline `=` value need the following token masked.
+        redact_next_argument =
+            !argument.contains('=') && launch_option_name(argument).is_some_and(is_sensitive_launch_option);
+        rendered.push(quote_launch_argument(&redact_launch_argument(argument)));
+    }
+    let command = rendered.join(" ");
+    match &launch.working_dir {
+        Some(working_dir) => {
+            format!("{command} (working directory: {})", quote_launch_argument(&working_dir.to_string_lossy()))
+        }
+        None => command,
+    }
+}
+
+fn redact_launch_argument(argument: &str) -> String {
+    let Some((name, _value)) = argument.split_once('=') else {
+        return argument.to_string();
+    };
+    match launch_option_name(name) {
+        Some(option) if is_sensitive_launch_option(option) => format!("{name}={REDACTED_LAUNCH_VALUE}"),
+        _ => argument.to_string(),
+    }
+}
+
+/// Returns the option name of a JVM/agent flag, without its leading dashes.
+fn launch_option_name(flag: &str) -> Option<&str> {
+    if let Some(name) = flag.strip_prefix("--") {
+        Some(name)
+    } else if let Some(name) = flag.strip_prefix("-D") {
+        Some(name)
+    } else {
+        flag.strip_prefix('-')
+    }
+}
+
+fn is_sensitive_launch_option(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    SENSITIVE_LAUNCH_OPTION_MARKERS.iter().any(|marker| name.contains(marker))
+}
+
+fn quote_launch_argument(value: &str) -> String {
+    if !value.is_empty() && !value.chars().any(|character| character.is_whitespace() || character == '"') {
+        return value.to_string();
+    }
+    format!("\"{}\"", value.replace('"', "\\\""))
 }
 
 fn spawn_agent_process(launch: &AgentLaunchSpec) -> Result<Child, String> {
+    // Record the resolved command even on the happy path: when a user reports a
+    // startup failure, this line says which program and which jar were used.
+    log::debug!("[agent] launching {}", launch_display(launch));
     match agent_command(launch).spawn() {
         Ok(child) => Ok(child),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -4394,6 +4493,15 @@ fn format_agent_process_error(base: &str, exit_status: Option<String>, stderr_ta
     parts.join(". ")
 }
 
+/// Append the resolved command line to a startup failure.
+///
+/// The JVM reports "could not find or load main class" without naming the jar or
+/// the runtime it was handed, and a driver directory override can change both.
+/// Repeating the command line makes the failure self-explanatory.
+fn with_launch_command(error: String, command: &str) -> String {
+    format!("{error}. launch command: {command}")
+}
+
 fn is_agent_rpc_response_error(message: &str) -> bool {
     message.trim_start().starts_with("Agent RPC error (")
 }
@@ -4476,10 +4584,10 @@ mod tests {
         is_unsupported_handshake_error, launch_display, legacy_agent_call_error, mongo_collection_params,
         mongo_database_params, mongo_document_id_params, parse_agent_java_opts, read_agent_json_response,
         read_agent_line, read_agent_line_with_limit, start_stderr_collector, validate_dameng_java_system_properties,
-        AgentCallError, AgentCapability, AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage,
-        AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient,
-        AgentSessionDisposition, AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams,
-        MongoAgentMethod, StderrTail, AGENT_JAVA_TOO_OLD_MESSAGE, AGENT_PROTOCOL_VERSION,
+        with_launch_command, AgentCallError, AgentCapability, AgentDriverClient, AgentErrorCategory, AgentErrorContext,
+        AgentErrorStage, AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentOperationOutcome,
+        AgentRuntimeClient, AgentSessionDisposition, AgentTableReadCloseParams, AgentTableReadPageParams,
+        AgentTableReadStartParams, MongoAgentMethod, StderrTail, AGENT_JAVA_TOO_OLD_MESSAGE, AGENT_PROTOCOL_VERSION,
         AGENT_STDOUT_NOISE_SAMPLE_CHARS, MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES,
     };
     use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
@@ -5393,6 +5501,12 @@ for line in sys.stdin:
         assert!(is_retryable_agent_startup_error(
             "Failed to read startup line from agent: end of stream. agent process exited with exit code: 2"
         ));
+        // The launch command is appended to startup failures; it must not hide
+        // the premature-EOF marker the retry decision is based on.
+        assert!(is_retryable_agent_startup_error(&with_launch_command(
+            "Failed to read startup line from agent: end of stream".to_string(),
+            "java -jar agent.jar",
+        )));
         assert!(!is_retryable_agent_startup_error("Agent startup timed out (15s)"));
         assert!(!is_retryable_agent_startup_error(&format!(
             "{AGENT_JAVA_TOO_OLD_MESSAGE}. details: Failed to read startup line from agent: end of stream"

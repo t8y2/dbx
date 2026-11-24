@@ -29,6 +29,7 @@ describe("shortcutRegistry editor actions", () => {
   const formatterEditorActionIds: ShortcutActionId[] = [
     "formatSql",
     "toggleLineComment",
+    "toggleLineCommentAndAdvance",
     "toggleBlockComment",
     "indentMore",
     "indentLess",
@@ -460,6 +461,7 @@ describe("shortcutRegistry editor actions", () => {
     expect(shortcuts.executeSql).toBe("Mod+Shift+Enter");
     expect(shortcuts.formatSql).toBe("Shift+Mod+F");
     expect(shortcuts.toggleLineComment).toBe("Mod+/");
+    expect(shortcuts.toggleLineCommentAndAdvance).toBe("");
     expect(shortcuts.toggleBlockComment).toBe("Shift+Alt+A");
     expect(shortcuts.indentMore).toBe("");
     expect(shortcuts.indentLess).toBe("Shift+Tab");
@@ -785,6 +787,30 @@ describe("shortcutRegistry editor actions", () => {
         expect(findShortcutConflict("gotoLine", shortcuts.gotoLine, shortcuts, platform)).toBeNull();
         expect(findShortcutConflict("addNextSelectionOccurrence", shortcuts.addNextSelectionOccurrence, shortcuts, platform)).toBeNull();
       }
+    });
+  });
+
+  describe("goToLastEditLocation", () => {
+    it("registers an editor-scope definition with a JetBrains-style default", () => {
+      expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "goToLastEditLocation")).toMatchObject({
+        id: "goToLastEditLocation",
+        labelKey: "settings.shortcutGoToLastEditLocation",
+        scope: "editor",
+        defaultShortcut: "Shift+Mod+Backspace",
+      });
+      expect(DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation).toBe("Shift+Mod+Backspace");
+    });
+
+    it("maps the default to a CodeMirror key that no default binding uses", () => {
+      expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation)).toBe("Shift-Mod-Backspace");
+      expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation, "Win32")).toBe("Ctrl+Shift+Backspace");
+      // CodeMirror 默认键位表只占用 Backspace / Mod-Backspace，Shift+Mod+Backspace 为空闲键位。
+      expect(findShortcutConflict("goToLastEditLocation", DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation, DEFAULT_SHORTCUT_SETTINGS, "Win32")).toBeNull();
+      expect(findShortcutConflict("goToLastEditLocation", DEFAULT_SHORTCUT_SETTINGS.goToLastEditLocation, DEFAULT_SHORTCUT_SETTINGS, "MacIntel")).toBeNull();
+    });
+
+    it("keeps an explicit clear as unbound", () => {
+      expect(normalizeShortcutSettings({ goToLastEditLocation: "" }, "Win32").goToLastEditLocation).toBe("");
     });
   });
 

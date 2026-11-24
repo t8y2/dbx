@@ -833,7 +833,7 @@ jobs:
 
   publish-mcp-github-release:
     name: Publish MCP GitHub Release assets
-    runs-on: macos-15
+    runs-on: macos-26
     needs: [prepare, publish-mcp-server]
     steps:
       - uses: actions/checkout@v7

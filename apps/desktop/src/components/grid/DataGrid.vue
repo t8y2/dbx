@@ -106,6 +106,7 @@ import DataGridTableInfoPanels from "@/components/grid/DataGridTableInfoPanels.v
 import DataGridColumnFilterPopover from "@/components/grid/DataGridColumnFilterPopover.vue";
 import DataGridCellDetailHeader from "@/components/grid/DataGridCellDetailHeader.vue";
 import DataGridCellDetailHexViewer from "@/components/grid/DataGridCellDetailHexViewer.vue";
+import DataGridCellDetailTextPreview from "@/components/grid/DataGridCellDetailTextPreview.vue";
 import DataGridCellDetailForeignKey, { type ForeignKeyRowPreviewState } from "@/components/grid/DataGridCellDetailForeignKey.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
@@ -386,7 +387,16 @@ import { canReadClipboardText, eventTargetAllowsNativeClipboard, isPlainClipboar
 import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, parseDataGridClipboardInBatches, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import { parseInsertStatementPaste, parseInsertStatementPasteInBatches } from "@/lib/dataGrid/dataGridInsertPaste";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
-import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, DATA_GRID_COPY_EXTRACTOR_IDS, DATA_GRID_DEFAULT_COPY_PREFERENCES, extractorUnavailableForDatabase, type DataGridCopyExtractorId, type DataGridCopyPreference, type DataGridPrimaryKeyMode } from "@/lib/dataGrid/dataGridCopyExtractor";
+import {
+  DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS,
+  DATA_GRID_COPY_EXTRACTOR_IDS,
+  DATA_GRID_DEFAULT_COPY_PREFERENCES,
+  extractorUnavailableForDatabase,
+  type DataGridCopyExtractorId,
+  type DataGridCopyPreference,
+  type DataGridPrimaryKeyMode,
+  type DataGridSmartSingleColumnFormat,
+} from "@/lib/dataGrid/dataGridCopyExtractor";
 import { columnNamesForCopy, formatColumnNamesForCopy, type ColumnNameCopyQuoteStyle, type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resolveDataGridMaxRowNumber, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { createDataGridColumnStructureSignature } from "@/lib/dataGrid/dataGridColumnWidthState";
@@ -1254,6 +1264,7 @@ const showMongoJsonPreview = ref(false);
 const mongoJsonPreviewScope = ref<"selected" | "page">("selected");
 const activeCellDetailTab = ref<CellDetailTab>(defaultCellDetailTab());
 const cellDetailDialogOpen = ref(false);
+const binaryTextPreviewDetail = shallowRef<DataGridCellDetail | null>(null);
 const cellDetailDialogTarget = ref<{ rowIndex: number; col: number } | null>(null);
 const cellDetailPanelRef = ref<{ openSearch: () => boolean } | null>(null);
 const rowDetailDialogOpen = ref(false);
@@ -1547,7 +1558,7 @@ const filterGroupControlBindings = computed(() => ({
   activeGroup: activeFilterGroupNumber.value,
   hasRules: structuredFilterRules.value.some((rule) => !!rule.columnName),
   allDisabled: allFilterRulesDisabled.value,
-  disabled: !structuredFilterHydrationReady.value || applyingOnlyStructuredFilter.value || isApplyingWhere.value,
+  disabled: applyingOnlyStructuredFilter.value || isApplyingWhere.value,
   onAddGroup: addStructuredFilterGroup,
   onSelectGroup: selectStructuredFilterGroup,
   onDeleteGroup: deleteStructuredFilterGroup,
@@ -1558,6 +1569,7 @@ const filterWorkbenchRef = ref<{ focusRuleValue: (ruleId: string) => void }>();
 const filterBuilderColumnSearch = filterBuilder.columnSearch;
 const filteredFilterBuilderColumnOptions = filterBuilder.filteredColumns;
 const appliedStructuredWhereInput = filterBuilder.appliedWhereInput;
+const appliedStructuredRules = shallowRef<StructuredFilterRule[]>();
 const filterValueSuggestionRuleId = ref<string>();
 const filterValueSuggestionTarget = ref<DataGridDistinctValueSuggestionTarget>();
 const filterValueSuggestionSearch = ref("");
@@ -1636,11 +1648,6 @@ const filterValueSuggestionState = computed<DataGridDistinctValueSuggestionState
     canUseServerFilter: canUseServerColumnFilter.value,
   };
 });
-// Structured filter rules are restored asynchronously. A tab-switch snapshot's
-// probe includes the applied condition, so restoring before this hydration
-// settles would reject an otherwise valid snapshot and never retry it.
-const structuredFilterHydrationReady = ref(true);
-let structuredFilterHydrationRequestId = 0;
 const draftStructuredWhereInput = ref("");
 const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFilterEditorView);
 const dataGridOrderByVisible = computed(() => settingsStore.editorSettings.dataGridOrderByVisible);
@@ -2023,7 +2030,12 @@ function persistStructuredFilterState() {
   saveDataGridStructuredFilterState(structuredFilterCacheKey.value, {
     scopeKey: structuredFilterScopeKey.value,
     manualWhereInput: whereFilterInput.value,
-    rules: cloneDataGridStructuredFilterRules(structuredFilterRules.value),
+    rules: structuredFilterRules.value,
+    groups: {
+      active: activeFilterGroupNumber.value,
+      inactive: [...inactiveFilterGroupRules.value].map(([number, rules]) => ({ number, rules })),
+    },
+    appliedRules: appliedStructuredWhereInput.value ? appliedStructuredRules.value : undefined,
     appliedWhereInput: appliedStructuredWhereInput.value,
     // Vue wraps ref-held objects in proxies; structuredClone cannot clone those proxies.
     serverColumnFilters: structuredClone(toRaw(serverColumnFilters.value)),
@@ -2031,37 +2043,26 @@ function persistStructuredFilterState() {
 }
 
 function loadStructuredFilterStateForScope() {
-  activeFilterGroupNumber.value = 1;
-  inactiveFilterGroupRules.value = new Map();
-  const requestId = ++structuredFilterHydrationRequestId;
-  structuredFilterHydrationReady.value = false;
   const cached = cachedStructuredFilterState();
+  activeFilterGroupNumber.value = cached?.groups?.active ?? 1;
+  inactiveFilterGroupRules.value = new Map(cached?.groups?.inactive.map(({ number, rules }) => [number, rules]));
+  appliedStructuredRules.value = cached?.appliedRules;
   if (cached) {
     const cacheKey = structuredFilterCacheKey.value;
     const scopeKey = structuredFilterScopeKey.value;
-    structuredFilterRules.value = cloneDataGridStructuredFilterRules(cached.rules);
+    structuredFilterRules.value = cached.rules;
+    // The active group contains drafts. Restore the last applied SQL directly.
     appliedStructuredWhereInput.value = cached.appliedWhereInput;
     serverColumnFilters.value = structuredClone(cached.serverColumnFilters ?? {});
     // Restore the applied SQL before the manual input so the whereInput watcher
     // emits the combined condition instead of a brief empty WHERE (#8831).
     whereFilterInput.value = cached.manualWhereInput;
-    void buildStructuredWhereFromRules(structuredFilterRules.value)
-      .then((whereInput) => {
-        if (requestId !== structuredFilterHydrationRequestId || structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
-        appliedStructuredWhereInput.value = whereInput;
-        nextTick(() => {
-          emit("update:whereInput", currentWhereInput() ?? "");
-          markConditionInputsApplied();
-        });
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (requestId !== structuredFilterHydrationRequestId || structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
-        structuredFilterHydrationReady.value = true;
-        // The initial mounted restore may have run while the applied condition
-        // was empty; retry exactly after the async condition is settled.
-        nextTick(restoreTabSwitchViewSnapshot);
-      });
+    nextTick(() => {
+      if (structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
+      emit("update:whereInput", currentWhereInput() ?? "");
+      markConditionInputsApplied();
+      restoreTabSwitchViewSnapshot();
+    });
     return;
   }
   appliedStructuredWhereInput.value = "";
@@ -2069,7 +2070,6 @@ function loadStructuredFilterStateForScope() {
   whereFilterInput.value = props.initialWhereInput ?? "";
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
   markConditionInputsApplied();
-  structuredFilterHydrationReady.value = true;
 }
 
 function switchStructuredFilterGroup(number: number, rules: StructuredFilterRule[], discardActive = false) {
@@ -2132,6 +2132,7 @@ function updateTextFilterPanelHeight(height: number) {
 function resetStructuredFilters() {
   closeFilterValueSuggestions();
   filterBuilder.reset();
+  appliedStructuredRules.value = undefined;
 }
 
 async function clearAllFilters() {
@@ -2176,7 +2177,8 @@ function buildGroupedWhere(conditions: string[], rules: StructuredFilterRule[]):
   return result;
 }
 
-async function applyStructuredWhere(where: string) {
+async function applyStructuredWhere(where: string, rules: StructuredFilterRule[]) {
+  appliedStructuredRules.value = where ? rules : undefined;
   appliedStructuredWhereInput.value = where;
   if (filterEditorView.value === "quick") filterBuilderOpen.value = false;
   await applyWhereFilter();
@@ -2184,7 +2186,12 @@ async function applyStructuredWhere(where: string) {
 
 async function applyStructuredFilters() {
   if (!canUseWhereSearch.value) return;
-  await applyStructuredWhere(await buildStructuredWhereFromRules(structuredFilterRules.value));
+  const scopeKey = structuredFilterScopeKey.value;
+  const cacheKey = structuredFilterCacheKey.value;
+  const rules = cloneDataGridStructuredFilterRules(structuredFilterRules.value);
+  const where = await buildStructuredWhereFromRules(rules);
+  if (structuredFilterScopeKey.value !== scopeKey || structuredFilterCacheKey.value !== cacheKey) return;
+  await applyStructuredWhere(where, rules);
 }
 
 const applyingOnlyStructuredFilter = ref(false);
@@ -2202,14 +2209,15 @@ async function applyOnlyStructuredFilter(ruleId: string) {
   const rulesSnapshot = JSON.stringify(structuredFilterRules.value);
   try {
     // Build before changing enabled states so an invalid condition cannot clear the filter.
-    const where = await buildStructuredWhereFromRules([{ ...rule, disabled: false }]);
+    const rules = [{ ...rule, disabled: false }];
+    const where = await buildStructuredWhereFromRules(rules);
     if (scopeKey !== structuredFilterScopeKey.value || cacheKey !== structuredFilterCacheKey.value || rulesSnapshot !== JSON.stringify(structuredFilterRules.value)) return;
     if (!where) {
       toast(t("grid.filterBuilderCompleteRuleFirst"));
       return;
     }
     filterBuilder.enableOnlyRule(ruleId);
-    await applyStructuredWhere(where);
+    await applyStructuredWhere(where, rules);
   } catch (error: unknown) {
     toast(error instanceof Error ? error.message : String(error));
   } finally {
@@ -2264,7 +2272,7 @@ watch(
 );
 
 watch(
-  [structuredFilterRules, appliedStructuredWhereInput, serverColumnFilters],
+  [structuredFilterRules, activeFilterGroupNumber, inactiveFilterGroupRules, appliedStructuredRules, appliedStructuredWhereInput, serverColumnFilters],
   () => {
     const columns = filterBuilderColumnOptions.value;
     if (columns.length > 0 && structuredFilterRules.value.some((rule) => rule.columnName && !columns.includes(rule.columnName))) {
@@ -5974,14 +5982,20 @@ async function forgetDroppedColumnQueryState(names: string[]): Promise<boolean> 
     whereFilterInput.value = "";
     cleared = true;
   }
-  const remainingRules = structuredFilterRules.value.filter((rule) => !rule.columnName || !dropped.has(dropColumnKey(rule.columnName)));
+  const keepRules = (rules: StructuredFilterRule[]) => rules.filter((rule) => !dropped.has(dropColumnKey(rule.columnName)));
+  const remainingRules = keepRules(structuredFilterRules.value);
   if (remainingRules.length !== structuredFilterRules.value.length) {
     structuredFilterRules.value = remainingRules.length > 0 ? remainingRules : [defaultStructuredFilterRule()];
+  }
+  inactiveFilterGroupRules.value = new Map([...inactiveFilterGroupRules.value].map(([number, rules]) => [number, keepRules(rules)]));
+  if (dataGridSqlTextReferencesAnyColumn(appliedStructuredWhereInput.value, names, dropColumnCaseSensitive())) {
+    const remainingAppliedRules = keepRules(appliedStructuredRules.value ?? []);
     try {
-      appliedStructuredWhereInput.value = await buildStructuredWhereFromRules(structuredFilterRules.value);
+      appliedStructuredWhereInput.value = await buildStructuredWhereFromRules(remainingAppliedRules);
     } catch {
       appliedStructuredWhereInput.value = "";
     }
+    appliedStructuredRules.value = remainingAppliedRules;
     cleared = true;
   }
   if (sortCol.value && dropped.has(dropColumnKey(sortCol.value))) {
@@ -7310,7 +7324,6 @@ function captureTabSwitchViewSnapshot() {
  */
 function restoreTabSwitchViewSnapshot() {
   if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;
-  if (!structuredFilterHydrationReady.value) return;
   const ownerKey = viewSnapshotOwnerKey.value;
   if (!ownerKey || !props.viewGeneration) return;
   if (showTranspose.value) return;
@@ -10179,6 +10192,7 @@ const {
   allSourceColumns: computed(() => props.sourceColumns),
   visibleColumnIndexes,
   extractorOptions: computed(() => settingsStore.editorSettings.dataGridExtractorOptions),
+  smartSingleColumnFormat: computed(() => settingsStore.editorSettings.dataGridSmartSingleColumnFormat),
   sql: computed(() => props.sql),
   exportSql: computed(() => props.exportSql),
   pageSql: computed(() => props.pageSql),
@@ -10443,9 +10457,10 @@ function sqlInsertExtractorOptions(primaryKeyMode: DataGridPrimaryKeyMode) {
   };
 }
 
-function saveExtractorConfiguration(value: { preference: DataGridCopyPreference; options: typeof settingsStore.editorSettings.dataGridExtractorOptions; visibleCopyExtractors: typeof settingsStore.editorSettings.dataGridVisibleCopyExtractors }) {
+function saveExtractorConfiguration(value: { preference: DataGridCopyPreference; singleColumnFormat: DataGridSmartSingleColumnFormat; options: typeof settingsStore.editorSettings.dataGridExtractorOptions; visibleCopyExtractors: typeof settingsStore.editorSettings.dataGridVisibleCopyExtractors }) {
   settingsStore.updateEditorSettings({
     dataGridCopyExtractor: value.preference,
+    dataGridSmartSingleColumnFormat: value.singleColumnFormat,
     dataGridExtractorOptions: value.options,
     dataGridVisibleCopyExtractors: value.visibleCopyExtractors,
   });
@@ -12775,6 +12790,18 @@ async function downloadDetailBinaryValue(detail: DataGridCellDetail | null, mode
   } catch (e: any) {
     toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
   }
+}
+
+function binaryTextPreviewItem(detail: DataGridCellDetail | null): ContextMenuItem | null {
+  if (!detail || (detail.isNull ?? detail.value === null) || !isBinaryCellColumnType(detail.type)) return null;
+  const sourceResult = props.result;
+  return {
+    label: t("grid.binaryTextPreview"),
+    icon: Code2,
+    action: () => {
+      if (props.result === sourceResult) binaryTextPreviewDetail.value = detail;
+    },
+  };
 }
 
 function binaryDownloadSubmenu(detail: DataGridCellDetail | null): ContextMenuItem | null {
@@ -15108,6 +15135,7 @@ onActivated(() => {
 });
 onDeactivated(() => {
   gridClipboardActive = false;
+  binaryTextPreviewDetail.value = null;
   pendingColumnOrder.value = null;
   pendingPasteAsNewRows.value = null;
   gridClipboardLifecycle++;
@@ -15945,6 +15973,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         bulkEdit: openBulkEditDialog,
         transpose: openContextTranspose,
       },
+      binaryTextPreviewItem: binaryTextPreviewItem(contextCellDetail.value),
       pluginDecodeItem: pluginDecodeItem(contextCellDetail.value),
       importItem: binaryImportItem(contextCellDetail.value),
       downloadItem: binaryDownloadSubmenu(contextCellDetail.value),
@@ -18361,6 +18390,18 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       @edit="openDialogCellInSidePanel"
     />
 
+    <DataGridCellDetailTextPreview
+      v-if="binaryTextPreviewDetail"
+      :open="true"
+      hide-trigger
+      :identity="`${binaryTextPreviewDetail.rowId}:${binaryTextPreviewDetail.colIndex}`"
+      :value="binaryTextPreviewDetail.value"
+      :column-type="binaryTextPreviewDetail.type"
+      :database-type="resolvedDatabaseType"
+      :incomplete="binaryTextPreviewDetail.isSourceTruncated"
+      @update:open="!$event && (binaryTextPreviewDetail = null)"
+    />
+
     <DataGridValueDiffDialog v-if="detailValueDiffSnapshot" v-model:open="detailValueDiffOpen" :snapshot="detailValueDiffSnapshot" />
 
     <DataGridDetailDialogs
@@ -18455,6 +18496,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       v-model:open="extractorConfigOpen"
       mode="configure"
       :preference="selectedCopyPreference"
+      :single-column-format="settingsStore.editorSettings.dataGridSmartSingleColumnFormat"
       :source-table-name="props.tableMeta?.tableName"
       :visible-copy-extractors="settingsStore.editorSettings.dataGridVisibleCopyExtractors"
       :options="settingsStore.editorSettings.dataGridExtractorOptions"

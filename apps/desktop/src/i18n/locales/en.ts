@@ -9098,6 +9098,8 @@ export default {
     useRawForAll: "Use Raw SQL for All",
     preserveQuotedBracedParameters: "Keep template placeholders inside SQL strings",
     ignore: "Ignore",
+    requestPending: "A parameter request is already pending. Execute or cancel it before running another query.",
+    targetChanged: "The connection or database changed while parameters were pending, so the request was cancelled. Run the query again.",
     kind: {
       string: "String",
       number: "Number",

@@ -113,6 +113,7 @@ import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { applyDdlDatabaseQualifier, formatDdlForDisplay, formatGeneratedDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard, eventTargetUsesNativeClipboard, isPlainClipboardShortcut } from "@/lib/common/clipboard";
+import { structureRowClickTargetOwnsFocus } from "@/lib/table/structureRowClickFocus";
 import { formatTsv } from "@/lib/export/exportFormats";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
@@ -4753,7 +4754,11 @@ function onColumnRowClick(column: EditableStructureColumn, event: MouseEvent) {
   columnContextMenuCtrlKey = false;
   columnPointerSelectionActive = false;
   if (!columnIsSelectable(column)) return;
-  if (!eventTargetUsesNativeClipboard(event)) structureScrollerElement(columnsScrollerRef.value)?.focus({ preventScroll: true });
+  // Focus the scroller only for inert cell content, so the row clipboard shortcuts keep
+  // acting on the table. A control under the pointer must keep focus: moving it to the
+  // scroller dismissed the dropdown/popover that the same click had just opened, because
+  // reka's popover and dropdown layers close on focus-outside (#15585).
+  if (!eventTargetUsesNativeClipboard(event) && !structureRowClickTargetOwnsFocus(event.target)) structureScrollerElement(columnsScrollerRef.value)?.focus({ preventScroll: true });
   if (event.shiftKey) {
     selectColumnRangeFromAnchor(column);
     return;

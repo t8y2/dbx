@@ -358,9 +358,23 @@ fn gaussdb_native_product_version(server_version: &str, hotpatch_version: Option
 /// layer. `product_version` is the server version and `hotpatch_version` is the
 /// hot-patch version (omitted when the server does not report one).
 async fn gaussdb_native_product_version_from_pool(pool: &deadpool_postgres::Pool) -> Option<String> {
-    let server_version = gaussdb_pg_setting_value(pool, "product_version").await?;
-    let hotpatch_version = gaussdb_pg_setting_value(pool, "hotpatch_version").await;
-    gaussdb_native_product_version(&server_version, hotpatch_version.as_deref())
+    let sql = "SELECT name, setting FROM pg_settings WHERE name IN ('product_version', 'hotpatch_version')";
+    let result =
+        tokio::time::timeout(Duration::from_secs(5), db::postgres::execute_query_with_max_rows(pool, sql, Some(2)))
+            .await
+            .ok()?
+            .ok()?;
+    let mut server_version = None;
+    let mut hotpatch_version = None;
+    for row in &result.rows {
+        let [name, setting] = row.as_slice() else { continue };
+        match name.as_str() {
+            Some("product_version") => server_version = setting.as_str(),
+            Some("hotpatch_version") => hotpatch_version = setting.as_str(),
+            _ => {}
+        }
+    }
+    gaussdb_native_product_version(server_version?, hotpatch_version)
 }
 
 /// Database metadata for a native (non-DWS, non-JDBC) GaussDB pool. The server
@@ -379,12 +393,6 @@ pub async fn gaussdb_native_database_info(
         driver_name: Some("DBX PostgreSQL driver".to_string()),
         ..Default::default()
     }
-}
-
-async fn gaussdb_pg_setting_value(pool: &deadpool_postgres::Pool, name: &str) -> Option<String> {
-    let sql = format!("SELECT setting FROM pg_settings WHERE name = '{name}'");
-    let result = db::postgres::execute_query_with_max_rows(pool, &sql, Some(1)).await.ok()?;
-    result.rows.first()?.first()?.as_str().map(str::to_string)
 }
 
 /// Held connection for a manual transaction session

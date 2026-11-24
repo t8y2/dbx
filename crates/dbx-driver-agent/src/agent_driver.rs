@@ -2092,32 +2092,34 @@ async fn spawn_ready_agent_process_before(
     startup_remaining(deadline)?;
     match spawn_ready_agent_process_once_internal(launch, Some(deadline), startup).await {
         Ok(process) => Ok(process),
-        Err(error) if is_retryable_agent_startup_error(&error) => {
+        Err(failure) if failure.retryable => {
             let delay = Duration::from_millis(AGENT_STARTUP_RETRY_DELAY_MS);
             if startup_remaining(deadline)? <= delay {
-                return Err("Agent startup deadline exceeded".to_string());
+                return Err("Agent startup deadline exceeded".into());
             }
             tokio::time::sleep(delay).await;
             startup_remaining(deadline)?;
-            spawn_ready_agent_process_once_internal(launch, Some(deadline), startup).await
+            spawn_ready_agent_process_once_internal(launch, Some(deadline), startup)
+                .await
+                .map_err(|failure| failure.message)
         }
-        Err(error) => Err(error),
+        Err(failure) => Err(failure.message),
     }
 }
 
 async fn spawn_ready_agent_process(launch: &AgentLaunchSpec) -> Result<ReadyAgentProcess, String> {
     match spawn_ready_agent_process_once(launch).await {
         Ok(process) => Ok(process),
-        Err(error) if is_retryable_agent_startup_error(&error) => {
-            log::warn!("[agent] process exited before startup handshake; retrying once: {error}");
+        Err(failure) if failure.retryable => {
+            log::warn!("[agent] process exited before startup handshake; retrying once: {}", failure.message);
             tokio::time::sleep(Duration::from_millis(AGENT_STARTUP_RETRY_DELAY_MS)).await;
-            spawn_ready_agent_process_once(launch).await
+            spawn_ready_agent_process_once(launch).await.map_err(|failure| failure.message)
         }
-        Err(error) => Err(error),
+        Err(failure) => Err(failure.message),
     }
 }
 
-async fn spawn_ready_agent_process_once(launch: &AgentLaunchSpec) -> Result<ReadyAgentProcess, String> {
+async fn spawn_ready_agent_process_once(launch: &AgentLaunchSpec) -> Result<ReadyAgentProcess, AgentStartupFailure> {
     spawn_ready_agent_process_once_internal(launch, None, None).await
 }
 
@@ -2125,7 +2127,7 @@ async fn spawn_ready_agent_process_once_internal(
     launch: &AgentLaunchSpec,
     deadline: Option<Instant>,
     startup: Option<&StartupCleanupGuard>,
-) -> Result<ReadyAgentProcess, String> {
+) -> Result<ReadyAgentProcess, AgentStartupFailure> {
     if let Some(deadline) = deadline {
         startup_remaining(deadline)?;
     }
@@ -2169,11 +2171,11 @@ async fn spawn_ready_agent_process_once_internal(
     let stdout = match startup_result {
         Ok(Ok(Ok(stdout))) => stdout,
         Ok(Ok(Err(error))) => {
-            return Err(with_launch_command(child.startup_error(error, &stderr_tail), &launch_command));
+            return Err(AgentStartupFailure::new(child.startup_error(error, &stderr_tail), &launch_command));
         }
         Ok(Err(error)) => {
             let error = child.startup_error(format!("Agent startup task failed: {error}"), &stderr_tail);
-            return Err(with_launch_command(error, &launch_command));
+            return Err(AgentStartupFailure::new(error, &launch_command));
         }
         Err(_) => {
             let error = child.startup_error(
@@ -2184,7 +2186,7 @@ async fn spawn_ready_agent_process_once_internal(
                 },
                 &stderr_tail,
             );
-            return Err(with_launch_command(error, &launch_command));
+            return Err(AgentStartupFailure::new(error, &launch_command));
         }
     };
 
@@ -2212,6 +2214,37 @@ fn clean_up_failed_agent_startup(error: String, child: &mut Child, stderr_tail: 
 fn is_retryable_agent_startup_error(error: &str) -> bool {
     error.contains("Failed to read startup line from agent: end of stream")
         && !error.contains(AGENT_JAVA_TOO_OLD_MESSAGE)
+}
+
+/// A startup failure, classified before any diagnostic text is appended.
+///
+/// The retry decision must read the cause alone: the rendered command contains
+/// argv that a custom `agent-launch.json` controls, so a path that happens to
+/// read "end of stream" would otherwise decide whether the agent is respawned.
+struct AgentStartupFailure {
+    message: String,
+    retryable: bool,
+}
+
+impl AgentStartupFailure {
+    fn new(cause: String, launch_command: &str) -> Self {
+        Self {
+            retryable: is_retryable_agent_startup_error(&cause),
+            message: with_launch_command(cause, launch_command),
+        }
+    }
+}
+
+impl From<String> for AgentStartupFailure {
+    fn from(message: String) -> Self {
+        Self { retryable: false, message }
+    }
+}
+
+impl From<&str> for AgentStartupFailure {
+    fn from(message: &str) -> Self {
+        Self { retryable: false, message: message.to_string() }
+    }
 }
 
 /// Outcome of one blocking agent RPC read: the restored stdout reader, the
@@ -4176,12 +4209,12 @@ fn agent_jar_path_matches_key(jar_path: &str, key: &str) -> bool {
 /// Placeholder that replaces credential values in diagnostic output.
 const REDACTED_LAUNCH_VALUE: &str = "***";
 
-/// Options whose inline value is structural and never user data.
+/// Prefix of the only option whose inline value is structural, never user data.
 ///
-/// `--add-opens` values are `java.base/...=ALL-UNNAMED` package lists that DBX
-/// composes itself, so keeping them readable costs nothing and keeps "is one
-/// `--add-opens` missing?" answerable from the log alone.
-const STRUCTURAL_LAUNCH_OPTIONS: &[&str] = &["--add-opens"];
+/// DBX composes `--add-opens=java.base/<package>=ALL-UNNAMED` itself, so a value
+/// in that exact shape keeps "is one `--add-opens` missing?" answerable from the
+/// log. Anything else behind the prefix came from a custom launch config.
+const ADD_OPENS_PREFIX: &str = "--add-opens=";
 
 /// Renders a launch for the debug log and for startup errors.
 ///
@@ -4198,7 +4231,13 @@ fn launch_display(launch: &AgentLaunchSpec) -> String {
     rendered.push(quote_launch_argument(&launch.program.to_string_lossy()));
     let jar_argument = launch_jar_argument_index(&launch.args);
     for (index, argument) in launch.args.iter().enumerate() {
-        let rendered_argument = if Some(index) == jar_argument || keeps_its_launch_value(argument) {
+        let rendered_argument = if Some(index) == jar_argument {
+            if looks_like_agent_jar_path(argument) {
+                argument.clone()
+            } else {
+                REDACTED_LAUNCH_VALUE.to_string()
+            }
+        } else if keeps_its_launch_value(argument) {
             argument.clone()
         } else {
             redact_launch_argument(argument)
@@ -4221,8 +4260,37 @@ fn launch_jar_argument_index(args: &[String]) -> Option<usize> {
     (jar_index < args.len()).then_some(jar_index)
 }
 
+/// True only for a `--add-opens` value in the shape DBX itself composes:
+/// `<java module>/<java package>=ALL-UNNAMED`.
 fn keeps_its_launch_value(argument: &str) -> bool {
-    STRUCTURAL_LAUNCH_OPTIONS.iter().any(|option| argument.starts_with(option))
+    let Some(value) = argument.strip_prefix(ADD_OPENS_PREFIX) else {
+        return false;
+    };
+    let Some((target, access)) = value.rsplit_once('=') else {
+        return false;
+    };
+    let Some((module, package)) = target.split_once('/') else {
+        return false;
+    };
+    access == "ALL-UNNAMED" && module.starts_with("java.") && is_java_path(module) && is_java_path(package)
+}
+
+/// A dotted Java identifier path, such as `java.base` or `java.lang.reflect`.
+fn is_java_path(value: &str) -> bool {
+    value.split('.').all(|segment| {
+        let mut characters = segment.chars();
+        characters.next().is_some_and(|character| character.is_ascii_lowercase())
+            && characters
+                .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_')
+    })
+}
+
+/// A jar path, as opposed to arbitrary text that happens to follow `-jar`.
+fn looks_like_agent_jar_path(argument: &str) -> bool {
+    argument.ends_with(".jar")
+        && !argument.contains("://")
+        && !argument.contains('=')
+        && !argument.chars().any(char::is_control)
 }
 
 /// Keeps the option name and drops the value.
@@ -4233,6 +4301,11 @@ fn redact_launch_argument(argument: &str) -> String {
         // with `-`.
         return if argument.starts_with('-') { argument.to_string() } else { REDACTED_LAUNCH_VALUE.to_string() };
     };
+    if !name.starts_with('-') {
+        // A positional argument with an inline value, such as a JDBC URL, is not
+        // an option at all: no part of it is a name worth reporting.
+        return REDACTED_LAUNCH_VALUE.to_string();
+    }
     format!("{name}={REDACTED_LAUNCH_VALUE}")
 }
 

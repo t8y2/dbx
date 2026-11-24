@@ -417,6 +417,9 @@ describe("useDataGridSearch IME composition", () => {
     const { search, onNavigate } = createSearch();
     search.searchText.value = "ali";
     await flushSearchDebounce();
+    // The debounced query auto-navigates to its first match; drop that call so
+    // the assertion below only observes navigation caused by the keydown.
+    onNavigate.mockClear();
 
     for (const key of ["Enter", "ArrowDown", "ArrowUp"]) {
       const event = keydown({ key, isComposing: true });

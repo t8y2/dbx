@@ -37,6 +37,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { createDatabaseCollationOptionsForCharset, parseCreateDatabaseCharsetMetadata, type CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import { editableDatabasePropertyGroups } from "@/lib/database/databasePropertyEditing";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { MYSQL_CHARACTER_SETS_SQL, MYSQL_COLLATIONS_SQL, mysqlTableCharsetFromCollation, mysqlTableCollationBelongsToCharset } from "@/lib/table/mysqlTableCollation";
 
 type DatabaseRow = {
@@ -409,7 +410,22 @@ async function confirmMysqlDatabaseCharsetChange() {
   if (!target || mysqlCharsetChangeExecuting.value || !mysqlCharsetChangeSql.value) return;
   mysqlCharsetChangeExecuting.value = true;
   try {
-    await api.executeQuery(props.connection.id, target.row.name, mysqlCharsetChangeSql.value);
+    // Library-level charset/collation edits are DDL. Route them through the same
+    // production gate the sidebar database-properties editor uses, so a
+    // production target cannot be altered from a one-click dropdown.
+    const executed = await executeWithProductionSqlGuard({
+      connection: props.connection,
+      database: target.row.name,
+      sql: mysqlCharsetChangeSql.value,
+      source: t("production.sourceObjectBrowser"),
+      execute: async () => {
+        await api.executeQuery(props.connection.id, target.row.name, mysqlCharsetChangeSql.value);
+        return true;
+      },
+    });
+    // The guard declined (production confirmation cancelled, or the connection
+    // is read-only): the DDL was never sent, so report nothing as a success.
+    if (executed !== true) return;
     toast(t("databaseBrowser.charsetChangeSuccess", { name: target.row.name, charset: target.charset, collation: target.collation }), 3000);
     showMysqlCharsetChangeConfirm.value = false;
     mysqlCharsetChangeTarget.value = null;

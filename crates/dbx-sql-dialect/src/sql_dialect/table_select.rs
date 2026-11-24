@@ -354,7 +354,10 @@ pub fn build_table_data_select_sql_with_database(
     };
     let where_clause =
         if effective_predicate.is_empty() { String::new() } else { format!(" WHERE ({effective_predicate})") };
-    let default_order_by = if matches!(database_type, Some(DatabaseType::InfluxDb) | Some(DatabaseType::InfluxDb3) | Some(DatabaseType::Cnosdb)) {
+    let default_order_by = if matches!(
+        database_type,
+        Some(DatabaseType::InfluxDb) | Some(DatabaseType::InfluxDb3) | Some(DatabaseType::Cnosdb)
+    ) {
         // InfluxQL only allows sorting of the timestamp column; SQL-mode
         // InfluxDB 3 tables also key naturally on `time`.
         Some("time DESC".to_string())

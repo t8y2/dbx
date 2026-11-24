@@ -41,9 +41,7 @@ pub fn build_endpoint(params: &ConnectParams) -> Result<Endpoint> {
     let database = first_non_empty(&[
         params.database.trim(),
         database_from_url.as_deref().unwrap_or(""),
-        url.path_segments()
-            .and_then(|mut segments| segments.find(|segment| !segment.is_empty()))
-            .unwrap_or(""),
+        url.path_segments().and_then(|mut segments| segments.find(|segment| !segment.is_empty())).unwrap_or(""),
         DEFAULT_DATABASE,
     ]);
     let tenant = first_non_empty(&[
@@ -127,10 +125,8 @@ fn normalize_connection_string(raw: &str, ssl: bool) -> Result<(Url, Option<Stri
     if ssl && url.scheme() == "http" {
         url.set_scheme("https").map_err(|_| anyhow::anyhow!("failed to enable TLS in CnosDB connection URL"))?;
     }
-    let database = url
-        .path_segments()
-        .and_then(|mut segments| segments.find(|segment| !segment.is_empty()))
-        .map(str::to_string);
+    let database =
+        url.path_segments().and_then(|mut segments| segments.find(|segment| !segment.is_empty())).map(str::to_string);
     let tenant = query_value(&url, "tenant");
     Ok((url, database, tenant))
 }
@@ -157,12 +153,7 @@ fn query_value(url: &Url, key: &str) -> Option<String> {
 }
 
 fn first_non_empty(values: &[&str]) -> String {
-    values
-        .iter()
-        .map(|value| value.trim())
-        .find(|value| !value.is_empty())
-        .unwrap_or_default()
-        .to_string()
+    values.iter().map(|value| value.trim()).find(|value| !value.is_empty()).unwrap_or_default().to_string()
 }
 
 fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
@@ -208,9 +199,8 @@ mod tests {
 
     #[test]
     fn rejects_mutual_tls_paths() {
-        let error =
-            build_endpoint(&ConnectParams { client_cert_path: "/tmp/client.pem".into(), ..Default::default() })
-                .unwrap_err();
+        let error = build_endpoint(&ConnectParams { client_cert_path: "/tmp/client.pem".into(), ..Default::default() })
+            .unwrap_err();
         assert!(error.to_string().contains("client certificate"));
 
         let error =

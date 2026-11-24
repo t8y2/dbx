@@ -40,10 +40,8 @@ impl CnosHttpClient {
         timeout_secs: u64,
         token: &CancellationToken,
     ) -> Result<QueryResult> {
-        let database = database
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(self.endpoint.database.as_str());
+        let database =
+            database.map(str::trim).filter(|value| !value.is_empty()).unwrap_or(self.endpoint.database.as_str());
         let url = sql_url(&self.endpoint, database)?;
         let request = self
             .client
@@ -52,11 +50,7 @@ impl CnosHttpClient {
             .header(ACCEPT, "application/json")
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(sql.to_string());
-        let request = if timeout_secs > 0 {
-            request.timeout(Duration::from_secs(timeout_secs))
-        } else {
-            request
-        };
+        let request = if timeout_secs > 0 { request.timeout(Duration::from_secs(timeout_secs)) } else { request };
 
         let response = tokio::select! {
             _ = token.cancelled() => bail!("CnosDB request cancelled"),
@@ -111,9 +105,8 @@ pub fn parse_sql_response(body: &str) -> Result<QueryResult> {
         return Ok(QueryResult::default());
     }
 
-    let value: Value = serde_json::from_str(trimmed).with_context(|| {
-        format!("failed to parse CnosDB JSON response: {}", truncate(trimmed, 240))
-    })?;
+    let value: Value = serde_json::from_str(trimmed)
+        .with_context(|| format!("failed to parse CnosDB JSON response: {}", truncate(trimmed, 240)))?;
 
     if let Some(message) = value.get("error_message").and_then(Value::as_str) {
         bail!("{message}");
@@ -124,10 +117,7 @@ pub fn parse_sql_response(body: &str) -> Result<QueryResult> {
 
     if let Some(rows) = value.as_array() {
         if let Some(affected) = affected_rows_only(rows) {
-            return Ok(QueryResult {
-                affected_rows: affected,
-                ..QueryResult::default()
-            });
+            return Ok(QueryResult { affected_rows: affected, ..QueryResult::default() });
         }
         return rows_from_objects(rows);
     }
@@ -149,9 +139,7 @@ fn rows_from_objects(rows: &[Value]) -> Result<QueryResult> {
     }
     let mut columns = Vec::new();
     for row in rows {
-        let object = row
-            .as_object()
-            .ok_or_else(|| anyhow!("CnosDB JSON row must be an object"))?;
+        let object = row.as_object().ok_or_else(|| anyhow!("CnosDB JSON row must be an object"))?;
         for key in object.keys() {
             if !columns.iter().any(|column| column == key) {
                 columns.push(key.clone());
@@ -161,20 +149,14 @@ fn rows_from_objects(rows: &[Value]) -> Result<QueryResult> {
     let column_types = columns
         .iter()
         .map(|column| {
-            rows.iter()
-                .find_map(|row| row.get(column))
-                .map(infer_type)
-                .unwrap_or_else(|| "STRING".to_string())
+            rows.iter().find_map(|row| row.get(column)).map(infer_type).unwrap_or_else(|| "STRING".to_string())
         })
         .collect::<Vec<_>>();
     let parsed_rows = rows
         .iter()
         .map(|row| {
             let object = row.as_object().expect("checked above");
-            columns
-                .iter()
-                .map(|column| object.get(column).cloned().unwrap_or(Value::Null))
-                .collect::<Vec<_>>()
+            columns.iter().map(|column| object.get(column).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>()
         })
         .collect();
     Ok(QueryResult {
@@ -208,10 +190,9 @@ fn rows_from_columns_and_rows(columns_value: &Value, rows_value: &Value) -> Resu
         .iter()
         .map(|row| match row {
             Value::Array(cells) => Ok(cells.clone()),
-            Value::Object(object) => Ok(columns
-                .iter()
-                .map(|column| object.get(column).cloned().unwrap_or(Value::Null))
-                .collect()),
+            Value::Object(object) => {
+                Ok(columns.iter().map(|column| object.get(column).cloned().unwrap_or(Value::Null)).collect())
+            }
             other => bail!("unsupported CnosDB row value: {other}"),
         })
         .collect::<Result<Vec<_>>>()?;
@@ -219,20 +200,10 @@ fn rows_from_columns_and_rows(columns_value: &Value, rows_value: &Value) -> Resu
         .iter()
         .enumerate()
         .map(|(index, _)| {
-            rows.iter()
-                .find_map(|row| row.get(index))
-                .map(infer_type)
-                .unwrap_or_else(|| "STRING".to_string())
+            rows.iter().find_map(|row| row.get(index)).map(infer_type).unwrap_or_else(|| "STRING".to_string())
         })
         .collect();
-    Ok(QueryResult {
-        columns,
-        column_types,
-        rows,
-        affected_rows: 0,
-        execution_time_ms: 0,
-        truncated: false,
-    })
+    Ok(QueryResult { columns, column_types, rows, affected_rows: 0, execution_time_ms: 0, truncated: false })
 }
 
 fn affected_rows_only(rows: &[Value]) -> Option<i64> {
@@ -243,12 +214,10 @@ fn affected_rows_only(rows: &[Value]) -> Option<i64> {
     if object.len() != 1 || !object.contains_key("rows") {
         return None;
     }
-    object.get("rows").and_then(Value::as_i64).or_else(|| {
-        object
-            .get("rows")
-            .and_then(Value::as_u64)
-            .and_then(|value| i64::try_from(value).ok())
-    })
+    object
+        .get("rows")
+        .and_then(Value::as_i64)
+        .or_else(|| object.get("rows").and_then(Value::as_u64).and_then(|value| i64::try_from(value).ok()))
 }
 
 fn infer_type(value: &Value) -> String {
@@ -277,10 +246,7 @@ mod tests {
 
     #[test]
     fn parses_array_of_objects() {
-        let result = parse_sql_response(
-            r#"[{"database_name":"public"},{"database_name":"oceanic_station"}]"#,
-        )
-        .unwrap();
+        let result = parse_sql_response(r#"[{"database_name":"public"},{"database_name":"oceanic_station"}]"#).unwrap();
         assert_eq!(result.columns, vec!["database_name".to_string()]);
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[0][0], json!("public"));

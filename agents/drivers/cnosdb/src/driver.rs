@@ -66,10 +66,7 @@ impl CnosdbDriver {
         driver.connect(params).await?;
         let token = CancellationToken::new();
         driver.validate_connection(&token).await?;
-        driver
-            .connection_info()?
-            .database_info
-            .ok_or_else(|| anyhow!("CnosDB connection metadata is unavailable"))
+        driver.connection_info()?.database_info.ok_or_else(|| anyhow!("CnosDB connection metadata is unavailable"))
     }
 
     pub async fn disconnect(&mut self) {
@@ -79,9 +76,7 @@ impl CnosdbDriver {
     }
 
     pub async fn validate_connection(&self, token: &CancellationToken) -> Result<()> {
-        self.require_client()?
-            .execute_sql("SHOW DATABASES", None, 5, token)
-            .await?;
+        self.require_client()?.execute_sql("SHOW DATABASES", None, 5, token).await?;
         Ok(())
     }
 
@@ -104,10 +99,7 @@ impl CnosdbDriver {
 
     pub async fn list_databases(&self, token: &CancellationToken) -> Result<Vec<DatabaseInfo>> {
         let result = self.require_client()?.execute_sql("SHOW DATABASES", None, 0, token).await?;
-        let name_idx = preferred_column_index(
-            &result.columns,
-            &["database_name", "name", "database", "db_name"],
-        );
+        let name_idx = preferred_column_index(&result.columns, &["database_name", "name", "database", "db_name"]);
         Ok(result
             .rows
             .into_iter()
@@ -138,14 +130,8 @@ impl CnosdbDriver {
             return Ok(Vec::new());
         }
         let database = effective_database(database, &self.current_database)?.to_string();
-        let result = self
-            .require_client()?
-            .execute_sql("SHOW TABLES", Some(&database), 0, token)
-            .await?;
-        let name_idx = preferred_column_index(
-            &result.columns,
-            &["table_name", "name", "table", "tables"],
-        );
+        let result = self.require_client()?.execute_sql("SHOW TABLES", Some(&database), 0, token).await?;
+        let name_idx = preferred_column_index(&result.columns, &["table_name", "name", "table", "tables"]);
         let mut tables = result
             .rows
             .into_iter()
@@ -220,10 +206,7 @@ impl CnosdbDriver {
     }
 
     pub async fn get_explain_info(&self, sql: &str, token: &CancellationToken, timeout_secs: u64) -> Result<String> {
-        let result = self
-            .require_client()?
-            .execute_sql(&format!("EXPLAIN {sql}"), None, timeout_secs, token)
-            .await?;
+        let result = self.require_client()?.execute_sql(&format!("EXPLAIN {sql}"), None, timeout_secs, token).await?;
         Ok(result
             .rows
             .into_iter()
@@ -306,9 +289,7 @@ impl CnosdbDriver {
                 continue;
             }
             if include_tables {
-                let tables = self
-                    .list_tables(&database, MetadataListConstraints::default(), token)
-                    .await?;
+                let tables = self.list_tables(&database, MetadataListConstraints::default(), token).await?;
                 for table in tables {
                     if completion_matches(&table.name, &request) {
                         candidates.push(CompletionAssistantCandidate {
@@ -335,10 +316,8 @@ impl CnosdbDriver {
         let start = Instant::now();
         let database = self.prepare_database(&options)?;
         let max_rows = normalized_max_rows(options.max_rows);
-        let mut result = self
-            .require_client()?
-            .execute_sql(&options.sql, Some(&database), options.timeout_secs, token)
-            .await?;
+        let mut result =
+            self.require_client()?.execute_sql(&options.sql, Some(&database), options.timeout_secs, token).await?;
         let truncated = result.rows.len() > max_rows;
         if truncated {
             result.rows.truncate(max_rows);
@@ -361,10 +340,8 @@ impl CnosdbDriver {
         let database = self.prepare_database(&options)?;
         let max_rows = normalized_max_rows(options.max_rows);
         let page_size = normalized_page_size(options.page_size, options.fetch_size, max_rows);
-        let result = self
-            .require_client()?
-            .execute_sql(&options.sql, Some(&database), options.timeout_secs, token)
-            .await?;
+        let result =
+            self.require_client()?.execute_sql(&options.sql, Some(&database), options.timeout_secs, token).await?;
         let mut cursor = QueryCursor {
             columns: result.columns,
             column_types: result.column_types,
@@ -394,10 +371,8 @@ impl CnosdbDriver {
         _timeout_secs: u64,
         _token: &CancellationToken,
     ) -> Result<QueryPageResult> {
-        let cursor = self
-            .query_sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("query session not found: {session_id}"))?;
+        let cursor =
+            self.query_sessions.get_mut(session_id).ok_or_else(|| anyhow!("query session not found: {session_id}"))?;
         let page_size = normalized_page_size(page_size, 0, cursor.max_rows);
         let mut page = read_cursor_page(cursor, page_size);
         if !page.has_more {
@@ -429,10 +404,7 @@ impl CnosdbDriver {
             if sql.is_empty() {
                 continue;
             }
-            last = self
-                .require_client()?
-                .execute_sql(sql, Some(&database), timeout_secs, token)
-                .await?;
+            last = self.require_client()?.execute_sql(sql, Some(&database), timeout_secs, token).await?;
             if looks_like_dml(sql) {
                 last.affected_rows = last.affected_rows.max(0);
             }
@@ -468,7 +440,6 @@ impl CnosdbDriver {
     fn require_client_mut(&mut self) -> Result<&mut CnosHttpClient> {
         self.client.as_mut().ok_or_else(|| anyhow!("CnosDB session is not connected"))
     }
-
 }
 
 fn read_cursor_page(cursor: &mut QueryCursor, page_size: usize) -> QueryPageResult {
@@ -489,11 +460,7 @@ fn read_cursor_page(cursor: &mut QueryCursor, page_size: usize) -> QueryPageResu
 }
 
 fn parse_describe_columns(result: QueryResult) -> Vec<ColumnInfo> {
-    let lower_columns = result
-        .columns
-        .iter()
-        .map(|column| column.to_ascii_lowercase())
-        .collect::<Vec<_>>();
+    let lower_columns = result.columns.iter().map(|column| column.to_ascii_lowercase()).collect::<Vec<_>>();
     let name_idx = column_index(&lower_columns, &["column_name", "name", "field"]);
     let type_idx = column_index(&lower_columns, &["data_type", "type", "column_type"]);
     let kind_idx = column_index(&lower_columns, &["column_type", "field_type", "kind"]);
@@ -533,11 +500,7 @@ fn column_index(columns: &[String], candidates: &[&str]) -> Option<usize> {
 }
 
 fn preferred_column_index(columns: &[String], candidates: &[&str]) -> Option<usize> {
-    candidates.iter().find_map(|candidate| {
-        columns
-            .iter()
-            .position(|column| column.eq_ignore_ascii_case(candidate))
-    })
+    candidates.iter().find_map(|candidate| columns.iter().position(|column| column.eq_ignore_ascii_case(candidate)))
 }
 
 fn build_fallback_table_ddl(database: &str, table: &str, columns: &[ColumnInfo]) -> String {
@@ -554,7 +517,8 @@ fn build_fallback_table_ddl(database: &str, table: &str, columns: &[ColumnInfo])
         }
         fields.push(format!("{} {}", quote_ident(&column.name), column.data_type));
     }
-    let mut ddl = format!("CREATE TABLE {}.{} (\n  {}", quote_ident(database), quote_ident(table), fields.join(",\n  "));
+    let mut ddl =
+        format!("CREATE TABLE {}.{} (\n  {}", quote_ident(database), quote_ident(table), fields.join(",\n  "));
     if !tags.is_empty() {
         if !fields.is_empty() {
             ddl.push(',');
@@ -593,11 +557,7 @@ fn completion_matches(name: &str, request: &CompletionAssistantRequest) -> bool 
     if request.case_sensitive {
         completion_match_mode(name, mask, &request.match_mode)
     } else {
-        completion_match_mode(
-            &name.to_ascii_lowercase(),
-            &mask.to_ascii_lowercase(),
-            &request.match_mode,
-        )
+        completion_match_mode(&name.to_ascii_lowercase(), &mask.to_ascii_lowercase(), &request.match_mode)
     }
 }
 
@@ -612,9 +572,7 @@ fn completion_match_mode(candidate: &str, mask: &str, mode: &str) -> bool {
 
 fn fuzzy_subsequence_matches(candidate: &str, expected: &str) -> bool {
     let mut candidate = candidate.chars();
-    expected
-        .chars()
-        .all(|expected| candidate.by_ref().any(|value| value == expected))
+    expected.chars().all(|expected| candidate.by_ref().any(|value| value == expected))
 }
 
 fn effective_database<'a>(database: &'a str, fallback: &'a str) -> Result<&'a str> {

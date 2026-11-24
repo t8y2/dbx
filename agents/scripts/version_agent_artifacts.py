@@ -11,7 +11,7 @@ from pathlib import Path
 # is picked up by the registry generator. Platforms it does not publish are
 # skipped by `rename_artifact`, which keeps Windows-only drivers like
 # `oracle-oci` working without special casing.
-NATIVE_DRIVERS = ("cassandra", "hive", "argo", "oracle", "oracle-oci", "xugu", "kingbase", "iotdb", "neo4j", "nebula", "vastbase", "duckdb", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "etcd", "etcd2", "sqlite-worker")
+NATIVE_DRIVERS = ("cassandra", "hive", "argo", "oracle", "oracle-oci", "xugu", "kingbase", "iotdb", "neo4j", "nebula", "vastbase", "duckdb", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "cnosdb", "etcd", "etcd2", "sqlite-worker")
 PLATFORMS = (
     "macos-aarch64",
     "macos-x64",

@@ -25,6 +25,7 @@ NATIVE_ONLY_AGENT_MODULES = {
     "nebula": "drivers/nebula-go",
     "vastbase": "drivers/vastbase-go",
     "tdengine": "drivers/tdengine",
+    "cnosdb": "drivers/cnosdb",
     "xugu": "drivers/xugu",
     "rabbitmq": "drivers/rabbitmq",
     "rocketmq": "drivers/rocketmq",

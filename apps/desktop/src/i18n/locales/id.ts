@@ -1166,6 +1166,7 @@ export default withEnglishFallback({
     postgresClientCertBrowse: "Pilih sertifikat klien",
     postgresClientKeyBrowse: "Pilih private key klien",
     connectionUrlOptional: "URL (opsional)",
+    generatedConnectionUrl: "URL Koneksi yang Dihasilkan",
     parseConnectionUrl: "Urai URL koneksi",
     parseConnectionUrlApplied: "URL koneksi diterapkan",
     parseConnectionUrlFailed: "Gagal mengurai URL koneksi: {message}",

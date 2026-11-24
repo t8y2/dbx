@@ -134,6 +134,9 @@ import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisibl
 import { SUNDB_DEFAULT_JDBC_DRIVER_CLASS, sundbJdbcDriverClass } from "@/lib/database/sundbDriverOptions";
 import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { buildConnectionUrlCopy, connectionUrlCopyFormats } from "@/lib/connection/connectionUrlBuilder";
+import { isSavedCredential, passwordViewerEnabled } from "@/lib/security/passwordViewer";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, normalizeDatabaseConnectionInfo, type DatabaseInfoField } from "@/lib/connection/connectionDatabaseInfo";
 import { agentDriverInstallKey, appendAgentDriverUpdateHint, connectionUsesSsh, hasAgentDriverUpdate, showAgentDriverInstallHint, type AgentDriverInstallState, type DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { prestoSqlBuiltinDriverPaths } from "@/lib/database/prestoSqlBuiltinDriver";
@@ -962,6 +965,7 @@ const selectedJdbcDriverPath = ref("");
 const jdbcManualClasspathOpen = ref(false);
 const connectionUrlInput = ref("");
 const appliedConnectionUrlInput = ref("");
+const showConnectionUrlCopyConfirm = ref(false);
 const meilisearchHostInput = ref("");
 const appliedMeilisearchHostInput = ref("");
 const oracleTnsAdminPath = ref("");
@@ -3322,6 +3326,7 @@ watch(
   ([savedConfig, isOpen]) => {
     const syncAction = connectionEditDraftSyncAction(savedConfig?.id ?? null, isOpen, editingId.value);
     if (syncAction === "preserve") return;
+    showConnectionUrlCopyConfirm.value = false;
     // Hydrate a detached edit draft before form watchers observe it. Do not
     // mutate the saved record or apply create defaults to an ID update. Only
     // flag the update as applied when the prefill really targeted this
@@ -4955,6 +4960,24 @@ function hasPendingConnectionUrlInput(): boolean {
   return !!url && url !== appliedConnectionUrlInput.value;
 }
 
+const generatedConnectionUrl = computed(() => {
+  if (hasPendingConnectionUrlInput()) return null;
+  const config = form.value;
+  // Oracle's JDBC form distinguishes a SID from a service name.
+  const standardUrl = config.db_type === "oracle" ? null : buildConnectionUrlCopy(config, "url");
+  const text = standardUrl ?? buildConnectionUrlCopy(config, "jdbcUrl");
+  if (!text) return null;
+
+  const secretFormat = standardUrl ? "urlWithPassword" : "jdbcUrlWithCredentials";
+  const canCopySecret = passwordViewerEnabled.value && !isSavedCredential(config.password) && connectionUrlCopyFormats(config).includes(secretFormat);
+  return {
+    text,
+    label: standardUrl ? "contextMenu.copyConnectionUrl" : "contextMenu.copyJdbcUrl",
+    secretFormat: canCopySecret ? secretFormat : null,
+    secretLabel: standardUrl ? "contextMenu.copyConnectionUrlWithPassword" : "contextMenu.copyJdbcUrlWithCredentials",
+  } as const;
+});
+
 function hasPendingMeilisearchHostInput(): boolean {
   const url = meilisearchHostInput.value.trim();
   return url !== appliedMeilisearchHostInput.value;
@@ -6492,6 +6515,19 @@ function applyConnectionUrl() {
   }
 }
 
+async function copyGeneratedConnectionUrl(includePassword = false) {
+  const preview = generatedConnectionUrl.value;
+  if (!preview) return;
+  const text = includePassword ? (preview.secretFormat ? buildConnectionUrlCopy(form.value, preview.secretFormat) : null) : preview.text;
+  if (!text) return;
+  try {
+    await copyToClipboard(text);
+    toast(t("connection.copied"), 2000);
+  } catch (error: unknown) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
 async function copyTestResult() {
   if (!testResultMessage.value) return;
   try {
@@ -7854,6 +7890,28 @@ function openExternalUrl(url: string) {
                       <TooltipContent>{{ t("connection.parseConnectionUrl") }}</TooltipContent>
                     </Tooltip>
                   </div>
+                  <template v-if="generatedConnectionUrl">
+                    <Label :class="connectionLabelClass">{{ t("connection.generatedConnectionUrl") }}</Label>
+                    <div class="col-span-3 flex min-w-0 items-center gap-1">
+                      <Input :model-value="generatedConnectionUrl.text" class="min-w-0 flex-1" :aria-label="t('connection.generatedConnectionUrl')" data-connection-url-preview readonly />
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <Button type="button" variant="outline" size="icon" class="h-9 w-9 shrink-0" :aria-label="t(generatedConnectionUrl.label)" @click="copyGeneratedConnectionUrl()">
+                            <Copy class="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{{ t(generatedConnectionUrl.label) }}</TooltipContent>
+                      </Tooltip>
+                      <Tooltip v-if="generatedConnectionUrl.secretFormat">
+                        <TooltipTrigger as-child>
+                          <Button type="button" variant="outline" size="icon" class="h-9 w-9 shrink-0" :aria-label="t(generatedConnectionUrl.secretLabel)" @click="showConnectionUrlCopyConfirm = true">
+                            <KeyRound class="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{{ t(generatedConnectionUrl.secretLabel) }}</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </template>
                 </div>
                 <div v-if="form.db_type === 'zookeeper'" class="grid grid-cols-4 items-start gap-4">
                   <span />
@@ -11601,6 +11659,15 @@ function openExternalUrl(url: string) {
 
   <ConnectionParametersDialog v-if="open" v-model:open="parameterEditorOpen" :model-value="form.url_params" :context="form" :definitions="parameterDriverDefinitions" :loading="parameterMetadataLoading" :metadata-error="parameterMetadataError" @apply="applyConnectionParameters" />
 
+  <DangerConfirmDialog
+    v-if="open && showConnectionUrlCopyConfirm"
+    v-model:open="showConnectionUrlCopyConfirm"
+    :title="t('contextMenu.copyPasswordConfirmTitle')"
+    :message="t('contextMenu.copyPasswordConfirmMessage')"
+    :confirm-label="t('contextMenu.copyPasswordConfirmAction')"
+    initial-focus="cancel"
+    @confirm="copyGeneratedConnectionUrl(true)"
+  />
   <Dialog v-model:open="showConnectionErrorDialog">
     <DialogContent class="min-w-0 sm:max-w-[680px]">
       <DialogHeader>

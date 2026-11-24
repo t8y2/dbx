@@ -1880,6 +1880,7 @@ export default withEnglishFallback({
     postgresClientCertBrowse: "选择客户端证书",
     postgresClientKeyBrowse: "选择客户端私钥",
     connectionUrlOptional: "URL（可选）",
+    generatedConnectionUrl: "生成的连接 URL",
     parseConnectionUrl: "解析连接 URL",
     parseConnectionUrlApplied: "已应用连接 URL",
     parseConnectionUrlFailed: "解析连接 URL 失败：{message}",

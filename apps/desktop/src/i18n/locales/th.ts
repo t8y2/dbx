@@ -1748,6 +1748,7 @@ export default withEnglishFallback({
     postgresClientCertBrowse: "เลือกใบรับรอง Client",
     postgresClientKeyBrowse: "เลือก Private Key ของ Client",
     connectionUrlOptional: "URL (ไม่บังคับ)",
+    generatedConnectionUrl: "URL การเชื่อมต่อที่สร้างขึ้น",
     parseConnectionUrl: "แยกวิเคราะห์ URL การเชื่อมต่อ",
     parseConnectionUrlApplied: "ใช้ URL การเชื่อมต่อแล้ว",
     parseConnectionUrlFailed: "แยกวิเคราะห์ URL การเชื่อมต่อไม่สำเร็จ: {message}",

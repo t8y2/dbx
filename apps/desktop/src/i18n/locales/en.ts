@@ -1948,6 +1948,7 @@ export default {
     postgresClientCertBrowse: "Choose client certificate",
     postgresClientKeyBrowse: "Choose client private key",
     connectionUrlOptional: "URL (optional)",
+    generatedConnectionUrl: "Generated URL",
     parseConnectionUrl: "Parse connection URL",
     parseConnectionUrlApplied: "Connection URL applied",
     parseConnectionUrlFailed: "Failed to parse connection URL: {message}",

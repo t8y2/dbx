@@ -1217,6 +1217,7 @@ export default withEnglishFallback({
     postgresClientCertBrowse: "Wybierz certyfikat klienta",
     postgresClientKeyBrowse: "Wybierz klucz prywatny klienta",
     connectionUrlOptional: "Adres URL (opcjonalnie)",
+    generatedConnectionUrl: "Wygenerowany adres URL połączenia",
     parseConnectionUrl: "Przeanalizuj adres URL połączenia",
     parseConnectionUrlApplied: "Zastosowano adres URL połączenia",
     parseConnectionUrlFailed: "Nie udało się przeanalizować adresu URL połączenia: {message}",

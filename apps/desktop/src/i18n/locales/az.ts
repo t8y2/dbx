@@ -915,6 +915,7 @@ export default withEnglishFallback({
     postgresClientCertBrowse: "Müştəri sertifikatını seçin",
     postgresClientKeyBrowse: "Müştərinin məxfi açarını seçin",
     connectionUrlOptional: "URL (istəyə bağlı)",
+    generatedConnectionUrl: "Yaradılmış qoşulma URL-i",
     parseConnectionUrl: "Əlaqə URL-ini təhlil et",
     parseConnectionUrlApplied: "Əlaqə URL-i tətbiq edildi",
     parseConnectionUrlFailed: "Əlaqə URL-ini təhlil etmək mümkün olmadı: {message}",

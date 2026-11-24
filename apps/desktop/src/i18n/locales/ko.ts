@@ -1619,6 +1619,7 @@ export default withEnglishFallback({
     postgresClientCertBrowse: "클라이언트 인증서 선택",
     postgresClientKeyBrowse: "클라이언트 개인 키 선택",
     connectionUrlOptional: "URL (선택)",
+    generatedConnectionUrl: "생성된 연결 URL",
     parseConnectionUrl: "연결 URL 파싱",
     parseConnectionUrlApplied: "연결 URL을 적용했습니다",
     parseConnectionUrlFailed: "연결 URL 파싱 실패: {message}",

@@ -1576,6 +1576,7 @@ export default withEnglishFallback({
     postgresClientCertBrowse: "クライアント証明書を選択",
     postgresClientKeyBrowse: "クライアント秘密鍵を選択",
     connectionUrlOptional: "URL（任意）",
+    generatedConnectionUrl: "生成された接続URL",
     parseConnectionUrl: "接続URLを解析",
     parseConnectionUrlApplied: "接続URLを適用しました",
     parseConnectionUrlFailed: "接続URLの解析に失敗しました: {message}",

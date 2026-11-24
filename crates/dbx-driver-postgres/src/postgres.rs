@@ -10596,6 +10596,12 @@ async fn list_foreign_keys_with_sql(
 }
 
 pub async fn list_foreign_keys(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
+    // The frontend keeps metadata requests for unqualified postgres sources
+    // schema-less (search_path resolution, see queryStore's
+    // useCurrentPostgresSchema); `n.nspname = ''` matches nothing, which
+    // silently returned zero FKs. Default to public like the other
+    // table-metadata queries in this file (get_columns, list_constraints...).
+    let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
     let tiers = [postgres_foreign_keys_sql(), postgres_foreign_keys_compat_sql()];

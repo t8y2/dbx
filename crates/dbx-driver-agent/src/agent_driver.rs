@@ -5711,21 +5711,63 @@ for line in sys.stdin:
             "--passphrase",
             "topsecret",
             "-Dfile.encoding=UTF-8",
+            "--add-opens=java.base/java.lang=ALL-UNNAMED",
             "-jar",
             "agent.jar",
         ]);
 
         let display = launch_display(&launch);
 
-        for secret in ["hunter2", "abc123", "xyz", "topsecret"] {
+        for secret in ["hunter2", "abc123", "xyz", "topsecret", "UTF-8"] {
             assert!(!display.contains(secret), "credential leaked into {display}");
         }
-        assert!(display.contains("-Dkeystore.password=***"), "{display}");
-        assert!(display.contains("-Ddbx.token=***"), "{display}");
-        assert!(display.contains("--api-key=***"), "{display}");
-        assert!(display.contains("--passphrase ***"), "{display}");
-        assert!(display.contains("-Dfile.encoding=UTF-8"), "{display}");
+        assert_eq!(
+            display,
+            "java -Dkeystore.password=*** -Ddbx.token=*** --api-key=*** --passphrase *** \
+             -Dfile.encoding=*** --add-opens=java.base/java.lang=ALL-UNNAMED -jar agent.jar"
+        );
+    }
+
+    #[test]
+    fn launch_display_masks_values_under_generic_option_names() {
+        // A custom `agent-launch.json` can name its options anything, and a JDBC
+        // URL carries the password as a positional argument, so the redaction
+        // cannot rely on a list of credential-like names.
+        let launch = AgentLaunchSpec::new("java")
+            .with_args([
+                "-Dservice.key=super-secret",
+                "--key",
+                "another-secret",
+                "-jar",
+                "agent.jar",
+                "jdbc:oracle:thin:scott/tiger@db.example.com:1521/svc",
+            ])
+            .with_working_dir("drivers/oracle");
+
+        let display = launch_display(&launch);
+
+        for leaked in ["super-secret", "another-secret", "tiger"] {
+            assert!(!display.contains(leaked), "credential leaked into {display}");
+        }
+        assert!(display.contains("-Dservice.key=***"), "{display}");
+        assert!(display.contains("--key ***"), "{display}");
         assert!(display.contains("-jar agent.jar"), "{display}");
+        assert!(display.contains("(working directory: drivers/oracle)"), "{display}");
+    }
+
+    #[test]
+    fn launch_display_escapes_control_characters() {
+        // Control characters in a configured path or option would otherwise turn
+        // one diagnostic line into several.
+        let launch = AgentLaunchSpec::new("java\nbin").with_args(["-jar", "agent\ntab\tname.jar"]);
+
+        let display = launch_display(&launch);
+
+        assert!(!display.contains('\n'), "newline leaked into {display:?}");
+        assert!(!display.contains('\t'), "tab leaked into {display:?}");
+        assert!(display.contains("\\n"), "{display}");
+        assert!(display.contains("\\t"), "{display}");
+        assert!(display.contains("agent\\ntab\\tname.jar"), "{display}");
     }
 
     #[test]

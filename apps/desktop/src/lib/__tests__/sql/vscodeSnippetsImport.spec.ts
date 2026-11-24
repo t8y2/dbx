@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES, mergeImportedVscodeSnippets, parseVscodeSnippetsFile, serializeVscodeSnippetsFile, type VscodeSnippetEntry } from "@/lib/sql/vscodeSnippetsImport";
+import { MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES, mergeImportedVscodeSnippets, parseVscodeSnippetsFile, readVscodeSnippetsFile, serializeVscodeSnippetsFile, type VscodeSnippetEntry } from "@/lib/sql/vscodeSnippetsImport";
 import type { SqlSnippet } from "@/types/database";
 
 function existingSnippet(prefix: string, overrides: Partial<SqlSnippet> = {}): SqlSnippet {
@@ -19,6 +19,11 @@ describe("parseVscodeSnippetsFile", () => {
     );
 
     expect(result).toEqual({ ok: true, value: [{ name: "Select rows", prefix: "selr", body: "SELECT * FROM ${1:table}" }] });
+  });
+
+  it("accepts comments and trailing commas from a VS Code snippets file", () => {
+    const source = '{ // Workspace snippets\n "fetch": { "prefix": "fetch", "body": ["SELECT 1",], },\n}';
+    expect(parseVscodeSnippetsFile(source)).toEqual({ ok: true, value: [{ name: "fetch", prefix: "fetch", body: "SELECT 1" }] });
   });
 
   it("joins array bodies with newlines", () => {
@@ -127,6 +132,35 @@ describe("mergeImportedVscodeSnippets", () => {
   });
 });
 
+describe("readVscodeSnippetsFile", () => {
+  it("assembles partial reads before parsing", async () => {
+    const payload = new TextEncoder().encode('{"query":{"prefix":"q","body":"SELECT 1"}}');
+    let offset = 0;
+    const result = await readVscodeSnippetsFile({
+      async read(buffer) {
+        const chunk = payload.subarray(offset, offset + 3);
+        if (!chunk.length) return null;
+        buffer.set(chunk);
+        offset += chunk.length;
+        return chunk.length;
+      },
+    });
+    expect(result).toEqual({ ok: true, value: [{ name: "query", prefix: "q", body: "SELECT 1" }] });
+  });
+
+  it("stops reading after the size limit plus one byte", async () => {
+    let bytesRead = 0;
+    const result = await readVscodeSnippetsFile({
+      async read(buffer) {
+        bytesRead += buffer.byteLength;
+        return buffer.byteLength;
+      },
+    });
+    expect(bytesRead).toBe(MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES + 1);
+    expect(result).toEqual({ ok: false, error: { code: "too-large" } });
+  });
+});
+
 describe("serializeVscodeSnippetsFile", () => {
   it("round-trips snippets through parseVscodeSnippetsFile, including disabled ones and placeholders", () => {
     const text = serializeVscodeSnippetsFile([existingSnippet("sel"), existingSnippet("ins", { label: "Insert row", body: "INSERT INTO ${1:table}\nVALUES (${2:values});", enabled: false })]);
@@ -138,6 +172,11 @@ describe("serializeVscodeSnippetsFile", () => {
         { name: "Insert row", prefix: "ins", body: "INSERT INTO ${1:table}\nVALUES (${2:values});" },
       ],
     });
+  });
+
+  it("round-trips a snippet named __proto__", () => {
+    const text = serializeVscodeSnippetsFile([existingSnippet("example", { label: "__proto__" })]);
+    expect(parseVscodeSnippetsFile(text)).toEqual({ ok: true, value: [{ name: "__proto__", prefix: "example", body: "-- example" }] });
   });
 
   it("suffixes duplicate labels so every map key stays unique", () => {

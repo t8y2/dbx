@@ -1,3 +1,4 @@
+import { getNodeValue, parseTree, type ParseError } from "jsonc-parser";
 import { uuid } from "@/lib/common/utils";
 import type { SqlSnippet } from "@/types/database";
 
@@ -88,7 +89,10 @@ export function parseVscodeSnippetsFile(text: string): VscodeSnippetsParseResult
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    const errors: ParseError[] = [];
+    const root = parseTree(text.trim(), errors, { allowTrailingComma: true });
+    if (!root || errors.length) return { ok: false, error: { code: "invalid-json" } };
+    parsed = getNodeValue(root);
   } catch {
     return { ok: false, error: { code: "invalid-json" } };
   }
@@ -116,6 +120,19 @@ export function parseVscodeSnippetsFile(text: string): VscodeSnippetsParseResult
   }
 
   return { ok: true, value: entries };
+}
+
+/** Read at most the import limit plus one sentinel byte, even if the file grows. */
+export async function readVscodeSnippetsFile(reader: { read(buffer: Uint8Array): Promise<number | null> }): Promise<VscodeSnippetsParseResult> {
+  const bytes = new Uint8Array(MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES + 1);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const read = await reader.read(bytes.subarray(offset));
+    if (!read) return parseVscodeSnippetsFile(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, offset)));
+    if (read < 0 || read > bytes.length - offset) throw new Error("Invalid snippet file read length");
+    offset += read;
+  }
+  return { ok: false, error: { code: "too-large" } };
 }
 
 /**
@@ -156,7 +173,7 @@ export function mergeImportedVscodeSnippets(existing: readonly SqlSnippet[], ent
  * re-import.
  */
 export function serializeVscodeSnippetsFile(snippets: readonly SqlSnippet[]): string {
-  const entries: Record<string, { prefix: string; body: string }> = {};
+  const entries: Record<string, { prefix: string; body: string }> = Object.create(null);
   const takenNames = new Set<string>();
 
   for (const snippet of snippets) {

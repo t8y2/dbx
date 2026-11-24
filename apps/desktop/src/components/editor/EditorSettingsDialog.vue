@@ -343,7 +343,7 @@ import { useToast } from "@/composables/useToast";
 import type { ConnectionConfig, InstalledPlugin, DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
 import { getCcSwitchPluginStatus, isCcSwitchPluginAvailable, isMagpieImportAvailable, MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION } from "@/lib/ai/ccSwitch";
 import { uuid } from "@/lib/common/utils";
-import { MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES, mergeImportedVscodeSnippets, parseVscodeSnippetsFile, serializeVscodeSnippetsFile, type VscodeSnippetsImportError } from "@/lib/sql/vscodeSnippetsImport";
+import { MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES, mergeImportedVscodeSnippets, parseVscodeSnippetsFile, readVscodeSnippetsFile, serializeVscodeSnippetsFile, type VscodeSnippetsImportError, type VscodeSnippetsParseResult } from "@/lib/sql/vscodeSnippetsImport";
 import { DEFAULT_SQL_SHORTCUT_SELECT_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
 import {
   BUILTIN_SQL_SHORTCUT_COUNT_ID,
@@ -1806,19 +1806,13 @@ async function importSnippetsFromDesktop() {
       filters: [{ name: "VS Code Snippets", extensions: ["json", "code-snippets"] }],
     });
     if (typeof selected !== "string") return;
-    const { readTextFile, stat } = await import("@tauri-apps/plugin-fs");
-    // Reject oversized files before reading them into memory. If the platform
-    // cannot stat the path, fall through and let the parse-time limit decide.
+    const { open: openFile } = await import("@tauri-apps/plugin-fs");
+    const file = await openFile(selected, { read: true });
     try {
-      const info = await stat(selected);
-      if (info.size > MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES) {
-        toast(translateSnippetsImportError({ code: "too-large" }), 5000);
-        return;
-      }
-    } catch {
-      // stat failures are not fatal; the parser's own limit still applies.
+      applyImportedSnippets(await readVscodeSnippetsFile(file));
+    } finally {
+      await file.close();
     }
-    applyImportedSnippetsText(await readTextFile(selected));
   } catch (error) {
     toast(t("settings.snippetsImportReadFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
   } finally {
@@ -1838,7 +1832,7 @@ async function handleSnippetsFileInputChange(event: Event) {
   }
   snippetsImporting.value = true;
   try {
-    applyImportedSnippetsText(await file.text());
+    applyImportedSnippets(parseVscodeSnippetsFile(await file.text()));
   } catch (error) {
     toast(t("settings.snippetsImportReadFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
   } finally {
@@ -1848,8 +1842,7 @@ async function handleSnippetsFileInputChange(event: Event) {
 
 // Import only updates the draft; the snippets tab is Apply-based, so the dirty
 // check and Apply footer pick the change up without touching the store here.
-function applyImportedSnippetsText(text: string) {
-  const result = parseVscodeSnippetsFile(text);
+function applyImportedSnippets(result: VscodeSnippetsParseResult) {
   if (!result.ok) {
     toast(translateSnippetsImportError(result.error), 5000);
     return;

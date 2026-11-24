@@ -382,3 +382,69 @@ describe("useDataGridSearch persistence (#8524)", () => {
     expect(loadDataGridSearchState("tab-1", SCOPE)).toBeUndefined();
   });
 });
+
+describe("useDataGridSearch IME composition", () => {
+  function createSearch() {
+    const onNavigate = vi.fn();
+    const search = useDataGridSearch({
+      columns: ["id", "name"],
+      rows: [["1", "Alice"]],
+      getCellSearchText: (row: string[], column: number) => row[column].toLowerCase(),
+      onNavigate,
+    });
+    return { search, onNavigate };
+  }
+
+  function keydown(init: { key: string; isComposing?: boolean; keyCode?: number }): KeyboardEvent & { preventDefault: ReturnType<typeof vi.fn> } {
+    return { ...init, preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as KeyboardEvent & { preventDefault: ReturnType<typeof vi.fn> };
+  }
+
+  it("leaves Tab to the input method while a composition is active", () => {
+    const { search } = createSearch();
+    // A column-prefix suggestion would otherwise make Tab accept it.
+    search.searchText.value = "na";
+
+    const event = keydown({ key: "Tab", isComposing: true });
+    search.onKeydown(event);
+
+    // The IME owns Tab: never swallow it, never accept a suggestion for the
+    // not-yet-committed pinyin.
+    expect(event.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("leaves Enter and arrows to the input method while a composition is active", async () => {
+    vi.useFakeTimers();
+    const { search, onNavigate } = createSearch();
+    search.searchText.value = "ali";
+    await flushSearchDebounce();
+
+    for (const key of ["Enter", "ArrowDown", "ArrowUp"]) {
+      const event = keydown({ key, isComposing: true });
+      search.onKeydown(event);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    }
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("treats the keyCode 229 / Process fallback as a composition", () => {
+    // WebKit fires compositionend before the committing keydown, so
+    // `isComposing` alone is not reliable in that window.
+    const { search } = createSearch();
+    for (const event of [keydown({ key: "Enter", keyCode: 229 }), keydown({ key: "Process" })]) {
+      search.onKeydown(event);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps normal shortcut handling once the composition commits", () => {
+    const { search } = createSearch();
+    search.searchText.value = "ali";
+    vi.useFakeTimers();
+
+    const event = keydown({ key: "Enter" });
+    search.onKeydown(event);
+
+    // A committed query still navigates as before.
+    expect(event.preventDefault).toHaveBeenCalled();
+  });
+});

@@ -117,6 +117,13 @@ function canReplaceAll(): boolean {
 }
 
 function onSearchInputKeydown(event: KeyboardEvent) {
+  // An IME composition (Chinese/Japanese pinyin, still uncommitted) owns Tab,
+  // Enter and the arrow keys: committing a candidate must not fall through to
+  // "accept suggestion" / "navigate match", which would also fight the input
+  // method for the key. The composed text is not in `searchText` yet — Vue's
+  // v-model drops input events while `composing` — so acting on it would
+  // search the *previous* query.
+  if (event.isComposing || event.key === "Process" || event.keyCode === 229) return;
   if (isReplaceAllShortcut(event)) {
     // Handled here: the forwarded keydown would run Enter = navigate-next in
     // the grid host. A closed replace row must not fire with hidden (possibly
@@ -129,6 +136,9 @@ function onSearchInputKeydown(event: KeyboardEvent) {
 }
 
 function onReplacementKeydown(event: KeyboardEvent) {
+  // Same IME gate as the search input: the Enter that commits a composition
+  // must not trigger Replace Current.
+  if (event.isComposing || event.key === "Process" || event.keyCode === 229) return;
   if (isReplaceAllShortcut(event)) {
     event.preventDefault();
     event.stopPropagation();

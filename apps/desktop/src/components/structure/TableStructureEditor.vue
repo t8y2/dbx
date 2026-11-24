@@ -10574,15 +10574,16 @@ watch(
 .structure-card-scroller::-webkit-scrollbar-thumb {
   background: rgba(82, 82, 82, 0.3);
   background: color-mix(in oklab, var(--foreground) 30%, transparent);
-  border: 3px solid transparent;
+  border: var(--dbx-workspace-scrollbar-inset) solid transparent;
   background-clip: padding-box;
   border-radius: 999px;
 }
 
+/* Full-track thickness on hover, like the workspace and data grid scrollbars (#15585). */
 .structure-card-scroller::-webkit-scrollbar-thumb:hover {
   background: rgba(82, 82, 82, 0.48);
   background: color-mix(in oklab, var(--foreground) 48%, transparent);
-  border-width: 2px;
+  border-width: 0;
   background-clip: padding-box;
 }
 
@@ -10670,38 +10671,41 @@ watch(
   vertical-align: middle;
 }
 
+/* Mirrors `.data-grid-vertical-scrollbar` so both axes thicken the same way (#15585). */
 .structure-vertical-scrollbar {
   position: relative;
-  width: 10px;
+  width: var(--dbx-workspace-scrollbar-size);
   cursor: default;
   touch-action: none;
 }
 
 .structure-vertical-scrollbar__thumb {
   position: absolute;
-  left: 3px;
-  width: 4px;
+  inset-inline: 0;
   min-height: 24px;
+  border-inline: var(--dbx-workspace-scrollbar-inset) solid transparent;
   border-radius: 999px;
   background: rgba(82, 82, 82, 0.3);
   background: color-mix(in oklab, var(--foreground) 30%, transparent);
+  background-clip: padding-box;
   transition:
-    left 120ms ease,
-    width 120ms ease,
+    border-width 120ms ease,
     background-color 120ms ease;
 }
 
 .structure-vertical-scrollbar:hover .structure-vertical-scrollbar__thumb,
 .structure-vertical-scrollbar--dragging .structure-vertical-scrollbar__thumb {
-  left: 2px;
-  width: 6px;
+  border-width: 0;
   background: rgba(82, 82, 82, 0.48);
   background: color-mix(in oklab, var(--foreground) 48%, transparent);
 }
 
+/* Same thumb model as the data grid (`.data-grid-horizontal-scrollbar`): a 10px
+   track whose thumb grows from the inset look to the full track on hover/drag, so
+   the hover feedback in the structure editor matches 表右键 → 查看数据 (#15585). */
 .structure-horizontal-scrollbar {
   position: relative;
-  height: 10px;
+  height: var(--dbx-workspace-scrollbar-size);
   flex-shrink: 0;
   cursor: pointer;
   touch-action: none;
@@ -10710,22 +10714,21 @@ watch(
 
 .structure-horizontal-scrollbar__thumb {
   position: absolute;
-  top: 3px;
-  height: 4px;
+  inset-block: 0;
   min-width: 24px;
+  border-block: var(--dbx-workspace-scrollbar-inset) solid transparent;
   border-radius: 999px;
   background: rgba(82, 82, 82, 0.3);
   background: color-mix(in oklab, var(--foreground) 30%, transparent);
+  background-clip: padding-box;
   transition:
-    top 120ms ease,
-    height 120ms ease,
+    border-width 120ms ease,
     background-color 120ms ease;
 }
 
 .structure-horizontal-scrollbar:hover .structure-horizontal-scrollbar__thumb,
 .structure-horizontal-scrollbar--dragging .structure-horizontal-scrollbar__thumb {
-  top: 2px;
-  height: 6px;
+  border-width: 0;
   background: rgba(82, 82, 82, 0.48);
   background: color-mix(in oklab, var(--foreground) 48%, transparent);
 }

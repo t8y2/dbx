@@ -645,6 +645,33 @@ describe("QueryEditor completion provider ownership", () => {
     expect(await accept("db.users.find({ na })", 18)).toEqual({ doc: "db.users.find({ name:  })", cursor: 22 });
   });
 
+  it("completes collections and sampled fields in MongoDB SQL mode", async () => {
+    const { store, provide, currentView } = createHarness({ databaseType: "mongodb", mongoQueryLanguage: "sql", modelValue: "SELECT * FROM us" });
+    const collections = await provide();
+    expect(collections?.options.map((option) => option.label)).toContain("users");
+    expect(store.listMongoCompletionCollections).toHaveBeenCalledWith("connection", "demo");
+
+    store.listMongoCompletionFields.mockResolvedValue([
+      { name: "mobile_number", type: "string" },
+      { name: "address.city", type: "string" },
+    ]);
+    const doc = "SELECT * FROM users WHERE mob";
+    currentView.dispatch({ changes: { from: 0, to: currentView.state.doc.length, insert: doc }, selection: { anchor: doc.length } });
+    const result = await provide();
+    expect(store.listMongoCompletionFields).toHaveBeenCalledWith("connection", "demo", "users");
+    const option = result?.options.find((candidate) => candidate.label === "mobile_number" || candidate.displayLabel === "mobile_number");
+    expect(option).toBeDefined();
+    expect(result?.options.map((candidate) => candidate.label)).toContain("address.city");
+    expect(result?.from).toBe(doc.length - "mob".length);
+  });
+
+  it("keeps SQL keywords in MongoDB SQL mode when the collection cannot be sampled", async () => {
+    const { store, provide } = createHarness({ databaseType: "mongodb", mongoQueryLanguage: "sql", modelValue: "SELECT * FROM users WHERE st" });
+    store.listMongoCompletionFields.mockRejectedValue(new Error("offline"));
+    const result = await provide();
+    expect(result?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["AND", "LIKE"]));
+  });
+
   it("completes MongoDB index names in dropIndex and replaces closing quote", async () => {
     const doc = 'db.users.dropIndex("")';
     const cursor = doc.indexOf('""') + 1;

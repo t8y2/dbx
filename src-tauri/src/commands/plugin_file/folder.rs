@@ -1,6 +1,8 @@
 //! Directory handles: a session-scoped, user-consented directory grant that a
-//! plugin can silently enumerate, read, and write within — without ever seeing
-//! the absolute path.
+//! plugin can silently enumerate, read, and write within. The canonical root
+//! never leaves the Rust side except as a display label returned by the picker
+//! (so recent-project lists can be rebuilt after a restart): every access is
+//! still gated by a session handle or a previously recorded grant.
 //!
 //! This mirrors the file-handle model in this module: the canonical root lives
 //! only in the Rust-side `folders` registry, keyed by an opaque uuid and owned
@@ -25,6 +27,90 @@ use super::PluginFileState;
 /// Bounds the synchronous expansion walk, matching the drop-folder cap.
 const MAX_FOLDER_ENTRIES: usize = 2000;
 const MAX_FOLDER_DEPTH: usize = 8;
+/// Per-plugin record of recently granted project folders, stored as
+/// `plugin-data/<plugin-id>/recent-folders.json`. Only canonical paths that the
+/// user confirmed in the native picker are recorded, so plugins can surface a
+/// recent list and pre-target the picker via `default_path`.
+const RECENT_FOLDERS_FILE: &str = "recent-folders.json";
+/// Keeps the dropdown short while covering day-to-day project switching.
+const MAX_RECENT_FOLDERS: usize = 10;
+
+/// Display entry for a recent project (name plus absolute path).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecentFolderMeta {
+    pub(crate) name: String,
+    pub(crate) path: String,
+}
+
+/// Location of the recent-folders file.
+fn recent_folders_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(RECENT_FOLDERS_FILE)
+}
+
+/// Reads the recorded paths; a missing or corrupt file means an empty list and
+/// never blocks granting a new folder.
+fn load_recent_folders(data_dir: &Path) -> Vec<PathBuf> {
+    let Ok(raw) = std::fs::read(recent_folders_path(data_dir)) else {
+        return Vec::new();
+    };
+    serde_json::from_slice::<Vec<String>>(&raw).unwrap_or_default().into_iter().map(PathBuf::from).collect()
+}
+
+/// Atomically replaces the list (temp file + fsync + rename) so a crash cannot
+/// corrupt the previous history.
+fn write_recent_folders(data_dir: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    create_dir_all(data_dir).map_err(|error| format!("cannot create plugin data directory: {error}"))?;
+    let encoded = serde_json::to_vec(&paths.iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<_>>())
+        .map_err(|error| format!("cannot encode recent folders: {error}"))?;
+    let target = recent_folders_path(data_dir);
+    let temp = format!("{}.tmp", target.to_string_lossy());
+    {
+        use std::io::Write;
+        let mut file =
+            std::fs::File::create(&temp).map_err(|error| format!("cannot create recent folders temp file: {error}"))?;
+        file.write_all(&encoded).map_err(|error| format!("cannot write recent folders: {error}"))?;
+        file.sync_all().map_err(|error| format!("cannot flush recent folders: {error}"))?;
+    }
+    std::fs::rename(&temp, &target).map_err(|error| format!("cannot replace recent folders: {error}"))
+}
+
+/// Records one user consent (canonical path), deduplicated and capped.
+/// Only a successful native-picker selection calls this, so the renderer can
+/// never add a grant on its own.
+pub(super) fn remember_recent_folder(data_dir: &Path, root: &Path) {
+    let mut paths = load_recent_folders(data_dir);
+    paths.retain(|item| item != root);
+    paths.insert(0, root.to_path_buf());
+    paths.truncate(MAX_RECENT_FOLDERS);
+    // History is a convenience: a failed write must not fail the grant.
+    let _ = write_recent_folders(data_dir, &paths);
+}
+
+/// Whether the path was previously granted to this plugin; the only ticket
+/// accepted by the dialog-free reopen command.
+pub(super) fn is_recent_folder(data_dir: &Path, canonical: &Path) -> bool {
+    load_recent_folders(data_dir).iter().any(|item| item == canonical)
+}
+
+/// Lists recent projects, dropping folders that were deleted or moved.
+pub(crate) fn recent_folder_metas(data_dir: &Path) -> Vec<RecentFolderMeta> {
+    let stored = load_recent_folders(data_dir);
+    let before = stored.len();
+    let kept: Vec<PathBuf> = stored.into_iter().filter(|path| path.is_dir()).collect();
+    if kept.len() != before {
+        let _ = write_recent_folders(data_dir, &kept);
+    }
+    kept.into_iter()
+        .map(|path| RecentFolderMeta {
+            name: path
+                .file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".to_string()),
+            path: path.to_string_lossy().into_owned(),
+        })
+        .collect()
+}
 
 /// One granted directory. `root` is canonical; `read_only` reserves a future
 /// opt-in for read-only grants.
@@ -35,12 +121,15 @@ pub(super) struct OpenFolder {
     pub(super) read_only: bool,
 }
 
-/// Wire shape for the handle metadata returned by `pickFolder`.
+/// Wire shape for the handle metadata returned by `pickFolder` / `openFolderPath`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FolderHandleMeta {
     pub(crate) folder_handle_id: String,
     pub(crate) name: String,
+    /// Canonical absolute path. Returned so plugin UIs can label recent
+    /// projects and reopen them after a restart; access stays grant-gated.
+    pub(crate) path: String,
 }
 
 /// One directory entry on the wire.
@@ -82,10 +171,11 @@ pub(super) fn open_folder(
         return Err("path is not a directory".to_string());
     }
     let name = canonical.file_name().and_then(|value| value.to_str()).unwrap_or("project").to_string();
+    let path = canonical.to_string_lossy().into_owned();
     let folder_handle_id = Uuid::new_v4().to_string();
     let mut folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
     folders.insert(folder_handle_id.clone(), OpenFolder { root: canonical, owner: plugin_id.to_string(), read_only });
-    Ok(FolderHandleMeta { folder_handle_id, name })
+    Ok(FolderHandleMeta { folder_handle_id, name, path })
 }
 
 /// Looks up a handle and enforces plugin ownership.
@@ -503,5 +593,45 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&mine);
         let _ = std::fs::remove_dir_all(&theirs);
+    }
+
+    #[test]
+    fn recent_folders_dedupe_and_cap() {
+        let data = temp_dir("recent-data");
+        let dirs: Vec<PathBuf> = (0..12)
+            .map(|index| {
+                let dir = data.join(format!("project-{index}"));
+                std::fs::create_dir_all(&dir).unwrap();
+                dir
+            })
+            .collect();
+        for dir in &dirs {
+            remember_recent_folder(&data, dir);
+        }
+        // Re-granting an older folder moves it back to the front instead of duplicating.
+        remember_recent_folder(&data, &dirs[2]);
+        let metas = recent_folder_metas(&data);
+        assert_eq!(metas.len(), MAX_RECENT_FOLDERS);
+        assert_eq!(metas[0].path, dirs[2].to_string_lossy());
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn recent_folders_drop_missing_directories() {
+        let data = temp_dir("recent-missing");
+        let alive = data.join("alive");
+        let gone = data.join("gone");
+        std::fs::create_dir_all(&alive).unwrap();
+        std::fs::create_dir_all(&gone).unwrap();
+        remember_recent_folder(&data, &alive);
+        remember_recent_folder(&data, &gone);
+        std::fs::remove_dir_all(&gone).unwrap();
+
+        let metas = recent_folder_metas(&data);
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].name, "alive");
+
+        let _ = std::fs::remove_dir_all(&data);
     }
 }

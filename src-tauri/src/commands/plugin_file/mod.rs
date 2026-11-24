@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -31,6 +31,8 @@ use serde::Serialize;
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
+
+use super::connection::AppState;
 
 /// Mirrors the bridge binary cap: one read/write chunk never exceeds it.
 pub const MAX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -436,24 +438,79 @@ pub async fn plugin_file_pick_folder(
     app: tauri::AppHandle,
     plugin_id: String,
     read_only: Option<bool>,
+    default_path: Option<String>,
 ) -> Result<Option<FolderHandleMeta>, String> {
     if plugin_id.trim().is_empty() {
         return Err("plugin id is required".to_string());
     }
+    let mut dialog = app.dialog().file();
+    // Start the native picker in the supplied directory (usually a recent
+    // project); missing or non-directory paths fall back to the OS default.
+    if let Some(directory) = default_path.as_deref().map(Path::new).filter(|path| path.is_dir()) {
+        dialog = dialog.set_directory(directory);
+    }
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog().file().pick_folder(move |path| {
+    dialog.pick_folder(move |path| {
         let _ = sender.send(path);
     });
-    let chosen = receiver.await.map_err(|error| error.to_string())?;
-    let Some(chosen) = chosen else { return Ok(None) };
+    let Some(chosen) = receiver.await.map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
     let path = chosen.into_path().map_err(|error| error.to_string())?;
+    // Persist the canonical path so the folder shows up in recent projects.
+    let canonical = path.canonicalize().map_err(|error| format!("cannot resolve folder path: {error}"))?;
+    let data_dir = app.state::<Arc<AppState>>().inner().plugins.plugin_data_dir(&plugin_id);
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<PluginFileState>();
-        open_folder(state.inner(), &plugin_id, &path, read_only == Some(true))
+        let meta = open_folder(state.inner(), &plugin_id, &path, read_only == Some(true))?;
+        folder::remember_recent_folder(&data_dir, &canonical);
+        Ok(meta)
     })
     .await
     .map_err(|error| error.to_string())?
     .map(Some)
+}
+
+/// Lists the project folders this plugin was previously granted, newest first.
+/// Paths are included so the plugin can label and re-target the native picker.
+#[tauri::command]
+pub async fn plugin_file_recent_folders(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+) -> Result<Vec<folder::RecentFolderMeta>, String> {
+    let data_dir = state.plugins.plugin_data_dir(&plugin_id);
+    tauri::async_runtime::spawn_blocking(move || folder::recent_folder_metas(&data_dir))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Reopens a previously granted folder by absolute path without a dialog.
+/// Only paths recorded for this plugin are accepted, so a renderer cannot use
+/// it to reach arbitrary directories.
+#[tauri::command]
+pub async fn plugin_file_open_folder_path(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+    path: String,
+) -> Result<Option<folder::FolderHandleMeta>, String> {
+    if plugin_id.trim().is_empty() {
+        return Err("plugin id is required".to_string());
+    }
+    let data_dir = state.plugins.plugin_data_dir(&plugin_id);
+    tauri::async_runtime::spawn_blocking(move || {
+        let canonical =
+            Path::new(&path).canonicalize().map_err(|error| format!("cannot resolve folder path: {error}"))?;
+        if !folder::is_recent_folder(&data_dir, &canonical) {
+            return Err("folder is not in this plugin's recent grants".to_string());
+        }
+        // Reopening counts as recent use, so move it back to the front.
+        folder::remember_recent_folder(&data_dir, &canonical);
+        let state = app.state::<PluginFileState>();
+        open_folder(state.inner(), &plugin_id, &canonical, false).map(Some)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

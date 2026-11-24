@@ -325,7 +325,7 @@ export interface PluginHostBridgeApi {
   /** Close any file handle, discarding unsaved state. */
   closeFileHandle?(pluginId: string, handleId: string): Promise<void>;
   /** Native folder-picker dialog; resolves a directory handle the plugin can later enumerate/read/write silently. Null means the user cancelled. */
-  pickFolder?(pluginId: string, options?: { readOnly?: boolean }): Promise<{ folderHandleId: string; name: string } | null>;
+  pickFolder?(pluginId: string, options?: { readOnly?: boolean; defaultPath?: string }): Promise<{ folderHandleId: string; name: string; path?: string } | null>;
   /** Recursively list entries under a granted folder handle, optionally filtering by extension. */
   folderList?(pluginId: string, folderHandleId: string, options?: { subPath?: string; extensions?: string[] }): Promise<{ entries: FolderEntry[]; truncated: boolean }>;
   /** Read a file inside a granted folder handle as UTF-8 text. */
@@ -336,6 +336,10 @@ export interface PluginHostBridgeApi {
   folderWriteBinary?(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, options?: { create?: boolean }): Promise<string>;
   /** Close a directory handle, releasing the grant. */
   closeFolderHandle?(pluginId: string, folderHandleId: string): Promise<void>;
+  /** Recently granted project folders (name + absolute path), persisted across restarts. */
+  recentFolders?(pluginId: string): Promise<Array<{ name: string; path: string }>>;
+  /** Reopen a folder granted earlier without a dialog; rejects paths this plugin never received. */
+  openFolderPath?(pluginId: string, path: string): Promise<{ folderHandleId: string; name: string; path?: string } | null>;
   /** Whether this host receives OS file drops on the plugin's behalf (desktop only). */
   receiveOsDrops?: boolean;
   /** Persistent per-plugin key-value storage for sandboxed UIs; resolves null when the key is unset. */
@@ -1064,7 +1068,8 @@ export class PluginHostBridge {
     if (method === "host.pickFolder") {
       if (!this.api.pickFolder) throw new Error("Host folder picking is unavailable");
       const input = params && typeof params === "object" ? (params as Record<string, unknown>) : {};
-      return this.api.pickFolder(this.plugin.manifest.id, { readOnly: input.readOnly === true });
+      const defaultPath = typeof input.defaultPath === "string" && input.defaultPath ? input.defaultPath : undefined;
+      return this.api.pickFolder(this.plugin.manifest.id, { readOnly: input.readOnly === true, defaultPath });
     }
     if (method === "host.folderList") {
       const input = requireRecord(params, "host.folderList params");
@@ -1094,6 +1099,17 @@ export class PluginHostBridge {
       if (!this.api.closeFolderHandle) throw new Error("Host folder handle is unavailable");
       await this.api.closeFolderHandle(this.plugin.manifest.id, requireHandleId(input.folderHandleId));
       return null;
+    }
+    if (method === "host.recentFolders") {
+      if (!this.api.recentFolders) throw new Error("Host recent folders are unavailable");
+      return this.api.recentFolders(this.plugin.manifest.id);
+    }
+    if (method === "host.openFolderPath") {
+      const input = requireRecord(params, "host.openFolderPath params");
+      if (!this.api.openFolderPath) throw new Error("Host folder reopening is unavailable");
+      // The host checks the path against this plugin's persisted grants, so a
+      // renderer cannot open an arbitrary directory by string alone.
+      return this.api.openFolderPath(this.plugin.manifest.id, requireString(input.path));
     }
     if (method === "host.storageGet") {
       this.requirePermission("host.storage");
@@ -1687,6 +1703,10 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         folderWriteText: (folderHandleId, relativePath, content, options) => request('host.folderWriteText', { folderHandleId, relativePath, content, create: options?.create !== false }),
         folderWriteBinary: (folderHandleId, relativePath, dataBase64, options) => request('host.folderWriteBinary', { folderHandleId, relativePath, dataBase64, create: options?.create !== false }),
         closeFolderHandle: (folderHandleId) => request('host.closeFolderHandle', { folderHandleId }),
+        // Persisted recent grants: lets plugins pre-target the native picker.
+        recentFolders: () => request('host.recentFolders'),
+        // Dialog-free reopen of a previously granted folder.
+        openFolderPath: (path) => request('host.openFolderPath', { path }),
         onDragState: (listener) => { listeners.dragstate.add(listener); return () => listeners.dragstate.delete(listener); },
         onDrop: (listener) => { listeners.filedrop.add(listener); return () => listeners.filedrop.delete(listener); },
       }),

@@ -715,12 +715,14 @@ function createBridge() {
       // Folder-handle API: extends the file-handle model with a directory grant
       // that stays silent for the session so plugins can auto-save and export
       // alongside .erm files without re-prompting. Desktop-only (Tauri dialogs).
-      pickFolder: isTauriRuntime() ? (pluginId, options) => tauriFileApi().then(({ pickPluginLocalFolder }) => pickPluginLocalFolder(pluginId, options?.readOnly)) : undefined,
+      pickFolder: isTauriRuntime() ? (pluginId, options) => tauriFileApi().then(({ pickPluginLocalFolder }) => pickPluginLocalFolder(pluginId, options?.readOnly, options?.defaultPath)) : undefined,
       folderList: isTauriRuntime() ? (pluginId, folderHandleId, options) => tauriFileApi().then(({ listPluginLocalFolder }) => listPluginLocalFolder(pluginId, folderHandleId, options)) : undefined,
       folderReadText: isTauriRuntime() ? (pluginId, folderHandleId, relativePath) => tauriFileApi().then(({ readPluginLocalFolderText }) => readPluginLocalFolderText(pluginId, folderHandleId, relativePath)) : undefined,
       folderWriteText: isTauriRuntime() ? (pluginId, folderHandleId, relativePath, content, options) => tauriFileApi().then(({ writePluginLocalFolderText }) => writePluginLocalFolderText(pluginId, folderHandleId, relativePath, content, options?.create)) : undefined,
       folderWriteBinary: isTauriRuntime() ? (pluginId, folderHandleId, relativePath, dataBase64, options) => tauriFileApi().then(({ writePluginLocalFolderBinary }) => writePluginLocalFolderBinary(pluginId, folderHandleId, relativePath, dataBase64, options?.create)) : undefined,
       closeFolderHandle: isTauriRuntime() ? (pluginId, folderHandleId) => tauriFileApi().then(({ closePluginLocalFolder }) => closePluginLocalFolder(pluginId, folderHandleId)) : undefined,
+      recentFolders: isTauriRuntime() ? (pluginId) => tauriFileApi().then(({ recentPluginLocalFolders }) => recentPluginLocalFolders(pluginId)) : undefined,
+      openFolderPath: isTauriRuntime() ? (pluginId, path) => tauriFileApi().then(({ openPluginLocalFolderByPath }) => openPluginLocalFolderByPath(pluginId, path)) : undefined,
       folderHandleAvailable: isTauriRuntime(),
       // OS drops (with folder expansion) are a desktop-host capability; the
       // bridge advertises it to plugins through capabilities.fileTransfer.

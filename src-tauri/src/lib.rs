@@ -2743,6 +2743,8 @@ pub fn run() {
             commands::plugin_file::plugin_file_write,
             commands::plugin_file::plugin_file_close,
             commands::plugin_file::plugin_file_pick_folder,
+            commands::plugin_file::plugin_file_recent_folders,
+            commands::plugin_file::plugin_file_open_folder_path,
             commands::plugin_file::plugin_file_folder_list,
             commands::plugin_file::plugin_file_folder_read_text,
             commands::plugin_file::plugin_file_folder_write_text,

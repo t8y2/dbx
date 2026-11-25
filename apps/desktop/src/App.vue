@@ -1784,8 +1784,19 @@ async function settleUpdateBlockers() {
         transactions: queryStore.tabs.filter((tab) => Boolean(tab.txnSessionId)).map((tab) => ({ id: tab.id, label: tab.title })),
       }),
       cancelTask: (id) => cancelBackgroundTask(id),
-      cancelExecution: (id) => queryStore.cancelTabExecution(id),
-      cancelExplain: (id) => queryStore.cancelTabExplain(id),
+      // Only ask the store when there is something to ask about: a tab that is
+      // already cancelling (or has no dispatched execution) answers `false`
+      // without a backend call, and that is not a failed stop.
+      cancelExecution: (id) => {
+        const tab = queryStore.tabs.find((candidate) => candidate.id === id);
+        if (!tab || tab.isCancelling || !tab.isExecuting || !tab.executionId) return Promise.resolve(true);
+        return queryStore.cancelTabExecution(id);
+      },
+      cancelExplain: (id) => {
+        const tab = queryStore.tabs.find((candidate) => candidate.id === id);
+        if (!tab?.isExplaining || !tab.explainExecutionId) return Promise.resolve(true);
+        return queryStore.cancelTabExplain(id);
+      },
       rollbackTransaction: (id) => queryStore.rollbackTransaction(id),
     },
     { timeoutMs: UPDATE_SETTLE_TIMEOUT_MS },

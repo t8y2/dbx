@@ -222,6 +222,39 @@ describe("chartData", () => {
       expect(option?.series[0].data).toEqual([150, 280]);
     });
 
+    it("disables smoothing on a time axis so unevenly spaced points cannot loop back", () => {
+      const timed = result(
+        ["time", "value"],
+        [
+          ["2026-11-25T10:00:00Z", 100],
+          ["2026-11-25T14:00:00Z", 90],
+          ["2026-11-25T14:05:00Z", 80],
+          ["2026-11-25T14:05:30Z", 10],
+          ["2026-11-25T14:06:00Z", 5],
+        ],
+      );
+      const option = buildQueryChartOption(timed, { chartType: "line", xColumnIndex: 0, yColumnIndexes: [1] });
+      expect(option?.xAxis).toMatchObject({ type: "time" });
+      expect(option?.series[0].smooth).toBe(false);
+
+      const forcedTime = buildQueryChartOption(timed, {
+        chartType: "line",
+        xColumnIndex: 0,
+        yColumnIndexes: [1],
+        xAxisType: "time",
+      });
+      expect(forcedTime?.series[0].smooth).toBe(false);
+    });
+
+    it("keeps smoothing on a category axis", () => {
+      const option = buildQueryChartOption(testResult, {
+        chartType: "line",
+        xColumnIndex: 0,
+        yColumnIndexes: [1],
+      });
+      expect(option?.series[0].smooth).toBe(true);
+    });
+
     it("uses time axis for numeric epoch X column", () => {
       const timed = result(
         ["ts", "value"],

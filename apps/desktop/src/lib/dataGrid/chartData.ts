@@ -145,7 +145,11 @@ export function buildQueryChartOption(result: QueryResult, config: QueryChartOpt
         const value = toChartNumber(row[yIdx]) ?? 0;
         return timestamps ? [timestamps[rowIndex], value] : value;
       }),
-      smooth: chartType === "line",
+      // Bezier smoothing overshoots when time-axis points are unevenly spaced
+      // (e.g. minutes apart then seconds apart) and the value drops sharply,
+      // making the line loop back on itself. Straight segments keep the series
+      // faithful to the actual samples. Category axes keep the original look.
+      smooth: chartType === "line" && !timestamps,
       label: {
         show: showLabels,
         position: "top" as const,

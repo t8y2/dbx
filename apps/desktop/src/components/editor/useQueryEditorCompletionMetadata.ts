@@ -587,7 +587,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     if (!props.connectionId || props.database == null || usesLocalOnlyCompletionMetadata()) return;
     const generation = completionCacheGeneration;
     try {
-      const tables = await connectionStore.listCompletionTables(props.connectionId, props.database, "", Math.max(MAX_COMPLETION_TABLES, 500), props.schema || undefined, false, props.schema, props.catalog, { activateConnection: false });
+      const tables = await connectionStore.listCompletionTables(props.connectionId, props.database, "", Math.max(MAX_COMPLETION_TABLES, 500), undefined, false, props.schema, props.catalog, { activateConnection: false });
       if (generation !== completionCacheGeneration) return;
       const scopedTables = tables.map((table) => ({
         ...table,

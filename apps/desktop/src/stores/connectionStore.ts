@@ -10845,9 +10845,10 @@ export const useConnectionStore = defineStore("connection", () => {
                 }
               }
             } catch {
-              if (schema) {
-                const tables = await listCompletionTableMetadata(connectionId, database, schema, trimmedFilter, limit, catalog);
-                results = tableInfosToCompletionTables(tables, schema, catalog);
+              const fallbackSchema = schema?.trim() || (!globalSearch ? currentSchema?.trim() : undefined);
+              if (fallbackSchema) {
+                const tables = await listCompletionTableMetadata(connectionId, database, fallbackSchema, trimmedFilter, limit, catalog);
+                results = tableInfosToCompletionTables(tables, fallbackSchema, catalog);
               } else {
                 results = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit, undefined, catalog);
               }

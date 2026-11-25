@@ -347,7 +347,7 @@ describe.each([false, true])("Snowflake namespace completion (semantic=%s)", (se
 
     await metadata.prefetchCompletionTables();
 
-    expect(store.listCompletionTables).toHaveBeenCalledWith("connection", "", "", 500, "YJ1235", false, "YJ1235", undefined, { activateConnection: false });
+    expect(store.listCompletionTables).toHaveBeenCalledWith("connection", "", "", 500, undefined, false, "YJ1235", undefined, { activateConnection: false });
     expect(metadata.cachedTables.map((table) => table.name)).toContain("SYS_USER");
   });
 

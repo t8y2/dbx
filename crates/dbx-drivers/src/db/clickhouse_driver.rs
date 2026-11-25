@@ -209,10 +209,15 @@ fn append_extra_params(url: &mut String, extra_params: Option<&str>) {
     }
 }
 
+/// The connection test sends `SELECT 1` in a POST body, as every query does. Some proxies in
+/// front of ClickHouse reset a GET query while passing the same POST (#15642).
+const CONNECTION_TEST_SQL: &str = "SELECT 1";
+
 fn build_connection_test_url(base_url: &str, extra_params: Option<&str>) -> String {
-    let mut url = format!("{}/?query=SELECT%201", base_url);
-    append_extra_params(&mut url, extra_params);
-    url
+    match extra_params.filter(|params| !params.is_empty()) {
+        Some(params) => format!("{base_url}/?{params}"),
+        None => format!("{base_url}/"),
+    }
 }
 
 #[derive(Default)]
@@ -654,7 +659,7 @@ fn request_error_detail(error: &reqwest::Error) -> String {
 
 pub async fn test_connection(client: &ChClient, timeout: Duration) -> Result<(), String> {
     let url = build_connection_test_url(&client.base_url, client.extra_params.as_deref());
-    let req = build_request(client, client.http.get(&url));
+    let req = build_request(client, client.http.post(&url).body(CONNECTION_TEST_SQL));
     let resp = with_connection_timeout("ClickHouse", timeout, async {
         req.send().await.map_err(|e| format!("ClickHouse connection failed: {}", request_error_detail(&e)))
     })
@@ -941,6 +946,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn connection_test_sends_select_1_as_a_post_body() {
+        // The reporter's proxy reset a GET query while it passed the same query as POST (#15642).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            // Like that proxy, close a GET without an answer.
+            if request.starts_with("POST ") {
+                write_http_response(&mut socket, "200 OK", "1\n").await;
+            }
+            request
+        });
+        let client =
+            ChClient::new_with_ca_cert(&format!("http://{address}"), None, None, None, None, Duration::from_secs(2))
+                .unwrap();
+        let result = test_connection(&client, Duration::from_secs(2)).await;
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST / HTTP/1.1\r\n"), "got: {request}");
+        assert!(request.ends_with("\r\n\r\nSELECT 1"), "got: {request}");
+        result.expect("a POST connection test passes where GET is reset");
+    }
 
     async fn read_http_request<Stream: tokio::io::AsyncRead + Unpin>(socket: &mut Stream) -> String {
         use tokio::io::AsyncReadExt;
@@ -1392,7 +1421,7 @@ mod tests {
         );
         assert_eq!(
             build_connection_test_url(&client.base_url, client.extra_params.as_deref()),
-            "http://localhost:8123/?query=SELECT%201&dialect_type=ANSI&unknown_setting=1"
+            "http://localhost:8123/?dialect_type=ANSI&unknown_setting=1"
         );
         assert_eq!(
             build_query_url_with_format(

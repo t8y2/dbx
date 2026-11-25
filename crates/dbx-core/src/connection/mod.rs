@@ -16513,7 +16513,7 @@ for line in sys.stdin:
                 request.extend_from_slice(&byte);
             }
             let request = String::from_utf8(request).unwrap();
-            assert!(request.starts_with("GET /?query=SELECT%201 "));
+            assert!(request.starts_with("POST / "));
             assert!(request.lines().any(|line| line.eq_ignore_ascii_case("host: clickhouse.proxy.invalid:8123")));
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n1\n").await.unwrap();
         });

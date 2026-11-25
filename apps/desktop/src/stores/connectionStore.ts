@@ -10120,7 +10120,8 @@ export const useConnectionStore = defineStore("connection", () => {
     options: { activateConnection?: boolean; allowConnection?: boolean } = {},
   ): Promise<SqlCompletionTable[]> {
     const oracleAssistant = isOracleCompletionDatabase(getConfig(connectionId)?.db_type);
-    const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, globalSearch ? currentSchema : (schema ?? currentSchema)) : schema?.trim() || undefined;
+    const effectiveSchema = globalSearch ? undefined : schema?.trim() || currentSchema?.trim() || undefined;
+    const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, globalSearch ? currentSchema : (schema ?? currentSchema)) : effectiveSchema;
     const objectKinds: CompletionAssistantObjectKind[] = ["table", "view"];
     const response = await completionAssistantSearch(
       {
@@ -10131,7 +10132,7 @@ export const useConnectionStore = defineStore("connection", () => {
         mask: filter.trim(),
         max_results: limit ?? 200,
         global_search: globalSearch,
-        parent_schema: globalSearch ? null : (schema ?? null),
+        parent_schema: globalSearch ? null : oracleAssistant ? (schema ?? null) : (effectiveSchema ?? null),
         match_mode: matchMode,
       },
       requestRevision,
@@ -10202,6 +10203,7 @@ export const useConnectionStore = defineStore("connection", () => {
         schema: schema ?? null,
         object_kinds: ["column"],
         mask: "",
+        case_sensitive: Boolean(context?.tableQuoted || context?.schemaQuoted),
         max_results: 500,
         parent_schema: schema ?? null,
         parent_name: table,
@@ -11157,10 +11159,10 @@ export const useConnectionStore = defineStore("connection", () => {
     const cacheKey = `${completionColumnsKey(connectionId, database, completionTable, completionSchema, catalog, context)}${sessionCacheScope}${contextCacheScope}`;
     if (!completionColumnsCache.value[cacheKey]) {
       const requestRevision = completionCacheRevision(connectionId, database);
-      await withCompletionInFlight(
+      const outcome = await withCompletionInFlight<"cached" | "empty" | "stale" | "skipped">(
         `${cacheKey}:columns`,
         async () => {
-          if (options.activateConnection === false && !connectedIds.value.has(connectionId)) return;
+          if (options.activateConnection === false && !connectedIds.value.has(connectionId)) return "skipped";
           if (options.activateConnection !== false) await ensureConnected(connectionId);
           // Use assistant metadata opportunistically, then fall back to canonical metadata.
           if (!usesCurrentSchema && !catalog) {
@@ -11179,10 +11181,10 @@ export const useConnectionStore = defineStore("connection", () => {
                   numeric_scale: null,
                   character_maximum_length: null,
                 }));
-                if (requestRevision !== completionCacheRevision(connectionId, database)) return;
+                if (requestRevision !== completionCacheRevision(connectionId, database)) return "stale";
                 completionColumnsCache.value[cacheKey] = columns;
                 evictOldestCacheEntries(completionColumnsCache.value, COMPLETION_CACHE_MAX);
-                return;
+                return "cached";
               }
             } catch {
               // Fall back to the existing metadata path below.
@@ -11192,17 +11194,20 @@ export const useConnectionStore = defineStore("connection", () => {
           const columns = currentSchema
             ? await api.getColumns(connectionId, database, querySchema, completionTable, catalog, context?.clientSessionId, currentSchema)
             : await api.getColumns(connectionId, database, querySchema, completionTable, catalog, usesCurrentSchema ? context?.clientSessionId : undefined);
-          if (requestRevision !== completionCacheRevision(connectionId, database)) return;
+          if (requestRevision !== completionCacheRevision(connectionId, database)) return "stale";
+          if (columns.length === 0) return "empty";
           completionColumnsCache.value[cacheKey] = columns;
           evictOldestCacheEntries(completionColumnsCache.value, COMPLETION_CACHE_MAX);
+          return "cached";
         },
         { scope: completionLimiterScope(connectionId, database), kind: "columns" },
       );
-    }
-
-    if (!completionColumnsCache.value[cacheKey]) {
-      if (options.activateConnection === false) return [];
-      return listCompletionColumns(connectionId, database, table, schema, context, catalog, options);
+      if (!completionColumnsCache.value[cacheKey]) {
+        if (outcome === "stale" && options.activateConnection !== false) {
+          return listCompletionColumns(connectionId, database, table, schema, context, catalog, options);
+        }
+        return [];
+      }
     }
 
     const columns = completionColumnsCache.value[cacheKey].map((column) => ({

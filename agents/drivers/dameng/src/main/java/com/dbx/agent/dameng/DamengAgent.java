@@ -2,6 +2,12 @@ package com.dbx.agent.dameng;
 
 import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.CompletionAssistantCandidate;
+import com.dbx.agent.CompletionAssistantCandidateKind;
+import com.dbx.agent.CompletionAssistantMatchMode;
+import com.dbx.agent.CompletionAssistantObjectKind;
+import com.dbx.agent.CompletionAssistantRequest;
+import com.dbx.agent.CompletionAssistantResponse;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.ExecuteQueryOptions;
@@ -802,6 +808,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
             || normalized.contains("sysobjects")
             || normalized.contains("all_dependencies")
             || normalized.contains("all_tab_comments")
+            || normalized.contains("all_tab_columns")
+            || normalized.contains("all_col_comments")
             || normalized.contains("dbms_metadata")
             || normalized.contains("get_ddl");
     }
@@ -1247,6 +1255,555 @@ public final class DamengAgent extends AbstractJdbcAgent {
             return "TABLE";
         }
         return upper;
+    }
+
+    @Override
+    public CompletionAssistantResponse completionAssistantSearch(CompletionAssistantRequest request) {
+        if (request == null) {
+            return new CompletionAssistantResponse(List.of(), false, false);
+        }
+        List<CompletionAssistantObjectKind> kinds = request.getObject_kinds();
+        boolean wantsColumns = kinds.contains(CompletionAssistantObjectKind.COLUMN);
+        boolean wantsTables = kinds.isEmpty()
+            || kinds.contains(CompletionAssistantObjectKind.TABLE)
+            || kinds.contains(CompletionAssistantObjectKind.VIEW);
+        boolean wantsSchemas = kinds.contains(CompletionAssistantObjectKind.SCHEMA);
+        if (!wantsColumns && !wantsTables && !wantsSchemas) {
+            return super.completionAssistantSearch(request);
+        }
+        if (legacyJdbcMetadata) {
+            return StandardJdbcMetadata.INSTANCE.completionAssistantSearch(
+                requireConnected(),
+                DM6_METADATA_PROFILE,
+                getConfiguredDatabase(),
+                request
+            );
+        }
+        if (wantsColumns && !wantsTables && !wantsSchemas) {
+            return completionAssistantColumns(request);
+        }
+        if (wantsSchemas && !wantsTables && !wantsColumns) {
+            return completionAssistantSchemas(request);
+        }
+        if (wantsTables && !wantsColumns && !wantsSchemas) {
+            return completionAssistantTables(request);
+        }
+        int limit = boundedCompletionLimit(request.getMax_results());
+        List<CompletionAssistantCandidate> merged = new ArrayList<>();
+        boolean incomplete = false;
+        if (wantsSchemas && merged.size() < limit) {
+            CompletionAssistantResponse schemas = completionAssistantSchemas(request);
+            appendBoundedCandidates(merged, schemas.getCandidates(), limit);
+            incomplete = incomplete || schemas.getIncomplete();
+        }
+        if (wantsTables && merged.size() < limit) {
+            CompletionAssistantResponse tables = completionAssistantTables(request);
+            appendBoundedCandidates(merged, tables.getCandidates(), limit);
+            incomplete = incomplete || tables.getIncomplete();
+        }
+        if (wantsColumns && merged.size() < limit) {
+            CompletionAssistantResponse columns = completionAssistantColumns(request);
+            appendBoundedCandidates(merged, columns.getCandidates(), limit);
+            incomplete = incomplete || columns.getIncomplete();
+        }
+        return new CompletionAssistantResponse(merged, incomplete, false);
+    }
+
+    private CompletionAssistantResponse completionAssistantSchemas(CompletionAssistantRequest request) {
+        int limit = boundedCompletionLimit(request.getMax_results());
+        String mask = request.getMask().trim();
+        boolean caseSensitive = request.getCase_sensitive();
+        CompletionAssistantMatchMode matchMode = request.getMatch_mode();
+        String database = blankToNull(request.getDatabase());
+        List<CompletionAssistantCandidate> candidates = new ArrayList<>();
+        boolean incomplete = false;
+        for (String schema : listSchemas()) {
+            if (schema == null || schema.isBlank()) {
+                continue;
+            }
+            if (!matchesCompletionMask(schema, mask, matchMode, caseSensitive)) {
+                continue;
+            }
+            if (candidates.size() == limit) {
+                incomplete = true;
+                break;
+            }
+            candidates.add(new CompletionAssistantCandidate(
+                schema,
+                CompletionAssistantCandidateKind.SCHEMA,
+                database,
+                schema,
+                null,
+                null,
+                null,
+                "SCHEMA"
+            ));
+        }
+        return new CompletionAssistantResponse(candidates, incomplete, false);
+    }
+
+    private CompletionAssistantResponse completionAssistantTables(CompletionAssistantRequest request) {
+        int limit = boundedCompletionLimit(request.getMax_results());
+        boolean caseSensitive = request.getCase_sensitive();
+        String mask = request.getMask().trim();
+        CompletionAssistantMatchMode matchMode = request.getMatch_mode();
+        List<String> objectTypes = completionTableObjectTypes(request.getObject_kinds());
+        String database = blankToNull(request.getDatabase());
+        try {
+            if (request.getGlobal_search()) {
+                String preferredSchema = normalizeSchema(firstNonBlank(caseSensitive, request.getSchema(), request.getParent_schema()));
+                return queryCompletionTablesGlobal(
+                    preferredSchema,
+                    objectTypes,
+                    mask,
+                    matchMode,
+                    caseSensitive,
+                    limit,
+                    database
+                );
+            }
+            String owner = normalizeSchema(firstNonBlank(caseSensitive, request.getParent_schema(), request.getSchema()));
+            if (owner.isEmpty()) {
+                return new CompletionAssistantResponse(List.of(), false, false);
+            }
+            CompletionAssistantResponse exact = queryCompletionTablesScoped(
+                owner,
+                false,
+                objectTypes,
+                mask,
+                matchMode,
+                caseSensitive,
+                limit,
+                database
+            );
+            if (!exact.getCandidates().isEmpty() || caseSensitive) {
+                return exact;
+            }
+            String upperOwner = owner.toUpperCase(Locale.ROOT);
+            if (!upperOwner.equals(owner)) {
+                CompletionAssistantResponse upper = queryCompletionTablesScoped(
+                    upperOwner,
+                    false,
+                    objectTypes,
+                    mask,
+                    matchMode,
+                    false,
+                    limit,
+                    database
+                );
+                if (!upper.getCandidates().isEmpty()) {
+                    return upper;
+                }
+            }
+            return queryCompletionTablesScoped(
+                owner,
+                true,
+                objectTypes,
+                mask,
+                matchMode,
+                false,
+                limit,
+                database
+            );
+        } catch (RuntimeException error) {
+            if (isDamengMetadataDictionaryUnavailableError(error) || isDamengInvalidDatetimeMetadataError(error)) {
+                return StandardJdbcMetadata.INSTANCE.completionAssistantSearch(
+                    requireConnected(),
+                    DM6_METADATA_PROFILE,
+                    getConfiguredDatabase(),
+                    request
+                );
+            }
+            throw error;
+        }
+    }
+
+    private CompletionAssistantResponse queryCompletionTablesScoped(
+        String owner,
+        boolean caseInsensitiveOwner,
+        List<String> objectTypes,
+        String mask,
+        CompletionAssistantMatchMode matchMode,
+        boolean caseSensitive,
+        int limit,
+        String database
+    ) {
+        return unchecked(() -> {
+            List<Object> args = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("""
+                SELECT /*+ PARALLEL(1) */
+                       o.OWNER,
+                       o.OBJECT_NAME AS TABLE_NAME,
+                       o.OBJECT_TYPE AS TABLE_TYPE,
+                       c.COMMENTS
+                FROM ALL_OBJECTS o
+                LEFT JOIN ALL_TAB_COMMENTS c
+                    ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
+                WHERE
+                """.stripIndent().trim());
+            sql.append(caseInsensitiveOwner ? " UPPER(o.OWNER) = UPPER(?)" : " o.OWNER = ?");
+            args.add(owner);
+            appendRawObjectTypePredicate(sql, args, objectTypes);
+            sql.append(" AND (o.OBJECT_TYPE <> 'TABLE' OR o.OBJECT_NAME NOT LIKE 'MTAB$_%')");
+            appendCompletionMaskPredicate(sql, args, "o.OBJECT_NAME", mask, matchMode, caseSensitive);
+            sql.append(" ORDER BY o.OBJECT_NAME, o.OWNER LIMIT ?");
+            args.add(limit + 1);
+            return executeCompletionTablesQuery(sql.toString(), args, limit, database);
+        });
+    }
+
+    private CompletionAssistantResponse queryCompletionTablesGlobal(
+        String preferredSchema,
+        List<String> objectTypes,
+        String mask,
+        CompletionAssistantMatchMode matchMode,
+        boolean caseSensitive,
+        int limit,
+        String database
+    ) {
+        return unchecked(() -> {
+            List<Object> args = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("""
+                SELECT /*+ PARALLEL(1) */
+                       o.OWNER,
+                       o.OBJECT_NAME AS TABLE_NAME,
+                       o.OBJECT_TYPE AS TABLE_TYPE,
+                       c.COMMENTS
+                FROM ALL_OBJECTS o
+                LEFT JOIN ALL_TAB_COMMENTS c
+                    ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
+                WHERE 1 = 1
+                """.stripIndent().trim());
+            appendRawObjectTypePredicate(sql, args, objectTypes);
+            sql.append(" AND (o.OBJECT_TYPE <> 'TABLE' OR o.OBJECT_NAME NOT LIKE 'MTAB$_%')");
+            appendCompletionMaskPredicate(sql, args, "o.OBJECT_NAME", mask, matchMode, caseSensitive);
+            if (!preferredSchema.isEmpty()) {
+                sql.append(" ORDER BY CASE WHEN UPPER(o.OWNER) = UPPER(?) THEN 0 ELSE 1 END, o.OBJECT_NAME, o.OWNER LIMIT ?");
+                args.add(preferredSchema);
+            } else {
+                sql.append(" ORDER BY o.OBJECT_NAME, o.OWNER LIMIT ?");
+            }
+            args.add(limit + 1);
+            return executeCompletionTablesQuery(sql.toString(), args, limit, database);
+        });
+    }
+
+    private CompletionAssistantResponse executeCompletionTablesQuery(
+        String sql,
+        List<Object> args,
+        int limit,
+        String database
+    ) throws Exception {
+        List<CompletionAssistantCandidate> candidates = new ArrayList<>();
+        boolean incomplete = false;
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            bind(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String name = rs.getString("TABLE_NAME");
+                    if (name == null || name.isBlank()) {
+                        continue;
+                    }
+                    if (candidates.size() == limit) {
+                        incomplete = true;
+                        break;
+                    }
+                    String owner = rs.getString("OWNER");
+                    String objectType = normalizeObjectType(rs.getString("TABLE_TYPE"));
+                    CompletionAssistantCandidateKind kind = "VIEW".equals(objectType) || "MATERIALIZED_VIEW".equals(objectType)
+                        ? CompletionAssistantCandidateKind.VIEW
+                        : CompletionAssistantCandidateKind.TABLE;
+                    candidates.add(new CompletionAssistantCandidate(
+                        name,
+                        kind,
+                        database,
+                        owner,
+                        null,
+                        null,
+                        rs.getString("COMMENTS"),
+                        objectType
+                    ));
+                }
+            }
+        }
+        return new CompletionAssistantResponse(candidates, incomplete, false);
+    }
+
+    private CompletionAssistantResponse completionAssistantColumns(CompletionAssistantRequest request) {
+        boolean caseSensitive = request.getCase_sensitive();
+        String parentName = firstNonBlank(caseSensitive, request.getParent_name());
+        if (parentName == null) {
+            return new CompletionAssistantResponse(List.of(), false, false);
+        }
+        String owner = normalizeSchema(firstNonBlank(caseSensitive, request.getParent_schema(), request.getSchema()));
+        if (owner.isEmpty()) {
+            return new CompletionAssistantResponse(List.of(), false, false);
+        }
+        int limit = boundedCompletionLimit(request.getMax_results());
+        String mask = request.getMask().trim();
+        CompletionAssistantMatchMode matchMode = request.getMatch_mode();
+        String database = blankToNull(request.getDatabase());
+        try {
+            CompletionAssistantResponse exact = queryCompletionColumnsExact(
+                owner,
+                parentName,
+                mask,
+                matchMode,
+                caseSensitive,
+                limit,
+                database
+            );
+            if (!exact.getCandidates().isEmpty() || caseSensitive) {
+                return exact;
+            }
+            String upperOwner = owner.toUpperCase(Locale.ROOT);
+            String upperTable = parentName.toUpperCase(Locale.ROOT);
+            if (!upperOwner.equals(owner) || !upperTable.equals(parentName)) {
+                CompletionAssistantResponse upper = queryCompletionColumnsExact(
+                    upperOwner,
+                    upperTable,
+                    mask,
+                    matchMode,
+                    false,
+                    limit,
+                    database
+                );
+                if (!upper.getCandidates().isEmpty()) {
+                    return upper;
+                }
+            }
+            String[] resolved = resolveUniqueCaseInsensitiveColumnTarget(owner, parentName);
+            if (resolved == null) {
+                return exact;
+            }
+            boolean sameAsExact = resolved[0].equals(owner) && resolved[1].equals(parentName);
+            boolean sameAsUpper = resolved[0].equals(upperOwner) && resolved[1].equals(upperTable);
+            if (sameAsExact || sameAsUpper) {
+                return exact;
+            }
+            return queryCompletionColumnsExact(
+                resolved[0],
+                resolved[1],
+                mask,
+                matchMode,
+                false,
+                limit,
+                database
+            );
+        } catch (RuntimeException error) {
+            if (isDamengMetadataDictionaryUnavailableError(error)) {
+                return StandardJdbcMetadata.INSTANCE.completionAssistantSearch(
+                    requireConnected(),
+                    DM6_METADATA_PROFILE,
+                    getConfiguredDatabase(),
+                    request
+                );
+            }
+            throw error;
+        }
+    }
+
+    private CompletionAssistantResponse queryCompletionColumnsExact(
+        String owner,
+        String table,
+        String mask,
+        CompletionAssistantMatchMode matchMode,
+        boolean caseSensitive,
+        int limit,
+        String database
+    ) {
+        return unchecked(() -> {
+            List<Object> args = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("""
+                SELECT /*+ PARALLEL(1) */
+                       c.OWNER,
+                       c.TABLE_NAME,
+                       c.COLUMN_NAME,
+                       c.DATA_TYPE,
+                       c.DATA_PRECISION,
+                       c.DATA_SCALE,
+                       c.DATA_LENGTH,
+                       c.CHAR_LENGTH,
+                       c.CHAR_USED,
+                       cc.COMMENTS
+                FROM ALL_TAB_COLUMNS c
+                LEFT JOIN ALL_COL_COMMENTS cc
+                    ON cc.OWNER = c.OWNER
+                    AND cc.TABLE_NAME = c.TABLE_NAME
+                    AND cc.COLUMN_NAME = c.COLUMN_NAME
+                WHERE c.OWNER = ? AND c.TABLE_NAME = ?
+                """.stripIndent().trim());
+            args.add(owner);
+            args.add(table);
+            appendCompletionMaskPredicate(sql, args, "c.COLUMN_NAME", mask, matchMode, caseSensitive);
+            sql.append(" ORDER BY c.COLUMN_ID LIMIT ?");
+            args.add(limit + 1);
+
+            List<CompletionAssistantCandidate> candidates = new ArrayList<>();
+            boolean incomplete = false;
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        String columnName = rs.getString("COLUMN_NAME");
+                        if (columnName == null || columnName.isBlank()) {
+                            continue;
+                        }
+                        if (candidates.size() == limit) {
+                            incomplete = true;
+                            break;
+                        }
+                        String rowOwner = firstNonBlank(rs.getString("OWNER"), owner);
+                        String rowTable = firstNonBlank(rs.getString("TABLE_NAME"), table);
+                        String baseType = rs.getString("DATA_TYPE");
+                        String dataType = baseType == null ? "" : formatDataType(
+                            baseType,
+                            intObject(rs, "DATA_PRECISION"),
+                            intObject(rs, "DATA_SCALE"),
+                            intObject(rs, "DATA_LENGTH"),
+                            intObject(rs, "CHAR_LENGTH"),
+                            rs.getString("CHAR_USED"),
+                            null
+                        );
+                        candidates.add(new CompletionAssistantCandidate(
+                            columnName,
+                            CompletionAssistantCandidateKind.COLUMN,
+                            database,
+                            rowOwner,
+                            rowOwner,
+                            rowTable,
+                            rs.getString("COMMENTS"),
+                            dataType
+                        ));
+                    }
+                }
+            }
+            return new CompletionAssistantResponse(candidates, incomplete, false);
+        });
+    }
+
+    private String[] resolveUniqueCaseInsensitiveColumnTarget(String owner, String table) {
+        return unchecked(() -> {
+            String sql = """
+                SELECT /*+ PARALLEL(1) */ DISTINCT c.OWNER, c.TABLE_NAME
+                FROM ALL_TAB_COLUMNS c
+                WHERE UPPER(c.OWNER) = UPPER(?) AND UPPER(c.TABLE_NAME) = UPPER(?)
+                LIMIT 2
+                """.stripIndent().trim();
+            List<String[]> matches = new ArrayList<>();
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+                stmt.setString(1, owner);
+                stmt.setString(2, table);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        String rowOwner = rs.getString("OWNER");
+                        String rowTable = rs.getString("TABLE_NAME");
+                        if (rowOwner != null && !rowOwner.isBlank() && rowTable != null && !rowTable.isBlank()) {
+                            matches.add(new String[] { rowOwner, rowTable });
+                        }
+                    }
+                }
+            }
+            return matches.size() == 1 ? matches.get(0) : null;
+        });
+    }
+
+    private static List<String> completionTableObjectTypes(List<CompletionAssistantObjectKind> kinds) {
+        LinkedHashSet<String> types = new LinkedHashSet<>();
+        boolean any = kinds == null || kinds.isEmpty();
+        if (any || kinds.contains(CompletionAssistantObjectKind.TABLE)) {
+            types.add("TABLE");
+        }
+        if (any || kinds.contains(CompletionAssistantObjectKind.VIEW)) {
+            types.add("VIEW");
+            types.add("MATERIALIZED VIEW");
+        }
+        if (types.isEmpty()) {
+            types.add("TABLE");
+            types.add("VIEW");
+            types.add("MATERIALIZED VIEW");
+        }
+        return new ArrayList<>(types);
+    }
+
+    private static void appendCompletionMaskPredicate(
+        StringBuilder sql,
+        List<Object> args,
+        String column,
+        String mask,
+        CompletionAssistantMatchMode matchMode,
+        boolean caseSensitive
+    ) {
+        if (mask == null || mask.isEmpty()) {
+            return;
+        }
+        String escaped = mask.replace("~", "~~").replace("%", "~%").replace("_", "~_");
+        String pattern = matchMode == CompletionAssistantMatchMode.CONTAINS
+            ? "%" + escaped + "%"
+            : escaped + "%";
+        if (caseSensitive) {
+            sql.append(" AND ").append(column).append(" LIKE ? ESCAPE '~'");
+            args.add(pattern);
+        } else {
+            sql.append(" AND UPPER(").append(column).append(") LIKE ? ESCAPE '~'");
+            args.add(pattern.toUpperCase(Locale.ROOT));
+        }
+    }
+
+    private static boolean matchesCompletionMask(
+        String value,
+        String mask,
+        CompletionAssistantMatchMode matchMode,
+        boolean caseSensitive
+    ) {
+        if (mask == null || mask.isEmpty()) {
+            return true;
+        }
+        String candidate = caseSensitive ? value : value.toUpperCase(Locale.ROOT);
+        String needle = caseSensitive ? mask : mask.toUpperCase(Locale.ROOT);
+        return matchMode == CompletionAssistantMatchMode.CONTAINS
+            ? candidate.contains(needle)
+            : candidate.startsWith(needle);
+    }
+
+    private static int boundedCompletionLimit(Integer requested) {
+        if (requested == null || requested <= 0) {
+            return 200;
+        }
+        return Math.min(requested, 1000);
+    }
+
+    private static void appendBoundedCandidates(
+        List<CompletionAssistantCandidate> target,
+        List<CompletionAssistantCandidate> incoming,
+        int limit
+    ) {
+        for (CompletionAssistantCandidate candidate : incoming) {
+            if (target.size() >= limit) {
+                break;
+            }
+            target.add(candidate);
+        }
+    }
+
+    private static String firstNonBlank(String... values) {
+        return firstNonBlank(false, values);
+    }
+
+    private static String firstNonBlank(boolean preserveWhitespace, String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return preserveWhitespace ? value : value.trim();
+            }
+        }
+        return null;
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value.trim();
     }
 
     @Override

@@ -1,5 +1,6 @@
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
+import type { SyntaxNode } from "@lezer/common";
 import { type QueryCompletionOption } from "./useQueryEditorBatchSelection";
 import { insertQueryEditorNewline } from "@/lib/editor/queryEditorNewline";
 import { isBatchColumnSelectionCompletionActive } from "@/lib/editor/batchColumnSelection";
@@ -11,9 +12,15 @@ import type { useSettingsStore } from "@/stores/settingsStore";
 import type { useQueryEditorCompletion } from "./useQueryEditorCompletion";
 import type { useQueryEditorBatchSelection } from "./useQueryEditorBatchSelection";
 
-// Only unambiguous T-SQL clause words can be recased before suggestions arrive.
-// The editor's syntax vocabulary also contains words that can be identifiers.
-const SQL_SERVER_SPACE_KEYWORDS = new Set("SELECT FROM WHERE JOIN INNER OUTER LEFT RIGHT FULL CROSS ON GROUP ORDER BY ASC DESC HAVING INSERT INTO VALUES UPDATE SET DELETE AS AND OR NOT DISTINCT TOP WITH UNION ALL EXISTS IN IS LIKE BETWEEN CASE WHEN THEN ELSE END".split(" "));
+// Only unambiguous clause and DDL words can be recased before suggestions arrive.
+// The editor's syntax vocabulary also contains words that can be identifiers
+// (`user`, `name`, `value`), so a Keyword node alone is not enough.
+const SPACE_CASE_KEYWORDS = new Set(
+  "SELECT FROM WHERE JOIN INNER OUTER LEFT RIGHT FULL CROSS ON GROUP ORDER BY ASC DESC HAVING INSERT INTO VALUES UPDATE SET DELETE AS AND OR NOT DISTINCT TOP WITH UNION ALL EXISTS IN IS LIKE BETWEEN CASE WHEN THEN ELSE END LIMIT OFFSET FETCH EXCEPT INTERSECT CREATE ALTER DROP TRUNCATE TABLE INDEX VIEW PRIMARY FOREIGN REFERENCES".split(
+    " ",
+  ),
+);
+const PROTECTED_SPACE_CASE_NODES = new Set(["String", "LineComment", "BlockComment", "QuotedIdentifier", "CompositeIdentifier"]);
 
 interface QueryEditorCompletionKeysOptions {
   props: Readonly<QueryEditorProps>;
@@ -234,26 +241,40 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     return true;
   }
 
-  function applySqlServerKeywordCaseOnSpace(view: EditorViewType): boolean {
-    const { state } = view;
+  function inProtectedSpaceCaseNode(node: SyntaxNode | null): boolean {
+    for (let current = node; current; current = current.parent) {
+      if (PROTECTED_SPACE_CASE_NODES.has(current.name)) return true;
+    }
+    return false;
+  }
+
+  function keywordCaseOnSpace(): "upper" | "lower" | null {
     const keywordCase = settingsStore.editorSettings.sqlFormatter.keywordCase;
-    if (props.databaseType !== "sqlserver" || !settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion || keywordCase === "preserve" || state.readOnly || state.selection.ranges.length !== 1) return false;
+    if (keywordCase !== "upper" && keywordCase !== "lower") return null;
+    const enabled = settingsStore.editorSettings.sqlFormatter.autoCaseKeywordsOnSpace === true || (props.databaseType === "sqlserver" && settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion);
+    return enabled ? keywordCase : null;
+  }
+
+  function applyKeywordCaseOnSpace(view: EditorViewType): boolean {
+    const { state } = view;
+    const keywordCase = keywordCaseOnSpace();
+    if (!keywordCase || state.readOnly || state.selection.ranges.length !== 1) return false;
 
     const cursor = state.selection.main.head;
     const token = syntaxTree(state).resolveInner(cursor, -1);
-    if (token.name !== "Keyword" || token.to !== cursor || token.parent?.name === "CompositeIdentifier") return false;
+    if (token.name !== "Keyword" || token.to !== cursor || inProtectedSpaceCaseNode(token)) return false;
 
     const lineStart = state.doc.lineAt(token.from).from;
     if (state.sliceDoc(lineStart, token.from).trimEnd().endsWith(".")) return false;
     const word = state.sliceDoc(token.from, token.to);
     const upper = word.toUpperCase();
-    if (!SQL_SERVER_SPACE_KEYWORDS.has(upper)) return false;
+    if (!SPACE_CASE_KEYWORDS.has(upper)) return false;
 
     const cased = keywordCase === "upper" ? upper : word.toLowerCase();
     if (word === cased) return false;
     view.dispatch({
       changes: { from: token.from, to: cursor, insert: cased + " " },
-      selection: { anchor: cursor + 1 },
+      selection: { anchor: token.from + cased.length + 1 },
       scrollIntoView: true,
       userEvent: "input.type",
     });
@@ -264,7 +285,7 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     if (isEditorComposing(view)) return false;
     if (!view.state.selection.main.empty) return false;
     if (acceptSnippetCompletionOnSpace(view)) return true;
-    return acceptSqlServerCompletionOnSpace(view) || applySqlServerKeywordCaseOnSpace(view);
+    return acceptSqlServerCompletionOnSpace(view) || applyKeywordCaseOnSpace(view);
   }
 
   function clearPendingCompletionTab() {

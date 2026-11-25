@@ -9403,6 +9403,7 @@ export default withEnglishFallback({
     sqlFormatterFormMode: "フォーム",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "キーワードの大文字/小文字",
+    sqlFormatterAutoCaseKeywordsOnSpace: "キーワードを自動変換",
     sqlFormatterFunctionCase: "関数の大文字/小文字",
     sqlFormatterDataTypeCase: "データ型の大文字/小文字",
     sqlFormatterIdentifierCase: "識別子の大文字/小文字",

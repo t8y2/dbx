@@ -102,6 +102,9 @@ export interface SqlFormatterOptionSettings extends SqlFormatterRuleSettings {
   // sql-formatter itself (see sqlFormatterOptions).
   layoutStyle: SqlFormatterLayoutStyle;
   keywordCase: SqlFormatterCase;
+  // DBX-private: recases the keyword before the cursor when Space is typed.
+  // Never reaches sql-formatter (see sqlFormatterOptions).
+  autoCaseKeywordsOnSpace: boolean;
   dataTypeCase: SqlFormatterCase;
   functionCase: SqlFormatterCase;
   identifierCase: SqlFormatterCase;
@@ -133,6 +136,7 @@ export const DEFAULT_SQL_FORMATTER_SETTINGS: SqlFormatterSettings = {
   ...DEFAULT_SQL_FORMATTER_RULE_SETTINGS,
   layoutStyle: "dbx",
   keywordCase: "upper",
+  autoCaseKeywordsOnSpace: false,
   dataTypeCase: "preserve",
   functionCase: "preserve",
   identifierCase: "preserve",
@@ -160,6 +164,7 @@ const SQL_FORMATTER_OPTION_KEYS = new Set<keyof SqlFormatterOptionSettings>([
   ...(Object.keys(DEFAULT_SQL_FORMATTER_RULE_SETTINGS) as (keyof SqlFormatterRuleSettings)[]),
   "layoutStyle",
   "keywordCase",
+  "autoCaseKeywordsOnSpace",
   "dataTypeCase",
   "functionCase",
   "identifierCase",
@@ -197,6 +202,7 @@ const SQL_FORMATTER_OPTION_VALIDATORS: Record<keyof SqlFormatterOptionSettings, 
   emptyLineMode: (value) => isStringChoice(value, EMPTY_LINE_MODE_VALUES),
   layoutStyle: (value) => isStringChoice(value, LAYOUT_STYLE_VALUES),
   keywordCase: (value) => isStringChoice(value, CASE_VALUES),
+  autoCaseKeywordsOnSpace: (value) => typeof value === "boolean",
   dataTypeCase: (value) => isStringChoice(value, CASE_VALUES),
   functionCase: (value) => isStringChoice(value, CASE_VALUES),
   identifierCase: (value) => isStringChoice(value, CASE_VALUES),
@@ -302,6 +308,7 @@ export function sqlFormatterOptionSettings(settings: unknown): SqlFormatterOptio
     emptyLineMode: normalizeChoice(input.emptyLineMode, EMPTY_LINE_MODE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.emptyLineMode),
     layoutStyle: normalizeChoice(input.layoutStyle, LAYOUT_STYLE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.layoutStyle),
     keywordCase: normalizeChoice(input.keywordCase, CASE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.keywordCase),
+    autoCaseKeywordsOnSpace: normalizeBoolean(input.autoCaseKeywordsOnSpace, DEFAULT_SQL_FORMATTER_SETTINGS.autoCaseKeywordsOnSpace),
     dataTypeCase: normalizeChoice(input.dataTypeCase, CASE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.dataTypeCase),
     functionCase: normalizeChoice(input.functionCase, CASE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.functionCase),
     identifierCase: normalizeChoice(input.identifierCase, CASE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.identifierCase),

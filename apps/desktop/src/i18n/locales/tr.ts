@@ -7563,6 +7563,7 @@ export default withEnglishFallback({
     sqlFormatterFormMode: "Form",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "Anahtar sözcük harf durumu",
+    sqlFormatterAutoCaseKeywordsOnSpace: "Anahtar sözcükleri dönüştür",
     sqlFormatterFunctionCase: "İşlev harf durumu",
     sqlFormatterDataTypeCase: "Veri türü harf durumu",
     sqlFormatterIdentifierCase: "Tanımlayıcı harf durumu",

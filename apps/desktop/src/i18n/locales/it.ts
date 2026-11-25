@@ -8999,6 +8999,7 @@ export default withEnglishFallback({
     sqlFormatterFormMode: "Modulo",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "Maiuscole/minuscole parole chiave",
+    sqlFormatterAutoCaseKeywordsOnSpace: "Converti le parole chiave",
     sqlFormatterFunctionCase: "Maiuscole/minuscole funzioni",
     sqlFormatterDataTypeCase: "Maiuscole/minuscole tipi di dati",
     sqlFormatterIdentifierCase: "Maiuscole/minuscole identificatori",

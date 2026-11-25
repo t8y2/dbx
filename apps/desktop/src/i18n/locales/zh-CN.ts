@@ -10389,6 +10389,7 @@ export default withEnglishFallback({
     sqlFormatterFormMode: "表单",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "关键字大小写",
+    sqlFormatterAutoCaseKeywordsOnSpace: "自动转换关键字",
     sqlFormatterFunctionCase: "函数名大小写",
     sqlFormatterDataTypeCase: "数据类型大小写",
     sqlFormatterIdentifierCase: "标识符大小写",

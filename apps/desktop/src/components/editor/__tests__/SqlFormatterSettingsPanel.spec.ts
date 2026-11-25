@@ -120,6 +120,16 @@ describe("SQL formatter settings panel rules and preview", () => {
     expect(update).toHaveBeenLastCalledWith({ ...current, selectListLayout: "fit", customRulesEnabled: false });
   });
 
+  it("emits the auto keyword-case switch without changing keyword case", async () => {
+    const { root, update } = mountPanel();
+    const toggle = root.querySelector<HTMLInputElement>("#sql-formatter-auto-case-keywords")!;
+    expect(toggle.checked).toBe(false);
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+    expect(update).toHaveBeenLastCalledWith({ ...DEFAULT_SQL_FORMATTER_SETTINGS, autoCaseKeywordsOnSpace: true });
+  });
+
   it("labels DML comma positions as comma placement and associates the width label", () => {
     const { root } = mountPanel({ ...DEFAULT_SQL_FORMATTER_SETTINGS, customRulesEnabled: true });
     const commaSelect = selectForLabel(root, "settings.sqlFormatterSelectCommaPosition");

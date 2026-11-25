@@ -7677,6 +7677,7 @@ export default withEnglishFallback({
     sqlFormatterFormMode: "Forma",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "Açar sözlərin hərf registri",
+    sqlFormatterAutoCaseKeywordsOnSpace: "Açar sözləri avtomatik dəyiş",
     sqlFormatterFunctionCase: "Funksiyaların hərf registri",
     sqlFormatterDataTypeCase: "Verilən növlərinin hərf registri",
     sqlFormatterIdentifierCase: "İdentifikatorların hərf registri",

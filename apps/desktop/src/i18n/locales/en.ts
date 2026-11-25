@@ -10426,6 +10426,7 @@ export default {
     sqlFormatterFormMode: "Form",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "Keyword case",
+    sqlFormatterAutoCaseKeywordsOnSpace: "Auto-case keywords",
     sqlFormatterFunctionCase: "Function case",
     sqlFormatterDataTypeCase: "Data type case",
     sqlFormatterIdentifierCase: "Identifier case",

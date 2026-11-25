@@ -627,7 +627,7 @@ const SQL_VARIABLE_SYNTAX_KEY_SET = new Set<string>(SQL_VARIABLE_SYNTAX_KEYS);
  * because the version boundary is known; nothing is inferred about which
  * style the user meant. Every future formatter option must be added here.
  */
-const SQL_FORMATTER_KEYS_ADDED_AFTER_TRANSFER_FORMAT = new Set<keyof SqlFormatterOptionSettings>(["commaPosition", "layoutStyle", ...(Object.keys(DEFAULT_SQL_FORMATTER_RULE_SETTINGS) as (keyof SqlFormatterRuleSettings)[])]);
+const SQL_FORMATTER_KEYS_ADDED_AFTER_TRANSFER_FORMAT = new Set<keyof SqlFormatterOptionSettings>(["commaPosition", "layoutStyle", "autoCaseKeywordsOnSpace", ...(Object.keys(DEFAULT_SQL_FORMATTER_RULE_SETTINGS) as (keyof SqlFormatterRuleSettings)[])]);
 
 /**
  * Complete-schema check that tolerates the absence of the post-transfer

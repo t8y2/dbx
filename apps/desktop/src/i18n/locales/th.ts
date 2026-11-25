@@ -10974,6 +10974,7 @@ export default withEnglishFallback({
     sqlFormatterFormMode: "ฟอร์ม",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "ตัวพิมพ์เล็กใหญ่ของ Keyword",
+    sqlFormatterAutoCaseKeywordsOnSpace: "แปลง Keyword อัตโนมัติ",
     sqlFormatterFunctionCase: "ตัวพิมพ์เล็กใหญ่ของ Function",
     sqlFormatterDataTypeCase: "ตัวพิมพ์เล็กใหญ่ของชนิดข้อมูล",
     sqlFormatterIdentifierCase: "ตัวพิมพ์เล็กใหญ่ของ Identifier",

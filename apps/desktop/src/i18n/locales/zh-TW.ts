@@ -8112,6 +8112,7 @@ export default withEnglishFallback({
     sqlFormatterFormMode: "表單",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "關鍵字大小寫",
+    sqlFormatterAutoCaseKeywordsOnSpace: "自動轉換關鍵字",
     sqlFormatterFunctionCase: "函式名稱大小寫",
     sqlFormatterDataTypeCase: "資料型別大小寫",
     sqlFormatterIdentifierCase: "識別符大小寫",

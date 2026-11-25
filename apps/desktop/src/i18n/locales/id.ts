@@ -8420,6 +8420,7 @@ export default withEnglishFallback({
     sqlFormatterFormMode: "Formulir",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "Huruf kata kunci",
+    sqlFormatterAutoCaseKeywordsOnSpace: "Ubah huruf kata kunci",
     sqlFormatterFunctionCase: "Huruf fungsi",
     sqlFormatterDataTypeCase: "Huruf tipe data",
     sqlFormatterIdentifierCase: "Huruf identifier",

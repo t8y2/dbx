@@ -122,6 +122,7 @@ const linesBetweenQueriesOptions: SqlFormatterLinesBetweenQueries[] = [0, 1, 2];
 const sqlFormatterOptionLabelKeys: Record<keyof SqlFormatterOptionSettings, string> = {
   layoutStyle: "settings.sqlFormatterLayoutStyle",
   keywordCase: "settings.sqlFormatterKeywordCase",
+  autoCaseKeywordsOnSpace: "settings.sqlFormatterAutoCaseKeywordsOnSpace",
   dataTypeCase: "settings.sqlFormatterDataTypeCase",
   functionCase: "settings.sqlFormatterFunctionCase",
   identifierCase: "settings.sqlFormatterIdentifierCase",
@@ -802,6 +803,11 @@ onBeforeUnmount(() => {
               {{ t("settings.sqlFormatterNewlineBeforeSemicolon") }}
             </Label>
             <Switch id="sql-formatter-newline-before-semicolon" :model-value="settings.newlineBeforeSemicolon" @update:model-value="(value: boolean) => updateOption('newlineBeforeSemicolon', value)" />
+          </div>
+
+          <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+            <Label for="sql-formatter-auto-case-keywords">{{ t("settings.sqlFormatterAutoCaseKeywordsOnSpace") }}</Label>
+            <Switch id="sql-formatter-auto-case-keywords" :model-value="settings.autoCaseKeywordsOnSpace" @update:model-value="(value: boolean) => updateOption('autoCaseKeywordsOnSpace', value)" />
           </div>
         </div>
 

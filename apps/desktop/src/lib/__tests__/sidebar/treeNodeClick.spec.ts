@@ -3,6 +3,7 @@ import {
   copyNameForTreeNode,
   isDirectNavigationTreeNode,
   isRepeatableNavigationTreeNode,
+  objectBrowserFilterForGroupNode,
   objectSourceKindForTreeNode,
   objectSourceTargetForTreeNode,
   shouldActivateTreeNodeOnSingleClick,
@@ -20,6 +21,16 @@ describe("treeNodeClick", () => {
   it("opens DynamoDB tables in the document browser on single or double activation", () => {
     expect(treeNodeRowAction("dynamodb-table", false, "single", "dynamodb")).toBe("toggle");
     expect(treeNodeRowDoubleClickAction("dynamodb-table", false, "double", false, "dynamodb")).toBe("toggle");
+  });
+
+  it("opens the object browser for a database-level trigger group", () => {
+    expect(objectBrowserFilterForGroupNode("group-triggers")).toBe("triggers");
+  });
+
+  it("keeps a table-scoped trigger group on its table instead of the database object browser", () => {
+    expect(objectBrowserFilterForGroupNode("group-triggers", "orders")).toBeUndefined();
+    // Double-click activation falls through to the table node's expand behavior.
+    expect(treeNodeRowDoubleClickAction("group-triggers", true, "double", true, "mysql", false, false)).toBe("toggle");
   });
 
   it("opens synonym nodes as synonym source", () => {

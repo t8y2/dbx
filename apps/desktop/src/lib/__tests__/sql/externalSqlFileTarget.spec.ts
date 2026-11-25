@@ -9,6 +9,7 @@ import {
   forgetExternalSqlFileTarget,
   moveExternalSqlFileTarget,
   rememberExternalSqlFileTarget,
+  rememberExternalSqlFileTargets,
   resolveExternalSqlFileTarget,
   resolveExternalSqlFileTargetForActiveTab,
   unassociatedExternalSqlFileTarget,
@@ -17,6 +18,22 @@ import {
 describe("external SQL file targets", () => {
   beforeEach(() => {
     localStorage.clear();
+  });
+
+  it("rejects an over-capacity batch without altering selected or unselected targets", () => {
+    const oldTarget = { connectionId: "original", database: "sales" };
+    const newTarget = { connectionId: "replacement", database: "reports" };
+    const paths = Array.from({ length: MAX_EXTERNAL_SQL_FILE_TARGETS }, (_, index) => `/work/${index}.sql`);
+    expect(rememberExternalSqlFileTargets(paths, oldTarget)).toBe("saved");
+    const originalStorage = localStorage.getItem(EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY);
+
+    expect(rememberExternalSqlFileTargets([paths[0]!, "/work/new.sql"], newTarget)).toBe("capacity");
+    expect(localStorage.getItem(EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY)).toBe(originalStorage);
+    expect(resolveExternalSqlFileTarget(paths[1]!, () => true, unassociatedExternalSqlFileTarget())).toMatchObject(oldTarget);
+
+    expect(rememberExternalSqlFileTargets([paths[0]!, paths[2]!], newTarget)).toBe("saved");
+    expect(resolveExternalSqlFileTarget(paths[0]!, () => true, unassociatedExternalSqlFileTarget())).toMatchObject(newTarget);
+    expect(resolveExternalSqlFileTarget(paths[1]!, () => true, unassociatedExternalSqlFileTarget())).toMatchObject(oldTarget);
   });
 
   it("restores the saved data source across normalized file paths", () => {

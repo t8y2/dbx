@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   executeMulti: vi.fn(),
   listTables: vi.fn(),
   listDatabases: vi.fn(),
+  listSchemas: vi.fn(),
   getTableDisplayDdl: vi.fn(),
   getColumns: vi.fn(),
 }));
@@ -99,7 +100,7 @@ vi.mock("@/components/ui/searchable-select/SearchableSelect.vue", () => ({
     props: ["modelValue", "options", "loading", "disabled"],
     emits: ["update:modelValue"],
     setup(props, { emit }) {
-      return () => h("input", { value: props.modelValue, disabled: props.disabled, "data-databases": JSON.stringify(props.options), "data-loading": String(props.loading), onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value) });
+      return () => h("input", { value: props.modelValue, disabled: props.disabled, "data-options": JSON.stringify(props.options), "data-loading": String(props.loading), onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value) });
     },
   }),
 }));
@@ -119,7 +120,7 @@ vi.mock("@/components/connection/ConnectionTreeSelect.vue", async () => {
   const { defineComponent, h } = await import("vue");
   return {
     default: defineComponent({
-      props: { modelValue: { type: String, default: "" }, connections: { type: Array, default: () => [] } },
+      props: { modelValue: { type: String, default: "" }, connections: { type: Array, default: () => [] }, triggerClass: { type: String, default: "" } },
       emits: ["update:modelValue"],
       setup(props, { emit }) {
         return () =>
@@ -127,6 +128,7 @@ vi.mock("@/components/connection/ConnectionTreeSelect.vue", async () => {
             "select",
             {
               "data-testid": "target-connection",
+              "data-trigger-class": props.triggerClass,
               value: props.modelValue,
               onChange: (event: Event) => emit("update:modelValue", (event.target as HTMLSelectElement).value),
             },
@@ -263,6 +265,7 @@ describe("QueryResultTransferDialog execution boundaries", () => {
     api.executeQuery.mockReset().mockResolvedValue({ columns: [], rows: [] });
     api.executeMulti.mockReset();
     api.listDatabases.mockReset().mockResolvedValue([{ name: "target_db" }]);
+    api.listSchemas.mockReset().mockResolvedValue([]);
     api.listTables.mockReset().mockResolvedValue([]);
     api.getTableDisplayDdl.mockReset().mockResolvedValue('CREATE TABLE "items" ("id" INTEGER, "name" VARCHAR(32)) ENGINE=InnoDB');
     api.getColumns.mockReset().mockResolvedValue([
@@ -293,11 +296,19 @@ describe("QueryResultTransferDialog execution boundaries", () => {
     expect(api.executeQuery).not.toHaveBeenCalled();
   });
 
+  it("renders the target connection picker as a bordered, full-width form control like the selects below it", async () => {
+    const { container } = await mountDialog(config("target", "mysql"));
+    const classes = container.querySelector('[data-testid="target-connection"]')?.getAttribute("data-trigger-class")?.split(/\s+/) ?? [];
+
+    // ConnectionTreeSelect defaults to a borderless, max-w-56 toolbar trigger.
+    expect(classes).toEqual(expect.arrayContaining(["border", "border-input", "rounded-md", "w-full", "max-w-none"]));
+  });
+
   it("loads searchable database options for the selected connection", async () => {
     api.listDatabases.mockResolvedValue([{ name: "app" }, { name: "archive" }]);
     const { container } = await mountDialog({ id: "target", name: "MySQL", db_type: "mysql", database: "app" } as ConnectionConfig);
     expect(api.listDatabases).toHaveBeenCalledWith("target");
-    expect(textInput(container, 0).getAttribute("data-databases")).toBe('["app","archive"]');
+    expect(textInput(container, 0).getAttribute("data-options")).toBe('["app","archive"]');
     expect(textInput(container, 0).value).toBe("app");
   });
 
@@ -320,7 +331,91 @@ describe("QueryResultTransferDialog execution boundaries", () => {
     await settle();
     resolveOld([{ name: "stale_database" }]);
     await settle();
-    expect(textInput(container, 0).getAttribute("data-databases")).toBe('["new_database"]');
+    expect(textInput(container, 0).getAttribute("data-options")).toBe('["new_database"]');
+  });
+
+  it.each([
+    ["Oracle", config("target", "oracle")],
+    ["Dameng", config("target", "dameng")],
+    ["OceanBase Oracle", config("target", "oceanbase-oracle")],
+    ["JDBC Oracle", { ...config("target", "jdbc"), connection_string: "jdbc:oracle:thin:@localhost:1521/XEPDB1" }],
+  ] as [string, ConnectionConfig][])("lists %s schemas in the schema picker and keeps them out of the database picker", async (_label, target) => {
+    api.listDatabases.mockResolvedValue([{ name: "APP" }, { name: "SALES" }]);
+    api.listSchemas.mockResolvedValue(["APP", "SALES"]);
+    const { container } = await mountDialog({ ...target, database: "orcl", default_schema: undefined });
+
+    expect(api.listDatabases).not.toHaveBeenCalled();
+    expect(api.listSchemas).toHaveBeenCalledWith("target", "orcl", true);
+    expect(textInput(container, 0).value).toBe("orcl");
+    expect(textInput(container, 0).disabled).toBe(true);
+    expect(textInput(container, 0).getAttribute("data-options")).toBe("[]");
+    expect(textInput(container, 1).disabled).toBe(false);
+    expect(textInput(container, 1).getAttribute("data-options")).toBe('["APP","SALES"]');
+    expect(startButton(container).disabled).toBe(true);
+
+    setInput(textInput(container, 1), "SALES");
+    await settle();
+    await startTransfer(container);
+    expect(api.listTables).toHaveBeenCalledWith("target", "orcl", "SALES");
+    expect(api.executeInTransaction.mock.calls[0].slice(0, 2)).toEqual(["target", "orcl"]);
+    expect(api.executeInTransaction.mock.calls[0][3]).toBe("SALES");
+  });
+
+  it("does not require a database for a Dameng target whose connection has none configured", async () => {
+    api.listSchemas.mockResolvedValue(["APP", "SALES"]);
+    const { container } = await mountDialog({ ...config("target", "dameng"), database: undefined, default_schema: undefined });
+    expect(api.listSchemas).toHaveBeenCalledWith("target", "", true);
+    expect(textInput(container, 0).value).toBe("");
+    expect(startButton(container).disabled).toBe(true);
+
+    setInput(textInput(container, 1), "APP");
+    await settle();
+    expect(startButton(container).disabled).toBe(false);
+    await startTransfer(container);
+    expect(api.listTables).toHaveBeenCalledWith("target", "", "APP");
+    expect(api.executeInTransaction.mock.calls[0].slice(0, 2)).toEqual(["target", ""]);
+    expect(api.executeInTransaction.mock.calls[0][3]).toBe("APP");
+  });
+
+  it("loads the schemas of the selected database and reloads them when the database changes", async () => {
+    api.listDatabases.mockResolvedValue([{ name: "target" }, { name: "archive" }]);
+    api.listSchemas.mockImplementation(async (_connectionId: string, database: string) => (database === "archive" ? ["public", "history"] : ["sales", "public"]));
+    const { container } = await mountDialog(config("target", "postgres"));
+    expect(api.listSchemas).toHaveBeenCalledWith("target", "target");
+    expect(textInput(container, 0).getAttribute("data-options")).toBe('["target","archive"]');
+    expect(textInput(container, 1).getAttribute("data-options")).toBe('["public","sales"]');
+    expect(textInput(container, 1).value).toBe("app");
+
+    setInput(textInput(container, 0), "archive");
+    await settle();
+    expect(api.listSchemas).toHaveBeenLastCalledWith("target", "archive");
+    expect(textInput(container, 1).getAttribute("data-options")).toBe('["history","public"]');
+    expect(textInput(container, 1).value).toBe("app");
+  });
+
+  it("ignores a schema response for a database that is no longer selected", async () => {
+    const pending = deferred<string[]>();
+    api.listSchemas.mockImplementation((_connectionId: string, database: string) => (database === "target" ? pending.promise : Promise.resolve(["history", "public"])));
+    const { container } = await mountDialog({ ...config("target", "postgres"), default_schema: undefined });
+    setInput(textInput(container, 0), "archive");
+    await settle();
+    pending.resolve(["stale"]);
+    await settle();
+    expect(textInput(container, 1).getAttribute("data-options")).toBe('["history","public"]');
+    expect(textInput(container, 1).value).toBe("");
+  });
+
+  it("keeps manual schema entry available when the schemas cannot be listed", async () => {
+    api.listSchemas.mockRejectedValue(new Error("permission denied"));
+    const { container } = await mountDialog({ ...config("target", "postgres"), default_schema: undefined });
+    expect(textInput(container, 1).getAttribute("data-options")).toBe("[]");
+    expect(textInput(container, 1).getAttribute("data-loading")).toBe("false");
+    expect(storeMocks.toast).not.toHaveBeenCalled();
+
+    setInput(textInput(container, 1), "sales");
+    await settle();
+    await startTransfer(container);
+    expect(api.listTables.mock.calls[0][2]).toBe("sales");
   });
 
   it("previews the destination and operations without reading or writing data", async () => {
@@ -947,6 +1042,7 @@ describe("QueryResultTransferDialog execution boundaries", () => {
   it("ignores a MySQL schema field so it cannot redirect writes into another database", async () => {
     const { container } = await mountDialog(config("target", "mysql"));
     expect(textInput(container, 1).disabled).toBe(true);
+    expect(api.listSchemas).not.toHaveBeenCalled();
     setInput(textInput(container, 1), "production");
     await settle();
     await startTransfer(container);

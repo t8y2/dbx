@@ -21,7 +21,7 @@ vi.mock("@/lib/backend/api", () => apiMock);
 vi.mock("@/composables/useDialogSources", () => ({ openDataCompareSession: openMock }));
 vi.mock("@/composables/useExportTracker", () => ({ useExportTracker: () => trackerMock }));
 
-const { buildDataCompareSyncPlanTables, normalizeKeyColumnOverrides, startDataCompareSession } = await import("../useDataCompareSession.ts");
+const { buildDataCompareSyncPlanTables, normalizeIgnoredColumnOverrides, normalizeKeyColumnOverrides, startDataCompareSession } = await import("../useDataCompareSession.ts");
 
 function column(name: string, isPrimaryKey = false): ColumnInfo {
   return { name, data_type: "TEXT", is_nullable: true, column_default: null, is_primary_key: isPrimaryKey, extra: null };
@@ -279,6 +279,42 @@ test("keeps a truncated missing-target table on the same row budget", async () =
 test("normalizes a per-table match-column map", () => {
   assert.deepEqual(normalizeKeyColumnOverrides({ users: [" id ", ""], orders: [], "": ["x"] }), { users: ["id"], orders: [] });
   assert.deepEqual(normalizeKeyColumnOverrides(undefined), {});
+});
+
+test("normalizes a per-table ignored-column map and drops empty entries", () => {
+  assert.deepEqual(normalizeIgnoredColumnOverrides({ users: [" updated_at ", "UPDATED_AT"], orders: [] }), { users: ["updated_at"] });
+  assert.deepEqual(normalizeIgnoredColumnOverrides(undefined), {});
+});
+
+test("sends the effective ignored columns of every table and drops keys from them", async () => {
+  const session = await runSession(
+    baseConfig({
+      selectedSourceTables: ["users", "orders"],
+      globalIgnoredColumns: ["EMAIL", "amount", "does_not_exist"],
+      ignoredColumnsByTable: { orders: ["tenant_id"] },
+    }),
+    [
+      { sourceTable: "users", targetTable: "users" },
+      { sourceTable: "orders", targetTable: "orders" },
+    ],
+  );
+
+  assert.equal(session.status, "completed");
+  // users: [user_id(PK), email, name] — EMAIL matches case-insensitively; amount and
+  // does_not_exist are not columns of this table.
+  assert.deepEqual(apiMock.prepareDataCompareFromTables.mock.calls[0]?.[0].ignoredColumns, ["email"]);
+  // orders: [tenant_id(PK), order_id(PK), amount] — the requested tenant_id keeps its
+  // key role instead of being ignored.
+  assert.deepEqual(apiMock.prepareDataCompareFromTables.mock.calls[1]?.[0].ignoredColumns, ["amount"]);
+});
+
+test("carries the ignored-only row count into the table result", async () => {
+  apiMock.prepareDataCompareFromTables.mockImplementation((options: { targetTable: string }) => Promise.resolve({ ...preparationFor(options.targetTable), result: { added: [], removed: [], modified: [], ignoredOnlyCount: 7 } }));
+
+  const session = await runSession(baseConfig({ selectedSourceTables: ["users"], targetTable: "users", globalIgnoredColumns: ["email"] }), [{ sourceTable: "users", targetTable: "users" }]);
+
+  assert.equal(session.batchResults[0]?.ignoredOnlyCount, 7);
+  assert.equal(session.batchResults[0]?.status, "same");
 });
 
 test("keeps selection counts and generated plans consistent without changing diff rows", async () => {

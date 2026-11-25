@@ -500,6 +500,8 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: dbx_core::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: dbx_core::models::connection::default_query_timeout_secs(),
+
+            write_timeout_secs: 0,
             idle_timeout_secs: dbx_core::models::connection::default_idle_timeout_secs(),
             manual_transaction_timeout_secs: dbx_core::models::connection::default_manual_transaction_timeout_secs(),
             idle_disconnect_secs: dbx_core::models::connection::default_idle_disconnect_secs(),
@@ -1762,6 +1764,17 @@ async fn test_connection_with_info_impl(
                 | DatabaseType::Questdb
                 | DatabaseType::OpenGauss => match db::postgres::connect(&url, connect_timeout).await {
                     Ok(pool) => {
+                        // Non-DWS native GaussDB reports its real version only through
+                        // `pg_settings`; surface it in the test result so the connection
+                        // dialog shows the server and hot-patch versions.
+                        if config.db_type == DatabaseType::Gaussdb
+                            && !dbx_core::query::plugin_plan::is_explicit_gaussdb_dws_profile(&config)
+                        {
+                            database_info = Some(
+                                dbx_core::connection::gaussdb_native_database_info(&pool, config.effective_database())
+                                    .await,
+                            );
+                        }
                         pool.close();
                         Ok("Connection successful".to_string())
                     }
@@ -1824,13 +1837,9 @@ async fn test_connection_with_info_impl(
                             })));
                     }
 
-                    let native_err = match db::mongo_driver::connect_with_oidc(
-                        &url,
-                        connect_timeout,
-                        idle_timeout,
-                        state.mongo_oidc_browser_opener(),
-                    )
-                    .await
+                    let native_err = match state
+                        .connect_native_mongodb(&url, connect_timeout, idle_timeout, runtime_proxy.as_ref())
+                        .await
                     {
                         Ok(client) => {
                             match db::mongo_driver::test_connection_for_url(
@@ -1857,7 +1866,7 @@ async fn test_connection_with_info_impl(
                         }
                         Err(e) => e,
                     };
-                    if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
+                    if runtime_proxy.is_none() && !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                         let mut client =
                             spawn_mongo_legacy_fallback_agent(state.as_ref(), &config.db_type, &native_err).await?;
                         client.connect(mongo_legacy_connect_params(&config, &host, port)?).await.map_err(|err| {
@@ -2413,13 +2422,9 @@ async fn connect_db_inner(
                     state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                     PoolKind::agent(client)
                 } else {
-                    let native_err = match db::mongo_driver::connect_with_oidc(
-                        &url,
-                        connect_timeout,
-                        idle_timeout,
-                        state.mongo_oidc_browser_opener(),
-                    )
-                    .await
+                    let native_err = match state
+                        .connect_native_mongodb(&url, connect_timeout, idle_timeout, runtime_proxy.as_ref())
+                        .await
                     {
                         Ok(client) => {
                             state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
@@ -2456,7 +2461,7 @@ async fn connect_db_inner(
                         }
                         Err(e) => e,
                     };
-                    if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
+                    if runtime_proxy.is_none() && !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                         log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                         let mut client =
                             spawn_mongo_legacy_fallback_agent(state.inner().as_ref(), &db_config.db_type, &native_err)

@@ -1,9 +1,10 @@
 import { cellImagePreviewUrl } from "@/lib/dataGrid/cellImageUrl";
 import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
 import { clipboardCellValue, displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
-import { formatJsonText, looksLikeJsonContainerText } from "@/lib/dataGrid/cellDetailPresentation";
+import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, formatJsonText, looksLikeJsonContainerText } from "@/lib/dataGrid/cellDetailPresentation";
 import { isJsonTreeContainer } from "@/lib/common/jsonTree";
 import { cqlLiteralToJsonText } from "@/lib/dataGrid/cqlLiteralJson";
+import { mongoDocumentGridJson, mongoExtendedJsonValueType } from "@/lib/mongo/mongoDocumentValues";
 import type { DatabaseType } from "@/types/database";
 
 export const CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH = 12_000;
@@ -460,6 +461,16 @@ export function filterDataGridDetailFields<T extends DataGridCellDetail>(fields:
 }
 
 function detailFormattedJson(value: string, databaseType: DatabaseType | undefined): string {
+  const mongoJson = databaseType === "mongodb" ? mongoDocumentGridJson(value) : undefined;
+  if (mongoJson !== undefined) {
+    if (mongoJson.length > CELL_DETAIL_JSON_FORMAT_MAX_LENGTH) return "";
+    try {
+      if (mongoExtendedJsonValueType(JSON.parse(mongoJson))) return "";
+    } catch {
+      return "";
+    }
+    return formatJsonText(mongoJson) ?? "";
+  }
   if (looksLikeJsonContainer(value)) {
     const formatted = formatJsonText(value);
     if (formatted !== undefined) return formatted;

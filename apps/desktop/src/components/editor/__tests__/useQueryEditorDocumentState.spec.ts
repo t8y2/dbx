@@ -82,6 +82,19 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
 }
 
 describe("QueryEditor document and viewport ownership", () => {
+  it("does not let delayed viewport restoration override a bookmark reveal", async () => {
+    const { state, props, currentView, emit } = createHarness({ modelValue: "one\ntwo\nthree" });
+    state.restoreEditorViewport({ scrollTop: 500, scrollLeft: 10 });
+    props.revealRequest = { id: 1, line: 3, column: 1 };
+    state.performEditorReveal();
+    currentView.scrollDOM.scrollTop = 42;
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(currentView.state.selection.main.head).toBe(8);
+    expect(currentView.scrollDOM.scrollTop).toBe(42);
+    expect(emit).toHaveBeenCalledWith("editorRevealConsumed");
+  });
+
   it("isolates undo on new tabs and restores each cached tab's own history", async () => {
     const { currentView, activate, append, callbacks } = createHarness();
     await append(" -- a");
@@ -166,6 +179,26 @@ describe("QueryEditor document and viewport ownership", () => {
     state.scheduleEditorViewportEmit();
     await vi.advanceTimersByTimeAsync(200);
     expect(emit).toHaveBeenCalledWith("viewportChange", { scrollTop: 100, scrollLeft: 0 }, "tab-b");
+  });
+
+  it("reports a settled selection once and commits it immediately when asked", async () => {
+    const { state, currentView, emit } = createHarness();
+    const selectionEmits = () => emit.mock.calls.filter(([event]) => event === "selectionStateChange");
+    for (const head of [2, 4, 6]) {
+      currentView.dispatch({ selection: { anchor: 0, head } });
+      state.recordSelection(currentView);
+    }
+    expect(selectionEmits()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(selectionEmits()).toEqual([["selectionStateChange", { anchor: 0, head: 6 }]]);
+
+    currentView.dispatch({ selection: { anchor: 3 } });
+    state.recordSelection(currentView);
+    state.commitSelection(currentView);
+    expect(selectionEmits()).toHaveLength(2);
+    expect(selectionEmits()[1]).toEqual(["selectionStateChange", { anchor: 3, head: 3 }]);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(selectionEmits()).toHaveLength(2);
   });
 
   it("captures state before tab deactivation and never flushes a reset inactive viewport", () => {

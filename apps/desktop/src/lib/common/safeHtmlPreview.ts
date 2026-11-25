@@ -8,3 +8,15 @@ export function buildSafeHtmlPreview(content: string): string {
   const safeContent = content.replace(META_REFRESH_PATTERN, "<!-- meta refresh removed -->");
   return ["<!doctype html>", "<html>", "<head>", '<meta charset="utf-8">', `<meta http-equiv="Content-Security-Policy" content="${SAFE_HTML_PREVIEW_CSP}">`, "</head>", "<body>", safeContent, "</body>", "</html>"].join("\n");
 }
+
+/** Render database content as an inert fragment inside the sandbox. */
+export function buildStaticHtmlPreview(content: string): string {
+  const fragment = document.createElement("template");
+  fragment.innerHTML = content;
+  for (const element of fragment.content.querySelectorAll("meta, base, iframe, object, embed")) element.remove();
+  for (const link of fragment.content.querySelectorAll("a, area")) {
+    link.removeAttribute("href");
+    link.removeAttribute("xlink:href");
+  }
+  return buildSafeHtmlPreview(`<div inert>${fragment.innerHTML}</div>`);
+}

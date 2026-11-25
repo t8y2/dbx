@@ -1,6 +1,7 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
 import type { TransferColumnNameCase, TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import type { MysqlDelimiterCommand } from "@/lib/sql/sqlStatementRanges";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
@@ -177,6 +178,8 @@ export interface ConnectionConfig {
   connect_timeout_secs?: number;
   connect_timeout_inherit?: boolean;
   query_timeout_secs?: number;
+  /** Timeout for data writes. 0 (default) means unlimited; schema changes ignore it. */
+  write_timeout_secs?: number;
   query_timeout_inherit?: boolean;
   idle_timeout_secs?: number;
   /** Seconds a manual transaction may sit idle before DBX rolls it back. */
@@ -879,11 +882,30 @@ export interface PluginMarketplaceArtifact {
   size?: number;
 }
 
+/** Host verdict for one catalog version, computed by the backend from the catalog's compatibility table. */
+export interface PluginVersionCompatibility {
+  compatible: boolean;
+  /** Declared `engines.dbx` requirement, echoed for display. */
+  dbx?: string;
+  /** Declared `engines.host_api` requirement, echoed for display. */
+  hostApi?: string;
+  /** Which requirement failed; absent when the version is compatible. */
+  blockedBy?: "dbx" | "hostApi";
+  /**
+   * `true` when a newer DBX could satisfy the failing requirement, `false` when it could not
+   * (upper bound such as `<0.7.0`, exact older version, or an unsatisfied host API range);
+   * absent when the version is compatible.
+   */
+  upgradeRequired?: boolean;
+}
+
 export interface PluginMarketplaceVersion {
   version: string;
   releasedAt?: string;
   releaseNotes?: string;
   artifacts: PluginMarketplaceArtifact[];
+  /** Absent when the catalog declares no engine requirement for this version (treated as compatible). */
+  compatibility?: PluginVersionCompatibility;
 }
 
 export interface PluginMarketplacePlugin {
@@ -1944,6 +1966,7 @@ export interface BatchStatementExecutionItem {
 export interface BatchSqlExecution {
   executionId: string;
   submittedSql: string;
+  mysqlDelimiterCommands?: readonly MysqlDelimiterCommand[];
   editorFingerprint: string;
   sourceOffset: number;
   completed: number;
@@ -2235,6 +2258,7 @@ export interface ConnectionGroup {
   id: string;
   name: string;
   collapsed: boolean;
+  color?: string;
 }
 
 export type SidebarOrderEntry = { type: "group"; id: string; children?: SidebarOrderEntry[]; connectionIds?: string[] } | { type: "connection"; id: string };
@@ -2258,6 +2282,8 @@ export interface TreeNode {
   id: string;
   label: string;
   type: TreeNodeType;
+  /** Color of a sidebar connection group or the color inherited by a connection row. */
+  sidebarColor?: string;
   /** Additional values matched by sidebar search without rendering them. */
   searchAliases?: string[];
   children?: TreeNode[];
@@ -2281,6 +2307,8 @@ export interface TreeNode {
   tableName?: string;
   columnIndexKind?: "primary" | "unique" | "index";
   objectName?: string;
+  /** Native PostgreSQL sequence identifiers were read without display normalization. Absent on legacy cached nodes. */
+  postgresSequenceExactIdentity?: true;
   /** Distinguishes schema indexes from the existing table-child index actions. */
   objectScope?: "schema";
   signature?: string;
@@ -2706,6 +2734,10 @@ export interface QueryTab {
     scrollTop: number;
     scrollLeft: number;
   };
+  /** One-based bookmarked lines, saved with the open SQL tab. */
+  editorBookmarks?: number[];
+  /** Runtime-only document associated with mapped bookmark lines; not session data. */
+  editorBookmarksDocument?: string;
   editorSelection?: {
     anchor: number;
     head: number;
@@ -2832,7 +2864,7 @@ export interface QueryTab {
     eventOpenRequestId?: number;
     /** 显式的"新建事件"请求：单调递增，用于让已复用 tab 也能重复进入 CREATE 编辑器 */
     eventCreateRequestId?: number;
-    initialObjectFilter?: "tables" | "events" | "indexes";
+    initialObjectFilter?: ObjectBrowserFilter;
     indexRequestSequence?: number;
     indexCreateRequestId?: number;
     initialViewTarget?: SchemaIndexIdentity;
@@ -3132,6 +3164,8 @@ export interface TransferTaskConfig {
   operationTimeoutSecs?: number;
   /** Optional per-source-table transfer filter (bare WHERE or a full SELECT). */
   tableFilters?: Record<string, string>;
+  /** Optional explicit target table name per source table. */
+  targetTableNames?: Record<string, string>;
   /** Legacy-compatible rebuild flag; true takes precedence over the saved DML mode. */
   dropTargetBeforeCreate?: boolean;
   /** Legacy field only. Saved confirmation is always ignored and reset to false. */

@@ -249,12 +249,16 @@ export function buildTreeNodesFromLayout(layout: SidebarLayout, connections: Con
   const configMap = new Map(connections.map((connection) => [connection.id, connection]));
   const groupMap = new Map(layout.groups.map((group) => [group.id, group]));
 
-  const build = (entries: SidebarOrderEntry[]): TreeNode[] => {
+  const build = (entries: SidebarOrderEntry[], inheritedColor?: string): TreeNode[] => {
     const nodes: TreeNode[] = [];
     for (const entry of entries) {
       if (entry.type === "connection") {
         const config = configMap.get(entry.id);
-        if (config) nodes.push(makeConnectionNode(config, pinnedIds.has(entry.id)));
+        if (config) {
+          const node = makeConnectionNode(config, pinnedIds.has(entry.id));
+          if (inheritedColor) node.sidebarColor = inheritedColor;
+          nodes.push(node);
+        }
         continue;
       }
 
@@ -264,9 +268,10 @@ export function buildTreeNodesFromLayout(layout: SidebarLayout, connections: Con
         id: group.id,
         label: group.name,
         type: "connection-group",
+        ...(group.color ? { sidebarColor: group.color } : {}),
         pinned: pinnedIds.has(group.id),
         isExpanded: !group.collapsed,
-        children: orderPinnedTreeNodes(build(entryChildren(entry))),
+        children: orderPinnedTreeNodes(build(entryChildren(entry), group.color || inheritedColor)),
       });
     }
     return nodes;
@@ -463,7 +468,7 @@ export interface ReorderEntriesOptions {
   preserveSameGroupOrder?: boolean;
 }
 
-function findEntryParentGroupId(entries: SidebarOrderEntry[], entryId: string, parentGroupId: string | null = null): string | null | undefined {
+export function findEntryParentGroupId(entries: SidebarOrderEntry[], entryId: string, parentGroupId: string | null = null): string | null | undefined {
   for (const entry of entries) {
     if (entry.id === entryId) return parentGroupId;
     if (entry.type !== "group") continue;

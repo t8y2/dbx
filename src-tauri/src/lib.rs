@@ -2933,6 +2933,8 @@ pub fn run() {
             commands::list_sql_files::search_sql_file_contents,
             commands::list_sql_files::create_sql_file_in_folder,
             commands::list_sql_files::rename_sql_file_in_folder,
+            commands::list_sql_files::move_sql_file_in_folder,
+            commands::list_sql_files::watch_sql_file_folder,
             commands::list_sql_files::delete_sql_file_in_folder,
             commands::list_sql_files::create_sql_folder_in_folder,
             commands::list_sql_files::rename_sql_folder_in_folder,
@@ -3311,6 +3313,8 @@ pub fn run() {
             commands::mq_cmd::mq_get_backlog,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_get_cluster_info,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_broker_config,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_get_topic_route,
             #[cfg(feature = "mq-admin")]

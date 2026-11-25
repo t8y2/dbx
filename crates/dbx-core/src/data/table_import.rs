@@ -25,6 +25,7 @@ use sqlparser::dialect::{GenericDialect, MsSqlDialect, MySqlDialect, OracleDiale
 use sqlparser::parser::Parser;
 
 use crate::connection::{task_client_session_id, AppState, PoolKind};
+#[cfg(feature = "duckdb-sidecar")]
 use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::sql::SqlParsingOptions;
@@ -764,10 +765,12 @@ async fn duckdb_import_context_for_source(
     }
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 fn duckdb_sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 fn duckdb_parquet_scan_sql(path: &str, limit: usize, offset: Option<usize>) -> String {
     let mut sql = format!("SELECT * FROM read_parquet({}) LIMIT {}", duckdb_sql_string_literal(path), limit);
     if let Some(offset) = offset {
@@ -776,10 +779,12 @@ fn duckdb_parquet_scan_sql(path: &str, limit: usize, offset: Option<usize>) -> S
     sql
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 fn duckdb_parquet_count_sql(path: &str) -> String {
     format!("SELECT COUNT(*) AS dbx_total_rows FROM read_parquet({})", duckdb_sql_string_literal(path))
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 fn duckdb_count_result(result: &db::QueryResult) -> Result<usize, String> {
     let value = result
         .rows
@@ -1980,6 +1985,10 @@ fn sql_import_number_value(raw: &str, context: &str) -> Result<serde_json::Value
     Err(format!("{context}: unsupported numeric literal '{raw}'"))
 }
 
+fn sql_import_is_bit_literal(raw: &str) -> bool {
+    !raw.is_empty() && raw.bytes().all(|byte| byte == b'0' || byte == b'1')
+}
+
 // SQL imports round-trip rows through the preview and prepared-source JSON. Keep
 // allowlisted server-evaluated expressions as a fixed marker so the SQL builder
 // can emit only its own canonical expression, never arbitrary frontend text.
@@ -2023,6 +2032,13 @@ fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value
             SqlValue::Number(raw, _) => sql_import_number_value(raw.as_str(), context),
             SqlValue::Boolean(flag) => Ok(serde_json::Value::Bool(*flag)),
             SqlValue::Null => Ok(serde_json::Value::Null),
+            // 位串字面量（如 MySQL/Postgres 的 b'0'、b'1'、B'101'）：由 0 与 1 构成，
+            // 能够无损作为文本导入并在写入目标列（如 bit/bit(1)）时还原为位字面量。
+            SqlValue::SingleQuotedByteStringLiteral(raw) | SqlValue::DoubleQuotedByteStringLiteral(raw)
+                if sql_import_is_bit_literal(raw.as_str()) =>
+            {
+                Ok(serde_json::Value::String(raw.clone()))
+            }
             // 二进制/十六进制字面量无法无损地作为文本导入，明确拒绝而非静默改写。
             SqlValue::HexStringLiteral(_)
             | SqlValue::SingleQuotedByteStringLiteral(_)
@@ -2661,6 +2677,9 @@ impl ImportRowSource {
         first_batch_rows: usize,
         duckdb_context: Option<DuckDbImportContext>,
     ) -> Result<Self, String> {
+        // Parquet 导入仅在 duckdb-sidecar 构建下读取该上下文。
+        #[cfg(not(feature = "duckdb-sidecar"))]
+        let _ = duckdb_context;
         if source_format == TableImportSourceFormat::Sql {
             let bytes_read = Arc::new(AtomicU64::new(0));
             let mut stream = SqlImportRowStream::open(file_path, parse_options, Some(bytes_read.clone())).await?;
@@ -9349,6 +9368,7 @@ mod tests {
         assert_eq!(import_file_kind("sales.parquet").unwrap(), ImportFileKind::Parquet);
     }
 
+    #[cfg(feature = "duckdb-sidecar")]
     #[test]
     fn parquet_scan_sql_escapes_paths_and_adds_offset_after_limit() {
         let sql = duckdb_parquet_scan_sql(r"C:\data\customer's.parquet", 250, Some(500));
@@ -11555,6 +11575,48 @@ mod tests {
     #[test]
     fn sql_import_rejects_binary_literals() {
         let error = parse_sql_bytes(b"INSERT INTO t (a) VALUES (X'1A2B');", 10).unwrap_err();
+        assert!(error.contains("binary/hex"));
+    }
+
+    #[test]
+    fn sql_import_supports_bit_literals() {
+        let script = b"INSERT INTO t_calendar (id, workday) VALUES (1, b'1'), (2, b'0'), (3, B'1'), (4, b'101');";
+        let options = sql_import_options(DatabaseType::Mysql);
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+        assert_eq!(parsed.columns, vec!["id", "workday"]);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("1")]);
+        assert_eq!(parsed.rows[1], vec![serde_json::json!(2), serde_json::json!("0")]);
+        assert_eq!(parsed.rows[2], vec![serde_json::json!(3), serde_json::json!("1")]);
+        assert_eq!(parsed.rows[3], vec![serde_json::json!(4), serde_json::json!("101")]);
+
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "id".to_string(),
+                target_column: "id".to_string(),
+                target_data_type: None,
+                generator: None,
+            },
+            TableImportColumnMapping {
+                source_column: "workday".to_string(),
+                target_column: "workday".to_string(),
+                target_data_type: None,
+                generator: None,
+            },
+        ];
+        let target_types = vec![("id".to_string(), "int".to_string()), ("workday".to_string(), "bit(8)".to_string())];
+        let batches =
+            build_import_insert_batches(&parsed, &mappings, &target_types, "t_calendar", "", &DatabaseType::Mysql, 500)
+                .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0].sql,
+            "INSERT INTO `t_calendar` (`id`, `workday`) VALUES\n(1, b'1'),\n(2, b'0'),\n(3, b'1'),\n(4, b'101')"
+        );
+    }
+
+    #[test]
+    fn sql_import_rejects_non_bit_byte_literals() {
+        let error = parse_sql_bytes(b"INSERT INTO t (a) VALUES (B'xyz');", 10).unwrap_err();
         assert!(error.contains("binary/hex"));
     }
 

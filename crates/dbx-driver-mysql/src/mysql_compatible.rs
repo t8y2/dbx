@@ -147,8 +147,9 @@ pub async fn list_tables_show_from(pool: &MySqlPool, catalog: &str, database: &s
     let mut tables: Vec<TableInfo> = rows
         .iter()
         .filter_map(|row| {
-            let name = get_str(row, 0).trim().to_string();
-            if name.is_empty() {
+            // External catalogs report exact identifiers; keep surrounding spaces.
+            let name = get_str(row, 0);
+            if name.trim().is_empty() {
                 return None;
             }
             // SHOW FULL TABLES exposes a type column; plain SHOW TABLES does not.

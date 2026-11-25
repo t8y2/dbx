@@ -29,6 +29,12 @@ export const DATA_GRID_COPY_EXTRACTOR_IDS = [
 
 export type DataGridCopyExtractorId = (typeof DATA_GRID_COPY_EXTRACTOR_IDS)[number];
 export type DataGridCopyPreference = "smart" | DataGridCopyExtractorId;
+export const DATA_GRID_SMART_SINGLE_COLUMN_FORMATS = ["raw", "tsv", "csv", "one-row", "sql-in-list", "json", "json-lines"] as const satisfies readonly DataGridCopyExtractorId[];
+export type DataGridSmartSingleColumnFormat = "default" | (typeof DATA_GRID_SMART_SINGLE_COLUMN_FORMATS)[number];
+
+export function normalizeDataGridSmartSingleColumnFormat(value: unknown): DataGridSmartSingleColumnFormat {
+  return DATA_GRID_SMART_SINGLE_COLUMN_FORMATS.find((format) => format === value) ?? "default";
+}
 export type DataGridExtractorCategory = "raw" | "delimited" | "json" | "sql" | "document";
 
 export const DATA_GRID_DEFAULT_COPY_PREFERENCES: readonly DataGridCopyPreference[] = [

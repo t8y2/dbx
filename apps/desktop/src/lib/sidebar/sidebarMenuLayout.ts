@@ -21,7 +21,18 @@ export function sidebarMenuScope(type: SidebarMenuTargetType): SidebarMenuScope 
 }
 
 const primaryActions: Record<SidebarMenuScope, readonly string[]> = {
-  connection: ["connection.cancelConnecting", "contextMenu.openConnection", "contextMenu.disconnectConnection", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.openDatabaseBrowser", "contextMenu.createDatabase", "contextMenu.editConnection", "contextMenu.refreshChildren"],
+  connection: [
+    "connection.cancelConnecting",
+    "contextMenu.openConnection",
+    "contextMenu.disconnectConnection",
+    "contextMenu.newQuery",
+    "savedSql.openDefaultQuery",
+    "contextMenu.openDatabaseBrowser",
+    "connection.batchTestConnections",
+    "contextMenu.createDatabase",
+    "contextMenu.editConnection",
+    "contextMenu.refreshChildren",
+  ],
   // Closing a database hides itself once the database is already closed, so it leads the database menu
   // and "browse objects" stays first for databases that cannot be closed.
   database: ["contextMenu.closeDatabaseConnection", "contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.createDatabase", "contextMenu.refreshChildren"],
@@ -91,7 +102,7 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "diff.title",
     "dataDictionary.title",
   ],
-  copy: ["contextMenu.copyName", "contextMenu.copyConnectionInfo", "contextMenu.copyStructureAs", "contextMenu.copyFinalProxyPort", "contextMenu.copyTable", "contextMenu.pasteTable"],
+  copy: ["contextMenu.copyName", "contextMenu.copyConnectionInfo", "contextMenu.copyStructureAs", "contextMenu.copyFinalProxyPort", "contextMenu.copyTable", "contextMenu.pasteTable", "contextMenu.copyView", "contextMenu.pasteView"],
   organize: [
     "contextMenu.setDefaultDatabase",
     "contextMenu.clearDefaultDatabase",
@@ -99,6 +110,7 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "contextMenu.clearDefaultSchema",
     "contextMenu.editDatabaseProperties",
     "contextMenu.renameDatabase",
+    "contextMenu.renameSchema",
     "contextMenu.createSchema",
     "contextMenu.editSchemaComment",
     "contextMenu.configureVisibleObjects",
@@ -129,6 +141,7 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "contextMenu.damengJobAdmin",
     "contextMenu.vacuumTable",
     "contextMenu.mysqlAutoIncrement",
+    "contextMenu.mysqlTableMaintenance",
   ],
 };
 
@@ -141,7 +154,7 @@ export function sidebarMenuActionGroup(item: ContextMenuItem): MenuGroup {
   if (id === "plDebug.start.title" || id === "settings.shortcutExecuteSqlInNewResultTab" || id === "toolbar.explainPlan" || id === "editor.previewChanges" || id === "editor.contextMenu.export") return "data";
   if (id === "editor.contextMenu.copySelectionAsRichText" || id === "editor.contextMenu.screenshotSelection" || id === "editor.contextMenu.pasteRestoringSourceSql") return "copy";
   if (id === "editor.contextMenu.folding" || id === "editor.contextMenu.addNextSelectionOccurrence" || id === "editor.contextMenu.selectAllSelectionOccurrences" || id === "editor.contextMenu.selectCurrentStatement" || id === "editor.contextMenu.selectAll") return "selection";
-  if (id?.startsWith("editor.contextMenu.")) return "sql";
+  if (id === "toolbar.executeAllSql" || id?.startsWith("editor.contextMenu.")) return "sql";
   for (const [group, ids] of Object.entries(groupActions)) if (id && ids.includes(id)) return group as MenuGroup;
   return item.variant === "destructive" ? "danger" : "other";
 }

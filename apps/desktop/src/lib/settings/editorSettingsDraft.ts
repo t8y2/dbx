@@ -1,5 +1,5 @@
 import { normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
-import type { EditorSettings } from "@/stores/settingsStore";
+import { DEFAULT_EDITOR_SETTINGS, MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS, MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS, type EditorSettings } from "@/stores/settingsStore";
 import { normalizeBackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
@@ -45,6 +45,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "snippetTriggerKey",
   "sortCompletionColumnsAlphabetically",
   "selectFirstCompletionOnOpen",
+  "completionAutoActivationDelayMs",
   "wordWrap",
   "showWhitespace",
   "ddlOpenMode",
@@ -64,6 +65,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "crossWindowTabDragPreviewEnabled",
   "webLogoPosition",
   "tabLayout",
+  "tabWrapMaxRows",
   "tabPlacement",
   "colorizeConnectionTabs",
   "colorizeConnectionTabsScope",
@@ -185,6 +187,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "exportRowLimitEnabled",
   "exportRowLimit",
   "queryExportKeysetOptimizationEnabled",
+  "globalNumberGrouping",
   "globalDateTimeDisplayFormat",
   "globalDateTimeExportFormat",
   "globalDateTimeImportFormat",
@@ -238,6 +241,10 @@ export function normalizeQueryResultMaxRowsDraft(value: unknown): number {
 
 function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unknown {
   if (key === "sidebarHoverDelay") return normalizeSidebarHoverDelay(value);
+  if (key === "completionAutoActivationDelayMs") {
+    const parsed = typeof value === "number" ? value : Number.parseInt(String(value).trim(), 10);
+    return Number.isFinite(parsed) ? Math.min(MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.max(MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS, parsed)) : DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs;
+  }
   if (key === "pageSize" || key === "tableOpenPageSize") return normalizeTableOpenPageSizeDraft(value);
   if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
   if (key === "externalSqlEditorMaxMb") return normalizeExternalSqlEditorMaxMb(value);

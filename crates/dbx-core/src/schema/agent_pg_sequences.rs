@@ -134,23 +134,29 @@ fn sequence_last_values_sql(schema: &str, catalog: PgCatalog) -> String {
 /// catalog: KingbaseES stores the `pg_class` oid in `sys_depend.classid`, so
 /// `'sys_class'::regclass` (the compatibility view's own oid) never matches and
 /// the `owned by` clause would be dropped.
+///
+/// The text is joined with `concat_ws()`/`concat()` because KingbaseES with
+/// `pipes_as_concat` off reads `||` as logical OR, which turned the statements
+/// into `t`/`f` (t8y2/dbx#15564). Separators are never empty (Oracle mode reads
+/// `''` as NULL) and `concat()` keeps the two-argument form every mode accepts.
 fn sequence_source_sql(schema: &str, name: &str, catalog: PgCatalog) -> String {
     let catalog_name = catalog.catalog_name();
     let prefix = catalog.prefix();
     let user_by_id = catalog.user_by_id();
     format!(
         "SELECT concat_ws(E'\\n\\n', \
-           '-- auto-generated definition' || E'\\n' || \
-           'create sequence ' || quote_ident(c.relname) || E'\\n' || \
-           '    increment by ' || COALESCE(s.increment::text, '1') || E'\\n' || \
-           '    minvalue ' || COALESCE(s.minimum_value::text, '1') || E'\\n' || \
-           '    maxvalue ' || COALESCE(s.maximum_value::text, '9223372036854775807') || E'\\n' || \
-           '    start with ' || COALESCE(s.start_value::text, '1') || E'\\n' || \
-           CASE WHEN upper(COALESCE(s.cycle_option::text, 'NO')) = 'YES' \
-             THEN '    cycle;' ELSE '    no cycle;' END, \
-           'alter sequence ' || quote_ident(c.relname) || ' owner to ' || quote_ident({user_by_id}(c.relowner)) || ';', \
+           concat_ws(E'\\n', \
+             '-- auto-generated definition', \
+             concat_ws(' ', 'create sequence', quote_ident(c.relname)), \
+             concat_ws(' ', '    increment by', COALESCE(s.increment::text, '1')), \
+             concat_ws(' ', '    minvalue', COALESCE(s.minimum_value::text, '1')), \
+             concat_ws(' ', '    maxvalue', COALESCE(s.maximum_value::text, '9223372036854775807')), \
+             concat_ws(' ', '    start with', COALESCE(s.start_value::text, '1')), \
+             CASE WHEN upper(COALESCE(s.cycle_option::text, 'NO')) = 'YES' \
+               THEN '    cycle;' ELSE '    no cycle;' END), \
+           concat_ws(' ', 'alter sequence', quote_ident(c.relname), 'owner to', concat(quote_ident({user_by_id}(c.relowner)), ';')), \
            CASE WHEN owned.relname IS NOT NULL AND a.attname IS NOT NULL \
-             THEN 'alter sequence ' || quote_ident(c.relname) || ' owned by ' || quote_ident(owned.relname) || '.' || quote_ident(a.attname) || ';' \
+             THEN concat_ws(' ', 'alter sequence', quote_ident(c.relname), 'owned by', concat_ws('.', quote_ident(owned.relname), concat(quote_ident(a.attname), ';'))) \
            END \
          ) \
          FROM {catalog_name}.{prefix}_class c \
@@ -356,6 +362,16 @@ mod tests {
         assert!(pg_sql.contains("pg_catalog.pg_class"));
         assert!(pg_sql.contains("'pg_class'::regclass"));
         assert!(pg_sql.contains("pg_get_userbyid(c.relowner)"));
+    }
+
+    /// With `pipes_as_concat` off KingbaseES evaluates `||` as logical OR, so any
+    /// `||` in the query exports `t`/`f` instead of the statement (t8y2/dbx#15564).
+    #[test]
+    fn sequence_source_sql_avoids_the_boolean_or_reading() {
+        for catalog in [PgCatalog::Sys, PgCatalog::Pg] {
+            let sql = sequence_source_sql("public", "orders_seq", catalog);
+            assert!(!sql.contains("||"), "`||` is read as boolean OR on Kingbase: {sql}");
+        }
     }
 
     fn sequence_query_result(rows: Vec<Vec<serde_json::Value>>) -> db::QueryResult {

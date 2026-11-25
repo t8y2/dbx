@@ -844,6 +844,16 @@ pub async fn update_document_core(
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum DocumentDeleteId {
+    Text(String),
+    MongoDocument {
+        #[serde(rename = "bsonDocument")]
+        bson_document: serde_json::Map<String, serde_json::Value>,
+    },
+}
+
 pub async fn delete_document_core(
     state: &AppState,
     connection_id: &str,
@@ -852,7 +862,16 @@ pub async fn delete_document_core(
     id: &str,
     routing: Option<&str>,
 ) -> Result<u64, String> {
-    delete_document_core_with_type(state, connection_id, database, collection, id, routing, None).await
+    delete_document_core_with_type(
+        state,
+        connection_id,
+        database,
+        collection,
+        DocumentDeleteId::Text(id.to_owned()),
+        routing,
+        None,
+    )
+    .await
 }
 
 pub async fn delete_document_core_with_type(
@@ -860,12 +879,38 @@ pub async fn delete_document_core_with_type(
     connection_id: &str,
     database: &str,
     collection: &str,
-    id: &str,
+    id: DocumentDeleteId,
     routing: Option<&str>,
     document_type: Option<&str>,
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    let id = match id {
+        DocumentDeleteId::Text(ref text) => text.as_str(),
+        DocumentDeleteId::MongoDocument { bson_document } => {
+            if bson_document.keys().any(|key| key.starts_with('$')) {
+                return Err("Expected a BSON document ID, not an Extended JSON scalar or an operator".into());
+            }
+            let id = serde_json::Value::Object(bson_document);
+            return match &pool {
+                PoolKind::MongoDb(client) => {
+                    mongo_driver::delete_document_by_bson_id(client, database, collection, &id).await
+                }
+                PoolKind::Agent(client) => {
+                    let mut client = client.lock().await;
+                    let result: serde_json::Value = client
+                        .mongo_delete_document(serde_json::json!({
+                            "database": database,
+                            "collection": collection,
+                            "id": { "bsonDocument": id },
+                        }))
+                        .await?;
+                    Ok(result.get("deleted_count").and_then(|v| v.as_u64()).unwrap_or(0))
+                }
+                _ => Err("BSON document IDs are only supported for MongoDB".into()),
+            };
+        }
+    };
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::delete_document(client, database, collection, id).await,
         PoolKind::DynamoDb(client) => {

@@ -799,6 +799,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ dataGridCopyExtractor: "invalid" as any }).dataGridCopyExtractor).toBe("smart");
   });
 
+  it("normalizes the persisted Smart Copy single-column format", () => {
+    expect(normalizeEditorSettings({}).dataGridSmartSingleColumnFormat).toBe("default");
+    expect(normalizeEditorSettings({ dataGridSmartSingleColumnFormat: "json" }).dataGridSmartSingleColumnFormat).toBe("json");
+    expect(normalizeEditorSettings({ dataGridSmartSingleColumnFormat: "sql-inserts" as any }).dataGridSmartSingleColumnFormat).toBe("default");
+    expect(normalizeEditorSettings({ dataGridSmartSingleColumnFormat: "invalid" as any }).dataGridSmartSingleColumnFormat).toBe("default");
+  });
+
   it("normalizes persistent extractor configuration fail-fast defaults", () => {
     const defaults = normalizeEditorSettings({}).dataGridExtractorOptions;
     expect(defaults.dsv).toMatchObject({
@@ -1572,14 +1579,6 @@ describe("settingsStore AI API key normalization", () => {
     expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "hualong-ai")).toMatchObject({
       model: "deepseek-v4.1-flash",
       models: [{ name: "deepseek-v4.1-flash" }],
-    });
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "aicodemirror")).toMatchObject({
-      endpoint: "https://api.aicodemirror.ai/v1",
-      provider: "openai-compatible",
-      authMethod: "bearer",
-      requiresApiKey: true,
-      websiteUrl: "https://www.aicodemirror.ai/register?invitecode=DK44NH",
-      badgeKey: "ai.aicodemirrorSponsored",
     });
   });
 

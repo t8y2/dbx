@@ -2578,6 +2578,7 @@ export default withEnglishFallback({
     tableLoading: "テーブル読み込みポリシー",
     autoLoadAllTables: "すべてのテーブルを自動的に読み込む",
     autoLoadAllTablesHint: "高度なサイドバービューで「テーブル」グループを開くと、この接続のすべてのページが読み込まれ、テーブル名フィルターの対象がすべてのテーブルになります。大規模なスキーマでは時間がかかる場合があります。",
+    polarDbPostgresPickerHint: "PolarDB PostgreSQL 版を使用する場合は、PostgreSQL を選択してください。",
   },
   editor: {
     duckdbDraining: "前回の DuckDB クエリはまだ停止処理中です。しばらくしてから再試行してください。",

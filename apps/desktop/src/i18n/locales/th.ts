@@ -2469,6 +2469,7 @@ export default withEnglishFallback({
       revealRaw: "แสดงข้อความดิบ",
       apply: "นำไปใช้",
     },
+    polarDbPostgresPickerHint: "หากใช้ PolarDB PostgreSQL เวอร์ชัน โปรดเลือก PostgreSQL",
   },
   editor: {
     duckdbDraining: "Query DuckDB ก่อนหน้ายังหยุดไม่เสร็จ โปรดลองอีกครั้งในไม่ช้า",

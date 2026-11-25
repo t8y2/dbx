@@ -2318,6 +2318,7 @@ export default withEnglishFallback({
       revealRaw: "Показать исходный текст",
       apply: "Применить",
     },
+    polarDbPostgresPickerHint: "Если вы используете PolarDB PostgreSQL, выберите PostgreSQL.",
   },
   editor: {
     duckdbDraining: "Предыдущий запрос DuckDB ещё завершается. Повторите попытку чуть позже.",

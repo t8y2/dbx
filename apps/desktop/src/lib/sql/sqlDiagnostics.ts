@@ -177,7 +177,15 @@ function oracleMissingObjectRange(sql: string, offset: number): SqlErrorRange | 
 function mysqlSyntaxErrorExcerptRange(sql: string, message: string, location: SqlErrorLocation): SqlErrorRange | null {
   // MySQL 1064 gives a line number and an excerpt starting at the offending token.
   const excerpt = parseMysqlSyntaxError(message)?.excerpt;
-  if (!excerpt) return null;
+  if (excerpt === undefined) return null;
+  if (excerpt === "") {
+    // MySQL reports an empty excerpt when the parser reached the end of input.
+    // Point at the final visible character so the caret and underline agree.
+    const end = sql.trimEnd().length;
+    if (end === 0) return null;
+    const width = (sql.codePointAt(end - 2) ?? 0) > 0xffff ? 2 : 1;
+    return { from: end - width, to: end };
+  }
   const lineStart = lineColumnToOffset(sql, { line: location.line, column: 0 });
   if (lineStart == null) return null;
   const lineEnd = sql.indexOf("\n", lineStart);

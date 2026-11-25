@@ -4669,8 +4669,6 @@ export default withEnglishFallback({
     astraflowSponsored: "50 元免费额度",
     packyapiSponsored: "$1 免费额度",
     packyapiDescription: "⚡ PackyCode 是稳定高效的 API 中转服务商：一句话接入主流大模型，统一域名与密钥、智能容灾，并提供 Codex/Claude Code 高速通道。\n🎁 新用户领 $1 免费额度 + 首充折扣；人民币 1:1 充值无汇率无手续费，分组折扣低至 2 折。",
-    hiapiSponsored: "注册送 200 Credits",
-    hiapiDescription: "HiAPI 是面向开发者的图片、视频、音频及文本模型 API 平台，文本模型提供 OpenAI 兼容接口，Remote MCP 和 Agent Skills 可接入 Claude Code、Cursor 等 AI 编程工具。\n🎁 新用户注册赠送 200 Credits，充值送 10% 积分。",
     visitPartner: "访问合作伙伴网站",
     getApiKey: "获取 API Key",
     defaultModel: "默认模型",

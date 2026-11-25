@@ -4401,9 +4401,6 @@ export default withEnglishFallback({
     packyapiSponsored: "$1 бесплатного кредита",
     packyapiDescription:
       "⚡ PackyCode — стабильный API-релей для ведущих AI-моделей: один эндпоинт, один ключ, автоматический фейловер и выделенные быстрые маршруты для Codex и Claude Code.\n🎁 Новым пользователям — $1 бесплатного кредита и скидка на первое пополнение; оплата в юанях 1:1 без наценок, групповые скидки до 80%.",
-    hiapiSponsored: "200 Credits в подарок",
-    hiapiDescription:
-      "HiAPI — платформа API для разработчиков: модели изображений, видео, аудио и текста. Текстовые модели используют OpenAI-совместимые эндпоинты, а Remote MCP и Agent Skills подключают аккаунт к Claude Code, Cursor и другим агентам.\n🎁 Новым пользователям — 200 Credits при регистрации и 10% дополнительных Credits при пополнении.",
     ccSwitchProvider: "Импорт конфигураций ИИ",
     ccSwitchProviderDescription: "Импортируйте конфигурации ИИ из CC-SWITCH или Magpie в DBX.",
     ccSwitchImport: "Импортировать из CC-SWITCH",

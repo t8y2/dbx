@@ -4271,8 +4271,6 @@ export default withEnglishFallback({
     astraflowSponsored: "50 元免費額度",
     packyapiSponsored: "$1 免費額度",
     packyapiDescription: "⚡ PackyCode 是穩定高效的 API 中轉服務商：一句話接入主流大模型，統一網域與密鑰、智慧容災，並提供 Codex/Claude Code 高速通道。\n🎁 新用戶領 $1 免費額度 + 首儲折扣；人民幣 1:1 儲值無匯率無手續費，分組折扣最低 2 折。",
-    hiapiSponsored: "註冊送 200 Credits",
-    hiapiDescription: "HiAPI 是面向開發者的圖片、影片、音訊及文字模型 API 平台，文字模型提供 OpenAI 相容介面，Remote MCP 和 Agent Skills 可接入 Claude Code、Cursor 等 AI 編程工具。\n🎁 新用戶註冊贈送 200 Credits，儲值送 10% 積分。",
     visitPartner: "前往合作夥伴網站",
     getApiKey: "取得 API Key",
     defaultModel: "預設模型",

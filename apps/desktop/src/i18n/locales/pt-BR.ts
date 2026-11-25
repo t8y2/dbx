@@ -4296,9 +4296,6 @@ export default withEnglishFallback({
     packyapiSponsored: "$1 de crédito grátis",
     packyapiDescription:
       "⚡ O PackyCode é um relay de API estável para os principais modelos de IA: um endpoint, uma chave, failover automático e rotas rápidas dedicadas para Codex e Claude Code.\n🎁 Novos usuários recebem $1 de crédito grátis e desconto na primeira recarga; pague em RMB 1:1 sem taxas de câmbio, com descontos em grupo de até 80%.",
-    hiapiSponsored: "200 Credits grátis",
-    hiapiDescription:
-      "A HiAPI é uma plataforma de API para desenvolvedores com modelos de imagem, vídeo, áudio e texto; os modelos de texto usam endpoints compatíveis com OpenAI, e o Remote MCP e as Agent Skills conectam a mesma conta ao Claude Code, Cursor e outros agentes de código.\n🎁 Novos usuários recebem 200 Credits no cadastro e 10% de Credits extras nas recargas.",
     visitPartner: "Visitar site do parceiro",
     getApiKey: "Obter chave de API",
     defaultModel: "Modelo padrão",

@@ -2556,12 +2556,66 @@ fn validate_preexisting_target_columns(
 }
 
 fn transfer_key_columns(columns: &[db::ColumnInfo], db_type: &DatabaseType) -> Vec<String> {
-    let uses_unique_key_model = matches!(db_type, DatabaseType::Doris | DatabaseType::StarRocks);
+    let uses_unique_key_model = transfer_uses_unique_key_model(db_type);
     columns
         .iter()
         .filter(|column| column.is_primary_key || (uses_unique_key_model && column.is_unique))
         .map(|column| column.name.clone())
         .collect()
+}
+
+fn transfer_uses_unique_key_model(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Doris | DatabaseType::StarRocks)
+}
+
+/// Picks the columns that give paging a stable order when the source column
+/// metadata does not expose Doris/StarRocks key columns: prefer the primary key
+/// index, then any unique index. Order matters because a composite key only
+/// orders rows deterministically as a whole.
+fn transfer_ordering_columns_from_indexes(indexes: &[db::IndexInfo]) -> Vec<String> {
+    indexes
+        .iter()
+        .find(|index| index.is_primary)
+        .or_else(|| indexes.iter().find(|index| index.is_unique))
+        .map(|index| index.columns.clone())
+        .unwrap_or_default()
+}
+
+/// Doris and StarRocks describe a UNIQUE KEY table through its index metadata,
+/// not through `information_schema.COLUMNS.COLUMN_KEY`, so a unique-key table
+/// can look like it has no key at all. Transfer paging keys off those columns:
+/// with none, the read loop falls back to unordered `LIMIT/OFFSET` paging, which
+/// may visit one row on two pages and never read another, silently dropping rows
+/// on the target (#15649). Fill the flags from the index metadata so paging stays
+/// ordered (and keyset-capable) instead.
+async fn fill_unique_key_columns_from_index_metadata(
+    pool: &db::mysql::MySqlPool,
+    columns: &mut [db::ColumnInfo],
+    database: &str,
+    table: &str,
+    db_type: &DatabaseType,
+) {
+    if !transfer_uses_unique_key_model(db_type) || !transfer_key_columns(columns, db_type).is_empty() {
+        return;
+    }
+    let indexes = match db::doris::list_indexes(pool, database, table).await {
+        Ok(indexes) => indexes,
+        Err(error) => {
+            log::debug!(
+                "[transfer] {table}: cannot read the Doris/StarRocks index metadata for ordered paging: {error}"
+            );
+            return;
+        }
+    };
+    let key_columns = transfer_ordering_columns_from_indexes(&indexes);
+    if key_columns.is_empty() {
+        return;
+    }
+    for column in columns.iter_mut() {
+        if key_columns.iter().any(|name| name == &column.name) {
+            column.is_unique = true;
+        }
+    }
 }
 
 fn identity_insert_statement(table: &str, schema: &str, db_type: &DatabaseType, enabled: bool) -> String {
@@ -9742,12 +9796,16 @@ pub async fn get_columns_for_transfer(
         PoolKind::Mysql(p, _) => {
             let p = p.clone();
             let catalog = normalize_external_catalog_name(catalog).map(str::to_string);
-            if let Some(catalog) = catalog {
+            let mut columns = if let Some(catalog) = catalog {
                 // Use 3-part qualified column lookup for Doris/StarRocks external catalogs
-                db::doris::get_catalog_columns(&p, &catalog, &schema, &table).await
+                db::doris::get_catalog_columns(&p, &catalog, &schema, &table).await?
             } else {
-                db::mysql::get_columns(&p, &schema, &table).await
+                db::mysql::get_columns(&p, &schema, &table).await?
+            };
+            if let Ok(db_type) = get_db_type(state, connection_id).await {
+                fill_unique_key_columns_from_index_metadata(&p, &mut columns, &schema, &table, &db_type).await;
             }
+            Ok(columns)
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
@@ -16282,6 +16340,57 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             enum_values: None,
             ..Default::default()
         }
+    }
+
+    fn unique_key_index(columns: &[&str]) -> db::IndexInfo {
+        db::IndexInfo {
+            owner: None,
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
+            name: "UNIQUE KEY".to_string(),
+            columns: columns.iter().map(|column| column.to_string()).collect(),
+            is_unique: true,
+            is_primary: false,
+            filter: None,
+            index_type: Some("UNIQUE KEY".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: Vec::new(),
+            column_opclasses: vec![],
+            key_options: Vec::new(),
+            constraint_backed: false,
+        }
+    }
+
+    #[test]
+    fn doris_transfer_orders_paging_by_the_unique_key_columns() {
+        // A Doris UNIQUE KEY table reports no key flags through
+        // information_schema.COLUMNS, so the transfer used to page with
+        // `LIMIT/OFFSET` and no ORDER BY and silently drop rows (#15649).
+        let key_columns = transfer_ordering_columns_from_indexes(&[unique_key_index(&["info_date", "info_time"])]);
+        assert_eq!(key_columns, vec!["info_date".to_string(), "info_time".to_string()]);
+
+        let mut columns = vec![
+            test_column("info_date", "date"),
+            test_column("info_time", "datetime"),
+            test_column("payload", "varchar"),
+        ];
+        assert!(transfer_key_columns(&columns, &DatabaseType::Doris).is_empty());
+        for column in columns.iter_mut() {
+            if key_columns.iter().any(|name| name == &column.name) {
+                column.is_unique = true;
+            }
+        }
+        let keys = transfer_key_columns(&columns, &DatabaseType::Doris);
+        assert_eq!(keys, vec!["info_date".to_string(), "info_time".to_string()]);
+
+        let names = vec!["info_date".to_string(), "info_time".to_string(), "payload".to_string()];
+        let ordered = pagination_sql_with_order(&names, "t", "db", &DatabaseType::Doris, 10000, 10000, &keys, None);
+        assert!(ordered.contains("ORDER BY"), "expected ORDER BY in {ordered}");
+        let unordered = pagination_sql_with_order(&names, "t", "db", &DatabaseType::Doris, 10000, 10000, &[], None);
+        assert!(!unordered.contains("ORDER BY"), "unexpected ORDER BY in {unordered}");
+        assert_eq!(transfer_ordering_columns_from_indexes(&[]), Vec::<String>::new());
     }
 
     fn test_table(name: &str) -> db::TableInfo {

@@ -36,6 +36,8 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { createPluginAiCompletion, type PluginAiConfirmDecision, type PluginAiPromptPreview } from "@/lib/plugins/pluginAiCompletion";
 import { useQueryStore } from "@/stores/queryStore";
+import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { externalSqlEditorMaxBytes, isSqlOrScriptFilePath } from "@/lib/sql/sqlFileOpen";
 import { OPEN_PLUGIN_AI_CONVERSATION } from "@/lib/ai/aiPluginConversation";
 import { PLUGIN_CONNECTION_EDITOR } from "@/lib/connection/pluginConnectionEdit";
 
@@ -210,6 +212,23 @@ function parseHandleId(handleId: string): { source: "tauri" | "web"; rawId: stri
  *  into specs that mock the whole backend layer. */
 async function tauriFileApi() {
   return import("@/lib/backend/tauri");
+}
+
+/**
+ * Opens a granted folder entry outside the plugin: SQL/script files become
+ * editor tabs (same resolution as opening a file from the OS), everything
+ * else goes to the system default handler.
+ */
+async function openFolderEntryFromPlugin(pluginId: string, folderHandleId: string, relativePath: string, target: "app" | "system"): Promise<void> {
+  const fileApi = await tauriFileApi();
+  const path = await fileApi.resolvePluginLocalFolderEntry(pluginId, folderHandleId, relativePath);
+  if (target === "system" || !isSqlOrScriptFilePath(path)) {
+    await fileApi.openPathWithDefaultApp(path);
+    return;
+  }
+  const snapshot = await fileApi.readExternalSqlFileSnapshot(path, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb), "auto");
+  const destination = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!useConnectionStore().getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+  useQueryStore().openExternalSqlFile(destination.connectionId, destination.database, path, snapshot.content, snapshot.version, destination.catalog, destination.schema, undefined, snapshot.encoding);
 }
 
 // OS drops are the one flow where the renderer still names a path: the native
@@ -718,6 +737,8 @@ function createBridge() {
       pickFolder: isTauriRuntime() ? (pluginId, options) => tauriFileApi().then(({ pickPluginLocalFolder }) => pickPluginLocalFolder(pluginId, options?.readOnly, options?.defaultPath)) : undefined,
       folderList: isTauriRuntime() ? (pluginId, folderHandleId, options) => tauriFileApi().then(({ listPluginLocalFolder }) => listPluginLocalFolder(pluginId, folderHandleId, options)) : undefined,
       folderReadText: isTauriRuntime() ? (pluginId, folderHandleId, relativePath) => tauriFileApi().then(({ readPluginLocalFolderText }) => readPluginLocalFolderText(pluginId, folderHandleId, relativePath)) : undefined,
+      folderReadBinary: isTauriRuntime() ? (pluginId, folderHandleId, relativePath) => tauriFileApi().then(({ readPluginLocalFolderBinary }) => readPluginLocalFolderBinary(pluginId, folderHandleId, relativePath)) : undefined,
+      openFolderFile: isTauriRuntime() ? (pluginId, folderHandleId, relativePath, target) => openFolderEntryFromPlugin(pluginId, folderHandleId, relativePath, target) : undefined,
       folderWriteText: isTauriRuntime() ? (pluginId, folderHandleId, relativePath, content, options) => tauriFileApi().then(({ writePluginLocalFolderText }) => writePluginLocalFolderText(pluginId, folderHandleId, relativePath, content, options?.create)) : undefined,
       folderWriteBinary: isTauriRuntime() ? (pluginId, folderHandleId, relativePath, dataBase64, options) => tauriFileApi().then(({ writePluginLocalFolderBinary }) => writePluginLocalFolderBinary(pluginId, folderHandleId, relativePath, dataBase64, options?.create)) : undefined,
       closeFolderHandle: isTauriRuntime() ? (pluginId, folderHandleId) => tauriFileApi().then(({ closePluginLocalFolder }) => closePluginLocalFolder(pluginId, folderHandleId)) : undefined,

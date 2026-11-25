@@ -330,6 +330,10 @@ export interface PluginHostBridgeApi {
   folderList?(pluginId: string, folderHandleId: string, options?: { subPath?: string; extensions?: string[] }): Promise<{ entries: FolderEntry[]; truncated: boolean }>;
   /** Read a file inside a granted folder handle as UTF-8 text. */
   folderReadText?(pluginId: string, folderHandleId: string, relativePath: string): Promise<string>;
+  /** Read raw base64 bytes (images) inside a granted folder handle. */
+  folderReadBinary?(pluginId: string, folderHandleId: string, relativePath: string): Promise<string>;
+  /** Open a granted folder entry outside the plugin: SQL as an editor tab ("app") or any file with the OS default handler ("system"). */
+  openFolderFile?(pluginId: string, folderHandleId: string, relativePath: string, target: "app" | "system"): Promise<void>;
   /** Write a UTF-8 text file inside a granted folder handle; parent dirs created. Returns on success; absolute paths never leave the sandbox. */
   folderWriteText?(pluginId: string, folderHandleId: string, relativePath: string, content: string, options?: { create?: boolean }): Promise<void>;
   /** Write raw base64 bytes (PNG/XLSX) inside a granted folder handle. */
@@ -580,6 +584,8 @@ export class PluginHostBridge {
           // the file-handle model with a persistent session-level grant.
           folder: !!this.api.pickFolder && !!this.api.folderList && !!this.api.folderReadText && !!this.api.folderWriteText,
           folderBinary: !!this.api.folderWriteBinary,
+          folderBinaryRead: !!this.api.folderReadBinary,
+          folderOpen: !!this.api.openFolderFile,
         },
         [PLUGIN_CONNECTIONS_CAPABILITY]: !!this.api.listConnections || !!this.api.listAllConnections,
         [PLUGIN_CONNECTION_EDIT_CAPABILITY]: !!this.api.connectionEditor && this.hasPermission(PLUGIN_CONNECTION_EDIT_PERMISSION),
@@ -1083,6 +1089,16 @@ export class PluginHostBridge {
       const input = requireRecord(params, "host.folderReadText params");
       if (!this.api.folderReadText) throw new Error("Host folder reading is unavailable");
       return this.api.folderReadText(this.plugin.manifest.id, requireHandleId(input.folderHandleId), requireString(input.relativePath));
+    }
+    if (method === "host.folderReadBinary") {
+      const input = requireRecord(params, "host.folderReadBinary params");
+      if (!this.api.folderReadBinary) throw new Error("Host folder reading is unavailable");
+      return this.api.folderReadBinary(this.plugin.manifest.id, requireHandleId(input.folderHandleId), requireString(input.relativePath));
+    }
+    if (method === "host.openFolderFile") {
+      const input = requireRecord(params, "host.openFolderFile params");
+      if (!this.api.openFolderFile) throw new Error("Host file opening is unavailable");
+      return this.api.openFolderFile(this.plugin.manifest.id, requireHandleId(input.folderHandleId), requireString(input.relativePath), input.target === "system" ? "system" : "app");
     }
     if (method === "host.folderWriteText") {
       const input = requireRecord(params, "host.folderWriteText params");
@@ -1700,6 +1716,8 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         pickFolder: (options) => request('host.pickFolder', options || {}),
         folderList: (folderHandleId, options) => request('host.folderList', { folderHandleId, ...(options || {}) }),
         folderReadText: (folderHandleId, relativePath) => request('host.folderReadText', { folderHandleId, relativePath }),
+        folderReadBinary: (folderHandleId, relativePath) => request('host.folderReadBinary', { folderHandleId, relativePath }),
+        openFolderFile: (folderHandleId, relativePath, target) => request('host.openFolderFile', { folderHandleId, relativePath, target }),
         folderWriteText: (folderHandleId, relativePath, content, options) => request('host.folderWriteText', { folderHandleId, relativePath, content, create: options?.create !== false }),
         folderWriteBinary: (folderHandleId, relativePath, dataBase64, options) => request('host.folderWriteBinary', { folderHandleId, relativePath, dataBase64, create: options?.create !== false }),
         closeFolderHandle: (folderHandleId) => request('host.closeFolderHandle', { folderHandleId }),

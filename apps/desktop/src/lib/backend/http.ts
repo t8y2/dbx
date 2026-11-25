@@ -6107,6 +6107,14 @@ export async function readPluginLocalFolderText(_pluginId: string, _folderHandle
   throw new Error("Plugin folder reading is not available in the web backend");
 }
 
+export async function readPluginLocalFolderBinary(_pluginId: string, _folderHandleId: string, _relativePath: string): Promise<string> {
+  throw new Error("Plugin folder reading is not available in the web backend");
+}
+
+export async function resolvePluginLocalFolderEntry(_pluginId: string, _folderHandleId: string, _relativePath: string): Promise<string> {
+  throw new Error("Plugin folder reading is not available in the web backend");
+}
+
 export async function writePluginLocalFolderText(_pluginId: string, _folderHandleId: string, _relativePath: string, _content: string, _create = true): Promise<void> {
   throw new Error("Plugin folder writing is not available in the web backend");
 }

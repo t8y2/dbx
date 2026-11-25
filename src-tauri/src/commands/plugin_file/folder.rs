@@ -396,6 +396,47 @@ pub(super) fn folder_read_text(
     read_to_string(&absolute).map_err(|_| "cannot read file".to_string())
 }
 
+/// Reads a file inside a granted folder as raw bytes. Callers cap the base64
+/// payload before it reaches the bridge.
+pub(super) fn folder_read_binary(
+    state: &PluginFileState,
+    plugin_id: &str,
+    folder_handle_id: &str,
+    relative_path: &str,
+) -> Result<Vec<u8>, String> {
+    let canonical_root = {
+        let folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
+        let open = lookup(&folders, plugin_id, folder_handle_id)?;
+        check_root_unchanged(open)?
+    };
+    let absolute = resolve_relative(&canonical_root, relative_path)?;
+    let meta = std::fs::metadata(&absolute).map_err(|_| "cannot stat file".to_string())?;
+    if !meta.is_file() {
+        return Err("path is not a file".to_string());
+    }
+    std::fs::read(&absolute).map_err(|_| "cannot read file".to_string())
+}
+
+/// Resolves a file inside a granted folder to its canonical absolute path,
+/// for handing to other openers without exposing the grant root.
+pub(super) fn folder_resolve_entry(
+    state: &PluginFileState,
+    plugin_id: &str,
+    folder_handle_id: &str,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let canonical_root = {
+        let folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
+        let open = lookup(&folders, plugin_id, folder_handle_id)?;
+        check_root_unchanged(open)?
+    };
+    let absolute = resolve_relative(&canonical_root, relative_path)?;
+    if !absolute.exists() {
+        return Err("path does not exist".to_string());
+    }
+    Ok(absolute)
+}
+
 /// Shared write path: validates the target, creates parents, and returns the
 /// canonical absolute path the caller should atomically replace.
 fn prepare_write_target(

@@ -3386,6 +3386,14 @@ export async function readPluginLocalFolderText(pluginId: string, folderHandleId
   return invoke("plugin_file_folder_read_text", { pluginId, folderHandleId, relativePath });
 }
 
+export async function readPluginLocalFolderBinary(pluginId: string, folderHandleId: string, relativePath: string): Promise<string> {
+  return invoke("plugin_file_folder_read_binary", { pluginId, folderHandleId, relativePath });
+}
+
+export async function resolvePluginLocalFolderEntry(pluginId: string, folderHandleId: string, relativePath: string): Promise<string> {
+  return invoke("plugin_file_folder_resolve_entry", { pluginId, folderHandleId, relativePath });
+}
+
 export async function writePluginLocalFolderText(pluginId: string, folderHandleId: string, relativePath: string, content: string, create = true): Promise<void> {
   return invoke("plugin_file_folder_write_text", { pluginId, folderHandleId, relativePath, content, create });
 }

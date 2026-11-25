@@ -262,8 +262,8 @@ mod registry;
 use drop::open_dropped_plugin_files;
 pub(crate) use folder::close_all_plugin_folders;
 use folder::{
-    close_folder, folder_list, folder_read_text, folder_write_bytes, folder_write_text, open_folder, FolderHandleMeta,
-    FolderListResult,
+    close_folder, folder_list, folder_read_binary, folder_read_text, folder_resolve_entry, folder_write_bytes,
+    folder_write_text, open_folder, FolderHandleMeta, FolderListResult,
 };
 pub use registry::close_all_plugin_files;
 use registry::{
@@ -542,6 +542,42 @@ pub async fn plugin_file_folder_read_text(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn plugin_file_folder_read_binary(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    folder_handle_id: String,
+    relative_path: String,
+) -> Result<String, String> {
+    // Same payload ceiling as folder writes: base64 inflates by ~4/3.
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<PluginFileState>();
+        folder_read_binary(state.inner(), &plugin_id, &folder_handle_id, &relative_path)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    if bytes.len() > MAX_CHUNK_BYTES {
+        return Err("file is too large to read as base64".to_string());
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
+#[tauri::command]
+pub async fn plugin_file_folder_resolve_entry(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    folder_handle_id: String,
+    relative_path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<PluginFileState>();
+        folder_resolve_entry(state.inner(), &plugin_id, &folder_handle_id, &relative_path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map(|path| path.to_string_lossy().into_owned())
 }
 
 #[tauri::command]

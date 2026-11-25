@@ -2747,6 +2747,8 @@ pub fn run() {
             commands::plugin_file::plugin_file_open_folder_path,
             commands::plugin_file::plugin_file_folder_list,
             commands::plugin_file::plugin_file_folder_read_text,
+            commands::plugin_file::plugin_file_folder_read_binary,
+            commands::plugin_file::plugin_file_folder_resolve_entry,
             commands::plugin_file::plugin_file_folder_write_text,
             commands::plugin_file::plugin_file_folder_write_binary,
             commands::plugin_file::plugin_file_folder_close,

@@ -51,7 +51,8 @@ const mode = computed(() => props.modelValue.partitionMode ?? (props.modelValue.
 const timeUnits = ["day", "month", "year"] as const;
 const strategy = computed(() => (["day", "month", "year"].includes(mode.value) ? "time" : mode.value));
 const strategies = { none: "none", time: "time", value: "values", range: "range", group: "list" } as const;
-function changeStrategy(value: keyof typeof strategies) {
+function changeStrategy(value: unknown) {
+  if (value !== "time" && value !== "none" && value !== "value" && value !== "range" && value !== "group") return;
   const ids = props.modelValue.partitionColumnIds;
   emit("update:modelValue", { ...props.modelValue, partitionMode: value === "time" ? "month" : value, partitionColumnIds: value === "none" ? [] : value === "value" ? ids : ids.slice(0, 1) });
 }
@@ -131,7 +132,7 @@ function editProperty(index: number, field: 0 | 1, value: string) {
       <template v-for="group in columnGroups" :key="group.key">
         <label v-if="config.paimonPartitioning && group.key === 'partition'" class="flex flex-col gap-1">
           {{ t("structureEditor.partitionMethod") }}
-          <Select :model-value="strategy" :disabled="disabled" @update:model-value="changeStrategy($event as keyof typeof strategies)">
+          <Select :model-value="strategy" :disabled="disabled" @update:model-value="changeStrategy">
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent
               ><SelectItem v-for="(label, item) in strategies" :key="item" :value="item">{{ t("starrocksLayout." + label) }}</SelectItem></SelectContent

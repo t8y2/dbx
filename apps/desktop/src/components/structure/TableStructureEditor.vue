@@ -8441,7 +8441,7 @@ watch(
       </template>
     </DangerConfirmDialog>
     <StarRocksLayoutCopyDialog
-      v-if="!isCreateMode && ['starrocks', 'spark'].includes(databaseType) && props.tableName"
+      v-if="!isCreateMode && (databaseType === 'starrocks' || databaseType === 'spark') && props.tableName"
       :paimon="databaseType === 'spark'"
       v-model:open="starrocksLayoutCopyOpen"
       :connection-id="props.connectionId"
@@ -8698,7 +8698,7 @@ watch(
                 <TooltipContent side="bottom" class="font-mono font-medium" data-add-column-shortcut-content>Shift+Enter</TooltipContent>
               </Tooltip>
               <Button
-                v-if="activeTab === 'columns' && !isCreateMode && ['starrocks', 'spark'].includes(databaseType)"
+                v-if="activeTab === 'columns' && !isCreateMode && (databaseType === 'starrocks' || databaseType === 'spark')"
                 variant="outline"
                 size="sm"
                 :class="[structureToolbarButtonClass, 'structure-toolbar-action structure-toolbar-secondary']"

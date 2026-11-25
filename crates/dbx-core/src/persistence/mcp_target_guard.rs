@@ -10,6 +10,16 @@
 //! so the rejection lives there rather than only in the MCP tool handlers: the
 //! storage owns the real database path even when a standalone MCP process
 //! resolves `DBX_DATA_DIR` differently.
+//!
+//! Scope: the connection's own target, its saved `attached_databases`, and
+//! DuckDB `init_script` ATTACH statements. MCP-issued SQL is separately limited
+//! to no `ATTACH`/`DETACH` at all (`dbx_sql_core::sql_risk::mcp_sql_has_forbidden_file_attach`).
+//!
+//! Not covered: DuckDB's general file functions (`read_blob`, `read_csv`,
+//! `read_parquet`, `COPY ... TO`, `INSTALL`/`LOAD`, `EXPORT DATABASE`, ...) can
+//! still name an arbitrary path from SQL executed on an allowed connection.
+//! Those surfaces are tracked separately as a follow-up to #9108; this guard is
+//! a connection-target boundary, not a filesystem sandbox for SQL.
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +29,39 @@ use crate::path_utils::expand_tilde;
 
 /// Error code returned to MCP callers when a connection targets the config DB.
 pub const CONFIG_DB_PATH_FORBIDDEN: &str = "CONFIG_DB_PATH_FORBIDDEN";
+
+/// Whether this driver opens its target as a local file (`SQLite`, `DuckDB`,
+/// `Access`, `H2`). Only those drivers have a file path to protect; for network
+/// databases `host` is a hostname.
+pub fn uses_local_file_target(db_type: DatabaseType) -> bool {
+    database_manifest::entry(&db_type).is_some_and(|entry| entry.local_file)
+}
+
+/// Whether `config` names a local file the guard would have to compare with the
+/// configuration path.
+///
+/// Used when no configuration path can be resolved: a `:memory:`, empty or URL
+/// target cannot be the configuration database, so refusing it would only break
+/// legitimate work, while anything that resolves to a file system path must be
+/// refused rather than assumed safe.
+pub fn names_a_local_file_target(config: &ConnectionConfig) -> bool {
+    if !uses_local_file_target(config.db_type) {
+        return false;
+    }
+    let targets = std::iter::once(config.host.as_str())
+        .chain(config.attached_databases.iter().map(|attached| attached.path.as_str()));
+    if targets.into_iter().any(|host| !matches!(resolve_local_target(host), LocalTarget::NotAPath)) {
+        return true;
+    }
+    if config.db_type == DatabaseType::DuckDb {
+        // An init-script ATTACH opens a file at pool creation even though the
+        // connection target itself is not a path.
+        return crate::db::duckdb_sql::split_sql_statements(config.init_script.as_deref().unwrap_or_default())
+            .iter()
+            .any(|statement| crate::db::duckdb_sql::is_attach_statement(statement));
+    }
+    false
+}
 
 /// Returns `Err(CONFIG_DB_PATH_FORBIDDEN: ...)` when `config` is a local-file
 /// database whose target — its own file, one of its saved `attached_databases`,
@@ -46,19 +89,19 @@ pub const CONFIG_DB_PATH_FORBIDDEN: &str = "CONFIG_DB_PATH_FORBIDDEN";
 /// configuration database". Which remote host is this machine is not decidable
 /// from the path, so the guard fails closed here.
 pub fn ensure_mcp_target_allowed(config_db_path: &Path, config: &ConnectionConfig) -> Result<(), String> {
-    if !database_manifest::entry(&config.db_type).is_some_and(|entry| entry.local_file) {
+    if !uses_local_file_target(config.db_type) {
         return Ok(());
     }
     // Fail closed: without a resolved configuration path the guard cannot prove
     // the target differs, and this connection is only reachable through MCP.
     let Some(config_db_path) = canonicalize_allow_missing(config_db_path) else {
-        return Err(config_db_forbidden());
+        return Err(config_db_forbidden(ForbiddenTarget::ConfigDb));
     };
     let targets = std::iter::once(config.host.as_str())
         .chain(config.attached_databases.iter().map(|attached| attached.path.as_str()));
     for host in targets {
-        if host_targets_config_db(&config_db_path, host) {
-            return Err(config_db_forbidden());
+        if let Some(reason) = host_targets_config_db(&config_db_path, host) {
+            return Err(config_db_forbidden(reason));
         }
     }
     // DuckDB executes its init script when the pool is created, so an ATTACH
@@ -72,34 +115,54 @@ pub fn ensure_mcp_target_allowed(config_db_path: &Path, config: &ConnectionConfi
             // Fail closed: an ATTACH whose target cannot be read could hide a
             // local file, and the connection is only reachable through MCP here.
             let Some(target) = crate::db::duckdb_sql::attached_target_from_attach_sql(&statement) else {
-                return Err(config_db_forbidden());
+                return Err(config_db_forbidden(ForbiddenTarget::ConfigDb));
             };
-            if host_targets_config_db(&config_db_path, &target) {
-                return Err(config_db_forbidden());
+            if let Some(reason) = host_targets_config_db(&config_db_path, &target) {
+                return Err(config_db_forbidden(reason));
             }
         }
     }
     Ok(())
 }
 
+/// Why a connection target was refused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ForbiddenTarget {
+    /// The target resolves to the configuration database or one of its sidecars.
+    ConfigDb,
+    /// A UNC/WSL form the guard cannot compare against a drive path. Refused as
+    /// a family because its message is different: the target may be a perfectly
+    /// legitimate SMB/WSL database, not the configuration database itself.
+    NetworkShare,
+}
+
 /// Whether a connection target/reference names the configuration database.
 ///
 /// Network shares are refused outright — see the module docs — because their
 /// resolved form cannot be compared with the local configuration path.
-fn host_targets_config_db(config_db_path: &Path, host: &str) -> bool {
+fn host_targets_config_db(config_db_path: &Path, host: &str) -> Option<ForbiddenTarget> {
     match resolve_local_target(host) {
-        LocalTarget::NetworkShare => true,
-        LocalTarget::File(target) => is_config_db_path(config_db_path, &target),
-        LocalTarget::NotAPath => false,
+        LocalTarget::NetworkShare => Some(ForbiddenTarget::NetworkShare),
+        LocalTarget::File(target) => is_config_db_path(config_db_path, &target).then_some(ForbiddenTarget::ConfigDb),
+        LocalTarget::NotAPath => None,
     }
 }
 
-/// Shared message for every rejected target; the resolved path is deliberately
-/// omitted so the agent cannot learn where the configuration database lives.
-fn config_db_forbidden() -> String {
-    format!(
-        "{CONFIG_DB_PATH_FORBIDDEN}: MCP connections cannot target DBX's own configuration database, which stores DBX's settings and credentials."
-    )
+/// Message for a rejected target; the resolved path is deliberately omitted so
+/// the agent cannot learn where the configuration database lives.
+fn config_db_forbidden(reason: ForbiddenTarget) -> String {
+    match reason {
+        ForbiddenTarget::ConfigDb => format!(
+            "{CONFIG_DB_PATH_FORBIDDEN}: MCP connections cannot target DBX's own configuration database, which stores DBX's settings and credentials."
+        ),
+        // Windows only: the sqlite driver opens `//host/share` as a UNC URI, so
+        // a loopback share aliases this machine's drives. Say that instead of
+        // pretending the target was the configuration database — the refusal is
+        // about an unverifiable path family, not about this specific file.
+        ForbiddenTarget::NetworkShare => format!(
+            "{CONFIG_DB_PATH_FORBIDDEN}: MCP does not allow network (UNC/WSL) database paths on Windows. They may alias this machine's own drives and cannot be verified against the local configuration database."
+        ),
+    }
 }
 
 /// Matches `dbx.db` itself and the SQLite sidecars that share its file-name
@@ -401,6 +464,42 @@ mod tests {
         let host = directory.path().join("app.db").to_string_lossy().into_owned();
         let error = ensure_mcp_target_allowed(Path::new(""), &sqlite_connection(&host)).unwrap_err();
         assert!(error.starts_with(CONFIG_DB_PATH_FORBIDDEN), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn refuses_network_shares_with_a_network_path_message() {
+        // The refusal is about an unverifiable path family, not about having
+        // recognized this file as `dbx.db`; legitimate SMB/WSL connections are
+        // blocked too, so the message must say so.
+        let directory = temp_dir();
+        let config_db = directory.path().join("dbx.db");
+        let error =
+            ensure_mcp_target_allowed(&config_db, &sqlite_connection(r"\\fileserver\share\dbx.db")).unwrap_err();
+        assert!(error.starts_with(CONFIG_DB_PATH_FORBIDDEN), "{error}");
+        assert!(error.contains("network (UNC/WSL)"), "{error}");
+
+        // A real configuration-database target keeps the original message.
+        let target = config_db.to_string_lossy().into_owned();
+        let error = ensure_mcp_target_allowed(&config_db, &sqlite_connection(&target)).unwrap_err();
+        assert!(error.contains("own configuration database"), "{error}");
+    }
+
+    #[test]
+    fn unresolved_boundary_only_counts_real_file_targets() {
+        // No config path to compare: targets that cannot be a file stay usable,
+        // anything that names a file is unverifiable.
+        for host in ["", "jdbc:h2:file:/data/example", "file:///data/example", "  "] {
+            assert!(!names_a_local_file_target(&sqlite_connection(host)), "{host}");
+        }
+        let directory = temp_dir();
+        let host = directory.path().join("app.db").to_string_lossy().into_owned();
+        assert!(names_a_local_file_target(&sqlite_connection(&host)));
+
+        let mut duck = duckdb_connection("", "ATTACH 'sales.duckdb' AS sales");
+        assert!(names_a_local_file_target(&duck));
+        duck.init_script = Some("INSTALL httpfs".to_string());
+        assert!(!names_a_local_file_target(&duck));
     }
 
     #[cfg(windows)]

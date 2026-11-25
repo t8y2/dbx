@@ -648,6 +648,86 @@ mod tests {
         assert!(ensure_connection_target_for_id(&state, &HeaderMap::new(), "protected").await.is_ok());
     }
 
+    #[tokio::test]
+    async fn mcp_http_handlers_enforce_the_configuration_database_boundary() {
+        use axum::extract::{Query, State as AxumState};
+        use axum::Json;
+
+        let directory = tempfile::tempdir().unwrap();
+        let config_db = directory.path().join("dbx.db");
+        let storage = dbx_core::persistence::test_storage::open(&config_db).await.unwrap();
+        let config = |host: &std::path::Path| {
+            serde_json::from_value::<dbx_core::models::connection::ConnectionConfig>(serde_json::json!({
+                "id": "protected",
+                "name": "protected",
+                "db_type": "sqlite",
+                "host": host.to_string_lossy(),
+                "port": 0,
+                "username": "",
+                "password": "",
+                "database": "main",
+            }))
+            .unwrap()
+        };
+        storage.save_connections(&[config(&config_db)]).await.unwrap();
+        let state = Arc::new(WebState::for_tests(
+            Arc::new(dbx_core::connection::AppState::new(storage)),
+            directory.path().to_path_buf(),
+        ));
+        let mut mcp_headers = HeaderMap::new();
+        mcp_headers.insert("x-dbx-mcp-request", "1".parse().unwrap());
+
+        // Connection creation carries the full config, so the pool never exists
+        // for an MCP-forwarded request.
+        let connect = || crate::routes::connection::ConnectRequest { config: config(&config_db), client_attempt: None };
+        let error =
+            crate::routes::connection::connect_db(AxumState(state.clone()), mcp_headers.clone(), Json(connect()))
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("CONFIG_DB_PATH_FORBIDDEN"), "{error}");
+
+        // Schema introspection only carries the id.
+        let schema_query = || -> crate::routes::schema::SchemaQuery {
+            serde_json::from_value(serde_json::json!({ "connection_id": "protected" })).unwrap()
+        };
+        let error =
+            crate::routes::schema::list_databases(AxumState(state.clone()), mcp_headers.clone(), Query(schema_query()))
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("CONFIG_DB_PATH_FORBIDDEN"), "{error}");
+
+        let query_request = || -> crate::routes::query::ExecuteQueryRequest {
+            serde_json::from_value(serde_json::json!({
+                "connectionId": "protected",
+                "database": "main",
+                "sql": "SELECT 1",
+            }))
+            .unwrap()
+        };
+        let error =
+            crate::routes::query::execute_query(AxumState(state.clone()), mcp_headers.clone(), Json(query_request()))
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("CONFIG_DB_PATH_FORBIDDEN"), "{error}");
+
+        // The desktop editor may still open the connection (no MCP marker), and
+        // reusing that pool must not launder the refusal for MCP calls.
+        crate::routes::connection::connect_db(AxumState(state.clone()), HeaderMap::new(), Json(connect()))
+            .await
+            .expect("the Web editor keeps its existing behaviour");
+        let error =
+            crate::routes::query::execute_query(AxumState(state.clone()), mcp_headers.clone(), Json(query_request()))
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("CONFIG_DB_PATH_FORBIDDEN"), "{error}");
+
+        // ... while the same request without the marker is executed normally.
+        let executed =
+            crate::routes::query::execute_query(AxumState(state.clone()), HeaderMap::new(), Json(query_request()))
+                .await;
+        assert!(executed.is_ok(), "{:?}", executed.err().map(|error| error.to_string()));
+    }
+
     fn database_policy() -> McpGlobalPolicy {
         McpGlobalPolicy {
             read_only: true,

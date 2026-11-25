@@ -300,6 +300,26 @@ impl DbxBackend for UnavailableBackend {
     }
 }
 
+/// How a backend enforces DBX's configuration-database boundary (#9108).
+///
+/// The three states are deliberately distinct: an unresolvable boundary must
+/// fail closed, and it must not be reportable with the same value that means
+/// "a trusted remote party enforces this".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigDbBoundary {
+    /// This backend owns the configuration database at this path; the MCP
+    /// process enforces the guard itself.
+    Local(std::path::PathBuf),
+    /// A trusted remote backend (DBX Web) owns the configuration database and
+    /// enforces the same guard on every MCP-forwarded route. This process may
+    /// not be able to resolve the remote path at all.
+    Remote,
+    /// No boundary could be resolved. Local-file connections must be refused:
+    /// an unverifiable target must never read as "not the configuration
+    /// database".
+    Unresolved,
+}
+
 #[async_trait]
 pub trait DbxBackend: Send + Sync {
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String>;
@@ -311,6 +331,17 @@ pub trait DbxBackend: Send + Sync {
     }
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String>;
+
+    /// How this backend enforces DBX's configuration-database boundary.
+    ///
+    /// MCP refuses connections (and listings) that target `dbx.db`: it stores
+    /// `mcp_global_policy`, so letting an agent reach it would let the agent
+    /// rewrite the policy that constrains it (#9108). Backends that do not
+    /// resolve the path at all inherit [`ConfigDbBoundary::Unresolved`], which
+    /// refuses local-file connections rather than assuming they are safe.
+    fn config_db_boundary(&self) -> ConfigDbBoundary {
+        ConfigDbBoundary::Unresolved
+    }
 
     /// Whether the user has saved any MCP policy. Fresh installs have none,
     /// in which case writable plugin connections fall back to their own
@@ -1430,8 +1461,8 @@ impl DbxBackend for LocalBackend {
         Ok(configs)
     }
 
-    fn config_db_path(&self) -> Option<std::path::PathBuf> {
-        Some(self.state.storage.storage_db_path().to_path_buf())
+    fn config_db_boundary(&self) -> ConfigDbBoundary {
+        ConfigDbBoundary::Local(self.state.storage.storage_db_path().to_path_buf())
     }
 
     async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
@@ -1959,12 +1990,18 @@ impl DbxBackend for WebBackend {
             .map_err(|error| format!("Invalid connection list response: {error}"))
     }
 
-    /// Best effort: the DBX Web process owns the real data directory, but it
-    /// normally resolves to the same per-user location this process sees. When it
-    /// does not (portable/`DBX_DATA_DIR` installs), the mutation guard in the Web
-    /// storage path still applies; only resolution-time filtering would miss.
-    fn config_db_path(&self) -> Option<std::path::PathBuf> {
-        crate::paths::storage_db_path().ok()
+    /// The DBX Web process owns the real data directory, but it normally
+    /// resolves to the same per-user location this process sees. Use that path
+    /// when it is available so listings and resolution are filtered here too.
+    /// When it is not (portable/`DBX_DATA_DIR` installs), the boundary is
+    /// [`ConfigDbBoundary::Remote`]: every MCP-marked route on the Web server
+    /// re-checks the target against the database it actually owns, so an
+    /// unresolvable local path never weakens the guarantee.
+    fn config_db_boundary(&self) -> ConfigDbBoundary {
+        match crate::paths::storage_db_path() {
+            Ok(path) => ConfigDbBoundary::Local(path),
+            Err(_) => ConfigDbBoundary::Remote,
+        }
     }
 
     async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {

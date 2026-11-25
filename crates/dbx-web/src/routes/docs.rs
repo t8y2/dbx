@@ -2,6 +2,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::Json;
 use dbx_core::docs::{CollectOptions, SchemaSnapshot};
 use dbx_core::models::connection::ConnectionConfig;
@@ -39,8 +40,12 @@ async fn load_connection(state: &Arc<WebState>, connection_id: &str) -> Result<C
 
 pub async fn collect_snapshot(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(request): Json<DocsSnapshotRequest>,
 ) -> Result<Json<SchemaSnapshot>, AppError> {
+    // #9108: MCP docs tools forward here, and the snapshot opens a pool the same
+    // way SQL does, so the configuration-database target check runs first.
+    super::mcp_policy::ensure_connection_target_for_id(&state, &headers, &request.connection_id).await?;
     let connection = load_connection(&state, &request.connection_id).await?;
 
     let options = CollectOptions {

@@ -20,7 +20,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::backend::{
-    format_query_result, new_connection_config_with_external_config, parse_database_type, ConnectionSummary, DbxBackend,
+    format_query_result, new_connection_config_with_external_config, parse_database_type, ConfigDbBoundary,
+    ConnectionSummary, DbxBackend,
 };
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::runtime::McpTransport;
@@ -4917,7 +4918,7 @@ impl DbxMcpServer {
         // #9108: never advertise a configuration-database connection, even when a
         // policy would allow it. Resolution refuses it too; filtering here keeps
         // the name and id out of listings and resources.
-        let config_db_path = self.backend.config_db_path();
+        let boundary = self.backend.config_db_boundary();
         Ok(connections
             .into_iter()
             .filter(|connection| policy_allows_connection(&policy, group_paths.get(&connection.id), connection))
@@ -4927,11 +4928,7 @@ impl DbxMcpServer {
                 resolved.visible && resolved.level >= dbx_core::mcp_access::McpAccessLevel::Read
             })
             .filter(|connection| !self.scope.connection_scope_enabled() || self.scope.matches(connection))
-            .filter(|connection| {
-                config_db_path
-                    .as_deref()
-                    .is_none_or(|path| mcp_target_guard::ensure_mcp_target_allowed(path, connection).is_ok())
-            })
+            .filter(|connection| boundary_allows_connection(&boundary, connection))
             .collect())
     }
 
@@ -5005,6 +5002,38 @@ impl DbxMcpServer {
             Ok(())
         } else {
             Err(tool_error("TOOL_OUT_OF_SCOPE", format!("Tool \"{tool_name}\" is not allowed by DBX MCP settings.")))
+        }
+    }
+
+    /// #9108: a saved connection that targets DBX's configuration database (or
+    /// restores it as an attached database) would let any MCP tool read or
+    /// rewrite the policy meant to constrain the agent. The mutation guard only
+    /// sees connections created through MCP, so resolution re-checks every saved
+    /// configuration, including ones created in the desktop UI.
+    #[allow(clippy::result_large_err)]
+    fn ensure_connection_target_allowed(
+        &self,
+        connection: &dbx_core::models::connection::ConnectionConfig,
+    ) -> Result<(), CallToolResult> {
+        // The boundary is re-read per call so a Web backend that loses its local
+        // path resolution does not keep an older, narrower decision.
+        match self.backend.config_db_boundary() {
+            ConfigDbBoundary::Local(config_db_path) => {
+                mcp_target_guard::ensure_mcp_target_allowed(&config_db_path, connection).map_err(guard_refusal_error)
+            }
+            // The Web server owns the configuration database and enforces the
+            // same guard on every MCP-marked route it forwards.
+            ConfigDbBoundary::Remote => Ok(()),
+            // Fail closed for local files only: without a resolved boundary the
+            // guard cannot prove a path differs from `dbx.db`, while network
+            // databases and non-path targets have no file to protect.
+            ConfigDbBoundary::Unresolved => {
+                if mcp_target_guard::names_a_local_file_target(connection) {
+                    Err(config_db_forbidden_error())
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -5579,7 +5608,7 @@ impl DbxMcpServer {
             .map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))?;
         let connections =
             self.backend.load_connections().await.map_err(|error| tool_error("CONNECTION_LOAD_ERROR", error))?;
-        let config_db_path = self.backend.config_db_path();
+        let boundary = self.backend.config_db_boundary();
         let mut allowed: std::collections::BTreeMap<String, Vec<(String, String)>> = std::collections::BTreeMap::new();
         for config in connections {
             let Some(plugin_id) = config.plugin_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) else {
@@ -5593,10 +5622,7 @@ impl DbxMcpServer {
             }
             // #9108: plugin tools select their connection by id, so a protected
             // configuration must not stay reachable through this surface either.
-            if config_db_path
-                .as_deref()
-                .is_some_and(|path| mcp_target_guard::ensure_mcp_target_allowed(path, &config).is_err())
-            {
+            if !boundary_allows_connection(&boundary, &config) {
                 continue;
             }
             allowed.entry(plugin_id.to_string()).or_default().push((config.id.clone(), config.name.clone()));
@@ -6818,6 +6844,29 @@ fn config_db_forbidden_error() -> CallToolResult {
         "CONFIG_DB_PATH_FORBIDDEN",
         "MCP connections cannot target DBX's own configuration database, which stores DBX's settings and credentials.",
     )
+}
+
+/// Turns the guard's `CONFIG_DB_PATH_FORBIDDEN: ...` message into a tool error,
+/// keeping its detail: network-path refusals say so instead of claiming the
+/// target was the configuration database.
+fn guard_refusal_error(message: String) -> CallToolResult {
+    let prefix = format!("{}: ", mcp_target_guard::CONFIG_DB_PATH_FORBIDDEN);
+    tool_error("CONFIG_DB_PATH_FORBIDDEN", message.strip_prefix(&prefix).unwrap_or(&message).to_string())
+}
+
+/// Whether a saved connection may be advertised and used under `boundary`.
+///
+/// Same rules as `ensure_connection_target_allowed`: `Unresolved` fails closed
+/// for local-file drivers only.
+fn boundary_allows_connection(
+    boundary: &ConfigDbBoundary,
+    connection: &dbx_core::models::connection::ConnectionConfig,
+) -> bool {
+    match boundary {
+        ConfigDbBoundary::Local(path) => mcp_target_guard::ensure_mcp_target_allowed(path, connection).is_ok(),
+        ConfigDbBoundary::Remote => true,
+        ConfigDbBoundary::Unresolved => !mcp_target_guard::names_a_local_file_target(connection),
+    }
 }
 
 fn database_scope_for_connection(
@@ -8214,6 +8263,30 @@ mod tests {
             "ssl": false
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn unresolved_config_db_boundary_fails_closed_for_file_targets_only() {
+        let file: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "file", "name": "file", "db_type": "sqlite",
+            "host": "/tmp/app.db", "port": 0, "username": "", "password": "", "database": "main",
+        }))
+        .expect("sqlite connection");
+        let non_path = connection("memory", "memory", "sqlite", ":memory:");
+        let network = connection("net", "net", "mysql", "db.internal");
+
+        let unresolved = ConfigDbBoundary::Unresolved;
+        // An unresolvable boundary must not read as "nothing to protect".
+        assert!(!boundary_allows_connection(&unresolved, &file));
+        // Targets that cannot be a file keep working.
+        assert!(boundary_allows_connection(&unresolved, &non_path));
+        assert!(boundary_allows_connection(&unresolved, &network));
+
+        // A trusted remote backend enforces the guard on every route it serves.
+        assert!(boundary_allows_connection(&ConfigDbBoundary::Remote, &file));
+        // A local boundary compares against the path.
+        let directory = tempfile::tempdir().expect("temp dir");
+        assert!(boundary_allows_connection(&ConfigDbBoundary::Local(directory.path().join("dbx.db")), &file));
     }
 
     fn call_safety_policy(full: bool) -> McpGlobalPolicy {

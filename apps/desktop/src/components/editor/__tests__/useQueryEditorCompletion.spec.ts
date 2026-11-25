@@ -583,6 +583,17 @@ describe("QueryEditor completion provider ownership", () => {
     expect(result?.options.map((option) => option.label)).toContain("user:1");
   });
 
+  it("inserts the selected collection after typing db in a script-selected database", async () => {
+    const doc = "use analytics\ndb";
+    const { store, provide, currentView } = createHarness({ databaseType: "mongodb", database: "", modelValue: doc });
+    const result = await provide();
+    expect(store.listMongoCompletionCollections).toHaveBeenCalledWith("connection", "analytics");
+    const option = result?.options.find((candidate) => candidate.displayLabel === "users");
+    expect(option?.apply).toBeTypeOf("function");
+    (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, doc.length);
+    expect(currentView.state.doc.toString()).toBe("use analytics\ndb.users");
+  });
+
   it("rejects stale Mongo collection loads after request invalidation", async () => {
     const { store, provide, completion } = createHarness({ databaseType: "mongodb", modelValue: "db.us" });
     let resolve!: (collections: string[]) => void;

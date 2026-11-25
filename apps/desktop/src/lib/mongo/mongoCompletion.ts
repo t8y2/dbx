@@ -499,6 +499,14 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       break;
     case "root":
       items = rootItems(prefix);
+      if (prefix === "db") {
+        const names = collectionNameItems("", collections).map((item) => ({
+          ...item,
+          filterText: `db.${item.label}`,
+          apply: `db.${item.apply}`,
+        }));
+        items = [...names, ...items];
+      }
       break;
     case "database":
       items = databaseItems(prefix, input.databases ?? []);
@@ -624,8 +632,8 @@ export function mongoCompletionNeedsFields(mode: MongoCompletionMode): boolean {
 }
 
 /** Modes whose items are built from the database's collection names. */
-export function mongoCompletionNeedsCollections(mode: MongoCompletionMode): boolean {
-  return mode === "collection" || mode === "collectionOrMethod" || mode === "collectionRef";
+export function mongoCompletionNeedsCollections({ mode, prefix }: MongoCompletionContext): boolean {
+  return (mode === "root" && prefix === "db") || mode === "collection" || mode === "collectionOrMethod" || mode === "collectionRef";
 }
 
 /** Modes whose items are built from the target collection's indexes. */
@@ -787,6 +795,8 @@ export function shouldAutoOpenMongoDocumentQueryCompletion(text: string, cursor:
  * of the identifier and are safe to keep.
  */
 export function getMongoCompletionResultValidFor(context?: MongoCompletionContext): RegExp {
+  // Bare db adds live collection names. Refetch when typing or deleting across that boundary.
+  if (context?.mode === "root") return context.prefix === "db" ? /^db$/ : /^(?!db$)["']?[\w_$-]*$/;
   if (!context || !DOT_SCOPED_MODES.has(context.mode)) {
     if (context?.mode === "value") return /(?:new\s+)?["']?[\w_$.-]*$/;
     return /["']?[\w_$.-]*$/;

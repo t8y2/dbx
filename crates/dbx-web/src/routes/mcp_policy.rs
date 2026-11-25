@@ -712,7 +712,7 @@ mod tests {
 
         // The desktop editor may still open the connection (no MCP marker), and
         // reusing that pool must not launder the refusal for MCP calls.
-        crate::routes::connection::connect_db(AxumState(state.clone()), HeaderMap::new(), Json(connect()))
+        let _pool = crate::routes::connection::connect_db(AxumState(state.clone()), HeaderMap::new(), Json(connect()))
             .await
             .expect("the Web editor keeps its existing behaviour");
         let error =

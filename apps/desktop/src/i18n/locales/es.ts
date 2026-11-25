@@ -2824,6 +2824,10 @@ export default withEnglishFallback({
     pie: "Circular",
     noNumericData: "No hay datos numéricos disponibles para graficar",
     showLabels: "Mostrar valores",
+    xAxisType: "Tipo de eje X",
+    xAxisAuto: "Automático",
+    xAxisCategory: "Categoría",
+    xAxisTime: "Tiempo",
   },
   grid: {
     setTablePageSizeDefault: "Fijar valor predeterminado para esta tabla",

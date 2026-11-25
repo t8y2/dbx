@@ -92,6 +92,27 @@ describe("QueryChart", () => {
     expect(option.series[0].label.show).toBe(false);
   });
 
+  it("renders the X-axis type selector and infers a time axis by default", async () => {
+    app = createApp(QueryChart, {
+      result: {
+        columns: ["time", "value"],
+        rows: [
+          ["2026-11-25T10:00:00Z", 1],
+          ["2026-11-25T10:30:00Z", 2],
+        ],
+        affected_rows: 2,
+        execution_time_ms: 1,
+      },
+    });
+    app.mount(container!);
+    await nextTick();
+
+    expect(container!.querySelector('[data-testid="query-chart-x-axis-type"]')).not.toBeNull();
+    const vchart = container!.querySelector("[data-chart-option]") as HTMLDivElement;
+    const option = JSON.parse(vchart.getAttribute("data-chart-option") || "{}");
+    expect(option.xAxis.type).toBe("time");
+  });
+
   it("initializes showLabels from localStorage if previously enabled", async () => {
     localStorage.setItem("dbx-query-chart-show-labels", "true");
 

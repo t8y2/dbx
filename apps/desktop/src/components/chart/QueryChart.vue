@@ -12,7 +12,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { QueryResult } from "@/types/database";
 import { useTheme } from "@/composables/useTheme";
-import { axisColumnLabel, chartableColumnIndexes, buildQueryChartOption, type ChartType } from "@/lib/dataGrid/chartData";
+import { axisColumnLabel, chartableColumnIndexes, buildQueryChartOption, type ChartType, type XAxisType } from "@/lib/dataGrid/chartData";
 
 use([CanvasRenderer, LineChart, BarChart, PieChart, GridComponent, TooltipComponent, LegendComponent]);
 
@@ -34,6 +34,7 @@ function readShowLabelsPreference(): boolean {
 }
 
 const chartType = ref<ChartType>("bar");
+const xAxisType = ref<XAxisType>("auto");
 const xColumnIndex = ref(0);
 const yColumnIndexes = ref<number[]>([]);
 const showLabels = ref(readShowLabelsPreference());
@@ -59,6 +60,17 @@ const xColumnValue = computed({
     }
   },
 });
+const xAxisTypeValue = computed({
+  get: () => xAxisType.value,
+  set: (value: string) => {
+    if (value === "auto" || value === "category" || value === "time") xAxisType.value = value;
+  },
+});
+const xAxisTypeOptions: { value: XAxisType; labelKey: string }[] = [
+  { value: "auto", labelKey: "chart.xAxisAuto" },
+  { value: "category", labelKey: "chart.xAxisCategory" },
+  { value: "time", labelKey: "chart.xAxisTime" },
+];
 const yColumnLabel = computed(() => {
   if (yColumnIndexes.value.length === 0) return "0";
   const [first, ...rest] = yColumnIndexes.value;
@@ -94,6 +106,7 @@ const chartOption = computed(() => {
     yColumnIndexes: yColumnIndexes.value,
     showLabels: showLabels.value,
     isDark: isDark.value,
+    xAxisType: xAxisType.value,
   });
 });
 
@@ -125,6 +138,18 @@ const hasData = computed(() => props.result.rows.length > 0 && numericColumnInde
             </SelectTrigger>
             <SelectContent>
               <SelectItem v-for="col in allColumnOptions" :key="col.index" :value="String(col.index)">{{ col.label }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <span class="h-4 w-px bg-border" />
+        <div class="flex items-center gap-1.5">
+          <span class="text-muted-foreground">{{ t("chart.xAxisType") }}</span>
+          <Select v-model="xAxisTypeValue">
+            <SelectTrigger class="h-6 w-auto border-0 bg-transparent px-1 text-xs shadow-none focus:ring-0" data-testid="query-chart-x-axis-type">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="mode in xAxisTypeOptions" :key="mode.value" :value="mode.value">{{ t(mode.labelKey) }}</SelectItem>
             </SelectContent>
           </Select>
         </div>

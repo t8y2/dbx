@@ -3109,6 +3109,10 @@ export default {
     pie: "Pie",
     noNumericData: "No numeric data available for charting",
     showLabels: "Show Values",
+    xAxisType: "X-Axis Type",
+    xAxisAuto: "Auto",
+    xAxisCategory: "Category",
+    xAxisTime: "Time",
   },
   grid: {
     setTablePageSizeDefault: "Set default for this table",

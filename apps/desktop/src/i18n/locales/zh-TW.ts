@@ -2706,6 +2706,10 @@ export default withEnglishFallback({
     pie: "餅圖",
     noNumericData: "沒有可用於圖表的數值資料",
     showLabels: "顯示數值",
+    xAxisType: "X軸類型",
+    xAxisAuto: "自動",
+    xAxisCategory: "類別",
+    xAxisTime: "時間",
   },
   grid: {
     setTablePageSizeDefault: "設為此資料表的預設值",

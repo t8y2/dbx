@@ -3037,6 +3037,10 @@ export default withEnglishFallback({
     pie: "饼图",
     noNumericData: "没有可用于图表的数值数据",
     showLabels: "显示数值",
+    xAxisType: "X轴类型",
+    xAxisAuto: "自动",
+    xAxisCategory: "类别",
+    xAxisTime: "时间",
   },
   grid: {
     setTablePageSizeDefault: "设为此表的默认值",

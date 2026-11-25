@@ -2724,6 +2724,10 @@ export default withEnglishFallback({
     pie: "Pizza",
     noNumericData: "Nenhum dado numérico disponível para gerar o gráfico",
     showLabels: "Mostrar valores",
+    xAxisType: "Tipo do eixo X",
+    xAxisAuto: "Automático",
+    xAxisCategory: "Categoria",
+    xAxisTime: "Tempo",
   },
   grid: {
     setTablePageSizeDefault: "Definir padrão para esta tabela",

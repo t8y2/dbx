@@ -2724,6 +2724,10 @@ export default withEnglishFallback({
     pie: "파이",
     noNumericData: "차트에 사용할 숫자 데이터가 없습니다",
     showLabels: "값 표시",
+    xAxisType: "X축 유형",
+    xAxisAuto: "자동",
+    xAxisCategory: "범주",
+    xAxisTime: "시간",
   },
   grid: {
     setTablePageSizeDefault: "이 테이블의 기본값으로 설정",

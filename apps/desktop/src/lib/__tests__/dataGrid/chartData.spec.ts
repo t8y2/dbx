@@ -238,6 +238,50 @@ describe("chartData", () => {
       ]);
     });
 
+    it("forces a time axis when xAxisType is time, skipping unparseable rows", () => {
+      const timed = result(
+        ["time", "value"],
+        [
+          ["2026-11-25T10:00:00Z", 10],
+          ["not-a-time", 20],
+          [1700000300000, 30],
+        ],
+      );
+      const option = buildQueryChartOption(timed, { chartType: "line", xColumnIndex: 0, yColumnIndexes: [1], xAxisType: "time" });
+      expect(option?.xAxis).toMatchObject({ type: "time" });
+      expect(option?.series[0].data).toEqual([
+        [Date.parse("2026-11-25T10:00:00Z"), 10],
+        [null, 20],
+        [1700000300000, 30],
+      ]);
+    });
+
+    it("forces a category axis when xAxisType is category even for timestamp values", () => {
+      const timed = result(
+        ["time", "value"],
+        [
+          ["2026-11-25T10:00:00Z", 10],
+          ["2026-11-25T10:30:00Z", 20],
+        ],
+      );
+      const option = buildQueryChartOption(timed, { chartType: "line", xColumnIndex: 0, yColumnIndexes: [1], xAxisType: "category" });
+      expect(option?.xAxis).toMatchObject({ type: "category", data: ["2026-11-25T10:00:00Z", "2026-11-25T10:30:00Z"] });
+      expect(option?.series[0].data).toEqual([10, 20]);
+    });
+
+    it("auto mode falls back to category when X column has mixed time values", () => {
+      const timed = result(
+        ["time", "value"],
+        [
+          ["2026-11-25T10:00:00Z", 10],
+          ["not-a-time", 20],
+        ],
+      );
+      const auto = buildQueryChartOption(timed, { chartType: "line", xColumnIndex: 0, yColumnIndexes: [1] });
+      expect(auto?.xAxis).toMatchObject({ type: "category" });
+      expect(auto?.series[0].data).toEqual([10, 20]);
+    });
+
     it("pie chart keeps string category labels even when X is a time column", () => {
       const timed = result(
         ["time", "value"],

@@ -2964,6 +2964,10 @@ export default withEnglishFallback({
     pie: "วงกลม",
     noNumericData: "ไม่มีข้อมูลตัวเลขสำหรับสร้างแผนภูมิ",
     showLabels: "แสดงค่า",
+    xAxisType: "ประเภทแกน X",
+    xAxisAuto: "อัตโนมัติ",
+    xAxisCategory: "หมวดหมู่",
+    xAxisTime: "เวลา",
   },
   grid: {
     setTablePageSizeDefault: "ตั้งค่าเริ่มต้นสำหรับตารางนี้",

@@ -68,16 +68,20 @@ export function axisColumnLabel(columns: string[], index: number): string {
 
 export type ChartType = "line" | "bar" | "pie";
 
+/** How the horizontal axis is scaled: inferred from data, or forced by the user. */
+export type XAxisType = "auto" | "category" | "time";
+
 export interface QueryChartOptionConfig {
   chartType: ChartType;
   xColumnIndex: number;
   yColumnIndexes: number[];
   showLabels?: boolean;
   isDark?: boolean;
+  xAxisType?: XAxisType;
 }
 
 export function buildQueryChartOption(result: QueryResult, config: QueryChartOptionConfig) {
-  const { chartType, xColumnIndex, yColumnIndexes, showLabels = false, isDark = false } = config;
+  const { chartType, xColumnIndex, yColumnIndexes, showLabels = false, isDark = false, xAxisType = "auto" } = config;
   if (xColumnIndex < 0 || yColumnIndexes.length === 0) return null;
 
   const xData = result.rows.map((row) => String(row[xColumnIndex] ?? ""));
@@ -110,10 +114,16 @@ export function buildQueryChartOption(result: QueryResult, config: QueryChartOpt
   const yIndices = yColumnIndexes.filter((index) => index >= 0 && index < result.columns.length);
   if (yIndices.length === 0) return null;
 
-  // InfluxDB and other time-series sources return a timestamp column. When the
-  // chosen X column is entirely timestamps, use a real time axis so points are
-  // positioned by elapsed time instead of being evenly spaced by row count.
-  const timestamps = timeColumnTimestamps(result, xColumnIndex);
+  // Resolve the horizontal-axis scale. "auto" infers a time axis when every X
+  // value is a timestamp (InfluxDB style); "time"/"category" force the user's
+  // choice. In forced time mode unparseable values become null so ECharts skips
+  // them instead of drawing them at a bogus position.
+  let timestamps: (number | null)[] | null = null;
+  if (xAxisType === "time") {
+    timestamps = result.rows.map((row) => toChartTimestamp(row[xColumnIndex]));
+  } else if (xAxisType === "auto") {
+    timestamps = timeColumnTimestamps(result, xColumnIndex);
+  }
   const xAxis = timestamps ? { type: "time" as const, axisLabel: { color: isDark ? "#aaa" : "#666" } } : { type: "category" as const, data: xData, axisLabel: { color: isDark ? "#aaa" : "#666" } };
 
   return {

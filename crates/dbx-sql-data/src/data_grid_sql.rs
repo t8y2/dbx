@@ -3096,7 +3096,7 @@ pub fn format_grid_sql_literal_with_spatial(
     } else {
         let escaped_text = literal_text.replace('\\', "\\\\").replace('\'', "''");
         match grid_sub_control_escape(database_type) {
-            Some(escape) => escape_grid_sub_control(&escaped_text, escape),
+            Some(escape) => escape_grid_control_chars(&escaped_text, escape),
             None => escaped_text,
         }
     };
@@ -3131,15 +3131,23 @@ fn grid_sub_control_escape(database_type: Option<DatabaseType>) -> Option<GridSu
     }
 }
 
-fn escape_grid_sub_control(text: &str, escape: GridSubControlEscape) -> String {
-    if !text.contains(['\u{1a}', '\0']) {
+fn escape_grid_control_chars(text: &str, escape: GridSubControlEscape) -> String {
+    let escape_line_endings = escape == GridSubControlEscape::BackslashZ;
+    if !text.contains(['\u{1a}', '\0']) && !(escape_line_endings && text.contains(['\r', '\n'])) {
         return text.to_string();
     }
     let sub_control = match escape {
         GridSubControlEscape::BackslashZ => "\\Z",
         GridSubControlEscape::Hex => "\\x1a",
     };
-    text.replace('\0', "\\0").replace('\u{1a}', sub_control)
+    let escaped = text.replace('\0', "\\0").replace('\u{1a}', sub_control);
+    if escape_line_endings {
+        // MySQL SQL literals may be copied through an editor that normalizes
+        // CR/LF. Escape data line endings just like the database export path.
+        escaped.replace('\r', "\\r").replace('\n', "\\n")
+    } else {
+        escaped
+    }
 }
 
 fn postgres_json_array_element_type(
@@ -7158,6 +7166,63 @@ mod tests {
             vec![
                 "UPDATE `reports` SET `payload` = 0x0001abff WHERE `id` = 1;",
                 "UPDATE `reports` SET `payload` = X'' WHERE `id` = 2;"
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_copy_statements_escape_text_line_endings() {
+        let table_meta = DataGridTableMeta {
+            catalog: None,
+            database: None,
+            schema: None,
+            table_name: "notes".to_string(),
+            primary_keys: vec!["id".to_string()],
+            columns: Some(vec![column("id", "int", false, None), column("text", "TEXT", true, None)]),
+        };
+        let columns = vec!["id".to_string(), "text".to_string()];
+        let rows = vec![vec![json!(1), json!("a\rb\nc\r\nd\0e\u{1a}f\\r'")], vec![json!(2), json!("plain text")]];
+        let insert = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(table_meta.clone()),
+            columns: columns.clone(),
+            column_types: None,
+            source_columns: None,
+            rows: rows.clone(),
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
+            include_computed_columns: false,
+            include_database_name: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
+        });
+        assert_eq!(
+            insert.as_deref(),
+            Some(concat!(
+                "INSERT INTO `notes` (`id`, `text`) VALUES\n",
+                r"(1, 'a\rb\nc\r\nd\0e\Zf\\r'''),",
+                "\n",
+                "(2, 'plain text');"
+            ))
+        );
+
+        let updates = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta,
+            columns,
+            source_columns: None,
+            rows,
+            include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
+        });
+        assert_eq!(
+            updates,
+            vec![
+                r"UPDATE `notes` SET `text` = 'a\rb\nc\r\nd\0e\Zf\\r''' WHERE `id` = 1;",
+                "UPDATE `notes` SET `text` = 'plain text' WHERE `id` = 2;",
             ]
         );
     }
@@ -12415,17 +12480,22 @@ mod tests {
             columns: vec!["id".to_string(), "name".to_string()],
             source_columns: None,
             rows: vec![vec![json!(2), json!("Ada")]],
-            dirty_rows: vec![(0, vec![(1, json!("111\n222"))])],
+            dirty_rows: vec![(0, vec![(1, json!("111\r\n222\r333\n444"))])],
             deleted_rows: vec![],
             new_rows: vec![],
             include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
-        assert_eq!(result.statements, vec!["UPDATE `employees` SET `name` = '111\n222' WHERE `id` = 2;"]);
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE `employees` SET `name` = '111\\r\\n222\\r333\\n444' WHERE `id` = 2;"]
+        );
         assert_eq!(
             result.rollback_statements,
-            vec!["UPDATE `employees` SET `name` = 'Ada' WHERE `id` = 2 AND BINARY `name` = '111\n222';"]
+            vec![
+                "UPDATE `employees` SET `name` = 'Ada' WHERE `id` = 2 AND BINARY `name` = '111\\r\\n222\\r333\\n444';"
+            ]
         );
     }
 

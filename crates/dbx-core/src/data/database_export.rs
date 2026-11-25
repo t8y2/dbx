@@ -597,6 +597,144 @@ fn sort_export_views_by_dependencies<'a>(
     sorted_names.iter().filter_map(|name| views_by_name.get(name.as_str()).copied()).collect()
 }
 
+/// Views and materialized views that read one of the exported tables. A
+/// PostgreSQL `DROP TABLE` is rejected while such a view exists, so the export
+/// has to drop them before the table DDL whenever it recreates them (#14178).
+///
+/// The relation kind is returned as `v`/`m` instead of a boolean so the legacy
+/// text-row client stays usable, and the schema column lets the caller separate
+/// views it exports from views owned by another schema.
+const POSTGRES_EXPORT_TABLE_DEPENDENT_VIEWS_SQL: &str = "SELECT DISTINCT src_ns.nspname, src.relname, \
+       CASE src.relkind WHEN 'm' THEN 'm' ELSE 'v' END AS view_kind \
+     FROM pg_catalog.pg_depend dep \
+     JOIN pg_catalog.pg_rewrite rewrite ON rewrite.oid = dep.objid \
+     JOIN pg_catalog.pg_class src ON src.oid = rewrite.ev_class \
+     JOIN pg_catalog.pg_namespace src_ns ON src_ns.oid = src.relnamespace \
+     WHERE dep.classid = 'pg_catalog.pg_rewrite'::regclass \
+       AND dep.refclassid = 'pg_catalog.pg_class'::regclass \
+       AND src.relkind IN ('v', 'm') \
+       AND dep.refobjid = ANY(ARRAY( \
+         SELECT to_regclass(ref_name) FROM unnest($1::text[]) AS ref_name \
+         WHERE to_regclass(ref_name) IS NOT NULL)) \
+       AND dep.refobjid <> src.oid \
+     ORDER BY view_kind, src_ns.nspname, src.relname";
+
+/// A view or materialized view that depends on one of the exported tables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostgresExportDependentView {
+    schema: String,
+    name: String,
+    materialized: bool,
+}
+
+async fn list_postgres_export_table_dependent_views(
+    state: &crate::connection::AppState,
+    pool_key: &str,
+    schema: &str,
+    table_names: &[String],
+) -> Result<Vec<PostgresExportDependentView>, String> {
+    let pool = {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
+            Some(crate::connection::PoolKind::Postgres(pool)) => pool.clone(),
+            _ => return Ok(Vec::new()),
+        }
+    };
+    let table_refs = table_names
+        .iter()
+        .map(|table| crate::transfer::qualified_table(table, schema, &DatabaseType::Postgres, None))
+        .collect::<Vec<_>>();
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let client = crate::db::postgres::PostgresTextClient::new(&client);
+    let rows = client
+        .query(POSTGRES_EXPORT_TABLE_DEPENDENT_VIEWS_SQL, &[&table_refs])
+        .await
+        .map_err(|e| format!("listing dependent views: {e}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| PostgresExportDependentView {
+            schema: row.get::<_, String>(0),
+            name: row.get::<_, String>(1),
+            materialized: row.get::<_, String>(2) == "m",
+        })
+        .collect())
+}
+
+/// What the pre-cleanup block may say about one group of dependent views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostgresDependentViewNotice {
+    /// The export recreates them, so dropping them first is lossless.
+    Recreated,
+    /// The export does not recreate them; the table cascade removes them.
+    NotExported,
+    /// They live in another schema and only survive when that schema is part of
+    /// the same export.
+    OtherSchema,
+}
+
+/// Renders the PostgreSQL pre-cleanup block written near the top of an export.
+///
+/// The views that depend on the exported tables are dropped before any table is
+/// touched, which is the ordering `pg_dump --clean` uses. `CASCADE` belongs on
+/// the view drops rather than the table drops: on a view it can only remove
+/// dependent views, so tables, sequences and routines stay untouched.
+///
+/// Views that are not part of the export must not be dropped -- there is no
+/// definition in the file to recreate them with. Then the block only documents
+/// the collateral damage of the `DROP TABLE ... CASCADE` statements that follow.
+fn postgres_export_dependent_views_sql(
+    views: &[PostgresExportDependentView],
+    notice: PostgresDependentViewNotice,
+) -> String {
+    if views.is_empty() {
+        return String::new();
+    }
+    let qualified = |view: &PostgresExportDependentView| {
+        crate::transfer::qualified_table(&view.name, &view.schema, &DatabaseType::Postgres, None)
+    };
+    let mut sql = String::new();
+    match notice {
+        PostgresDependentViewNotice::Recreated => {
+            sql.push_str(
+                "-- Drop views before the tables they depend on: PostgreSQL rejects\n\
+                 -- DROP TABLE while a view depends on it. CASCADE is scoped to views, so\n\
+                 -- tables, sequences and routines stay untouched. Every object dropped\n\
+                 -- here is recreated later in this file.\n",
+            );
+            for view in views {
+                let keyword = if view.materialized { "MATERIALIZED VIEW" } else { "VIEW" };
+                sql.push_str(&format!("DROP {keyword} IF EXISTS {} CASCADE;\n", qualified(view)));
+            }
+        }
+        PostgresDependentViewNotice::NotExported => {
+            sql.push_str(
+                "-- WARNING: the views below depend on tables exported here but are NOT\n\
+                 -- part of this export, so they are not recreated. The DROP TABLE ...\n\
+                 -- CASCADE statements in this file remove them and their definitions are\n\
+                 -- lost. Enable views/procedures/functions/sequences in the export\n\
+                 -- options to keep them, or recreate them manually after restoring.\n",
+            );
+            for view in views {
+                let kind = if view.materialized { "materialized view" } else { "view" };
+                sql.push_str(&format!("--   {kind} {}\n", qualified(view)));
+            }
+        }
+        PostgresDependentViewNotice::OtherSchema => {
+            sql.push_str(
+                "-- NOTE: these views in other schemas also depend on the exported tables.\n\
+                 -- They are removed by the CASCADE above and are only recreated when this\n\
+                 -- export contains their schema as well.\n",
+            );
+            for view in views {
+                let kind = if view.materialized { "materialized view" } else { "view" };
+                sql.push_str(&format!("--   {kind} {}\n", qualified(view)));
+            }
+        }
+    }
+    sql.push('\n');
+    sql
+}
+
 fn mysql_database_export_preamble(database: &str, charset: Option<&str>, collation: Option<&str>) -> String {
     let database = quote_identifier(database, &DatabaseType::Mysql);
     let charset = charset.map(str::trim).filter(|value| !value.is_empty());
@@ -5526,6 +5664,53 @@ async fn export_database_sql_core_inner_with_phases(
         }
     }
 
+    // PostgreSQL rejects `DROP TABLE` while a view depends on it, so resolve the
+    // dependent views before anything is written: the pre-cleanup block belongs
+    // ahead of the table DDL, and the table drops only skip CASCADE when that
+    // block recreates every view they rely on (see `postgres_views_precleaned`).
+    let postgres_dependent_views = if db_type == DatabaseType::Postgres
+        && request.include_structure
+        && request.drop_table_if_exists
+        && !tables.is_empty()
+    {
+        let table_names: Vec<String> = tables.iter().map(|table| table.name.clone()).collect();
+        match await_export_operation(
+            &request.export_id,
+            Box::pin(list_postgres_export_table_dependent_views(state, &pool_key, &request.schema, &table_names)),
+        )
+        .await
+        {
+            Ok(views) => views,
+            Err(error) if error == EXPORT_CANCELLED_ERROR => return Err(EXPORT_CANCELLED_ERROR.to_string()),
+            Err(error) => {
+                record_export_error(
+                    &mut file,
+                    request.fail_on_error,
+                    format!("resolving dependent views: {error}"),
+                    &mut lenient_errors,
+                )?;
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    // Only views this export recreates may be dropped up front. A dependent view
+    // that was excluded -- or never selected because `include_objects` is off --
+    // has to stay untouched: dropping it would delete the object with no
+    // definition in the file to restore. Views owned by another schema travel the
+    // same way: they are only recreated when that schema is exported too.
+    let exported_view_names: HashSet<&str> =
+        if request.include_objects { views.iter().map(|view| view.name.as_str()).collect() } else { HashSet::new() };
+    let (postgres_views_to_recreate, postgres_views_other): (Vec<_>, Vec<_>) = postgres_dependent_views
+        .into_iter()
+        .partition(|view| view.schema == request.schema && exported_view_names.contains(view.name.as_str()));
+    let (postgres_views_other_schema, postgres_views_outside_export): (Vec<_>, Vec<_>) =
+        postgres_views_other.into_iter().partition(|view| view.schema != request.schema);
+    let postgres_views_precleaned = db_type == DatabaseType::Postgres
+        && !postgres_views_to_recreate.is_empty()
+        && postgres_views_outside_export.is_empty();
+
     // 8. Discover optional schema-wide objects before calculating workload.
     let mut procedures: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut functions: Vec<crate::types::ObjectInfo> = Vec::new();
@@ -5766,6 +5951,17 @@ async fn export_database_sql_core_inner_with_phases(
         }
     }
 
+    for (views, notice) in [
+        (&postgres_views_to_recreate, PostgresDependentViewNotice::Recreated),
+        (&postgres_views_outside_export, PostgresDependentViewNotice::NotExported),
+        (&postgres_views_other_schema, PostgresDependentViewNotice::OtherSchema),
+    ] {
+        let block = postgres_export_dependent_views_sql(views, notice);
+        if !block.is_empty() {
+            writeln!(file, "{block}").map_err(|e| format!("Failed to write file: {e}"))?;
+        }
+    }
+
     for extension in &postgres_extensions {
         if is_export_cancelled(&request.export_id).await {
             return Err("Export cancelled".to_string());
@@ -5918,8 +6114,12 @@ async fn export_database_sql_core_inner_with_phases(
         // Export structure
         if request.include_structure {
             if request.drop_table_if_exists {
-                writeln!(file, "{}", drop_table_if_exists_sql(table_name, &request.schema, &db_type))
-                    .map_err(|e| format!("Failed to write file: {e}"))?;
+                writeln!(
+                    file,
+                    "{}",
+                    drop_table_if_exists_sql(table_name, &request.schema, &db_type, !postgres_views_precleaned)
+                )
+                .map_err(|e| format!("Failed to write file: {e}"))?;
             }
             for sequence in postgres_sequences.iter().filter(|sequence| {
                 !sequence.created_by_table && sequence.owner_table.as_deref() == Some(table_name.as_str())
@@ -6762,8 +6962,15 @@ fn filter_export_table_infos(
         .collect()
 }
 
-fn drop_table_if_exists_sql(table_name: &str, schema: &str, db_type: &DatabaseType) -> String {
-    let cascade = if db_type == &DatabaseType::Postgres { " CASCADE" } else { "" };
+/// `DROP TABLE IF EXISTS` for one exported table.
+///
+/// PostgreSQL needs `CASCADE` only while something still depends on the table.
+/// Once the export drops the dependent views ahead of the table DDL (see
+/// [`postgres_export_dependent_views_sql`]) the cascade is dropped as well: a
+/// stray `CASCADE` on the table is what silently removes views that live in the
+/// target database but outside the export.
+fn drop_table_if_exists_sql(table_name: &str, schema: &str, db_type: &DatabaseType, cascade: bool) -> String {
+    let cascade = if cascade && db_type == &DatabaseType::Postgres { " CASCADE" } else { "" };
     format!("DROP TABLE IF EXISTS {}{};", crate::transfer::qualified_table(table_name, schema, db_type, None), cascade)
 }
 
@@ -6836,6 +7043,16 @@ fn build_database_export_object_source_sql_unwrapped(
     } else {
         source
     };
+    if is_postgres_export_materialized_view(&source) {
+        // Materialized views have no `CREATE OR REPLACE`, and a plain `CREATE
+        // MATERIALIZED VIEW` fails with `relation already exists` when the
+        // restore target still has it. Dropping it first is the only executable
+        // shape; the CREATE below rebuilds the data.
+        return format!(
+            "DROP MATERIALIZED VIEW IF EXISTS {} CASCADE;\n{source}",
+            crate::transfer::qualified_table(object_name, schema, &database_type, None)
+        );
+    }
     if source.is_empty() || !drop_if_exists || database_type != DatabaseType::Mysql {
         return source;
     }
@@ -6850,6 +7067,16 @@ fn build_database_export_object_source_sql_unwrapped(
     };
     let object_name = quote_identifier(object_name, &DatabaseType::Mysql);
     format!("DROP {object_type} IF EXISTS {object_name};\n{source}")
+}
+
+/// Whether an object source begins a materialized view definition.
+///
+/// PostgreSQL has no `CREATE OR REPLACE MATERIALIZED VIEW`, so the keyword
+/// sequence is the only kind marker the source text carries.
+fn is_postgres_export_materialized_view(source: &str) -> bool {
+    let source = source.trim_start();
+    let upper = source.get(..64).unwrap_or(source).to_ascii_uppercase();
+    upper.starts_with("CREATE MATERIALIZED VIEW") || upper.starts_with("CREATE OR REPLACE MATERIALIZED VIEW")
 }
 
 /// agent 序列源以空行分块（create sequence / alter ... owner to / alter ... owned by），
@@ -6880,18 +7107,19 @@ mod tests {
         format_sqlserver_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_enum_ddl,
         generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
         generate_postgres_sequence_post_table_ddl, generate_postgres_sequence_setval_sql, is_dameng_auto_increment_ddl,
-        is_postgres_extension_member_routine, linux_f_type_is_network_filesystem, linux_mount_source_from_mountinfo,
-        linux_mount_source_from_proc, linux_network_file_identity_from_mountinfo, mysql_database_export_preamble,
-        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
-        record_export_destination_identity, record_export_error, remaining_rows_under_limit,
-        replace_database_export_select_list, sort_export_views_by_dependencies, sorted_cap_order_expression,
-        split_postgres_export_table_ddl, write_database_export_rows, write_database_export_rows_with_mode,
-        write_row_limit_sort_fallback_comment, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
-        BuildExportSqlInsertOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
-        DdlNormalizeOptions, ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
-        PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
-        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
-        POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
+        is_postgres_export_materialized_view, is_postgres_extension_member_routine, linux_f_type_is_network_filesystem,
+        linux_mount_source_from_mountinfo, linux_mount_source_from_proc, linux_network_file_identity_from_mountinfo,
+        mysql_database_export_preamble, mysql_view_dependencies_from_rows, mysql_view_dependencies_sql,
+        normalize_export_table_ddl, postgres_export_dependent_views_sql, record_export_destination_identity,
+        record_export_error, remaining_rows_under_limit, replace_database_export_select_list,
+        sort_export_views_by_dependencies, sorted_cap_order_expression, split_postgres_export_table_ddl,
+        write_database_export_rows, write_database_export_rows_with_mode, write_row_limit_sort_fallback_comment,
+        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
+        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions,
+        ExportDestinationIdentity, ExportedTableSql, PostgresDependentViewNotice, PostgresExportDependentView,
+        PostgresExportEnum, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
+        SqlInsertDialect, SqlInsertMode, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
     };
     use super::{
         await_export_operation, await_export_stream_operation, clear_export_cancelled, combine_schema_sql_export,
@@ -8475,16 +8703,119 @@ mod tests {
 
     #[test]
     fn builds_drop_table_if_exists_with_qualified_mysql_name() {
-        let sql = drop_table_if_exists_sql("users", "app", &DatabaseType::Mysql);
+        let sql = drop_table_if_exists_sql("users", "app", &DatabaseType::Mysql, true);
 
         assert_eq!(sql, "DROP TABLE IF EXISTS `users`;");
     }
 
     #[test]
     fn builds_drop_table_if_exists_without_empty_schema() {
-        let sql = drop_table_if_exists_sql("users", "", &DatabaseType::Postgres);
+        let sql = drop_table_if_exists_sql("users", "", &DatabaseType::Postgres, true);
 
         assert_eq!(sql, "DROP TABLE IF EXISTS \"users\" CASCADE;");
+    }
+
+    #[test]
+    fn postgres_table_drop_skips_cascade_once_views_are_precleaned() {
+        let sql = drop_table_if_exists_sql("users", "public", &DatabaseType::Postgres, false);
+
+        assert_eq!(sql, "DROP TABLE IF EXISTS \"public\".\"users\";");
+    }
+
+    #[test]
+    fn postgres_precleanup_drops_dependent_views_before_tables() {
+        let views = vec![
+            PostgresExportDependentView {
+                schema: "public".to_string(),
+                name: "active_users".to_string(),
+                materialized: false,
+            },
+            PostgresExportDependentView {
+                schema: "public".to_string(),
+                name: "user_rollup".to_string(),
+                materialized: true,
+            },
+        ];
+
+        let sql = postgres_export_dependent_views_sql(&views, PostgresDependentViewNotice::Recreated);
+
+        assert!(sql.contains("DROP VIEW IF EXISTS \"public\".\"active_users\" CASCADE;"), "{sql}");
+        assert!(sql.contains("DROP MATERIALIZED VIEW IF EXISTS \"public\".\"user_rollup\" CASCADE;"), "{sql}");
+        // Views are the only cascade target: the table drops that follow carry no CASCADE.
+        assert!(!sql.lines().any(|line| line.trim_start().starts_with("DROP TABLE")), "{sql}");
+    }
+
+    #[test]
+    fn postgres_precleanup_warns_when_views_are_not_exported() {
+        let views = vec![PostgresExportDependentView {
+            schema: "public".to_string(),
+            name: "active_users".to_string(),
+            materialized: false,
+        }];
+
+        let sql = postgres_export_dependent_views_sql(&views, PostgresDependentViewNotice::NotExported);
+
+        assert!(sql.starts_with("-- WARNING:"), "{sql}");
+        assert!(sql.contains("--   view \"public\".\"active_users\""), "{sql}");
+        assert!(!sql.contains("DROP VIEW"), "{sql}");
+    }
+
+    #[test]
+    fn postgres_precleanup_is_empty_without_dependent_views() {
+        for notice in [
+            PostgresDependentViewNotice::Recreated,
+            PostgresDependentViewNotice::NotExported,
+            PostgresDependentViewNotice::OtherSchema,
+        ] {
+            assert_eq!(postgres_export_dependent_views_sql(&[], notice), "");
+        }
+    }
+
+    #[test]
+    fn postgres_precleanup_notes_cross_schema_views() {
+        let views = vec![PostgresExportDependentView {
+            schema: "reporting".to_string(),
+            name: "daily_totals".to_string(),
+            materialized: false,
+        }];
+
+        let sql = postgres_export_dependent_views_sql(&views, PostgresDependentViewNotice::OtherSchema);
+
+        assert!(sql.contains("--   view \"reporting\".\"daily_totals\""), "{sql}");
+        assert!(!sql.lines().any(|line| line.trim_start().starts_with("DROP ")), "{sql}");
+    }
+
+    #[test]
+    fn postgres_materialized_view_export_drops_before_create() {
+        let sql = build_database_export_object_source_sql(
+            DatabaseType::Postgres,
+            &ObjectSourceKind::View,
+            "user_rollup",
+            "CREATE MATERIALIZED VIEW public.user_rollup AS SELECT 1",
+            "public",
+            false,
+        );
+
+        assert_eq!(
+            sql,
+            "DROP MATERIALIZED VIEW IF EXISTS \"public\".\"user_rollup\" CASCADE;\n\
+             CREATE MATERIALIZED VIEW public.user_rollup AS SELECT 1;"
+        );
+    }
+
+    #[test]
+    fn plain_postgres_view_export_keeps_create_or_replace() {
+        let sql = build_database_export_object_source_sql(
+            DatabaseType::Postgres,
+            &ObjectSourceKind::View,
+            "active_users",
+            "CREATE OR REPLACE VIEW public.active_users AS SELECT 1",
+            "public",
+            true,
+        );
+
+        assert_eq!(sql, "CREATE OR REPLACE VIEW public.active_users AS SELECT 1;");
+        assert!(!is_postgres_export_materialized_view(&sql));
     }
 
     #[test]

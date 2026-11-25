@@ -70,6 +70,8 @@ All-database export is serial orchestration of independent logical exports. It i
 
 When enabled, DBX writes database-adapted `DROP TABLE IF EXISTS` statements before the matching `CREATE TABLE`. Running the script can delete target data, so review this option carefully.
 
+PostgreSQL additionally gets a dependency pre-cleanup block at the top of the file: a database refuses `DROP TABLE` while a view depends on the table. DBX drops the dependent views first, in dependency order (`DROP VIEW IF EXISTS ... CASCADE` / `DROP MATERIALIZED VIEW IF EXISTS ... CASCADE`), and only then drops the tables -- so the table statements carry no `CASCADE` and cannot touch unrelated objects. This relies on the views being exported too: enable "views / procedures / functions / sequences" so they are recreated. With that option disabled the file only carries a comment warning that `DROP TABLE ... CASCADE` removes the target database's dependent views without recreating them.
+
 ### MySQL Create Database
 
 MySQL exports can add `CREATE DATABASE IF NOT EXISTS` and `USE` at the beginning. The importing account needs appropriate privileges. The option is off by default to avoid unexpected database creation or context switching.

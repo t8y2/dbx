@@ -10524,6 +10524,7 @@ export default withEnglishFallback({
     includeStructure: "Struktur tabel (DDL)",
     includeCreateDatabase: "Sertakan pengaturan database (CREATE DATABASE / USE)",
     dropTableIfExists: "Tambahkan DROP TABLE IF EXISTS sebelum DDL",
+    dropTableIfExistsWithoutObjects: "Jika tampilan/prosedur/fungsi/urutan tidak disertakan, pemulihan juga menghapus tampilan yang bergantung pada tabel ini dan tidak membuatnya ulang (DROP TABLE … CASCADE).",
     omitAutoIncrement: "Abaikan AUTO_INCREMENT (untuk skrip instalasi baru)",
     omitDatabaseQualifier: "Hilangkan awalan DB pada nama tabel",
     preserveOriginalLanguage: "Pertahankan bahasa asli dalam SQL (dekode escape \\uXXXX)",

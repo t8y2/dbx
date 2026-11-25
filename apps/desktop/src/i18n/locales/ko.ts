@@ -11275,6 +11275,7 @@ export default withEnglishFallback({
     includeStructure: "테이블 구조 (DDL)",
     includeCreateDatabase: "데이터베이스 설정 포함 (CREATE DATABASE / USE)",
     dropTableIfExists: "DDL 앞에 DROP TABLE IF EXISTS 추가",
+    dropTableIfExistsWithoutObjects: "뷰/저장 프로시저/함수/시퀀스를 선택하지 않으면 복원 시 이 테이블에 의존하는 기존 뷰도 삭제되며 다시 생성되지 않습니다(DROP TABLE … CASCADE).",
     omitAutoIncrement: "AUTO_INCREMENT 생략 (초기 설치 스크립트용)",
     omitDatabaseQualifier: "테이블 이름에서 DB 접두사 생략",
     preserveOriginalLanguage: "SQL에 원본 언어 유지 (\\uXXXX 이스케이프 디코딩)",

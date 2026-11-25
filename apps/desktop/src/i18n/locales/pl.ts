@@ -10585,6 +10585,7 @@ export default withEnglishFallback({
     includeStructure: "Struktura tabel (DDL)",
     includeCreateDatabase: "Instrukcje tworzenia bazy (CREATE DATABASE / USE)",
     dropTableIfExists: "Dodaj DROP TABLE IF EXISTS przed DDL",
+    dropTableIfExistsWithoutObjects: "Gdy widoki/procedury/funkcje/sekwencje nie są eksportowane, przywracanie usuwa także istniejące widoki zależne od tych tabel i nie odtwarza ich (DROP TABLE … CASCADE).",
     omitAutoIncrement: "Pomiń AUTO_INCREMENT (dla skryptów czystej instalacji)",
     omitDatabaseQualifier: "Pomiń prefiks bazy w nazwach tabel",
     preserveOriginalLanguage: "Zachowaj oryginalny język w SQL (dekoduj sekwencje \\uXXXX)",

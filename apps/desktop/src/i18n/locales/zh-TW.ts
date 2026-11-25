@@ -10276,6 +10276,7 @@ export default withEnglishFallback({
     includeStructure: "資料表結構 (DDL)",
     includeCreateDatabase: "匯出建庫語句（CREATE DATABASE / USE）",
     dropTableIfExists: "匯出前新增 DROP TABLE IF EXISTS",
+    dropTableIfExistsWithoutObjects: "未勾選「檢視表 / 預存程序 / 函式 / 序列」時，還原會一併刪除目標資料庫中相依這些表的檢視表，且不會重建（DROP TABLE … CASCADE）。",
     omitAutoIncrement: "省略 AUTO_INCREMENT（用於全新安裝的初始化腳本）",
     omitDatabaseQualifier: "表名省略庫名前綴",
     preserveOriginalLanguage: "在 SQL 中保留原始語言（解碼 \\uXXXX 轉義）",

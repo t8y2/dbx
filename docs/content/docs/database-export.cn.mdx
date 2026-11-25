@@ -70,6 +70,8 @@ Desktop 导出成功后可以从任务结果直接在文件管理器中打开输
 
 启用后，会在对应 `CREATE TABLE` 前写入数据库适配的 `DROP TABLE IF EXISTS`。执行导出文件时，这会删除目标表及其数据，应谨慎使用。
 
+PostgreSQL 会额外在文件开头写入依赖视图的清理语句：视图依赖表时，数据库会拒绝 `DROP TABLE`。DBX 先按依赖顺序 `DROP VIEW IF EXISTS ... CASCADE` / `DROP MATERIALIZED VIEW IF EXISTS ... CASCADE`，随后再删表，因此删表语句本身不需要 `CASCADE`，也不会波及其他对象。前提是同时勾选“视图 / 存储过程 / 函数 / 序列”以重建这些视图；未勾选时导出文件只保留一条注释警告，说明 `DROP TABLE ... CASCADE` 会删除目标库中依赖这些表的视图且不会重建。
+
 ### MySQL 创建数据库
 
 MySQL 可以在文件开头加入 `CREATE DATABASE IF NOT EXISTS` 和 `USE`。导入账号需要相应权限；默认关闭，避免脚本意外创建或切换数据库。

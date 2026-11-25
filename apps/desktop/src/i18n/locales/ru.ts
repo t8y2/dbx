@@ -12773,6 +12773,7 @@ export default withEnglishFallback({
     includeStructure: "Структура таблиц (DDL)",
     includeCreateDatabase: "Включить создание базы данных (CREATE DATABASE / USE)",
     dropTableIfExists: "Добавлять DROP TABLE IF EXISTS перед DDL",
+    dropTableIfExistsWithoutObjects: "Если представления/процедуры/функции/последовательности не экспортируются, восстановление также удаляет существующие представления, зависящие от этих таблиц, и не пересоздаёт их (DROP TABLE … CASCADE).",
     omitAutoIncrement: "Пропускать AUTO_INCREMENT (для скриптов чистой установки)",
     omitDatabaseQualifier: "Опускать префикс БД в именах таблиц",
     preserveOriginalLanguage: "Сохранять исходный язык в SQL (декодировать escape-последовательности \\uXXXX)",

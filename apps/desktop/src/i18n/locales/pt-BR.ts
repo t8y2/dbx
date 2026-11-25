@@ -1180,6 +1180,7 @@ export default withEnglishFallback({
     blockedRetryConsequence: "Após a confirmação, as consultas em execução serão canceladas, as tarefas em segundo plano serão encerradas e as transações não confirmadas serão revertidas; as alterações não confirmadas na transação serão perdidas.",
     blockedRetryAccept: "Fechar tudo e continuar",
     settleItemFailed: "Não foi possível interromper {target}: {error}",
+    settleItemUnconfirmed: "{target} não confirmou que parou.",
     settleItemRunning: "{target} ainda está em execução.",
     preparationAiRuns: "Uma conversa de IA ainda está em execução. Aguarde o término ou interrompa-a antes de atualizar.",
   },

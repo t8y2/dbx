@@ -21,10 +21,12 @@ function makeHost(state: UpdateSettleSnapshot) {
     cancelExecution: async (id) => {
       calls.push(`cancelExecution:${id}`);
       state.executions = state.executions.filter((tab) => tab.id !== id);
+      return true;
     },
     cancelExplain: async (id) => {
       calls.push(`cancelExplain:${id}`);
       state.explains = state.explains.filter((tab) => tab.id !== id);
+      return true;
     },
     rollbackTransaction: async (id) => {
       calls.push(`rollback:${id}`);
@@ -97,7 +99,7 @@ describe("settleUpdateWork", () => {
 
     const failures = await settleUpdateWork(host, { timeoutMs: 10, pollMs: 1 });
 
-    expect(failures).toEqual([{ kind: "execution", id: "tab-1", label: "orders", error: "backend offline" }]);
+    expect(failures).toEqual([{ kind: "execution", id: "tab-1", label: "orders", reason: "rejected", error: "backend offline" }]);
   });
 
   it("keeps the reason a transaction rollback failed", async () => {
@@ -106,16 +108,61 @@ describe("settleUpdateWork", () => {
       throw new Error("rollback rejected");
     };
 
-    await expect(settleUpdateWork(host, { timeoutMs: 10, pollMs: 1 })).resolves.toEqual([{ kind: "transaction", id: "tab-1", label: "customers", error: "rollback rejected" }]);
+    await expect(settleUpdateWork(host, { timeoutMs: 10, pollMs: 1 })).resolves.toEqual([{ kind: "transaction", id: "tab-1", label: "customers", reason: "rejected", error: "rollback rejected" }]);
   });
 
-  it("reports work that never stops, once, without an error", async () => {
+  it("reports work that never stops, once, as still running", async () => {
     const { host } = makeHost(makeState({ executions: [item("tab-1", "orders")] }));
     host.cancelExecution = async () => true;
 
     const failures = await settleUpdateWork(host, { timeoutMs: 5, pollMs: 1 });
 
-    expect(failures).toEqual([{ kind: "execution", id: "tab-1", label: "orders", error: undefined }]);
+    expect(failures).toEqual([{ kind: "execution", id: "tab-1", label: "orders", reason: "still-running" }]);
+  });
+
+  it("treats a `false` answer as an unconfirmed cancellation, not a stop", async () => {
+    // cancelTabExplain clears the local state before the backend answers, so the
+    // snapshot says "stopped" even when the cancellation was refused.
+    const state = makeState({ explains: [item("tab-1", "explain orders")] });
+    const { host } = makeHost(state);
+    host.cancelExplain = async () => {
+      state.explains = [];
+      return false;
+    };
+
+    await expect(settleUpdateWork(host, { timeoutMs: 20, pollMs: 1 })).resolves.toEqual([{ kind: "explain", id: "tab-1", label: "explain orders", reason: "unconfirmed" }]);
+  });
+
+  it("treats a `false` answer for a query as unconfirmed too", async () => {
+    const state = makeState({ executions: [item("tab-1", "orders")] });
+    const { host } = makeHost(state);
+    host.cancelExecution = async () => {
+      state.executions = [];
+      return false;
+    };
+
+    await expect(settleUpdateWork(host, { timeoutMs: 20, pollMs: 1 })).resolves.toEqual([{ kind: "execution", id: "tab-1", label: "orders", reason: "unconfirmed" }]);
+  });
+
+  it("does not hang on a cancellation that never returns", async () => {
+    const state = makeState({ executions: [item("tab-1", "orders")] });
+    const { host } = makeHost(state);
+    host.cancelExecution = () => new Promise(() => {});
+
+    const startedAt = Date.now();
+    const failures = await settleUpdateWork(host, { timeoutMs: 30, pollMs: 1 });
+
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+    expect(failures).toEqual([{ kind: "execution", id: "tab-1", label: "orders", reason: "unconfirmed" }]);
+  });
+
+  it("does not hang on a rollback that never returns", async () => {
+    const { host } = makeHost(makeState({ transactions: [item("tab-1", "customers")] }));
+    host.rollbackTransaction = () => new Promise(() => {});
+
+    const failures = await settleUpdateWork(host, { timeoutMs: 30, pollMs: 1 });
+
+    expect(failures).toEqual([{ kind: "transaction", id: "tab-1", label: "customers", reason: "unconfirmed" }]);
   });
 
   it("settles work that started after the prompt appeared", async () => {
@@ -137,6 +184,7 @@ describe("settleUpdateWork", () => {
       calls.push(`cancelExecution:${id}`);
       state.executions = [];
       state.transactions = [];
+      return true;
     };
 
     await settleUpdateWork(host);

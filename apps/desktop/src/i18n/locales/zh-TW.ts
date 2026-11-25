@@ -1113,6 +1113,7 @@ export default withEnglishFallback({
     blockedRetryConsequence: "確認後會取消正在執行的查詢、終止背景工作，並回滾未提交的交易；交易中尚未提交的修改會遺失。",
     blockedRetryAccept: "全部關閉並繼續",
     settleItemFailed: "{target} 未能停止：{error}",
+    settleItemUnconfirmed: "{target} 未能確認已停止。",
     settleItemRunning: "{target} 仍在執行。",
     preparationAiRuns: "AI 對話仍在執行，請等待結束或先停止後再更新。",
     preparing: "正在準備更新…",

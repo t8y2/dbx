@@ -1262,6 +1262,7 @@ export default withEnglishFallback({
     blockedRetryConsequence: "เมื่อยืนยันแล้ว ระบบจะยกเลิกคิวรีที่กำลังดำเนินการ ยุติงานเบื้องหลัง และย้อนกลับธุรกรรมที่ยังไม่ได้คอมมิต; การแก้ไขที่ยังไม่ได้คอมมิตในธุรกรรมจะสูญหาย",
     blockedRetryAccept: "ปิดทั้งหมดและดำเนินการต่อ",
     settleItemFailed: "ไม่สามารถหยุด {target} ได้: {error}",
+    settleItemUnconfirmed: "ไม่ได้รับการยืนยันว่า {target} หยุดแล้ว",
     settleItemRunning: "{target} ยังคงทำงานอยู่",
     preparationAiRuns: "บทสนทนา AI ยังคงทำงานอยู่ โปรดรอให้เสร็จหรือหยุดก่อนอัปเดต",
   },

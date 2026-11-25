@@ -1180,6 +1180,7 @@ export default withEnglishFallback({
     blockedRetryConsequence: "確認すると、実行中のクエリがキャンセルされ、バックグラウンドタスクが終了され、未コミットのトランザクションがロールバックされます。トランザクション内の未コミットの変更は失われます。",
     blockedRetryAccept: "すべて閉じて続行",
     settleItemFailed: "{target} を停止できませんでした：{error}",
+    settleItemUnconfirmed: "{target} の停止を確認できませんでした。",
     settleItemRunning: "{target} はまだ実行中です。",
     preparationAiRuns: "AI との会話がまだ実行中です。終了を待つか停止してから更新してください。",
   },

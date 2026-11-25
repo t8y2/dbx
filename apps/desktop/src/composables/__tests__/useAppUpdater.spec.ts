@@ -416,6 +416,25 @@ describe("silent update lifecycle", () => {
     expect(updater.updateCheckFailed.value).toBe(true);
     expect(updater.updateCheckMessage.value).toContain("a new query started");
   });
+  it("a failed cleanup can be retried without restarting DBX", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const prepare = vi
+      .fn()
+      .mockRejectedValueOnce(new UpdatePreparationError("2 tasks running", "tasks"))
+      .mockRejectedValueOnce(new UpdatePreparationError("orders could not be stopped: backend offline", "settle_failed"))
+      .mockResolvedValueOnce(() => {});
+    const updater = mount({ prepareForUpdate: prepare });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+    await updater.confirmBlockedInstall();
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+
+    // The package is still there and the error is not terminal: retrying installs.
+    await updater.installDownloadedUpdate();
+
+    expect(mocks.installDownloadedUpdate).toHaveBeenCalledWith("cached", "1.1.0");
+    expect(updater.updateCheckFailed.value).toBe(false);
+  });
   it("retries only restart after relaunch fails", async () => {
     mocks.relaunchApp.mockRejectedValueOnce(new Error("restart failed"));
     const updater = mount();

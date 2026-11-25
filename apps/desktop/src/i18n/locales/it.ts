@@ -1179,6 +1179,7 @@ export default withEnglishFallback({
     blockedRetryConsequence: "Dopo la conferma, le query in esecuzione verranno annullate, le attività in background terminate e verrà eseguito il rollback delle transazioni non confermate; le modifiche non ancora confermate nelle transazioni andranno perse.",
     blockedRetryAccept: "Chiudi tutto e continua",
     settleItemFailed: "Impossibile fermare {target}: {error}",
+    settleItemUnconfirmed: "{target} non ha confermato l'arresto.",
     settleItemRunning: "{target} è ancora in esecuzione.",
     preparationAiRuns: "Una conversazione IA è ancora in esecuzione. Attendine la fine o interrompila prima di aggiornare.",
   },

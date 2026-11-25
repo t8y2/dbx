@@ -1160,6 +1160,7 @@ export default withEnglishFallback({
     blockedRetryConsequence: "После подтверждения выполняемые запросы будут отменены, фоновые задачи остановлены, а незафиксированные транзакции откачены; незафиксированные изменения в транзакциях будут потеряны.",
     blockedRetryAccept: "Закрыть все и продолжить",
     settleItemFailed: "Не удалось остановить {target}: {error}",
+    settleItemUnconfirmed: "{target}: остановка не подтверждена.",
     settleItemRunning: "{target} всё ещё выполняется.",
     preparationAiRuns: "Диалог с ИИ всё ещё выполняется. Дождитесь его завершения или остановите его перед обновлением.",
   },

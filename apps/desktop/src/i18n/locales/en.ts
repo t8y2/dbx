@@ -1342,6 +1342,7 @@ export default {
     blockedRetryConsequence: "Confirming cancels the running queries, stops background tasks and rolls back open transactions. Uncommitted changes in those transactions will be lost.",
     blockedRetryAccept: "Close all and continue",
     settleItemFailed: "{target} could not be stopped: {error}",
+    settleItemUnconfirmed: "{target} did not confirm it stopped.",
     settleItemRunning: "{target} is still running.",
     preparationAiRuns: "An AI conversation is still running. Wait for it to finish, or stop it, before updating.",
     preparing: "Preparing update…",

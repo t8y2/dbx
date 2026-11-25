@@ -1760,7 +1760,9 @@ async function consumePendingComponentUpdatesAfterRestart() {
 const UPDATE_SETTLE_TIMEOUT_MS = 10_000;
 
 function describeSettleFailure(failure: UpdateSettleFailure): string {
-  return failure.error ? t("updates.settleItemFailed", { target: failure.label, error: failure.error }) : t("updates.settleItemRunning", { target: failure.label });
+  if (failure.reason === "rejected") return t("updates.settleItemFailed", { target: failure.label, error: failure.error ?? "" });
+  if (failure.reason === "unconfirmed") return t("updates.settleItemUnconfirmed", { target: failure.label });
+  return t("updates.settleItemRunning", { target: failure.label });
 }
 
 async function settleUpdateBlockers() {

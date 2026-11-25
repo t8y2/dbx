@@ -1186,6 +1186,7 @@ export default withEnglishFallback({
     blockedRetryConsequence: "확인하면 실행 중인 쿼리가 취소되고, 백그라운드 작업이 종료되며, 커밋되지 않은 트랜잭션이 롤백됩니다. 트랜잭션에서 아직 커밋되지 않은 변경 사항은 손실됩니다.",
     blockedRetryAccept: "모두 닫고 계속",
     settleItemFailed: "{target}을(를) 중지하지 못했습니다: {error}",
+    settleItemUnconfirmed: "{target}의 중지가 확인되지 않았습니다.",
     settleItemRunning: "{target}이(가) 아직 실행 중입니다.",
     preparationAiRuns: "AI 대화가 아직 실행 중입니다. 완료될 때까지 기다리거나 중지한 후 업데이트하세요.",
   },

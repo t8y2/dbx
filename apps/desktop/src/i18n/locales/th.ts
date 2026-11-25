@@ -4582,8 +4582,6 @@ export default withEnglishFallback({
     astraflowSponsored: "เครดิตฟรี ¥50",
     packyapiSponsored: "เครดิตฟรี $1",
     packyapiDescription: "⚡ PackyCode คือ API Relay ที่เสถียรสำหรับโมเดล AI กระแสหลัก — Endpoint เดียว Key เดียว Failover อัตโนมัติ และ Route ความเร็วสูงเฉพาะสำหรับ Codex และ Claude Code\n🎁ผู้ใช้ใหม่รับเครดิตฟรี $1 พร้อมส่วนลดเติมเงินครั้งแรก จ่ายเป็น RMB ในอัตรา 1:1 โดยไม่มีส่วนเพิ่มจากการแปลง และส่วนลดกลุ่มสูงสุด 80%",
-    hiapiSponsored: "ฟรี 200 Credits",
-    hiapiDescription: "HiAPI คือแพลตฟอร์ม API ที่มุ่งเน้นนักพัฒนาสำหรับโมเดลรูปภาพ วิดีโอ เสียง และข้อความ โมเดลข้อความใช้ Endpoint ที่เข้ากันได้กับ OpenAI และ Remote MCP พร้อม Agent Skills เชื่อมบัญชีเดียวกันกับ Claude Code, Cursor และ Coding Agent อื่น\n🎁ผู้ใช้ใหม่รับ 200 Credits เมื่อลงทะเบียน พร้อม Credits โบนัส 10% เมื่อเติมเงิน",
     visitPartner: "เยี่ยมชมเว็บไซต์พาร์ตเนอร์",
     getApiKey: "รับ API Key",
     defaultModel: "โมเดลเริ่มต้น",

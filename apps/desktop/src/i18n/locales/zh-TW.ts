@@ -1682,6 +1682,7 @@ export default withEnglishFallback({
     nacosMetricsUrl: "指標位址",
     nacosMetricsUrlInvalid: "請輸入不含認證資訊與片段的 HTTP 或 HTTPS Prometheus 指標絕對位址。",
     searchDatabasePlaceholder: "搜尋資料庫類型",
+    polarDbPostgresPickerHint: "如果使用 PolarDB PostgreSQL 版，請選擇 PostgreSQL。",
     searchResults: "搜尋結果",
     databaseCategories: "分類",
     databaseCategorySql: "關聯式資料庫",

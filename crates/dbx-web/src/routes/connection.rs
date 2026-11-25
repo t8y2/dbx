@@ -794,7 +794,7 @@ pub async fn disconnect_db(
     permit
         .after_debug_cleanup_with_error(async {
             app.running_queries.cancel_connection(&body.connection_id);
-            app.remove_connection_pools_detached_checked(&body.connection_id).await.map_err(AppError::from)?;
+            app.remove_connection_pools_checked(&body.connection_id).await.map_err(AppError::from)?;
             app.nacos_registry.drop_connection(&body.connection_id).await;
             #[cfg(feature = "mq-admin")]
             app.mq_registry.drop_connection(&body.connection_id).await;

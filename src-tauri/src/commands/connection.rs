@@ -2897,7 +2897,7 @@ pub async fn disconnect_db(
     permit
         .after_debug_cleanup(async {
             state.running_queries.cancel_connection(&connection_id);
-            state.remove_connection_pools_detached_checked(&connection_id).await?;
+            state.remove_connection_pools_checked(&connection_id).await?;
             drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
             drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
             state.reset_connection_transport_checked(&connection_id).await?;

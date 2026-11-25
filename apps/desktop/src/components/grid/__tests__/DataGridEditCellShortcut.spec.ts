@@ -293,6 +293,7 @@ describe("DataGrid editCell shortcut", () => {
     const sqlEditor = document.createElement("input");
     sqlEditor.value = "SELECT 1";
     host.append(sqlEditor);
+    sqlEditor.focus();
     await selectDataCell(host, 0, 0);
 
     sqlEditor.focus();
@@ -410,5 +411,109 @@ describe("DataGrid editCell shortcut", () => {
     const editor = host.querySelector<HTMLInputElement>(".cell-edit-input");
     expect(editor?.value).toBe("Alice");
     expect(root.hasAttribute("data-cell-edit-selection-style")).toBe(false);
+  });
+
+  it("lets a search input keep characters after it receives keyboard focus", async () => {
+    const { host } = mountGrid({ renderMode: "dom" });
+    await settle();
+    const root = gridRoot(host);
+    await selectDataCell(host, 0, 1);
+    dispatchKey(root, "f", { metaKey: true });
+
+    const search = document.createElement("input");
+    search.type = "search";
+    host.append(search);
+    search.focus();
+    const keyEvent = dispatchKey(search, "Z");
+    const inputEvent = new InputEvent("beforeinput", { data: "Z", inputType: "insertText", bubbles: true, cancelable: true });
+    search.dispatchEvent(inputEvent);
+    await settle();
+
+    expect(keyEvent.defaultPrevented).toBe(false);
+    expect(inputEvent.defaultPrevented).toBe(false);
+    expect(host.querySelector(".cell-edit-input")).toBeNull();
+  });
+
+  it("releases keyboard ownership when Tab moves focus to a dialog editor", async () => {
+    const { host } = mountGrid({ renderMode: "dom" });
+    await settle();
+    const root = gridRoot(host);
+    await selectDataCell(host, 0, 1);
+
+    const editor = document.createElement("textarea");
+    host.append(editor);
+    dispatchKey(root, "Tab");
+    editor.focus();
+    const keyEvent = dispatchKey(editor, "X");
+    const inputEvent = new InputEvent("beforeinput", { data: "X", inputType: "insertText", bubbles: true, cancelable: true });
+    editor.dispatchEvent(inputEvent);
+    await settle();
+
+    expect(keyEvent.defaultPrevented).toBe(false);
+    expect(inputEvent.defaultPrevented).toBe(false);
+    expect(host.querySelector(".cell-edit-input")).toBeNull();
+  });
+
+  it("leaves a contenteditable editor alone after keyboard focus moves outside the grid", async () => {
+    const { host } = mountGrid({ renderMode: "dom" });
+    await settle();
+    const root = gridRoot(host);
+    await selectDataCell(host, 0, 1);
+
+    const editor = document.createElement("div");
+    editor.contentEditable = "true";
+    host.append(editor);
+    dispatchKey(root, "Tab");
+    editor.focus();
+    const keyEvent = dispatchKey(editor, "C");
+    const inputEvent = new InputEvent("beforeinput", { data: "C", inputType: "insertText", bubbles: true, cancelable: true });
+    editor.dispatchEvent(inputEvent);
+    await settle();
+
+    expect(keyEvent.defaultPrevented).toBe(false);
+    expect(inputEvent.defaultPrevented).toBe(false);
+    expect(host.querySelector(".cell-edit-input")).toBeNull();
+  });
+
+  it("scopes keyboard forwarding to the most recently selected grid", async () => {
+    const first = mountGrid({ renderMode: "dom" });
+    const second = mountGrid({ renderMode: "dom" });
+    await settle();
+    await selectDataCell(first.host, 0, 1);
+    await selectDataCell(second.host, 0, 1);
+
+    dispatchKey(gridRoot(second.host), "M");
+    await settle();
+    expect(second.host.querySelector<HTMLInputElement>(".cell-edit-input")?.value).toBe("M");
+    expect(first.host.querySelector(".cell-edit-input")).toBeNull();
+
+    const search = document.createElement("input");
+    search.type = "search";
+    second.host.append(search);
+    search.focus();
+    const event = dispatchKey(search, "Z");
+    await settle();
+    expect(event.defaultPrevented).toBe(false);
+    expect(first.host.querySelector(".cell-edit-input")).toBeNull();
+  });
+
+  it("does not suppress IME composition or beforeinput in an outside editor", async () => {
+    const { host } = mountGrid({ renderMode: "dom" });
+    await settle();
+    await selectDataCell(host, 0, 1);
+
+    const editor = document.createElement("input");
+    host.append(editor);
+    editor.focus();
+    const composition = new KeyboardEvent("keydown", { key: "1", bubbles: true, cancelable: true, isComposing: true });
+    Object.defineProperty(composition, "keyCode", { value: 229 });
+    editor.dispatchEvent(composition);
+    const inputEvent = new InputEvent("beforeinput", { data: "1", inputType: "insertText", bubbles: true, cancelable: true });
+    editor.dispatchEvent(inputEvent);
+    await settle();
+
+    expect(composition.defaultPrevented).toBe(false);
+    expect(inputEvent.defaultPrevented).toBe(false);
+    expect(host.querySelector(".cell-edit-input")).toBeNull();
   });
 });

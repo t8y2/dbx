@@ -3940,6 +3940,8 @@ let rowPreparationController: AbortController | null = null;
 let gridClipboardLifecycle = 0;
 let gridClipboardActive = true;
 let gridOwnsKeyboardAfterSelection = false;
+let gridPassiveFocusTarget: Element | null = null;
+let gridKeyboardNavigationPending = false;
 /**
  * Automatic background counts keep rows interactive. A manual footer count only covers the grid when it is
  * part of a navigation flow; counting total rows on demand must not look like a table refresh.
@@ -6540,6 +6542,8 @@ watch(
 const isErrorResult = computed(() => isQueryExecutionErrorResult(props.result) && props.result.rows.length > 0);
 const errorMessage = computed(() => (isErrorResult.value ? String(props.result.rows[0]?.[0] ?? "") : ""));
 function onUserCellSelection() {
+  gridPassiveFocusTarget = typeof document !== "undefined" ? document.activeElement : null;
+  gridKeyboardNavigationPending = false;
   gridOwnsKeyboardAfterSelection = true;
   invalidateContextMenuTarget();
 }
@@ -12082,12 +12086,29 @@ async function onGridKeydown(event: KeyboardEvent) {
   }
 }
 
+function releaseGridKeyboardOwnership() {
+  gridOwnsKeyboardAfterSelection = false;
+  gridPassiveFocusTarget = null;
+  gridKeyboardNavigationPending = false;
+}
+
 function releaseGridKeyboardOwnershipOnOutsideMouseDown(event: MouseEvent) {
   const root = gridRef.value;
-  if (!root || !(event.target instanceof Node) || !root.contains(event.target)) gridOwnsKeyboardAfterSelection = false;
+  if (!root || !(event.target instanceof Node) || !root.contains(event.target)) releaseGridKeyboardOwnership();
+}
+
+function releaseGridKeyboardOwnershipOnOutsideFocusIn(event: FocusEvent) {
+  const root = gridRef.value;
+  if (root && event.target instanceof Node && root.contains(event.target)) {
+    gridKeyboardNavigationPending = false;
+    return;
+  }
+  if (!gridOwnsKeyboardAfterSelection) return;
+  if (gridKeyboardNavigationPending || event.target !== gridPassiveFocusTarget) releaseGridKeyboardOwnership();
 }
 
 function forwardSelectedGridKeyboardInput(event: KeyboardEvent) {
+  if (gridOwnsKeyboardAfterSelection && dataGridDirectCellEditValue(event) === undefined) gridKeyboardNavigationPending = true;
   const root = gridRef.value;
   if (!gridOwnsKeyboardAfterSelection || event.defaultPrevented || !dataGridIsActive || !root || !currentSelectedCellPosition()) return;
   if (event.target instanceof Node && root.contains(event.target)) return;
@@ -12120,11 +12141,13 @@ function preventDuplicateSqlTextInput(event: InputEvent) {
 
 if (typeof document !== "undefined") {
   document.addEventListener("mousedown", releaseGridKeyboardOwnershipOnOutsideMouseDown, true);
+  document.addEventListener("focusin", releaseGridKeyboardOwnershipOnOutsideFocusIn, true);
   document.addEventListener("keydown", forwardSelectedGridKeyboardInput, true);
   document.addEventListener("beforeinput", preventDuplicateSqlTextInput, true);
   dataGridRuntimeScope.addCleanup(() => {
-    gridOwnsKeyboardAfterSelection = false;
+    releaseGridKeyboardOwnership();
     document.removeEventListener("mousedown", releaseGridKeyboardOwnershipOnOutsideMouseDown, true);
+    document.removeEventListener("focusin", releaseGridKeyboardOwnershipOnOutsideFocusIn, true);
     document.removeEventListener("keydown", forwardSelectedGridKeyboardInput, true);
     document.removeEventListener("beforeinput", preventDuplicateSqlTextInput, true);
   });

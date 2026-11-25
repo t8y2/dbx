@@ -4864,6 +4864,7 @@ export default {
     testErrorSafety: "Gemini blocked the prompt or response under its safety policy.",
     testErrorEmptyResponse: "The service or proxy closed the stream without returning visible text.",
     testErrorNetwork: "The network connection failed. Check the endpoint and proxy.",
+    testErrorServer: "The server returned an error status (usually 5xx), which typically comes from a self-hosted gateway or proxy. Check that the gateway forwards requests correctly, is not returning an error page, and that the backend service is up.",
     testErrorUnknown: "The test failed for an unclassified reason.",
     apply: "Apply to Editor",
     clear: "Clear Chat",

@@ -4786,6 +4786,7 @@ export default withEnglishFallback({
     testErrorSafety: "Gemini 的安全策略拦截了提示词或响应。",
     testErrorEmptyResponse: "服务或代理在返回可见文本前关闭了流。",
     testErrorNetwork: "网络连接失败，请检查 Endpoint 和代理。",
+    testErrorServer: "服务端返回了错误状态码（多为 5xx），通常来自自建网关或代理——请检查网关是否正常转发、是否返回了错误页，以及后端服务是否可用。",
     testErrorUnknown: "测试因未分类的原因失败。",
     apply: "应用到编辑器",
     clear: "清空对话",

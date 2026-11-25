@@ -154,6 +154,7 @@ import {
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { isAiConnectionTestConfigCurrent } from "@/lib/ai/aiConnectionTest";
+import { aiTestErrorPresentationOf } from "@/lib/ai/aiErrorPresentation";
 import { formatAiInlineMarkdownFragment, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
 import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
 import type { DriverStoreTab } from "@/lib/connection/agentDriverInstallHint";
@@ -7299,25 +7300,7 @@ const aiTestError = ref("");
 const aiTestLatency = ref<number | null>(null);
 const aiTestErrorCopied = ref(false);
 let aiTestRequestId = 0;
-const aiTestErrorCategoryKeys: Record<string, string> = {
-  auth: "ai.testErrorAuth",
-  modelNotFound: "ai.testErrorModelNotFound",
-  rateLimit: "ai.testErrorRateLimit",
-  timeout: "ai.testErrorTimeout",
-  tokenLimit: "ai.testErrorTokenLimit",
-  safety: "ai.testErrorSafety",
-  emptyResponse: "ai.testErrorEmptyResponse",
-  modelDiscoveryUnsupported: "ai.modelListUnsupported",
-  network: "ai.testErrorNetwork",
-  unknown: "ai.testErrorUnknown",
-};
-function aiTestErrorPresentationOf(error: string) {
-  const match = error.match(/^\[([^\]]+)]\s*(.*)$/s);
-  if (!match) return { summary: "", detail: error };
-  const key = aiTestErrorCategoryKeys[match[1]];
-  return key ? { summary: t(key), detail: match[2] } : { summary: "", detail: error };
-}
-const aiTestErrorPresentation = computed(() => aiTestErrorPresentationOf(aiTestError.value));
+const aiTestErrorPresentation = computed(() => aiTestErrorPresentationOf(aiTestError.value, (key) => t(key)));
 const aiTestErrorDisplay = computed(() => [aiTestErrorPresentation.value.summary, aiTestErrorPresentation.value.detail].filter(Boolean).join(" "));
 const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
 const aiIsClaudeCodeCli = computed(() => aiEditProvider.value === "claude-code-cli");
@@ -7632,7 +7615,6 @@ function aiEnterEditMode(configId?: string) {
   aiConfigListMode.value = "edit";
   aiEditConfigId.value = configId || null;
   // 进入编辑即丢弃该行的列表测试结果：编辑期间结果必然过时，保存后需重测（#15467 评审）。
-  if (configId) aiClearListTestState(configId);
 
   if (configId) {
     const config = settingsStore.aiConfigs.find((c) => c.id === configId);
@@ -7781,8 +7763,6 @@ async function aiSaveConfig() {
   try {
     if (aiEditConfigId.value) {
       await settingsStore.updateAiConfigItem(aiEditConfigId.value, config);
-      // 保存即改变配置内容，旧测试结果不再描述当前配置（#15467 评审）。
-      aiClearListTestState(aiEditConfigId.value);
     } else {
       await settingsStore.createAiConfig(config);
     }
@@ -7799,7 +7779,6 @@ function aiDeleteConfig(id: string) {
 
 async function aiConfirmDeleteConfig() {
   if (aiDeleteConfigId.value) {
-    aiClearListTestState(aiDeleteConfigId.value);
     try {
       await settingsStore.deleteAiConfig(aiDeleteConfigId.value);
     } catch (e: any) {
@@ -8019,10 +7998,26 @@ async function aiTestConn() {
   } catch (e: any) {
     if (requestId !== aiTestRequestId || !isAiConnectionTestConfigCurrent(config, currentAiEditConfig())) return;
     aiTestResult.value = "error";
-    aiTestError.value = translateBackendError(t, e);
+    aiTestError.value = aiTestErrorText(e);
   } finally {
     if (requestId === aiTestRequestId) aiTesting.value = false;
   }
+}
+
+/**
+ * Renders a failed connection test.
+ *
+ * The provider tags its failures with a `[category]` prefix (auth, rateLimit,
+ * serverError, …) so the user can tell *what to check*; the raw text alone
+ * ("API error (HTTP 500: empty response body)") says nothing about whether the
+ * key, the endpoint or the gateway is at fault (#15393). Structured backend
+ * errors keep their existing translation.
+ */
+function aiTestErrorText(error: unknown): string {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const categorized = aiTestErrorPresentationOf(raw, (key) => t(key));
+  if (categorized.summary) return `${categorized.summary}\n${categorized.detail}`;
+  return translateBackendError(t, error);
 }
 
 async function copyAiTestError() {
@@ -8034,76 +8029,6 @@ async function copyAiTestError() {
   }, 1500);
 }
 
-// #15393: per-config test from the AI config list. Reuses the same backend
-// probe as the edit-mode footer button, keyed by config id so each row keeps
-// its own status while a test is in flight. Each result keeps the snapshot it
-// was tested against: once the saved config changes (edited, replaced, or
-// deleted), the stale result is dropped instead of describing a config that
-// no longer exists (review on #15467), matching the edit-mode
-// isAiConnectionTestConfigCurrent guard.
-interface AiListTestState {
-  status: "testing" | "success" | "error";
-  latencyMs: number | null;
-  error: string;
-  testedConfig: AiConfigItem;
-  /** 发起请求的令牌：只有最新请求能写回/清理该行的状态（#15467 复审）。 */
-  requestId: number;
-}
-const aiListTestStates = ref<Record<string, AiListTestState>>({});
-let aiListTestRequestSeq = 0;
-
-function aiListTestConfigCurrent(tested: AiConfigItem): boolean {
-  const current = settingsStore.aiConfigs.find((candidate) => candidate.id === tested.id);
-  return current !== undefined && isAiConnectionTestConfigCurrent(tested, current);
-}
-
-const aiListTestVisibleStates = computed(() => {
-  const visible: Record<string, AiListTestState> = {};
-  for (const config of settingsStore.aiConfigs) {
-    const state = aiListTestStates.value[config.id];
-    if (state && aiListTestConfigCurrent(state.testedConfig)) visible[config.id] = state;
-  }
-  return visible;
-});
-
-function aiListTestErrorTitle(configId: string): string {
-  const error = aiListTestVisibleStates.value[configId]?.error ?? "";
-  const presentation = aiTestErrorPresentationOf(error);
-  return [presentation.summary, presentation.detail].filter(Boolean).join(" ");
-}
-
-async function aiTestConfigFromList(config: AiConfigItem) {
-  // A new attempt always takes over: the row shows "testing" for the request it
-  // is actually waiting on, and an older response can never clear or overwrite
-  // a newer request's state (token check below). This also keeps the button's
-  // enabled state honest — it is disabled only while a *current-config* request
-  // is in flight, and clicking always starts a fresh probe.
-  const requestId = ++aiListTestRequestSeq;
-  aiListTestStates.value[config.id] = { status: "testing", latencyMs: null, error: "", testedConfig: { ...config }, requestId };
-  const latest = () => aiListTestStates.value[config.id]?.requestId === requestId;
-  const stillCurrent = () => aiListTestConfigCurrent(config);
-  try {
-    const result = await aiTestConnection(config);
-    if (!latest()) return;
-    if (!stillCurrent()) {
-      // 配置在测试期间被编辑/删除：结果描述的不是当前配置，直接丢弃。
-      delete aiListTestStates.value[config.id];
-      return;
-    }
-    aiListTestStates.value[config.id] = { status: "success", latencyMs: result.latencyMs ?? null, error: "", testedConfig: { ...config }, requestId };
-  } catch (e) {
-    if (!latest()) return;
-    if (!stillCurrent()) {
-      delete aiListTestStates.value[config.id];
-      return;
-    }
-    aiListTestStates.value[config.id] = { status: "error", latencyMs: null, error: translateBackendError(t, e), testedConfig: { ...config }, requestId };
-  }
-}
-
-function aiClearListTestState(configId: string) {
-  delete aiListTestStates.value[configId];
-}
 
 async function ensureCliMcpStatus() {
   if (isWeb || activeSettingsTab.value !== "ai" || !aiIsCliProvider.value || mcpStatus.value || mcpStatusLoading.value) return;
@@ -12707,17 +12632,6 @@ LIMIT 100;</pre>
                       </div>
                     </div>
                     <div class="flex items-center gap-1">
-                      <Button type="button" size="sm" variant="ghost" :disabled="aiListTestVisibleStates[config.id]?.status === 'testing'" @click="aiTestConfigFromList(config)">
-                        <Loader2 v-if="aiListTestVisibleStates[config.id]?.status === 'testing'" class="mr-1 h-3 w-3 animate-spin" />
-                        {{ t("connection.test") }}
-                      </Button>
-                      <span v-if="aiListTestVisibleStates[config.id]?.status === 'success'" class="shrink-0 text-xs text-green-500">
-                        {{ t("connection.testSuccess") }}
-                        <span v-if="aiListTestVisibleStates[config.id]?.latencyMs != null" class="text-green-500/70">{{ aiListTestVisibleStates[config.id]?.latencyMs }}ms</span>
-                      </span>
-                      <span v-else-if="aiListTestVisibleStates[config.id]?.status === 'error'" class="max-w-[16rem] truncate text-xs text-destructive" :title="aiListTestErrorTitle(config.id)">
-                        {{ aiListTestVisibleStates[config.id]?.error }}
-                      </span>
                       <Button v-if="!config.isDefault" type="button" size="sm" variant="ghost" @click="aiSetDefaultConfig(config.id)">
                         {{ t("ai.setDefault") }}
                       </Button>

@@ -218,6 +218,11 @@ async function tauriFileApi() {
  * Opens a granted folder entry outside the plugin: SQL/script files become
  * editor tabs (same resolution as opening a file from the OS), everything
  * else goes to the system default handler.
+ *
+ * The SQL routing lives here on purpose: the plugin bridge stays a generic
+ * file API that answers with void, while the host decides how a resolved path
+ * is presented in this app. The resolved absolute path never crosses back into
+ * the plugin sandbox.
  */
 async function openFolderEntryFromPlugin(pluginId: string, folderHandleId: string, relativePath: string, target: "app" | "system"): Promise<void> {
   const fileApi = await tauriFileApi();

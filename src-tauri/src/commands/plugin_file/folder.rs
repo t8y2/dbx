@@ -376,6 +376,39 @@ fn walk_dir(
     Ok(())
 }
 
+/// Resolves a readable regular file inside the grant and returns it together
+/// with its metadata. Containment is validated before the path is handed back,
+/// so callers can gate a large read before loading any bytes.
+fn resolve_readable_file(
+    state: &PluginFileState,
+    plugin_id: &str,
+    folder_handle_id: &str,
+    relative_path: &str,
+) -> Result<(PathBuf, std::fs::Metadata), String> {
+    let canonical_root = {
+        let folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
+        let open = lookup(&folders, plugin_id, folder_handle_id)?;
+        check_root_unchanged(open)?
+    };
+    let absolute = resolve_relative(&canonical_root, relative_path)?;
+    let meta = std::fs::metadata(&absolute).map_err(|_| "cannot stat file".to_string())?;
+    if !meta.is_file() {
+        return Err("path is not a file".to_string());
+    }
+    Ok((absolute, meta))
+}
+
+/// Returns the byte size of a readable file without loading it, so the command
+/// layer can ask the user before reading a large file.
+pub(super) fn folder_file_size(
+    state: &PluginFileState,
+    plugin_id: &str,
+    folder_handle_id: &str,
+    relative_path: &str,
+) -> Result<u64, String> {
+    Ok(resolve_readable_file(state, plugin_id, folder_handle_id, relative_path)?.1.len())
+}
+
 /// Reads a file inside a granted folder as UTF-8 text.
 pub(super) fn folder_read_text(
     state: &PluginFileState,
@@ -383,37 +416,19 @@ pub(super) fn folder_read_text(
     folder_handle_id: &str,
     relative_path: &str,
 ) -> Result<String, String> {
-    let canonical_root = {
-        let folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
-        let open = lookup(&folders, plugin_id, folder_handle_id)?;
-        check_root_unchanged(open)?
-    };
-    let absolute = resolve_relative(&canonical_root, relative_path)?;
-    let meta = std::fs::metadata(&absolute).map_err(|_| "cannot stat file".to_string())?;
-    if !meta.is_file() {
-        return Err("path is not a file".to_string());
-    }
+    let (absolute, _) = resolve_readable_file(state, plugin_id, folder_handle_id, relative_path)?;
     read_to_string(&absolute).map_err(|_| "cannot read file".to_string())
 }
 
-/// Reads a file inside a granted folder as raw bytes. Callers cap the base64
-/// payload before it reaches the bridge.
+/// Reads a file inside a granted folder as raw bytes. The command layer asks
+/// the user to confirm before loading files above its large-read threshold.
 pub(super) fn folder_read_binary(
     state: &PluginFileState,
     plugin_id: &str,
     folder_handle_id: &str,
     relative_path: &str,
 ) -> Result<Vec<u8>, String> {
-    let canonical_root = {
-        let folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
-        let open = lookup(&folders, plugin_id, folder_handle_id)?;
-        check_root_unchanged(open)?
-    };
-    let absolute = resolve_relative(&canonical_root, relative_path)?;
-    let meta = std::fs::metadata(&absolute).map_err(|_| "cannot stat file".to_string())?;
-    if !meta.is_file() {
-        return Err("path is not a file".to_string());
-    }
+    let (absolute, _) = resolve_readable_file(state, plugin_id, folder_handle_id, relative_path)?;
     std::fs::read(&absolute).map_err(|_| "cannot read file".to_string())
 }
 
@@ -559,6 +574,20 @@ mod tests {
         let entry = folders.get(&meta.folder_handle_id).expect("registered");
         assert_eq!(entry.plugin_id, OWNER);
         assert!(!entry.read_only);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_size_reports_bytes_without_reading() {
+        let dir = temp_dir("size");
+        std::fs::write(dir.join("data.bin"), vec![0u8; 64]).unwrap();
+        let state = PluginFileState::default();
+        let meta = open_folder(&state, OWNER, &dir, false).unwrap();
+
+        assert_eq!(folder_file_size(&state, OWNER, &meta.folder_handle_id, "data.bin").unwrap(), 64);
+        // Same containment and ownership gates as an actual read.
+        assert!(folder_file_size(&state, OWNER, &meta.folder_handle_id, "../escape").is_err());
+        assert!(folder_file_size(&state, OTHER, &meta.folder_handle_id, "data.bin").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

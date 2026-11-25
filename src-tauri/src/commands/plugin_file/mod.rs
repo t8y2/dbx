@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use serde::Serialize;
 use tauri::{Manager, State};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use uuid::Uuid;
 
 use super::connection::AppState;
@@ -40,6 +40,10 @@ pub const MAX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 /// Chunk size advertised to plugins for `beginSave` writes: comfortably below
 /// the 2 MiB bridge payload limit after base64 inflation.
 pub const SAVE_CHUNK_BYTES: usize = 1024 * 1024;
+
+/// Folder reads above this size ask the user for confirmation first, instead
+/// of silently loading a huge file into memory.
+const LARGE_READ_CONFIRM_BYTES: u64 = 10 * 1024 * 1024;
 
 const MAX_OPEN_HANDLES: usize = 64;
 
@@ -262,8 +266,8 @@ mod registry;
 use drop::open_dropped_plugin_files;
 pub(crate) use folder::close_all_plugin_folders;
 use folder::{
-    close_folder, folder_list, folder_read_binary, folder_read_text, folder_resolve_entry, folder_write_bytes,
-    folder_write_text, open_folder, FolderHandleMeta, FolderListResult,
+    close_folder, folder_file_size, folder_list, folder_read_binary, folder_read_text, folder_resolve_entry,
+    folder_write_bytes, folder_write_text, open_folder, FolderHandleMeta, FolderListResult,
 };
 pub use registry::close_all_plugin_files;
 use registry::{
@@ -529,6 +533,57 @@ pub async fn plugin_file_folder_list(
     .map_err(|error| error.to_string())?
 }
 
+/// Native confirmation shown before a folder read above
+/// `LARGE_READ_CONFIRM_BYTES`. Declining fails the call so the plugin can
+/// surface a clear message instead of receiving a truncated payload.
+async fn confirm_large_read(app: &tauri::AppHandle, relative_path: &str, size: u64) -> Result<(), String> {
+    let message = format!(
+        "The plugin wants to read \"{relative_path}\" ({:.1} MB).\n\nAllow this read?",
+        size as f64 / (1024.0 * 1024.0)
+    );
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .message(message)
+        .title("Large file read")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom("Allow".to_string(), "Cancel".to_string()))
+        .show(move |allowed| {
+            let _ = sender.send(allowed);
+        });
+    if receiver.await.unwrap_or(false) {
+        Ok(())
+    } else {
+        Err("user declined reading a large file".to_string())
+    }
+}
+
+/// Sizes a file through the folder grant before reading it and asks the user
+/// when it exceeds the confirmation threshold. Nothing is loaded into memory
+/// until the user agrees.
+async fn gate_large_read(
+    app: &tauri::AppHandle,
+    plugin_id: &str,
+    folder_handle_id: &str,
+    relative_path: &str,
+) -> Result<(), String> {
+    let size = {
+        let app = app.clone();
+        let plugin_id = plugin_id.to_string();
+        let folder_handle_id = folder_handle_id.to_string();
+        let relative_path = relative_path.to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<PluginFileState>();
+            folder_file_size(state.inner(), &plugin_id, &folder_handle_id, &relative_path)
+        })
+        .await
+        .map_err(|error| error.to_string())??
+    };
+    if size > LARGE_READ_CONFIRM_BYTES {
+        confirm_large_read(app, relative_path, size).await?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn plugin_file_folder_read_text(
     app: tauri::AppHandle,
@@ -536,6 +591,7 @@ pub async fn plugin_file_folder_read_text(
     folder_handle_id: String,
     relative_path: String,
 ) -> Result<String, String> {
+    gate_large_read(&app, &plugin_id, &folder_handle_id, &relative_path).await?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<PluginFileState>();
         folder_read_text(state.inner(), &plugin_id, &folder_handle_id, &relative_path)
@@ -551,16 +607,15 @@ pub async fn plugin_file_folder_read_binary(
     folder_handle_id: String,
     relative_path: String,
 ) -> Result<String, String> {
-    // Same payload ceiling as folder writes: base64 inflates by ~4/3.
+    // No hard payload cap: large files are allowed once the user confirms the
+    // size prompt above.
+    gate_large_read(&app, &plugin_id, &folder_handle_id, &relative_path).await?;
     let bytes = tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<PluginFileState>();
         folder_read_binary(state.inner(), &plugin_id, &folder_handle_id, &relative_path)
     })
     .await
     .map_err(|error| error.to_string())??;
-    if bytes.len() > MAX_CHUNK_BYTES {
-        return Err("file is too large to read as base64".to_string());
-    }
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 

@@ -691,7 +691,7 @@ const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
 | `onDrop(fn)`                               | 拖入本工作台的文件以读句柄送达；拖入文件夹会被展开为其中包含的文件（`.git` 等点开头文件与目录会被跳过），每个文件额外携带 `relativePath`（以 `/` 分隔、以拖入文件夹自身名字开头的路径，如 `folder/nested/a.csv`），可用于还原拖入的目录结构，也能区分不同拖入根目录下的同名文件。监听器签名为 `(files, { dropId, truncated, position })`：`dropId` 标识本次拖入的整组条目（取消与进度记账的分组键），`truncated` 为 `true` 表示展开因 2000 文件或 8 层深度上限被截断，`position` 为 drop 落点相对于 iframe 视口内的 CSS 坐标 `{ x, y }`。 |
 | `onDragState(fn)`                          | 是否有系统拖拽悬在本工作台上方；用它驱动拖放遮罩或高亮悬停元素。监听器签名为 `(active, position)`：`active` 为布尔值，`position` 为光标当前相对于 iframe 视口内的 CSS 坐标 `{ x, y }`（拖拽移出或结束时为 `undefined`）。 |
 
-桌面端与网页端的行为差异：请以 init 消息里 additive 的 `capabilities.fileTransfer` 标志位（`pick`、`beginSave`、`read`、`drop`、`folderExpansion`、`folder`）做能力探测，不要靠试调用。桌面端 `pick` / `beginSave` 走原生对话框、`onDrop` 接收系统拖放（句柄由宿主惰性打开，读时分块流式，因此超大文件夹与大文件都不会占满句柄；选取文件数超过共享句柄池时自动降级为惰性条目，不会静默丢弃）。网页端 `pick` 回退到浏览器文件选择器、`beginSave` 回退为内存缓冲加浏览器下载、`onDrop` / `onDragState` 不会触发（`drop`/`folderExpansion`/`folder` 为 `false`）、句柄也没有 `relativePath`。`onDrop` 只在拖放落点位于本插件工作台区域内时触发；落点在宿主其他区域时保持宿主自身的行为。
+桌面端与网页端的行为差异：请以 init 消息里 additive 的 `capabilities.fileTransfer` 标志位（`pick`、`beginSave`、`read`、`drop`、`folderExpansion`、`folder`、`folderBinary`、`folderBinaryRead`、`folderOpen`）做能力探测，不要靠试调用。桌面端 `pick` / `beginSave` 走原生对话框、`onDrop` 接收系统拖放（句柄由宿主惰性打开，读时分块流式，因此超大文件夹与大文件都不会占满句柄；选取文件数超过共享句柄池时自动降级为惰性条目，不会静默丢弃）。网页端 `pick` 回退到浏览器文件选择器、`beginSave` 回退为内存缓冲加浏览器下载、`onDrop` / `onDragState` 不会触发（`drop`/`folderExpansion`/`folder` 为 `false`）、句柄也没有 `relativePath`。`onDrop` 只在拖放落点位于本插件工作台区域内时触发；落点在宿主其他区域时保持宿主自身的行为。
 
 #### 目录句柄
 
@@ -716,12 +716,14 @@ await ft.closeFolderHandle(folderHandleId);
 | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `pickFolder({ readOnly? })`                        | 原生目录对话框；返回 `{ folderHandleId, name }`，用户取消时为 `null`。授权在当前会话内有效，插件卸载时清扫残留；`readOnly: true` 会拒绝后续写入。                          |
 | `folderList(folderHandleId, { subPath?, extensions? })` | 递归列出条目 `{ name, relativePath, kind, size?, modifiedAt? }` 及 `truncated`。跳过点开头条目、符号链接与特殊文件；`extensions` 大小写不敏感；上限 2000 条、深度 8 层。      |
-| `folderReadText(folderHandleId, relativePath)`     | 以 UTF-8 文本读取文件。                                                                                                                                                     |
+| `folderReadText(folderHandleId, relativePath)`     | 以 UTF-8 文本读取文件。超过 10 MiB 时会先弹出原生确认框，用户拒绝则调用失败。                                                                                                  |
+| `folderReadBinary(folderHandleId, relativePath)`   | 以 base64 读取文件原始字节（图片、XLSX），沿用相同的包含性校验与 10 MiB 确认阈值。                                                                                          |
+| `openFolderFile(folderHandleId, relativePath, target)` | 在插件之外打开条目：`"app"` 把 SQL/脚本文件以编辑器标签打开，`"system"` 交给系统默认程序。不返回值；绝对路径只保留在宿主内部。                                            |
 | `folderWriteText(folderHandleId, relativePath, content, { create? })` | 通过 temp+fsync+rename 原子替换文件内容，失败时原文件保持完好。自动创建缺失的父目录。不返回值；渲染层永远不会获知绝对路径。                                 |
 | `folderWriteBinary(folderHandleId, relativePath, dataBase64, { create? })` | 以同样的原子方式写入 base64 原始字节（PNG/XLSX 导出）。与流式文件写入共享 8 MiB base64 载荷上限。                                              |
 | `closeFolderHandle(folderHandleId)`                | 释放授权。插件卸载时宿主会清扫残留句柄。                                                                                                                                     |
 
-绝对路径不会到达渲染层。授权根目录在 pick 时一次性 canonicalize 并 **冻结**，每次调用前重新校验——如果用户从外面把授权目录换成了符号链接，后续所有读写都会被拒绝。每个相对路径先做词法校验（禁止绝对路径与 `..` 组件），再通过最近已存在祖先进行规范化，确保符号链接无法逃出冻结的根目录。写入使用原子 temp+fsync+rename，失败时原工程文件完好无损。这是单文件句柄模型的增量扩展：`pick` / `beginSave` / `onDrop` 保持原有的一次性语义。
+绝对路径不会进入插件沙箱：句柄操作一律使用相对路径，`openFolderFile` 仅在宿主内部解析目标路径。授权根目录在 pick 时一次性 canonicalize 并 **冻结**，每次调用前重新校验——如果用户从外面把授权目录换成了符号链接，后续所有读写都会被拒绝。每个相对路径先做词法校验（禁止绝对路径与 `..` 组件），再通过最近已存在祖先进行规范化，确保符号链接无法逃出冻结的根目录。写入使用原子 temp+fsync+rename，失败时原工程文件完好无损。这是单文件句柄模型的增量扩展：`pick` / `beginSave` / `onDrop` 保持原有的一次性语义。
 
 ### 持久化 UI 状态
 

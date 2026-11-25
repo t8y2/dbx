@@ -1368,6 +1368,261 @@ pub struct QueryExecutionOptions {
     pub report_compilation_errors: bool,
 }
 
+/// How one statement's runtime is bounded.
+///
+/// The difference between "stop waiting" and "stop the server" is the whole
+/// point. Cancelling a read costs nothing. Cancelling a write leaves the caller
+/// unable to say whether the rows landed, so a retry duplicates data and no
+/// retry loses it. Cancelling a schema change makes the server roll it back
+/// while it still holds metadata locks, and any replica that already applied the
+/// same binlog event drifts out of sync — which is not self-healing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatementTimeout {
+    /// Reads: give up and cancel the server statement.
+    Cancel(Duration),
+    /// Writes with an explicit limit: stop waiting, leave the server alone.
+    Detach(Duration),
+    /// Schema changes, and writes by default: no deadline at all.
+    Unlimited,
+}
+
+impl StatementTimeout {
+    /// Server-side budget. `Detach` returns `None` on purpose: not cancelling the
+    /// statement is exactly what `Detach` means.
+    pub fn server_budget(self) -> Option<Duration> {
+        match self {
+            Self::Cancel(after) => Some(after),
+            Self::Detach(_) | Self::Unlimited => None,
+        }
+    }
+
+    /// How long the client is willing to wait for a result.
+    pub fn client_wait(self) -> Option<Duration> {
+        match self {
+            Self::Cancel(after) | Self::Detach(after) => Some(after),
+            Self::Unlimited => None,
+        }
+    }
+
+    /// Whether the client may send a cancel to the server when the wait expires.
+    pub fn cancels_on_timeout(self) -> bool {
+        matches!(self, Self::Cancel(_))
+    }
+}
+
+/// What a statement is allowed to change. Drives the timeout decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatementScope {
+    Read,
+    Write,
+    SchemaChange,
+}
+
+const SCHEMA_CHANGE_KEYWORDS: &[&str] = &[
+    "CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "COMMENT", "GRANT", "REVOKE", "REINDEX", "VACUUM", "ANALYZE",
+    "ANALYSE", "OPTIMIZE", "REPAIR",
+];
+
+const WRITE_KEYWORDS: &[&str] =
+    &["INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "COPY", "LOAD", "IMPORT", "CALL", "EXEC", "EXECUTE"];
+
+fn leading_statement_keyword(sql: &str) -> Option<String> {
+    let stripped = strip_sql_comments_and_literals(sql);
+    let trimmed = stripped.trim_start();
+    let end = trimmed.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(trimmed.len());
+    (end > 0).then(|| trimmed[..end].to_ascii_uppercase())
+}
+
+/// Classify one statement without parsing it where possible.
+///
+/// The keyword pass runs first on purpose: sqlparser cannot parse every vendor
+/// extension (`ALTER TABLE ... ADD PARTITION`, Oracle packages, ClickHouse DDL),
+/// and a statement it failed to parse must not silently fall back to the read
+/// deadline just because the AST was unavailable.
+pub fn statement_scope(sql: &str, db_type: Option<DatabaseType>) -> StatementScope {
+    if db_type == Some(DatabaseType::SqlServer) {
+        // GO batches may contain transaction control followed by DML or DDL.
+        // The risk classifier ranks transaction control above both.
+        let statements = split_sql_batches(sql)
+            .into_iter()
+            .flat_map(|batch| crate::sql::split_sql_statements_for_database(&batch, DatabaseType::SqlServer));
+        return highest_statement_scope(statements, db_type);
+    }
+    single_statement_scope(sql, db_type)
+}
+
+fn highest_statement_scope(
+    statements: impl IntoIterator<Item = String>,
+    db_type: Option<DatabaseType>,
+) -> StatementScope {
+    let mut scope = StatementScope::Read;
+    for sql in statements {
+        match single_statement_scope(&sql, db_type) {
+            StatementScope::SchemaChange => return StatementScope::SchemaChange,
+            StatementScope::Write => scope = StatementScope::Write,
+            StatementScope::Read => {}
+        }
+    }
+    scope
+}
+
+fn single_statement_scope(sql: &str, db_type: Option<DatabaseType>) -> StatementScope {
+    if let Some(keyword) = leading_statement_keyword(sql) {
+        if SCHEMA_CHANGE_KEYWORDS.contains(&keyword.as_str()) {
+            return StatementScope::SchemaChange;
+        }
+        if WRITE_KEYWORDS.contains(&keyword.as_str()) {
+            return StatementScope::Write;
+        }
+        if db_type == Some(DatabaseType::SqlServer) && keyword == "WAITFOR" && sqlserver_waitfor_is_read_only(sql) {
+            return StatementScope::Read;
+        }
+    }
+    match db_type.map(|db_type| classify_sql_risk_for_database(sql, db_type)) {
+        Some(Ok(SqlRisk::Ddl)) => StatementScope::SchemaChange,
+        Some(Ok(SqlRisk::Write | SqlRisk::Transaction)) => StatementScope::Write,
+        _ => StatementScope::Read,
+    }
+}
+
+// WAITFOR DELAY/TIME with a literal only waits. Other forms can consume
+// Service Broker messages or contain more SQL in the same batch.
+fn sqlserver_waitfor_is_read_only(sql: &str) -> bool {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+
+    let Ok(tokens) = Tokenizer::new(&MsSqlDialect {}, sql).tokenize() else {
+        return false;
+    };
+    let tokens = tokens.into_iter().filter(|token| !matches!(token, Token::Whitespace(_))).collect::<Vec<_>>();
+    let tokens = tokens.strip_suffix(&[Token::SemiColon]).unwrap_or(&tokens);
+    matches!(tokens, [Token::Word(waitfor), Token::Word(mode), Token::SingleQuotedString(_)]
+        if waitfor.quote_style.is_none() && waitfor.value.eq_ignore_ascii_case("WAITFOR")
+            && mode.quote_style.is_none()
+            && (mode.value.eq_ignore_ascii_case("DELAY") || mode.value.eq_ignore_ascii_case("TIME")))
+}
+
+/// True when `sql` is a schema change or a data write.
+pub fn statement_outlives_read_timeout_budget(sql: &str, db_type: Option<DatabaseType>) -> bool {
+    statement_scope(sql, db_type) != StatementScope::Read
+}
+
+/// Resolve how one statement is bounded.
+///
+/// `read_secs` and `write_secs` mirror the connection settings: `None` keeps the
+/// built-in read default and `Some(0)` means unlimited. Schema changes are always
+/// unlimited — there is no sensible default for "how long may a rebuild take", so
+/// the product does not offer one to get wrong.
+pub fn resolve_statement_timeout(
+    read_secs: Option<u64>,
+    write_secs: Option<u64>,
+    db_type: Option<DatabaseType>,
+    sql: &str,
+) -> StatementTimeout {
+    timeout_for_scope(statement_scope(sql, db_type), read_secs, write_secs)
+}
+
+fn timeout_for_scope(scope: StatementScope, read_secs: Option<u64>, write_secs: Option<u64>) -> StatementTimeout {
+    match scope {
+        StatementScope::SchemaChange => StatementTimeout::Unlimited,
+        StatementScope::Write => match write_secs {
+            Some(secs) if secs > 0 => StatementTimeout::Detach(Duration::from_secs(secs)),
+            _ => StatementTimeout::Unlimited,
+        },
+        StatementScope::Read => match resolve_query_timeout(read_secs) {
+            Some(after) => StatementTimeout::Cancel(after),
+            None => StatementTimeout::Unlimited,
+        },
+    }
+}
+
+/// Timeout decision for a statement about to run on `connection_id`, using the
+/// stored connection settings.
+pub async fn connection_statement_timeout(
+    state: &AppState,
+    connection_id: &str,
+    sql: &str,
+    read_override: Option<u64>,
+) -> StatementTimeout {
+    let (read_secs, write_secs, db_type) = {
+        let configs = state.configs.read().await;
+        match configs.get(connection_id) {
+            Some(config) => (
+                read_override.or(Some(config.effective_query_timeout_secs())),
+                config.effective_write_timeout_secs(),
+                Some(statement_split_database_type(config)),
+            ),
+            None => (read_override, None, None),
+        }
+    };
+    let scope = if db_type == Some(DatabaseType::SqlServer) {
+        statement_scope(sql, db_type)
+    } else {
+        highest_statement_scope(query_execution_plan(sql, db_type, false).statements, db_type)
+    };
+    timeout_for_scope(scope, read_secs, write_secs)
+}
+
+/// Run one statement on a background task so a `Detach` deadline can stop the
+/// client wait without touching the server statement.
+///
+/// Dropping the returned receiver does not abort the task and does not cancel the
+/// database call; the caller is expected to keep waiting only as long as
+/// [`StatementTimeout::client_wait`] allows.
+pub fn spawn_detached_statement<K: Send + 'static>(
+    state: Arc<AppState>,
+    connection_id: String,
+    database: String,
+    sql: String,
+    schema: Option<String>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+    keep_alive: K,
+    messages: Option<query_messages::QueryMessagesCallback>,
+) -> tokio::sync::oneshot::Receiver<Result<db::QueryResult, QueryExecutionError>> {
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        // Keep the running-task registration alive until the server call really
+        // finishes, so the user can still cancel it after the deadline passes.
+        let _keep_alive = keep_alive;
+        // The message sink is task-local, so the scope has to be entered inside
+        // the detached task rather than around the caller's wait.
+        let result = query_messages::with_query_messages(
+            messages,
+            execute_sql_statement_with_options_typed(
+                &state,
+                &connection_id,
+                &database,
+                &sql,
+                schema.as_deref(),
+                cancel_token,
+                options,
+            ),
+        )
+        .await;
+        let _ = result_tx.send(result);
+    });
+    result_rx
+}
+
+/// Message shown when a write exceeded its configured `write_timeout_secs`.
+/// The wording must not claim the statement failed: it did not.
+pub fn detached_write_timeout_message(wait: Duration) -> String {
+    format!(
+        "Statement has not returned after {}s. It is still running on the server and its result is unknown — check the data before retrying. Nothing was cancelled.",
+        wait.as_secs().max(1)
+    )
+}
+
+/// Server-side budget for one statement.
+pub fn statement_server_budget(
+    read_secs: Option<u64>,
+    write_secs: Option<u64>,
+    db_type: Option<DatabaseType>,
+    sql: &str,
+) -> Option<Duration> {
+    resolve_statement_timeout(read_secs, write_secs, db_type, sql).server_budget()
+}
+
 fn validate_query_execution_mode(
     db_type: Option<DatabaseType>,
     sql: &str,
@@ -1858,10 +2113,23 @@ fn apply_query_timeout_override(budget: &mut DbOperationBudget, timeout_secs: Op
     }
 }
 
-fn oceanbase_mysql_session_timeout_sql(config: Option<&ConnectionConfig>, timeout_secs: Option<u64>) -> Option<String> {
+fn oceanbase_mysql_session_timeout_sql(config: Option<&ConnectionConfig>, timeout: Option<Duration>) -> Option<String> {
     let config = config?;
-    let timeout_secs = timeout_secs.unwrap_or(config.query_timeout_secs);
-    crate::db::oceanbase_mysql::query_timeout_sql(config, timeout_secs)
+    if !crate::db::oceanbase_mysql::is_config(config) {
+        return None;
+    }
+    // OceanBase has no documented unlimited sentinel. Use the documented
+    // session variable maximum when DBX has no statement deadline.
+    const MAX_TIMEOUT_MICROS: u128 = 3_216_672_000_000_000;
+    let micros = timeout.map_or(MAX_TIMEOUT_MICROS, |duration| duration.as_micros().min(MAX_TIMEOUT_MICROS));
+    Some(format!("SET ob_query_timeout = {micros}"))
+}
+
+async fn set_oceanbase_mysql_session_timeout(conn: &mut mysql_async::Conn, sql: Option<&str>) -> Result<(), String> {
+    if let Some(sql) = sql {
+        conn.query_drop(sql).await.map_err(|err| format!("Failed to apply OceanBase query timeout: {err}"))?;
+    }
+    Ok(())
 }
 
 // Keep do_execute_typed's future shallow, as with MySQL transaction settlement.
@@ -1906,18 +2174,13 @@ async fn apply_oceanbase_mysql_session_timeout(
     state: &AppState,
     pool_key: &str,
     conn: &mut mysql_async::Conn,
-    timeout_secs: Option<u64>,
+    timeout: Option<Duration>,
 ) -> Result<(), String> {
     let sql = {
         let configs = state.configs.read().await;
-        oceanbase_mysql_session_timeout_sql(crate::connection::config_for_pool_key(pool_key, &configs), timeout_secs)
+        oceanbase_mysql_session_timeout_sql(crate::connection::config_for_pool_key(pool_key, &configs), timeout)
     };
-    if let Some(sql) = sql {
-        // OceanBase enforces query timeouts through a session variable; set it
-        // on the checked-out connection in case the pooled session was reset.
-        conn.query_drop(&sql).await.map_err(|err| format!("Failed to apply OceanBase query timeout: {err}"))?;
-    }
-    Ok(())
+    set_oceanbase_mysql_session_timeout(conn, sql.as_deref()).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1939,13 +2202,23 @@ async fn do_execute_typed(
     state.touch_pool_activity(pool_key).await;
     let _activity_touch = state.pool_activity_touch(pool_key);
 
-    let query_timeout = resolve_query_timeout(options.timeout_secs);
+    let (statement_read_secs, statement_write_secs, statement_db_type) = {
+        let configs = state.configs.read().await;
+        let config = crate::connection::config_for_pool_key(pool_key, &configs);
+        (
+            options.timeout_secs.or_else(|| config.map(|config| config.query_timeout_secs)),
+            config.and_then(|config| config.effective_write_timeout_secs()),
+            config.map(statement_split_database_type),
+        )
+    };
+    let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
+    let query_timeout =
+        statement_server_budget(statement_read_secs, statement_write_secs, statement_db_type.or(pool_db_type), sql);
     // Re-check at statement start so a write that becomes ready after the
     // temporary unlock window expires is still blocked, even if an earlier
     // statement in the same batch is still running.
     check_read_only_for_connection(state, pool_key, sql).await?;
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
-    let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
     let mysql_catalog_dialect = connection_mysql_catalog_dialect_for_pool_key(state, pool_key).await;
     let pool = state.pool_handle(pool_key).await.ok_or("Connection not found")?;
     // Everything the driver dispatch does for this statement — pool checkout,
@@ -2045,7 +2318,7 @@ async fn do_execute_typed(
                     });
                 });
             }
-            apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
+            apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, query_timeout).await?;
             wait_for_result_opt(
                 cancel_token.clone(),
                 query_timeout,
@@ -2445,6 +2718,10 @@ async fn do_execute_typed(
             let schema = schema_for_execution_context(pool_db_type, schema).map(|s| s.to_string());
             let max_rows = options.max_rows;
             let rpc_timeout = query_timeout;
+            let options = QueryExecutionOptions {
+                timeout_secs: Some(query_timeout.map_or(0, |timeout| timeout.as_secs())),
+                ..options
+            };
             if is_canceled(&cancel_token) {
                 return Err(canceled_error().into());
             }
@@ -3361,9 +3638,10 @@ async fn execute_postgres_drop_database(
         }
     };
 
-    let query_timeout = resolve_query_timeout(options.timeout_secs);
+    // DROP DATABASE waits for every other session to leave; the read budget is not
+    // the right bound for that.
     let max_rows = options.max_rows;
-    wait_for_query_opt(cancel_token, query_timeout, async {
+    wait_for_query_opt(cancel_token, None, async {
         db::postgres::terminate_current_user_database_backends(&pool, target_database).await?;
         db::postgres::execute_query_with_max_rows(&pool, sql, max_rows).await
     })
@@ -4467,7 +4745,11 @@ struct MysqlBatchConnection<'a> {
     data_charset: Option<db::mysql::MySqlDataCharset>,
     conn: &'a mut mysql_async::Conn,
     cancel_token: Option<CancellationToken>,
-    query_timeout: Option<Duration>,
+    oceanbase_read_timeout_sql: Option<String>,
+    oceanbase_unlimited_timeout_sql: Option<String>,
+    statement_read_secs: Option<u64>,
+    statement_write_secs: Option<u64>,
+    db_type: Option<DatabaseType>,
     bare: bool,
     max_rows: Option<usize>,
     max_result_bytes: Option<usize>,
@@ -4475,6 +4757,14 @@ struct MysqlBatchConnection<'a> {
     table_data_preview: bool,
     dialect: db::mysql::MySqlQueryDialect,
     diagnostic_trace_id: Option<&'a str>,
+}
+
+impl MysqlBatchConnection<'_> {
+    async fn apply_session_timeout(&mut self, timeout: Option<Duration>) -> Result<(), String> {
+        let sql =
+            if timeout.is_some() { &self.oceanbase_read_timeout_sql } else { &self.oceanbase_unlimited_timeout_sql };
+        set_oceanbase_mysql_session_timeout(self.conn, sql.as_deref()).await
+    }
 }
 
 impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
@@ -4487,9 +4777,14 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
     }
 
     async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::mysql::MySqlQueryResult>, String> {
+        // Each statement owns its decision: reads may be cancelled, writes and
+        // schema changes may not.
+        let statement_timeout =
+            statement_server_budget(self.statement_read_secs, self.statement_write_secs, self.db_type, statement);
+        self.apply_session_timeout(statement_timeout).await?;
         wait_for_result_opt(
             self.cancel_token.clone(),
-            self.query_timeout,
+            statement_timeout,
             db::mysql::execute_query_results_on_conn_with_limits_with_data_charset(
                 &mut *self.conn,
                 statement,
@@ -4511,6 +4806,18 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
         on_result: &mut (dyn FnMut(usize, &db::QueryResult) + Send),
     ) -> db::mysql::MySqlNonResultBatchOutcome {
         let sql = mysql_non_result_batch_sql(statements);
+        // A pipelined batch is one wire round trip, so the whole batch shares a
+        // budget: if any statement in it is a write or schema change, none of them
+        // may be cancelled by the read deadline.
+        let statement_timeout =
+            if statements.iter().any(|statement| statement_outlives_read_timeout_budget(statement, self.db_type)) {
+                None
+            } else {
+                resolve_query_timeout(self.statement_read_secs)
+            };
+        if let Err(error) = self.apply_session_timeout(statement_timeout).await {
+            return db::mysql::MySqlNonResultBatchOutcome { results: Vec::new(), error: Some(error) };
+        }
         let mut completed_results = Vec::with_capacity(statements.len());
         let mut record_result = |statement_index: usize, result: &db::QueryResult| {
             completed_results.push(result.clone());
@@ -4518,7 +4825,7 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
         };
         match wait_for_result_opt(
             self.cancel_token.clone(),
-            self.query_timeout,
+            statement_timeout,
             db::mysql::execute_non_result_batch_on_conn(&mut *self.conn, &sql, statements.len(), &mut record_result),
         )
         .await
@@ -4914,7 +5221,17 @@ async fn execute_multi_mysql(
 ) -> Result<Vec<ExecuteMultiResult>, String> {
     let trace_id = options.execution_id.as_deref().unwrap_or("none");
     let total_started_at = std::time::Instant::now();
-    let query_timeout = resolve_query_timeout(options.timeout_secs);
+    let (statement_read_secs, statement_write_secs) = {
+        let configs = state.configs.read().await;
+        let config = crate::connection::config_for_pool_key(pool_key, &configs);
+        (
+            options.timeout_secs.or_else(|| config.map(|config| config.query_timeout_secs)),
+            config.and_then(|config| config.effective_write_timeout_secs()),
+        )
+    };
+    // Checkout / catalog work keeps the read budget; each statement gets its own
+    // decision inside the batch executor.
+    let query_timeout = resolve_query_timeout(statement_read_secs);
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
     let bare = mode == crate::connection::MysqlMode::Bare;
     let max_rows = options.max_rows;
@@ -4942,7 +5259,11 @@ async fn execute_multi_mysql(
     };
     let checkout_ms = checkout_started_at.elapsed().as_millis();
     apply_mysql_client_session_context(state, pool_key, pool, &mut conn, database).await?;
-    apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
+    let (oceanbase_read_timeout_sql, oceanbase_unlimited_timeout_sql) = {
+        let configs = state.configs.read().await;
+        let config = crate::connection::config_for_pool_key(pool_key, &configs);
+        (oceanbase_mysql_session_timeout_sql(config, query_timeout), oceanbase_mysql_session_timeout_sql(config, None))
+    };
     let catalog_started_at = std::time::Instant::now();
     wait_for_result_opt(
         cancel_token.clone(),
@@ -4965,7 +5286,11 @@ async fn execute_multi_mysql(
         data_charset: pool.data_charset(),
         conn: &mut conn,
         cancel_token: cancel_token.clone(),
-        query_timeout,
+        oceanbase_read_timeout_sql,
+        oceanbase_unlimited_timeout_sql,
+        statement_read_secs,
+        statement_write_secs,
+        db_type,
         bare,
         max_rows,
         max_result_bytes,
@@ -5138,7 +5463,14 @@ async fn execute_multi_sqlserver(
     check_read_only_for_connection_multi(state, pool_key, &batches).await?;
     let mut all_results = Vec::new();
     let max_rows = options.max_rows;
-    let query_timeout = resolve_query_timeout(options.timeout_secs);
+    let (statement_read_secs, statement_write_secs) = {
+        let configs = state.configs.read().await;
+        let config = crate::connection::config_for_pool_key(pool_key, &configs);
+        (
+            options.timeout_secs.or_else(|| config.map(|config| config.query_timeout_secs)),
+            config.and_then(|config| config.effective_write_timeout_secs()),
+        )
+    };
     let execution_mode = options.execution_mode;
 
     for batch in &batches {
@@ -5159,8 +5491,10 @@ async fn execute_multi_sqlserver(
             _ => return Err("Expected SQL Server connection".to_string()),
         };
 
+        let batch_timeout =
+            statement_server_budget(statement_read_secs, statement_write_secs, Some(DatabaseType::SqlServer), batch);
         let (mut client_guard, lock_wait_ms) =
-            match lock_shared_client_with_wait(&client, cancel_token.clone(), query_timeout).await {
+            match lock_shared_client_with_wait(&client, cancel_token.clone(), batch_timeout).await {
                 Ok(value) => value,
                 Err(err) => {
                     all_results.push(ExecuteMultiResult::execution_error_with_backend(
@@ -5207,7 +5541,7 @@ async fn execute_multi_sqlserver(
                 db::sqlserver::execute_batch_with_max_rows_metadata(&mut client_guard, &execution_sql, max_rows).await
             }
         };
-        let result = wait_for_result_opt(cancel_token.clone(), query_timeout, execution).await;
+        let result = wait_for_result_opt(cancel_token.clone(), batch_timeout, execution).await;
         let abandoned = client_guard.take_abandoned_after_row_limit();
         drop(client_guard);
         if abandoned {
@@ -5446,7 +5780,14 @@ async fn execute_statements_inner(
         };
         let mut client = client.lock().await;
         let database = if database.trim().is_empty() { None } else { Some(database) };
-        let result = execute_multi_agent(&mut client, database, statements, execution_schema, timeout_secs).await;
+        // A batch that contains a write or a schema change owns its runtime, so
+        // the read budget is not forwarded to the agent either.
+        let agent_timeout_secs = if statements.iter().any(|sql| statement_outlives_read_timeout_budget(sql, db_type)) {
+            Some(0)
+        } else {
+            timeout_secs
+        };
+        let result = execute_multi_agent(&mut client, database, statements, execution_schema, agent_timeout_secs).await;
         drop(client);
         match result {
             Ok(result) => return Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result }),
@@ -5944,6 +6285,12 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
     let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
     let mut operation_budget = configured_operation_budget_for_pool_key(state, pool_key).await;
     apply_query_timeout_override(&mut operation_budget, timeout_secs);
+    // These statements share one transaction outcome. A read deadline in a
+    // mixed transaction must not roll back writes that already completed.
+    let statement_db_type = connection_statement_split_database_type(state, connection_id).await.or(db_type);
+    if statements.iter().any(|sql| statement_outlives_read_timeout_budget(sql, statement_db_type)) {
+        operation_budget.query_timeout = None;
+    }
 
     // This is the single capability model for explicit batch transactions.
     // Do not add a backend here unless its execution path keeps every statement
@@ -6198,7 +6545,7 @@ async fn exec_tx_mysql_inner(
     database: &str,
 ) -> Result<db::QueryResult, String> {
     let mut conn = db::mysql::get_conn_with_health_check_with_timeout(&pool, budget.checkout_timeout).await?;
-    apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, None).await?;
+    apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, budget.query_timeout).await?;
     db::mysql::apply_catalog_database_context(&mut conn, catalog_dialect, catalog, database).await?;
     mysql_query_drop_with_timeout(
         &mut conn,
@@ -8175,6 +8522,119 @@ mod tests {
     use std::sync::atomic::Ordering;
     use tokio::time::timeout;
 
+    #[test]
+    fn statement_scope_checks_sqlserver_transaction_scripts_and_go_batches() {
+        let sqlserver = Some(DatabaseType::SqlServer);
+        for sql in [
+            "BEGIN TRANSACTION; UPDATE t SET a = 1; COMMIT;",
+            "SELECT 1\nGO\nUPDATE t SET a = 1",
+            "SELECT a INTO t2 FROM t",
+            "WAITFOR DELAY '00:00:02'; INSERT INTO t VALUES (1);",
+            "WAITFOR (RECEIVE TOP(1) * FROM queue), TIMEOUT 2000",
+        ] {
+            assert_eq!(statement_scope(sql, sqlserver), StatementScope::Write, "{sql}");
+            assert_eq!(statement_server_budget(Some(1), Some(1), sqlserver, sql), None, "{sql}");
+        }
+        assert_eq!(
+            statement_scope("BEGIN TRANSACTION; CREATE TABLE t (id int); COMMIT;", sqlserver),
+            StatementScope::SchemaChange
+        );
+        assert_eq!(statement_scope("SELECT 1\nGO\nSELECT 2", sqlserver), StatementScope::Read);
+        assert_eq!(statement_scope("WAITFOR DELAY '00:00:10'; SELECT 1", sqlserver), StatementScope::Read);
+    }
+
+    #[test]
+    fn statement_scope_classifies_ddl_writes_and_reads() {
+        let mysql = Some(DatabaseType::Mysql);
+        // Vendor DDL that sqlparser cannot always parse must still be recognised.
+        assert_eq!(
+            statement_scope("CREATE TABLE t (id INT) PARTITION BY HASH(id) PARTITIONS 4", mysql),
+            StatementScope::SchemaChange
+        );
+        assert_eq!(
+            statement_scope("ALTER TABLE t ADD PARTITION (PARTITION p1 VALUES LESS THAN (10))", mysql),
+            StatementScope::SchemaChange
+        );
+        assert_eq!(statement_scope("DROP TABLE t", mysql), StatementScope::SchemaChange);
+        assert_eq!(statement_scope("INSERT INTO t SELECT * FROM s", mysql), StatementScope::Write);
+        assert_eq!(statement_scope("/* migration */\n  update t set a = 1", mysql), StatementScope::Write);
+        assert_eq!(statement_scope("SELECT * FROM t", mysql), StatementScope::Read);
+        assert_eq!(statement_scope("SHOW CREATE TABLE t", mysql), StatementScope::Read);
+    }
+
+    #[test]
+    fn schema_changes_are_never_bounded_by_any_timeout() {
+        let mysql = Some(DatabaseType::Mysql);
+        // Even an explicitly configured write limit must not reach a schema change:
+        // cancelling one leaves the server rolling back while holding metadata locks.
+        assert_eq!(
+            resolve_statement_timeout(
+                Some(60),
+                Some(5),
+                mysql,
+                "ALTER TABLE t ADD PARTITION (PARTITION p1 VALUES LESS THAN (10))"
+            ),
+            StatementTimeout::Unlimited
+        );
+        assert_eq!(
+            resolve_statement_timeout(Some(60), Some(5), mysql, "CREATE TABLE t (id INT)"),
+            StatementTimeout::Unlimited
+        );
+    }
+
+    #[test]
+    fn writes_are_unlimited_by_default_and_detached_when_limited() {
+        let mysql = Some(DatabaseType::Mysql);
+        assert_eq!(
+            resolve_statement_timeout(Some(60), Some(0), mysql, "INSERT INTO t VALUES (1)"),
+            StatementTimeout::Unlimited
+        );
+        assert_eq!(resolve_statement_timeout(Some(60), None, mysql, "UPDATE t SET a = 1"), StatementTimeout::Unlimited);
+        assert_eq!(
+            resolve_statement_timeout(Some(60), Some(5), mysql, "INSERT INTO t VALUES (1)"),
+            StatementTimeout::Detach(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn reads_keep_the_cancel_semantics() {
+        let mysql = Some(DatabaseType::Mysql);
+        assert_eq!(
+            resolve_statement_timeout(Some(60), Some(5), mysql, "SELECT 1"),
+            StatementTimeout::Cancel(Duration::from_secs(60))
+        );
+        assert_eq!(
+            resolve_statement_timeout(None, Some(5), mysql, "SELECT 1"),
+            StatementTimeout::Cancel(QUERY_TIMEOUT)
+        );
+        assert_eq!(resolve_statement_timeout(Some(0), Some(5), mysql, "SELECT 1"), StatementTimeout::Unlimited);
+    }
+
+    #[test]
+    fn detach_never_asks_the_server_to_cancel() {
+        let detach = StatementTimeout::Detach(Duration::from_secs(5));
+        assert_eq!(detach.server_budget(), None);
+        assert_eq!(detach.client_wait(), Some(Duration::from_secs(5)));
+        assert!(!detach.cancels_on_timeout());
+
+        let cancel = StatementTimeout::Cancel(Duration::from_secs(60));
+        assert_eq!(cancel.server_budget(), Some(Duration::from_secs(60)));
+        assert_eq!(cancel.client_wait(), Some(Duration::from_secs(60)));
+        assert!(cancel.cancels_on_timeout());
+
+        let unlimited = StatementTimeout::Unlimited;
+        assert_eq!(unlimited.server_budget(), None);
+        assert_eq!(unlimited.client_wait(), None);
+        assert!(!unlimited.cancels_on_timeout());
+    }
+
+    #[test]
+    fn detached_timeout_message_does_not_claim_failure() {
+        let message = detached_write_timeout_message(Duration::from_secs(5));
+        assert!(message.contains("still running"), "{message}");
+        assert!(message.contains("Nothing was cancelled"), "{message}");
+    }
+
     #[tokio::test]
     #[ignore = "requires DBX_NAVICAT_MYSQL_SOCKET for an isolated MySQL instance"]
     async fn stateless_mysql_context_survives_pool_replacement_on_first_execution() {
@@ -9475,6 +9935,7 @@ for line in sys.stdin:
             transport_layers: Vec::new(),
             connect_timeout_secs: 10,
             query_timeout_secs: 30,
+            write_timeout_secs: 0,
             idle_timeout_secs: 60,
             manual_transaction_timeout_secs: 300,
             idle_disconnect_secs: 0,
@@ -12370,14 +12831,14 @@ done
     }
 
     #[test]
-    fn oceanbase_mysql_session_timeout_sql_uses_connection_timeout_by_default() {
+    fn oceanbase_mysql_session_timeout_sql_replaces_a_previous_read_deadline_when_unlimited() {
         let mut config = test_connection_config(DatabaseType::Mysql);
         config.driver_profile = Some("oceanbase".to_string());
         config.query_timeout_secs = 300_000;
 
         assert_eq!(
             oceanbase_mysql_session_timeout_sql(Some(&config), None),
-            Some("SET ob_query_timeout = 300000000000".to_string())
+            Some("SET ob_query_timeout = 3216672000000000".to_string())
         );
     }
 
@@ -12388,7 +12849,7 @@ done
         config.query_timeout_secs = 30;
 
         assert_eq!(
-            oceanbase_mysql_session_timeout_sql(Some(&config), Some(600)),
+            oceanbase_mysql_session_timeout_sql(Some(&config), Some(Duration::from_secs(600))),
             Some("SET ob_query_timeout = 600000000".to_string())
         );
     }
@@ -12397,7 +12858,7 @@ done
     fn oceanbase_mysql_session_timeout_sql_skips_plain_mysql() {
         let config = test_connection_config(DatabaseType::Mysql);
 
-        assert_eq!(oceanbase_mysql_session_timeout_sql(Some(&config), Some(600)), None);
+        assert_eq!(oceanbase_mysql_session_timeout_sql(Some(&config), Some(Duration::from_secs(600))), None);
     }
 
     #[tokio::test]
@@ -12868,6 +13329,7 @@ done
             transport_layers: Vec::new(),
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
+            write_timeout_secs: 0,
             idle_timeout_secs: 60,
             manual_transaction_timeout_secs: 300,
             idle_disconnect_secs: 0,

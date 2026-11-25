@@ -3828,8 +3828,10 @@ pub async fn list_tables_filtered(
     let tables: Vec<TableInfo> = rows
         .iter()
         .filter_map(|row| {
-            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
-            (!name.is_empty()).then_some(TableInfo {
+            // MySQL identifiers may contain leading/trailing spaces inside
+            // backticks; only use trim() to reject blank rows.
+            let name = get_str_by_name(row, "TABLE_NAME");
+            (!name.trim().is_empty()).then_some(TableInfo {
                 name,
                 table_type: normalize_mysql_table_type(&get_str_by_name(row, "TABLE_TYPE")),
                 valid: None,
@@ -4460,8 +4462,9 @@ fn table_infos_from_show_rows(rows: &[mysql_async::Row]) -> Vec<TableInfo> {
     let mut tables = rows
         .iter()
         .filter_map(|row| {
-            let name = get_str(row, 0).trim().to_string();
-            if name.is_empty() {
+            // SHOW TABLES returns the exact identifier; keep surrounding spaces.
+            let name = get_str(row, 0);
+            if name.trim().is_empty() {
                 return None;
             }
             let table_type = normalize_mysql_table_type(&get_str(row, 1));
@@ -5271,37 +5274,43 @@ pub async fn list_object_statistics_with_budget(
         let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
         result.collect_and_drop::<mysql_async::Row>().await.map_err(|e| e.to_string())?
     };
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            let mut statistics = ObjectStatistics {
-                name,
-                schema: Some(database.to_string()),
-                estimated_rows: get_opt_i64(row, "TABLE_ROWS"),
-                total_bytes: get_opt_i64(row, "TOTAL_BYTES"),
-                ..Default::default()
-            };
-            if include_mysql_details {
-                statistics.data_length = get_opt_i64(row, "DATA_LENGTH");
-                statistics.engine = get_opt_str(row, "ENGINE");
-                statistics.created_at = get_opt_metadata_string(row, "CREATE_TIME");
-                statistics.updated_at = get_opt_metadata_string(row, "UPDATE_TIME");
-                statistics.collation = get_opt_str(row, "TABLE_COLLATION");
-                statistics.row_format = get_opt_str(row, "ROW_FORMAT");
-                statistics.avg_row_length = get_opt_i64(row, "AVG_ROW_LENGTH");
-                statistics.max_data_length = get_opt_i64(row, "MAX_DATA_LENGTH");
-                statistics.check_time = get_opt_metadata_string(row, "CHECK_TIME");
-                statistics.index_length = get_opt_i64(row, "INDEX_LENGTH");
-                statistics.auto_increment = get_opt_unsigned_metadata_string(row, "AUTO_INCREMENT");
-                statistics.data_free = get_opt_i64(row, "DATA_FREE");
-            }
-            Some(statistics)
-        })
-        .collect())
+    Ok(rows.iter().filter_map(|row| object_statistics_from_row(row, database, include_mysql_details)).collect())
+}
+
+fn object_statistics_from_row(
+    row: &mysql_async::Row,
+    database: &str,
+    include_mysql_details: bool,
+) -> Option<ObjectStatistics> {
+    // MySQL identifiers may contain leading/trailing spaces inside backticks.
+    // Keep TABLE_NAME byte-exact so the statistics can be matched to the object
+    // list; trim() is only an emptiness check.
+    let name = get_str_by_name(row, "TABLE_NAME");
+    if name.trim().is_empty() {
+        return None;
+    }
+    let mut statistics = ObjectStatistics {
+        name,
+        schema: Some(database.to_string()),
+        estimated_rows: get_opt_i64(row, "TABLE_ROWS"),
+        total_bytes: get_opt_i64(row, "TOTAL_BYTES"),
+        ..Default::default()
+    };
+    if include_mysql_details {
+        statistics.data_length = get_opt_i64(row, "DATA_LENGTH");
+        statistics.engine = get_opt_str(row, "ENGINE");
+        statistics.created_at = get_opt_metadata_string(row, "CREATE_TIME");
+        statistics.updated_at = get_opt_metadata_string(row, "UPDATE_TIME");
+        statistics.collation = get_opt_str(row, "TABLE_COLLATION");
+        statistics.row_format = get_opt_str(row, "ROW_FORMAT");
+        statistics.avg_row_length = get_opt_i64(row, "AVG_ROW_LENGTH");
+        statistics.max_data_length = get_opt_i64(row, "MAX_DATA_LENGTH");
+        statistics.check_time = get_opt_metadata_string(row, "CHECK_TIME");
+        statistics.index_length = get_opt_i64(row, "INDEX_LENGTH");
+        statistics.auto_increment = get_opt_unsigned_metadata_string(row, "AUTO_INCREMENT");
+        statistics.data_free = get_opt_i64(row, "DATA_FREE");
+    }
+    Some(statistics)
 }
 
 pub async fn list_table_objects_show(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
@@ -9744,6 +9753,54 @@ mod tests {
             vec![("active_users", "VIEW"), ("normal_table", "BASE TABLE"), ("t_order", "BASE TABLE")]
         );
         assert!(tables.iter().all(|table| table.comment.is_none()));
+    }
+
+    #[test]
+    fn show_rows_preserve_space_padded_table_identifiers() {
+        let rows = vec![
+            mysql_test_row(vec![Value::Bytes(b" orders ".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
+            mysql_test_row(vec![Value::Bytes(b"orders".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
+            mysql_test_row(vec![Value::Bytes(b"   ".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
+        ];
+
+        let tables = table_infos_from_show_rows(&rows);
+
+        assert_eq!(tables.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec![" orders ", "orders"]);
+    }
+
+    #[test]
+    fn object_statistics_rows_keep_space_padded_table_identifiers() {
+        let statistics_row = |name: &str, engine: &str, collation: &str| {
+            mysql_test_row_with_columns(
+                vec![
+                    Value::Bytes(name.as_bytes().to_vec()),
+                    Value::Int(7),
+                    Value::Int(4096),
+                    Value::Bytes(engine.as_bytes().to_vec()),
+                    Value::Bytes(collation.as_bytes().to_vec()),
+                ],
+                vec![
+                    Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(b"TABLE_NAME"),
+                    Column::new(ColumnType::MYSQL_TYPE_LONGLONG).with_name(b"TABLE_ROWS"),
+                    Column::new(ColumnType::MYSQL_TYPE_LONGLONG).with_name(b"TOTAL_BYTES"),
+                    Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(b"ENGINE"),
+                    Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(b"TABLE_COLLATION"),
+                ],
+            )
+        };
+        let rows = [
+            statistics_row(" orders ", "InnoDB", "utf8mb4_bin"),
+            statistics_row("orders", "MyISAM", "latin1_swedish_ci"),
+            statistics_row("   ", "InnoDB", "utf8mb4_bin"),
+        ];
+
+        let statistics = rows.iter().filter_map(|row| object_statistics_from_row(row, "app", true)).collect::<Vec<_>>();
+
+        assert_eq!(statistics.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(), vec![" orders ", "orders"]);
+        assert_eq!(statistics[0].estimated_rows, Some(7));
+        assert_eq!(statistics[0].total_bytes, Some(4096));
+        assert_eq!(statistics[0].engine.as_deref(), Some("InnoDB"));
+        assert_eq!(statistics[0].collation.as_deref(), Some("utf8mb4_bin"));
     }
 
     #[test]

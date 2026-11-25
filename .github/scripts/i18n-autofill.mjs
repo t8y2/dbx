@@ -3,6 +3,12 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+// A model answer that parsed but is unusable (truncated JSON, a missing key, a
+// placeholder that drifted). Smaller batches usually fix it, so these errors are
+// worth retrying; transport/auth errors are not.
+class TranslationShapeError extends Error {}
 
 const LOCALES_DIR = "apps/desktop/src/i18n/locales";
 const SOURCE_LOCALE = "zh-CN";
@@ -133,6 +139,28 @@ async function translateMissing(locale, keys, sourceLeaves) {
     throw new Error(`DEEPSEEK_API_KEY is required to translate ${keys.length} missing ${locale} i18n key(s)`);
   }
 
+  return translateKeys(locale, keys, sourceLeaves);
+}
+
+// One locale's keys in a single request, halving the batch and retrying when the
+// answer cannot be used. Long batches are what get truncated in practice (a 16-key
+// es request once came back cut mid-string), and a smaller batch is the fix that
+// does not depend on the gateway honouring a bigger max_tokens.
+async function translateKeys(locale, keys, sourceLeaves) {
+  try {
+    return await requestTranslations(locale, keys, sourceLeaves);
+  } catch (error) {
+    if (!(error instanceof TranslationShapeError) || keys.length === 1) throw error;
+
+    const splitAt = Math.ceil(keys.length / 2);
+    console.warn(`${locale}: retrying ${keys.length} key(s) as ${splitAt} + ${keys.length - splitAt} after: ${error.message.split("\n")[0]}`);
+    const head = await translateKeys(locale, keys.slice(0, splitAt), sourceLeaves);
+    const tail = await translateKeys(locale, keys.slice(splitAt), sourceLeaves);
+    return { ...head, ...tail };
+  }
+}
+
+async function requestTranslations(locale, keys, sourceLeaves) {
   const items = keys.map((key) => ({ key, source: sourceLeaves.get(key) }));
   const response = await fetch(apiUrl, {
     method: "POST",
@@ -171,18 +199,18 @@ async function translateMissing(locale, keys, sourceLeaves) {
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content.trim()) {
-    throw new Error(`DeepSeek API returned no translation content for ${locale}`);
+    throw new TranslationShapeError(`DeepSeek API returned no translation content for ${locale}`);
   }
 
-  const parsed = parseJsonContent(content);
+  const parsed = parseJsonContent(content, locale);
   const translations = parsed.translations;
   if (!translations || typeof translations !== "object" || Array.isArray(translations)) {
-    throw new Error(`DeepSeek response for ${locale} must contain a translations object`);
+    throw new TranslationShapeError(`DeepSeek response for ${locale} must contain a translations object`);
   }
 
   for (const key of keys) {
     if (typeof translations[key] !== "string" || !translations[key].trim()) {
-      throw new Error(`DeepSeek response for ${locale} is missing translation for ${key}`);
+      throw new TranslationShapeError(`DeepSeek response for ${locale} is missing translation for ${key}`);
     }
     assertSamePlaceholders(key, sourceLeaves.get(key), translations[key], locale);
   }
@@ -190,7 +218,7 @@ async function translateMissing(locale, keys, sourceLeaves) {
   return translations;
 }
 
-function parseJsonContent(content) {
+function parseJsonContent(content, locale = "") {
   const trimmed = content.trim();
   const withoutFence = trimmed
     .replace(/^```(?:json)?\s*/i, "")
@@ -199,7 +227,8 @@ function parseJsonContent(content) {
   try {
     return JSON.parse(withoutFence);
   } catch (error) {
-    throw new Error(`Unable to parse DeepSeek JSON response: ${error.message}\n${content}`);
+    const label = locale ? `${locale}: ` : "";
+    throw new TranslationShapeError(`${label}Unable to parse DeepSeek JSON response: ${error.message}\n${content}`);
   }
 }
 
@@ -207,7 +236,7 @@ function assertSamePlaceholders(key, source, translated, locale) {
   const sourcePlaceholders = placeholders(source);
   const translatedPlaceholders = placeholders(translated);
   if (sourcePlaceholders.join("\0") !== translatedPlaceholders.join("\0")) {
-    throw new Error(`${locale}:${key} placeholder mismatch: expected [${sourcePlaceholders.join(", ")}], got [${translatedPlaceholders.join(", ")}]`);
+    throw new TranslationShapeError(`${locale}:${key} placeholder mismatch: expected [${sourcePlaceholders.join(", ")}], got [${translatedPlaceholders.join(", ")}]`);
   }
 }
 
@@ -639,7 +668,11 @@ class Parser {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+export { placeholders, requestTranslations, translateKeys, translateMissing, TranslationShapeError };
+
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}

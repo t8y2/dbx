@@ -853,6 +853,52 @@ describe("connectionStore metadata loading", () => {
     expect(loadSchemaCache.mock.calls.every(([key]) => !legacyKeys.has(key) && key.includes("-jdbc-schema-v1"))).toBe(true);
   });
 
+  it("keeps space-padded MySQL table identifiers when a grouped table node loads", async () => {
+    const connection = mysqlConnection();
+    const listTables = vi.fn().mockResolvedValue([
+      { name: " orders ", table_type: "TABLE", comment: null },
+      { name: "orders", table_type: "TABLE", comment: null },
+    ]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      listObjects: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "grouped";
+    useSettingsStore().desktopSettings.sidebar_table_page_size = 200;
+    const store = useConnectionStore();
+    const tableGroup: TreeNode = { id: "mysql-1:app:__tables", label: "tree.tables", type: "group-tables", connectionId: connection.id, database: "app", isExpanded: true, children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [{ id: "mysql-1:app", label: "app", type: "database", connectionId: connection.id, database: "app", isExpanded: true, children: [tableGroup] }],
+      },
+    ];
+
+    await store.loadObjectGroupChildren(tableGroup);
+
+    const rows = tableGroup.children?.filter((node) => node.type === "table") ?? [];
+    expect(rows.map((node) => [node.label, node.tableName])).toEqual([
+      [" orders ", " orders "],
+      ["orders", "orders"],
+    ]);
+    expect(new Set(rows.map((node) => node.id)).size).toBe(2);
+  });
+
   it("loads inferred Oracle JDBC schemas without requesting empty catalogs", async () => {
     const listDatabases = vi.fn().mockResolvedValue([]);
     const listSchemas = vi.fn().mockResolvedValue(["ANONYMOUS", "DBX_TEST", "SYS", "SYSTEM"]);

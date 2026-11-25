@@ -575,6 +575,9 @@ pub struct AppState {
     /// PostgreSQL TLS cancel context, keyed by pool_key.
     /// Used to reconstruct a TLS connector compatible with the original connection when cancelling.
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
+    /// Probed Greenplum server capabilities, keyed by pool_key and cleared
+    /// alongside the pool so reconnects always re-discover the target server.
+    greenplum_capabilities: Arc<RwLock<HashMap<String, db::greenplum::GreenplumCapabilities>>>,
     /// Pool keys whose tab-scoped MySQL connection holds a transaction the user
     /// opened explicitly and DBX deliberately kept open
     /// (`preserve_explicit_transaction`). Keeping it here — not on the driver
@@ -1082,6 +1085,7 @@ struct PoolRoutingControl {
     connections: Arc<RwLock<ConnectionPoolRegistry>>,
     pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
+    greenplum_capabilities: Arc<RwLock<HashMap<String, db::greenplum::GreenplumCapabilities>>>,
     /// The same set as [`AppState::mysql_preserved_transactions`]. Every detach
     /// path (including `ClientSessionPoolCleanupGuard`'s `Drop`, which never
     /// reaches `AppState`) has to clear the marker together with the pool:
@@ -1245,10 +1249,12 @@ impl PoolRoutingControl {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut greenplum_caps = self.greenplum_capabilities.write().await;
             let mut preserved = self.mysql_preserved_transactions.write().await;
             for (key, _) in &removed {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                greenplum_caps.remove(key);
                 preserved.remove(key);
             }
         }
@@ -2078,6 +2084,7 @@ impl AppState {
             connections: self.connections.clone(),
             pool_activity: self.pool_activity.clone(),
             postgres_cancel_contexts: self.postgres_cancel_contexts.clone(),
+            greenplum_capabilities: self.greenplum_capabilities.clone(),
             mysql_preserved_transactions: self.mysql_preserved_transactions.clone(),
             task_supervisor: self.task_supervisor.clone(),
         }
@@ -2254,6 +2261,7 @@ impl AppState {
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
             honor_fixed_ssh_local_ports: AtomicBool::new(false),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
+            greenplum_capabilities: Arc::new(RwLock::new(HashMap::new())),
             mysql_preserved_transactions: Arc::new(RwLock::new(HashSet::new())),
             mysql_client_sessions: RwLock::new(HashMap::new()),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -3173,6 +3181,36 @@ impl AppState {
     /// Get the PostgreSQL TLS cancel context (used to reconstruct the TLS connector when cancelling a query).
     pub async fn get_postgres_cancel_context(&self, pool_key: &str) -> Option<db::postgres::PostgresCancelContext> {
         self.postgres_cancel_contexts.read().await.get(pool_key).cloned()
+    }
+
+    /// Resolves cached Greenplum capabilities for a native PostgreSQL pool.
+    /// Plain PostgreSQL, Cloudberry, OpenTenBase, and other PG-protocol engines
+    /// return `None` without altering their existing routing.
+    pub(crate) async fn greenplum_capabilities_for_pool(
+        &self,
+        pool_key: &str,
+        pool: &deadpool_postgres::Pool,
+        config: Option<&ConnectionConfig>,
+    ) -> Option<db::greenplum::GreenplumCapabilities> {
+        if let Some(config) = config {
+            if db::greenplum::is_known_non_greenplum_config(config) {
+                return None;
+            }
+        }
+        if let Some(cached) = self.greenplum_capabilities.read().await.get(pool_key).cloned() {
+            return cached.is_greenplum.then_some(cached);
+        }
+        match db::greenplum::probe_capabilities(pool).await {
+            Ok(caps) => {
+                let matched = caps.is_greenplum.then(|| caps.clone());
+                self.greenplum_capabilities.write().await.insert(pool_key.to_string(), caps);
+                matched
+            }
+            Err(error) => {
+                log::debug!("[greenplum][probe-fallback] pool_key={pool_key} error={error}");
+                None
+            }
+        }
     }
 
     pub fn pool_activity_touch(&self, pool_key: &str) -> PoolActivityTouch {
@@ -6112,6 +6150,7 @@ impl AppState {
         };
 
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.greenplum_capabilities.write().await.remove(pool_key);
         routing.close_pool_with_timeout(pool_key.to_string(), removed).await;
         #[cfg(test)]
         if let Some((ready, resume)) =
@@ -6199,6 +6238,7 @@ impl AppState {
             self.stop_keepalive_task(&pool_key).await;
             self.pool_activity.write().await.remove(&pool_key);
             self.postgres_cancel_contexts.write().await.remove(&pool_key);
+            self.greenplum_capabilities.write().await.remove(&pool_key);
             let removed = self.connections.write().await.remove(&pool_key);
             if let Some(pool) = removed {
                 self.pool_routing_control().close_pool_with_timeout(pool_key.clone(), pool).await;
@@ -6431,6 +6471,7 @@ impl AppState {
         self.stop_keepalive_task(&pool_key).await;
         self.pool_activity.write().await.remove(&pool_key);
         self.postgres_cancel_contexts.write().await.remove(&pool_key);
+        self.greenplum_capabilities.write().await.remove(&pool_key);
         self.mysql_preserved_transactions.write().await.remove(&pool_key);
         self.mysql_client_sessions.write().await.remove(&pool_key);
         let removed = self.update_connection_pools(|connections| connections.remove(&pool_key)).await;
@@ -6584,6 +6625,7 @@ impl AppState {
         self.stop_keepalive_task(pool_key).await;
         self.pool_activity.write().await.remove(pool_key);
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.greenplum_capabilities.write().await.remove(pool_key);
         self.mysql_preserved_transactions.write().await.remove(pool_key);
         let removed = self.connections.write().await.remove(pool_key);
         if let Some(pool) = removed {
@@ -6659,6 +6701,7 @@ impl AppState {
 
         self.pool_activity.write().await.remove(pool_key);
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.greenplum_capabilities.write().await.remove(pool_key);
         match close_reclaimed_agent_pool(pool).await {
             Ok(()) => true,
             Err((PoolKind::Agent(client), error)) if should_replace_agent_runtime(&error) => {
@@ -6797,9 +6840,11 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut greenplum_caps = self.greenplum_capabilities.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                greenplum_caps.remove(key);
             }
         }
         let mut conns = self.connections.write().await;
@@ -7936,6 +7981,7 @@ impl AppState {
         self.pool_activity.write().await.clear();
         self.session_credentials.clear_pool_owners();
         self.postgres_cancel_contexts.write().await.clear();
+        self.greenplum_capabilities.write().await.clear();
         self.draining_pools.lock().unwrap_or_else(|error| error.into_inner()).clear();
         self.metadata_gates.lock().await.clear();
         self.connections.write().await.drain().collect()
@@ -7974,9 +8020,11 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut greenplum_caps = self.greenplum_capabilities.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                greenplum_caps.remove(key);
             }
         }
         self.session_credentials.remove_pool_owners(&keys_to_remove);
@@ -8008,9 +8056,11 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut greenplum_caps = self.greenplum_capabilities.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                greenplum_caps.remove(key);
             }
         }
         let mut conns = self.connections.write().await;

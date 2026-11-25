@@ -213,6 +213,37 @@ describe("DataGrid inline cell editor multiline paste (#15307)", () => {
     expect(textarea.selectionStart).toBe(7);
   });
 
+  it("restores the middle caret when the paste handler has to reopen the editor", async () => {
+    const { host, gridRef } = mountGrid();
+    await openCellEditor(host, gridRef, 0, 1);
+
+    const root = host.querySelector<HTMLElement>("[data-grid-root]")!;
+    const input = host.querySelector<HTMLInputElement>("input.cell-edit-input")!;
+    input.setSelectionRange(4, 4);
+    const querySelector = root.querySelector.bind(root);
+    let missedHandoff = false;
+    // Model the editor being temporarily unavailable during the input swap.
+    const lookup = vi.spyOn(root, "querySelector").mockImplementation((selector: string) => {
+      if (selector === ".cell-edit-input--expanded" && !missedHandoff) {
+        missedHandoff = true;
+        return null;
+      }
+      return querySelector(selector);
+    });
+    try {
+      dispatchPasteOn(input, "N\nL");
+      await vi.waitFor(() => {
+        expect(missedHandoff).toBe(true);
+        const textarea = host.querySelector<HTMLTextAreaElement>("textarea.cell-edit-input--expanded");
+        expect(textarea?.value).toBe("seedN\nL-note");
+        expect(textarea?.selectionStart).toBe(7);
+        expect(textarea?.selectionEnd).toBe(7);
+      });
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+
   it("keeps the inline editor for a single-line paste", async () => {
     const { host, gridRef } = mountGrid();
     await openCellEditor(host, gridRef, 0, 2);

@@ -3743,6 +3743,9 @@ export default withEnglishFallback({
     pasteCellTextFailed: "셀에 텍스트를 붙여넣을 수 없습니다: {message}",
     copyExtractorSingleColumnFormat: "스마트 복사 단일 열 형식",
     copyExtractorUseSmartDefaults: "스마트 복사 기본 형식 사용",
+    foreignKeyDrillBack: "뒤로",
+    foreignKeyDrillBackTable: "{table}(으)로 돌아가기",
+    foreignKeyDrillBackResult: "이전 결과로 돌아가기",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

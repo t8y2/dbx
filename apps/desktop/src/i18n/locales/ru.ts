@@ -3874,6 +3874,9 @@ export default withEnglishFallback({
     pasteCellTextFailed: "Не удалось вставить текст в ячейку: {message}",
     copyExtractorSingleColumnFormat: "Формат одного столбца для Smart Copy",
     copyExtractorUseSmartDefaults: "Использовать формат Smart Copy по умолчанию",
+    foreignKeyDrillBack: "Назад",
+    foreignKeyDrillBackTable: "Назад к {table}",
+    foreignKeyDrillBackResult: "Назад к предыдущему результату",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

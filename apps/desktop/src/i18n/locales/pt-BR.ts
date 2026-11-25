@@ -3787,6 +3787,9 @@ export default withEnglishFallback({
     pasteCellTextFailed: "Não foi possível colar o texto na célula: {message}",
     copyExtractorSingleColumnFormat: "Formato de coluna única do Smart Copy",
     copyExtractorUseSmartDefaults: "Usar o formato padrão do Smart Copy",
+    foreignKeyDrillBack: "Voltar",
+    foreignKeyDrillBackTable: "Voltar para {table}",
+    foreignKeyDrillBackResult: "Voltar ao resultado anterior",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",

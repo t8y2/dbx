@@ -4051,6 +4051,9 @@ export default withEnglishFallback({
     pasteCellTextFailed: "ไม่สามารถวางข้อความลงในเซลล์: {message}",
     copyExtractorSingleColumnFormat: "รูปแบบคอลัมน์เดียวของการคัดลอกอัจฉริยะ",
     copyExtractorUseSmartDefaults: "ใช้รูปแบบเริ่มต้นของการคัดลอกอัจฉริยะ",
+    foreignKeyDrillBack: "ย้อนกลับ",
+    foreignKeyDrillBackTable: "กลับไปที่ {table}",
+    foreignKeyDrillBackResult: "กลับไปยังผลลัพธ์ก่อนหน้า",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",

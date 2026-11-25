@@ -3789,6 +3789,9 @@ export default withEnglishFallback({
     pasteCellTextFailed: "Impossibile incollare il testo nella cella: {message}",
     copyExtractorSingleColumnFormat: "Formato a colonna singola di Copia intelligente",
     copyExtractorUseSmartDefaults: "Usa il formato predefinito di Copia intelligente",
+    foreignKeyDrillBack: "Indietro",
+    foreignKeyDrillBackTable: "Torna a {table}",
+    foreignKeyDrillBackResult: "Torna al risultato precedente",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

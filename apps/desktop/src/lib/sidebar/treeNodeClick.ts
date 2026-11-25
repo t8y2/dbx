@@ -1,4 +1,4 @@
-import type { DatabaseType, ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
+import type { DatabaseType, ObjectBrowserFilter, ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { supportsConnectionQueryActions } from "@/lib/database/databaseFeatureSupport";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
@@ -107,6 +107,24 @@ const databaseChildGroupNodeTypes = new Set<TreeNodeType>([
   "group-types",
 ]);
 const displayPathObjectNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "package", "package-body", "type", "type-body"]);
+
+const groupNodeObjectBrowserFilters: Partial<Record<TreeNodeType, ObjectBrowserFilter>> = {
+  "group-tables": "tables",
+  "group-views": "views",
+  "group-materialized-views": "materializedViews",
+  "group-procedures": "procedures",
+  "group-functions": "functions",
+  "group-triggers": "triggers",
+  "group-events": "events",
+};
+
+/** 分组节点对应的对象浏览器分类：双击分组行时对象浏览器直接选中该分类。
+ *  `group-triggers` 同时用于数据库级与表级分组；表级分组属于具体表节点，
+ *  双击时应保持展开行为，而不是跳转到数据库范围的对象浏览器。 */
+export function objectBrowserFilterForGroupNode(type: TreeNodeType, tableName?: string | null): ObjectBrowserFilter | undefined {
+  if (type === "group-triggers" && tableName) return undefined;
+  return groupNodeObjectBrowserFilters[type];
+}
 
 export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKind | null {
   if (type === "view") return "VIEW";

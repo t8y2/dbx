@@ -190,6 +190,7 @@ import {
   isDirectNavigationTreeNode,
   isDocumentBrowserTreeNode,
   isRepeatableNavigationTreeNode,
+  objectBrowserFilterForGroupNode,
   objectSourceTargetForTreeNode,
   shouldOpenQueryOnTreeNodeActivation,
   shouldRunTreeNodeRowAction,
@@ -1405,11 +1406,6 @@ function runRowClickAction(clickDetail: number) {
     void openObjectBrowser(false, true);
     return;
   }
-  if (node.type === "group-events") {
-    beginNavigationRequest();
-    void openObjectBrowser();
-    return;
-  }
   const action = treeNodeRowAction(
     node.type,
     canExpand.value,
@@ -1954,9 +1950,17 @@ function onDoubleClick(event: MouseEvent) {
     void openObjectBrowser(false, true);
     return;
   }
-  if (activeNode.value.type === "group-events") {
+  // 双击对象分组行：打开对象浏览器并直接选中该分组的分类。
+  // 表级触发器分组带 tableName，属于表节点自身，继续走后面的展开逻辑。
+  const groupObjectFilter = objectBrowserFilterForGroupNode(activeNode.value.type, activeNode.value.tableName);
+  if (groupObjectFilter) {
     beginNavigationRequest();
-    void openObjectBrowser();
+    void openObjectBrowser(false, false, false, groupObjectFilter);
+    return;
+  }
+  // “查询”分组不是数据库对象，没有对应分类；双击只保证列表处于展开状态。
+  if (activeNode.value.type === "saved-sql-root") {
+    if (!activeNode.value.isExpanded) void toggle(beginNavigationRequest());
     return;
   }
   const action = treeNodeRowDoubleClickAction(
@@ -2182,7 +2186,7 @@ async function confirmDeleteSavedSqlFile() {
   releaseActiveNodeReference([node.id]);
 }
 
-async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean | "create" = false, focusSearch = false) {
+async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean | "create" = false, focusSearch = false, filterOverride?: import("@/types/database").ObjectBrowserFilter) {
   const node = activeNode.value;
   if (!node.connectionId) return;
   try {
@@ -2191,7 +2195,7 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean
 
     const eventName = openEventEditor === true && node.type === "event" ? node.objectName || node.label : undefined;
     const eventCreateRequestId = openEventEditor === "create" && node.type === "group-events" ? ++mysqlEventCreateRequestSeq : undefined;
-    const objectFilter = node.type === "event" || node.type === "group-events" ? "events" : undefined;
+    const objectFilter = filterOverride ?? (node.type === "event" || node.type === "group-events" ? "events" : undefined);
 
     const connection = connectionStore.getConfig(node.connectionId);
     if (!connection) return;
@@ -5726,7 +5730,10 @@ async function confirmEditDatabaseProperties() {
     const options = propertyGroups.includes("charsetCollation") ? { ...base, charset: editDatabaseCharset.value, collation: editDatabaseCollation.value } : propertyGroups.includes("databaseComment") ? { ...base, comment: editDatabaseCommentText.value } : null;
     if (!options) return;
     const sql = await buildUpdateDatabasePropertiesSql(options);
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database || node.label });
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database || node.label });
+    // The shared production gate declined the DDL (confirmation cancelled or a
+    // read-only connection), so nothing was sent and nothing succeeded.
+    if (!executed) return;
     toast(t("contextMenu.editDatabasePropertiesSuccess", { name: node.label }), 3000);
     showEditDatabasePropertiesDialog.value = false;
     await connectionStore.loadDatabases(node.connectionId, { force: true });
@@ -5800,7 +5807,8 @@ async function confirmEditSchemaComment() {
       comment: schemaCommentText.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    if (!executed) return;
     toast(t("contextMenu.editSchemaCommentSuccess", { name: node.label }), 3000);
     showEditSchemaCommentDialog.value = false;
     await connectionStore.loadSchemas(node.connectionId, node.database, { force: true });

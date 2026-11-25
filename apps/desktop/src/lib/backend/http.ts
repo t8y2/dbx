@@ -6123,7 +6123,7 @@ export async function closePluginLocalFolder(_pluginId: string, _folderHandleId:
   throw new Error("Plugin folder handle is not available in the web backend");
 }
 
-export async function writePluginLocalFolderBinary(_pluginId: string, _folderHandleId: string, _relativePath: string, _dataBase64: string, _create = true): Promise<void> {
+export async function writePluginLocalFolderBinary(_pluginId: string, _folderHandleId: string, _relativePath: string, _dataBase64: string, _create = true, _offset?: number): Promise<void> {
   throw new Error("Plugin folder writing is not available in the web backend");
 }
 

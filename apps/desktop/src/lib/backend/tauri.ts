@@ -3398,8 +3398,16 @@ export async function writePluginLocalFolderText(pluginId: string, folderHandleI
   return invoke("plugin_file_folder_write_text", { pluginId, folderHandleId, relativePath, content, create });
 }
 
-export async function writePluginLocalFolderBinary(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, create = true): Promise<void> {
-  return invoke("plugin_file_folder_write_binary", { pluginId, folderHandleId, relativePath, dataBase64, create });
+export async function writePluginLocalFolderBinary(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, create = true, offset?: number): Promise<void> {
+  // An offset means a chunked append for large files; without one the whole file is replaced atomically.
+  return invoke("plugin_file_folder_write_binary", {
+    pluginId,
+    folderHandleId,
+    relativePath,
+    dataBase64,
+    create,
+    ...(offset === undefined ? {} : { offset }),
+  });
 }
 
 export async function closePluginLocalFolder(pluginId: string, folderHandleId: string): Promise<void> {

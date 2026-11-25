@@ -12,8 +12,8 @@
 //! ancestor so symlinks inside the grant cannot escape it.
 
 use std::collections::HashMap;
-use std::fs::{create_dir_all, read_dir, read_to_string, File};
-use std::io::Write;
+use std::fs::{create_dir_all, read_dir, read_to_string, File, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
@@ -528,6 +528,42 @@ pub(super) fn folder_write_bytes(
     write_file_atomic(&target, bytes)
 }
 
+/// Appends one chunk of a large binary export at `offset`.
+///
+/// Large exports (PNG/XLSX) do not fit in a single bridge request, so the plugin
+/// uploads them in chunks: `offset == 0` truncates the target first, later chunks
+/// append in order, and the file is complete once the last chunk lands. Only
+/// whole-file writes use atomic replacement; chunked writes go straight to the
+/// file so the process never holds multiple copies in memory.
+pub(super) fn folder_write_bytes_chunk(
+    state: &PluginFileState,
+    plugin_id: &str,
+    folder_handle_id: &str,
+    relative_path: &str,
+    bytes: &[u8],
+    create: bool,
+    offset: u64,
+) -> Result<(), String> {
+    let target = prepare_write_target(state, plugin_id, folder_handle_id, relative_path, create)?;
+    if let Some(parent) = target.parent() {
+        create_dir_all(parent).map_err(|error| format!("cannot create parent directory: {error}"))?;
+    }
+    // Truncation is explicit: only the first chunk (offset 0) clears the file, later chunks keep existing bytes.
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&target)
+        .map_err(|error| format!("cannot open target file: {error}"))?;
+    if offset == 0 {
+        // Truncate the previous contents on the first chunk so a shorter export cannot leave a stale tail.
+        file.set_len(0).map_err(|error| format!("cannot truncate target file: {error}"))?;
+    }
+    file.seek(SeekFrom::Start(offset)).map_err(|error| format!("cannot seek target file: {error}"))?;
+    file.write_all(bytes).map_err(|error| format!("cannot write target file: {error}"))?;
+    Ok(())
+}
+
 /// Releases one folder handle owned by `plugin_id`.
 pub(super) fn close_folder(state: &PluginFileState, plugin_id: &str, folder_handle_id: &str) -> Result<(), String> {
     let mut folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
@@ -639,6 +675,24 @@ mod tests {
         folder_write_text(&state, OWNER, &meta.folder_handle_id, "db/nested/core.sql", "SELECT 1", true)
             .expect("write into new directory");
         assert_eq!(std::fs::read_to_string(dir.join("db/nested/core.sql")).unwrap(), "SELECT 1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chunked_binary_write_truncates_then_appends() {
+        let dir = temp_dir("chunk");
+        let state = PluginFileState::default();
+        let meta = open_folder(&state, OWNER, &dir, false).unwrap();
+
+        // The first chunk truncates and writes at offset 0; later chunks append in order.
+        folder_write_bytes_chunk(&state, OWNER, &meta.folder_handle_id, "out/big.png", b"hello ", true, 0).unwrap();
+        folder_write_bytes_chunk(&state, OWNER, &meta.folder_handle_id, "out/big.png", b"world", false, 6).unwrap();
+        assert_eq!(std::fs::read(dir.join("out/big.png")).unwrap(), b"hello world");
+
+        // Rewriting shorter content from offset 0 must truncate instead of keeping the previous tail.
+        folder_write_bytes_chunk(&state, OWNER, &meta.folder_handle_id, "out/big.png", b"hi", true, 0).unwrap();
+        assert_eq!(std::fs::read(dir.join("out/big.png")).unwrap(), b"hi");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

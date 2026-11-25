@@ -336,8 +336,8 @@ export interface PluginHostBridgeApi {
   openFolderFile?(pluginId: string, folderHandleId: string, relativePath: string, target: "app" | "system"): Promise<void>;
   /** Write a UTF-8 text file inside a granted folder handle; parent dirs created. Returns on success; absolute paths never leave the sandbox. */
   folderWriteText?(pluginId: string, folderHandleId: string, relativePath: string, content: string, options?: { create?: boolean }): Promise<void>;
-  /** Write raw base64 bytes (PNG/XLSX) inside a granted folder handle. */
-  folderWriteBinary?(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, options?: { create?: boolean }): Promise<void>;
+  /** Write raw base64 bytes (PNG/XLSX) inside a granted folder handle. `offset` enables chunked appends for payloads above the bridge limit. */
+  folderWriteBinary?(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, options?: { create?: boolean; offset?: number }): Promise<void>;
   /** Close a directory handle, releasing the grant. */
   closeFolderHandle?(pluginId: string, folderHandleId: string): Promise<void>;
   /** Recently granted project folders (name + absolute path), persisted across restarts. */
@@ -584,6 +584,8 @@ export class PluginHostBridge {
           // the file-handle model with a persistent session-level grant.
           folder: !!this.api.pickFolder && !!this.api.folderList && !!this.api.folderReadText && !!this.api.folderWriteText,
           folderBinary: !!this.api.folderWriteBinary,
+          // Offset-based chunked writes, so large exports no longer need a save dialog.
+          folderBinaryChunkedWrite: !!this.api.folderWriteBinary,
           folderBinaryRead: !!this.api.folderReadBinary,
           folderOpen: !!this.api.openFolderFile,
         },
@@ -1108,7 +1110,9 @@ export class PluginHostBridge {
     if (method === "host.folderWriteBinary") {
       const input = requireRecord(params, "host.folderWriteBinary params");
       if (!this.api.folderWriteBinary) throw new Error("Host folder writing is unavailable");
-      return this.api.folderWriteBinary(this.plugin.manifest.id, requireHandleId(input.folderHandleId), requireString(input.relativePath), requireBase64(input.dataBase64), { create: input.create !== false });
+      // An offset is only used for chunked writes above the bridge limit; without one the whole file is replaced atomically.
+      const offset = typeof input.offset === "number" && Number.isFinite(input.offset) && input.offset >= 0 ? input.offset : undefined;
+      return this.api.folderWriteBinary(this.plugin.manifest.id, requireHandleId(input.folderHandleId), requireString(input.relativePath), requireBase64(input.dataBase64), { create: input.create !== false, offset });
     }
     if (method === "host.closeFolderHandle") {
       const input = requireRecord(params, "host.closeFolderHandle params");
@@ -1719,7 +1723,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         folderReadBinary: (folderHandleId, relativePath) => request('host.folderReadBinary', { folderHandleId, relativePath }),
         openFolderFile: (folderHandleId, relativePath, target) => request('host.openFolderFile', { folderHandleId, relativePath, target }),
         folderWriteText: (folderHandleId, relativePath, content, options) => request('host.folderWriteText', { folderHandleId, relativePath, content, create: options?.create !== false }),
-        folderWriteBinary: (folderHandleId, relativePath, dataBase64, options) => request('host.folderWriteBinary', { folderHandleId, relativePath, dataBase64, create: options?.create !== false }),
+        folderWriteBinary: (folderHandleId, relativePath, dataBase64, options) => request('host.folderWriteBinary', { folderHandleId, relativePath, dataBase64, create: options?.create !== false, offset: options?.offset }),
         closeFolderHandle: (folderHandleId) => request('host.closeFolderHandle', { folderHandleId }),
         // Persisted recent grants: lets plugins pre-target the native picker.
         recentFolders: () => request('host.recentFolders'),

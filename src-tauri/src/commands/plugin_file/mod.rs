@@ -267,7 +267,7 @@ use drop::open_dropped_plugin_files;
 pub(crate) use folder::close_all_plugin_folders;
 use folder::{
     close_folder, folder_file_size, folder_list, folder_read_binary, folder_read_text, folder_resolve_entry,
-    folder_write_bytes, folder_write_text, open_folder, FolderHandleMeta, FolderListResult,
+    folder_write_bytes, folder_write_bytes_chunk, folder_write_text, open_folder, FolderHandleMeta, FolderListResult,
 };
 pub use registry::close_all_plugin_files;
 use registry::{
@@ -667,6 +667,7 @@ pub async fn plugin_file_folder_write_binary(
     relative_path: String,
     data_base64: String,
     create: Option<bool>,
+    offset: Option<u64>,
 ) -> Result<(), String> {
     // Same payload ceiling as chunked file writes: base64 inflates by ~4/3.
     if data_base64.len() > MAX_CHUNK_BYTES * 4 / 3 + 4 {
@@ -677,7 +678,26 @@ pub async fn plugin_file_folder_write_binary(
         .map_err(|error| format!("invalid base64 payload: {error}"))?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<PluginFileState>();
-        folder_write_bytes(state.inner(), &plugin_id, &folder_handle_id, &relative_path, &bytes, create.unwrap_or(true))
+        match offset {
+            // An offset means a chunked write of a large file, keeping each request under the bridge limit.
+            Some(offset) => folder_write_bytes_chunk(
+                state.inner(),
+                &plugin_id,
+                &folder_handle_id,
+                &relative_path,
+                &bytes,
+                create.unwrap_or(true),
+                offset,
+            ),
+            None => folder_write_bytes(
+                state.inner(),
+                &plugin_id,
+                &folder_handle_id,
+                &relative_path,
+                &bytes,
+                create.unwrap_or(true),
+            ),
+        }
     })
     .await
     .map_err(|error| error.to_string())?

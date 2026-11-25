@@ -28,7 +28,7 @@ import {
 } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION, DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
-import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
+import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, LEGACY_DATA_GRID_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
   it("defaults sidebar hover to enabled with a 300ms delay and validates saved values", () => {
@@ -986,11 +986,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ dataGridZebraRowBg: null as never }).dataGridZebraRowBg).toBe("");
   });
 
-  it("defaults the data grid font and preserves a custom font family", () => {
-    const defaultFontFamily = `"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
-    expect(normalizeEditorSettings({}).tableFontFamily).toBe(defaultFontFamily);
-    expect(normalizeEditorSettings({ tableFontFamily: "'IBM Plex Mono', monospace" }).tableFontFamily).toBe("'IBM Plex Mono', monospace");
-    expect(normalizeEditorSettings({ tableFontFamily: "   " }).tableFontFamily).toBe(defaultFontFamily);
+  it("migrates only the previous default data grid font and preserves custom fonts", () => {
+    expect(normalizeEditorSettings({}).tableFontFamily).toBe(DEFAULT_DATA_GRID_FONT_FAMILY);
+    expect(normalizeEditorSettings({ tableFontFamily: "   " }).tableFontFamily).toBe(DEFAULT_DATA_GRID_FONT_FAMILY);
+    expect(normalizeEditorSettings({ tableFontFamily: LEGACY_DATA_GRID_FONT_FAMILY }).tableFontFamily).toBe(DEFAULT_DATA_GRID_FONT_FAMILY);
+    const custom = '"Geist Variable Tabular", sans-serif';
+    expect(normalizeEditorSettings({ tableFontFamily: custom }).tableFontFamily).toBe(custom);
   });
 
   it("defaults the editor font with CJK fallbacks and migrates legacy default presets", () => {
@@ -2439,6 +2440,33 @@ describe("settingsStore editor settings persistence", () => {
   beforeEach(() => {
     vi.resetModules();
     setActivePinia(createPinia());
+  });
+
+  it("retains an explicitly reselected legacy table font on native patch saves and reload", async () => {
+    const { tableFontFamilyDefaultVersion: version, ...previousSettings } = DEFAULT_EDITOR_SETTINGS;
+    const saved = { ...previousSettings, tableFontFamily: LEGACY_DATA_GRID_FONT_FAMILY };
+    const loadEditorSettings = vi.fn(async () => ({ ...saved }));
+    const saveEditorSettings = vi.fn(async (snapshot, patch) => Object.assign(saved, patch ?? snapshot));
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    try {
+      const { useSettingsStore } = await import("@/stores/settingsStore");
+      const store = useSettingsStore();
+      await store.initEditorSettings();
+      expect(store.editorSettings.tableFontFamily).toBe(DEFAULT_DATA_GRID_FONT_FAMILY);
+      await store.updateEditorSettingsAndPersist({ tableFontFamily: LEGACY_DATA_GRID_FONT_FAMILY });
+      expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.anything(), {
+        tableFontFamily: LEGACY_DATA_GRID_FONT_FAMILY,
+        tableFontFamilyDefaultVersion: version,
+      });
+
+      setActivePinia(createPinia());
+      const reloaded = useSettingsStore();
+      await reloaded.initEditorSettings();
+      expect(reloaded.editorSettings.tableFontFamily).toBe(LEGACY_DATA_GRID_FONT_FAMILY);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("preserves a previously selected Classic SQL formatter layout when loading saved settings", async () => {

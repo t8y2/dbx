@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { cssFontFamilyForName, DEFAULT_MONO_FALLBACK_FONTS, DEFAULT_MONO_FONT_FAMILY, FONT_FAMILIES, LEGACY_PRESET_FONT_MAP, normalizeCustomFontFamilyInput, readableFontFamily } from "../appFonts";
-import { displayFontFamily, isPresetFontFamily } from "../fontFamilyOptions";
+import { cssFontFamilyForName, DATA_GRID_FONT_PRESETS, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FALLBACK_FONTS, DEFAULT_MONO_FONT_FAMILY, FONT_FAMILIES, LEGACY_PRESET_FONT_MAP, normalizeCustomFontFamilyInput, readableFontFamily } from "../appFonts";
+import { buildFontFamilyOptions, displayFontFamily, isPresetFontFamily } from "../fontFamilyOptions";
 
 describe("appFonts", () => {
   it("includes CJK fallbacks in DEFAULT_MONO_FALLBACK_FONTS", () => {
@@ -14,6 +14,13 @@ describe("appFonts", () => {
     expect(DEFAULT_MONO_FALLBACK_FONTS).toMatch(/^ui-monospace/);
     expect(DEFAULT_MONO_FALLBACK_FONTS.indexOf("monospace")).toBeGreaterThanOrEqual(0);
     expect(DEFAULT_MONO_FALLBACK_FONTS.indexOf("monospace")).toBeLessThan(DEFAULT_MONO_FALLBACK_FONTS.indexOf('"Microsoft YaHei"'));
+  });
+
+  it("offers system monospace first for table data and keeps the bundled Geist option", () => {
+    const options = buildFontFamilyOptions([], [], DATA_GRID_FONT_PRESETS);
+    expect(options[0]).toBe(DEFAULT_DATA_GRID_FONT_FAMILY);
+    expect(displayFontFamily(options[0])).toBe("System Monospace");
+    expect(options.map(displayFontFamily)).toContain("Geist Variable Tabular");
   });
 
   it("appends CJK fallbacks to DEFAULT_MONO_FONT_FAMILY", () => {

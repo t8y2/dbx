@@ -1,3 +1,4 @@
+import { DEFAULT_DATA_GRID_FONT_FAMILY } from "@/lib/app/appFonts";
 import { gridCellDisplayValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { BOOLEAN_CHECKBOX_SIZE, isBooleanCellValue, normalizeBooleanCellValue } from "@/lib/dataGrid/dataGridBooleanColumn";
 import { resolveDataGridCellTextRole } from "@/lib/dataGrid/dataGridCellTextVisual";
@@ -388,7 +389,7 @@ function resolveCanvasRenderState(canvas: HTMLCanvasElement, ctx: CanvasRenderin
   const cached = canvasRenderStateCache.get(canvas);
   if (cached?.cacheKey === cacheKey) return cached;
 
-  const fontFamily = canvasStyle.fontFamily || `"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
+  const fontFamily = canvasStyle.fontFamily || DEFAULT_DATA_GRID_FONT_FAMILY;
   const fontSize = Number.parseFloat(canvasStyle.fontSize) || 13;
   const lineHeight = canvasStyle.lineHeight;
   const normalFont = canvasFont({

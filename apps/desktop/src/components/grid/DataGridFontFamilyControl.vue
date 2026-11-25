@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { DEFAULT_DATA_GRID_FONT_FAMILY } from "@/lib/app/appFonts";
+import { DATA_GRID_FONT_PRESETS } from "@/lib/app/appFonts";
 import { buildFontFamilyOptions, displayFontFamily, loadSystemFontNames } from "@/lib/app/fontFamilyOptions";
 import { useSettingsStore } from "@/stores/settingsStore";
 
@@ -10,7 +10,7 @@ const { t } = useI18n();
 const settingsStore = useSettingsStore();
 const systemFontNames = ref<string[]>([]);
 const tableFontFamily = computed(() => settingsStore.editorSettings.tableFontFamily);
-const tableFontOptions = computed(() => buildFontFamilyOptions(systemFontNames.value, [tableFontFamily.value], [DEFAULT_DATA_GRID_FONT_FAMILY]));
+const tableFontOptions = computed(() => buildFontFamilyOptions(systemFontNames.value, [tableFontFamily.value], DATA_GRID_FONT_PRESETS));
 
 function setTableFontFamily(value: string) {
   settingsStore.updateEditorSettings({ tableFontFamily: value });

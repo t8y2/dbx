@@ -8,7 +8,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { aiConfigToItem, generateId, getConfigKey } from "@/lib/ai/aiConfigList";
 import { AI_CONVERSATION_FONT_FAMILY_DEFAULT, AI_CONVERSATION_FONT_SIZE_DEFAULT, normalizeAiConversationFontFamily, normalizeAiConversationFontSize } from "@/lib/ai/aiTypography";
-import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, LEGACY_PRESET_FONT_MAP } from "@/lib/app/appFonts";
+import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, LEGACY_DATA_GRID_FONT_FAMILY, LEGACY_PRESET_FONT_MAP } from "@/lib/app/appFonts";
 import { emitAlwaysOnTopToolbarVisibilityChanged } from "@/lib/app/windowAlwaysOnTop";
 import { defaultBackgroundImageSettings, normalizeBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import * as api from "@/lib/backend/api";
@@ -1178,6 +1178,7 @@ export interface EditorSettings {
   dataGridBooleanValueStyle: BooleanCellValueStyle;
   numericColumnRightAlign: boolean;
   tableFontFamily: string;
+  tableFontFamilyDefaultVersion: number;
   tableFontSize: number;
   structureEditorDensity: StructureEditorDensity;
   tableInfoActiveTab: TableInfoTab;
@@ -1436,6 +1437,7 @@ export const WELCOME_PAGE_DEFAULT_VERSION = 1;
 // blobs written by the unwrapped-title builds lack it and migrate to the new
 // default, while an explicit toggle afterwards stamps the marker and wins.
 export const COMPACT_TAB_TITLE_DEFAULT_VERSION = 1;
+const TABLE_FONT_FAMILY_DEFAULT_VERSION = 1;
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   fontFamily: DEFAULT_MONO_FONT_FAMILY,
@@ -1596,6 +1598,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridBooleanValueStyle: "true-false",
   numericColumnRightAlign: true,
   tableFontFamily: DEFAULT_DATA_GRID_FONT_FAMILY,
+  tableFontFamilyDefaultVersion: TABLE_FONT_FAMILY_DEFAULT_VERSION,
   tableFontSize: TABLE_FONT_SIZE_DEFAULT,
   structureEditorDensity: "compact",
   tableInfoActiveTab: "ddl",
@@ -2145,6 +2148,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const savedCompactTabTitleDefaultVersion = settings.compactTabTitleDefaultVersion;
   const compactTabTitleDefaultVersion = typeof savedCompactTabTitleDefaultVersion === "number" && savedCompactTabTitleDefaultVersion >= COMPACT_TAB_TITLE_DEFAULT_VERSION ? savedCompactTabTitleDefaultVersion : COMPACT_TAB_TITLE_DEFAULT_VERSION;
   const hasCurrentCompactTabTitleDefault = compactTabTitleDefaultVersion === savedCompactTabTitleDefaultVersion;
+  const savedTableFontVersion = settings.tableFontFamilyDefaultVersion;
+  const hasCurrentTableFontDefault = typeof savedTableFontVersion === "number" && savedTableFontVersion >= TABLE_FONT_FAMILY_DEFAULT_VERSION;
+  const tableFontFamily = normalizeFontFamily(settings.tableFontFamily, DEFAULT_DATA_GRID_FONT_FAMILY);
   // The active id can only be validated once the scheme list it points into is known.
   const dataGridTypeColorSchemes = normalizeDataGridTypeColorSchemes(settings.dataGridTypeColorSchemes);
   const savedExtractorMigrationVersion = settings.dataGridExtractorOptionsMigrationVersion;
@@ -2368,7 +2374,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridBooleanDisplayMode: settings.dataGridBooleanDisplayMode === "checkbox" ? "checkbox" : "dropdown",
     dataGridBooleanValueStyle: normalizeDataGridBooleanValueStyle(settings.dataGridBooleanValueStyle),
     numericColumnRightAlign: typeof settings.numericColumnRightAlign === "boolean" ? settings.numericColumnRightAlign : DEFAULT_EDITOR_SETTINGS.numericColumnRightAlign,
-    tableFontFamily: normalizeFontFamily(settings.tableFontFamily, DEFAULT_EDITOR_SETTINGS.tableFontFamily),
+    // Older snapshots included the full default stack even if the user had never picked a font.
+    tableFontFamily: !hasCurrentTableFontDefault && tableFontFamily === LEGACY_DATA_GRID_FONT_FAMILY ? DEFAULT_DATA_GRID_FONT_FAMILY : tableFontFamily,
+    tableFontFamilyDefaultVersion: hasCurrentTableFontDefault ? savedTableFontVersion : TABLE_FONT_FAMILY_DEFAULT_VERSION,
     tableFontSize: normalizeTableFontSize(settings.tableFontSize),
     structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
     tableInfoActiveTab: normalizeTableInfoTab(settings.tableInfoActiveTab),
@@ -2703,6 +2711,8 @@ export const useSettingsStore = defineStore("settings", () => {
     const snapshot = editorSettingsSnapshot(editorSettings.value);
     const fields = new Map(pendingSharedSettingsFields);
     const patch = Object.fromEntries([...fields.keys()].map((key) => [key, snapshot[key]]));
+    // Native windows merge individual fields. Persist an explicit font and its migration marker together.
+    if (fields.has("tableFontFamily")) patch.tableFontFamilyDefaultVersion = snapshot.tableFontFamilyDefaultVersion;
     const saved = isTauriRuntime() && fields.size ? await api.saveEditorSettings(snapshot, patch) : await api.saveEditorSettings(snapshot);
     for (const [key, revision] of fields) {
       if (pendingSharedSettingsFields.get(key) === revision) pendingSharedSettingsFields.delete(key);

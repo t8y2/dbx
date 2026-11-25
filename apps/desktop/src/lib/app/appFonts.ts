@@ -14,7 +14,9 @@ export const DEFAULT_MONO_FALLBACK_FONTS = `ui-monospace, SFMono-Regular, "SF Mo
 // Keep in sync with the editor font default in settingsStore; also the baseline
 // `--font-mono` value in tokens.css, which plugin sandboxes consume via the bridge.
 export const DEFAULT_MONO_FONT_FAMILY = `'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', ${DEFAULT_MONO_FALLBACK_FONTS}`;
-export const DEFAULT_DATA_GRID_FONT_FAMILY = `"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
+export const DEFAULT_DATA_GRID_FONT_FAMILY = DEFAULT_MONO_FALLBACK_FONTS;
+export const LEGACY_DATA_GRID_FONT_FAMILY = `"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
+export const DATA_GRID_FONT_PRESETS = [DEFAULT_DATA_GRID_FONT_FAMILY, LEGACY_DATA_GRID_FONT_FAMILY] as const;
 
 // Native-feeling UI option without DBX's bundled/brand font at the front of the stack.
 export const SYSTEM_UI_FONT_FAMILY = `system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;

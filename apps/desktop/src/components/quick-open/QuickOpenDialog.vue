@@ -739,7 +739,7 @@ watch(
 watch(selectedIndex, async () => {
   await nextTick();
   const container = listRef.value;
-  if (!container) return;
+  if (!container || container.querySelector("[data-quick-open-virtual-list]")) return;
   container.querySelector<HTMLElement>('[data-selected="true"]')?.scrollIntoView({ block: "nearest" });
 });
 </script>
@@ -934,7 +934,7 @@ watch(selectedIndex, async () => {
                               {{ metadataIndexStatuses[connection.id]?.state === "ready" ? t("quickOpen.indexRebuild") : t("quickOpen.indexBuild") }}
                             </button>
                             <button
-                              v-if="metadataIndexStatuses[connection.id]?.state === 'ready'"
+                              v-if="metadataIndexStatuses[connection.id]?.state === 'ready' || metadataIndexStatuses[connection.id]?.state === 'partial'"
                               type="button"
                               class="rounded-md px-2.5 py-1.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
                               :disabled="!!indexBusyConnection"

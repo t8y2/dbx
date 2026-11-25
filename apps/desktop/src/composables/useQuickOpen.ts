@@ -6,7 +6,8 @@ import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog } from "@
 import { databaseObjectTreeQuerySchema } from "@/lib/database/databaseFeatureSupport";
 import { runDatabaseStructureSearch, supportsDatabaseStructureSearchFromManifest, type DatabaseStructureSearchHit } from "@/lib/database/databaseStructureSearch";
 import { usesDocumentStructureSearch, usesSqlCatalogStructureSearch } from "@/lib/database/databaseStructureSearchCapabilities";
-import { connectionObjectTreeNodeSchema, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import {
   decodeQuickOpenMetadataCache,
   encodeQuickOpenMetadataCache,
@@ -62,7 +63,9 @@ const RECENT_QUICK_OPEN_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
 
 const CONTENT_SEARCH_DEBOUNCE_MS = 200;
 const CONTENT_SEARCH_MAX_RESULTS = 500;
-const METADATA_INDEX_MAX_RESULTS = 1000;
+const METADATA_INDEX_TABLE_PAGE_SIZE = 200;
+const METADATA_INDEX_ROUTINE_LIMIT = 1000;
+const METADATA_INDEX_CONNECTION_CONCURRENCY = 2;
 const QUICK_OPEN_RESULTS_DEBOUNCE_MS = 120;
 const QUICK_OPEN_RESULTS_DEBOUNCE_THRESHOLD = 500;
 
@@ -399,6 +402,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   const metadataIndexStatuses = ref<Record<string, QuickOpenIndexStatus>>({});
   const metadataIndexBuilds = new Map<string, Promise<boolean>>();
   const metadataIndexBuildGenerations = new Map<string, number>();
+  let metadataIndexBatchGeneration = 0;
   let metadataIndexStatusGeneration = 0;
   const metadataIndexBuildingConnections = new Set<string>();
   const metadataIndexClearedConnections = new Set<string>();
@@ -1385,6 +1389,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   interface MetadataIndexBuildResult {
     items: QuickOpenItem[];
     failedScopes: MetadataIndexScope[];
+    incompleteScopes: MetadataIndexScope[];
     coveredScopes: MetadataIndexScope[];
     incomplete: boolean;
   }
@@ -1403,6 +1408,28 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     };
     await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, () => run()));
     return results;
+  }
+
+  async function loadMetadataIndexTables(connection: ConnectionConfig, scope: MetadataIndexScope, assertCurrent: () => void): Promise<{ tables: SqlCompletionTable[]; complete: boolean }> {
+    const { database, catalog, schema } = scope;
+    const querySchema = catalog ? databaseObjectTreeQuerySchema(effectiveDatabaseTypeForConnection(connection), database, schema) : connectionObjectTreeQuerySchema(connection, database, schema);
+    const tables: SqlCompletionTable[] = [];
+    const seen = new Set<string>();
+    for (let offset = 0; ;) {
+      assertCurrent();
+      const page = await api.listTables(connection.id, database, querySchema, undefined, METADATA_INDEX_TABLE_PAGE_SIZE, offset, undefined, catalog);
+      assertCurrent();
+      for (const table of page) {
+        const tableSchema = table.schema ?? schema;
+        const identity = JSON.stringify([tableSchema, table.name]);
+        // A repeated row can indicate an unstable listing or a driver ignoring the offset.
+        if (seen.has(identity)) return { tables, complete: false };
+        seen.add(identity);
+        tables.push({ name: table.name, schema: tableSchema, catalog, type: sqlObjectNavigationTypeFromTableType(table.table_type), comment: table.comment });
+      }
+      if (page.length < METADATA_INDEX_TABLE_PAGE_SIZE) return { tables, complete: true };
+      offset += page.length;
+    }
   }
 
   async function loadAllMetadataIndexObjects(connection: ConnectionConfig, assertCurrent: () => void): Promise<MetadataIndexBuildResult> {
@@ -1519,6 +1546,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     };
 
     const failedScopes: MetadataIndexScope[] = [];
+    const incompleteScopes: MetadataIndexScope[] = [];
     const coveredScopes: MetadataIndexScope[] = [];
     for (const { database, catalog } of scopes.values()) {
       assertCurrent();
@@ -1542,48 +1570,46 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
           const addScopeItem = (item: QuickOpenItem): void => {
             scopeItems.set(quickOpenItemKey(item), item);
           };
-          let tables: SqlCompletionTable[];
-          if (catalog && typeof api.listTables === "function") {
-            const rawTables = await api.listTables(connection.id, database, databaseObjectTreeQuerySchema(effectiveDatabaseTypeForConnection(connection), database, tableScope.schema), undefined, undefined, undefined, undefined, catalog);
-            tables = rawTables.map((table: any) => {
-              const normalizedType = String(table.table_type || "TABLE")
-                .toUpperCase()
-                .replaceAll(" ", "_");
-              const type = normalizedType === "VIEW" ? "view" : normalizedType === "MATERIALIZED_VIEW" ? "materialized_view" : "table";
-              return { name: table.name, schema: tableScope.schema ?? table.schema ?? undefined, catalog, type, comment: table.comment };
-            });
-          } else if (typeof connectionStore.listCompletionTables === "function") {
-            tables = await connectionStore.listCompletionTables(connection.id, database, "", METADATA_INDEX_MAX_RESULTS, tableScope.schema, true, undefined, catalog, { activateConnection: false, allowConnection: false, verifySchemaMetadata: true, requireComplete: true });
-          } else {
-            tables = [];
-          }
-
+          const { tables, complete } = await loadMetadataIndexTables(connection, tableScope, assertCurrent);
+          let scopeComplete = complete;
           await mapWithConcurrency(tables, 4, async (table) => {
             assertCurrent();
-            const relation = remoteTableItem({ ...table, database, catalog: table.catalog ?? catalog, schema: table.schema ?? tableScope.schema }, connection, database, catalog);
-            addScopeItem(relation);
-            if (typeof connectionStore.listCompletionColumns !== "function") return;
-            const columns = await connectionStore.listCompletionColumns(connection.id, database, table.name, table.schema ?? tableScope.schema, undefined, catalog, { activateConnection: false, requireComplete: true });
-            assertCurrent();
-            for (const column of columns) addScopeItem(createColumnItem(table, column, database, catalog));
+            addScopeItem(remoteTableItem(table, connection, database, catalog));
+            try {
+              const columns = await connectionStore.listCompletionColumns(connection.id, database, table.name, table.schema, undefined, catalog, { activateConnection: false, requireComplete: true });
+              assertCurrent();
+              for (const column of columns) addScopeItem(createColumnItem(table, column, database, catalog));
+            } catch (error) {
+              if (error instanceof MetadataIndexBuildCancelled) throw error;
+              scopeComplete = false;
+            }
           });
 
-          if (!catalog && typeof connectionStore.listCompletionObjects === "function") {
-            const objects = await connectionStore.listCompletionObjects(connection.id, database, "", METADATA_INDEX_MAX_RESULTS, tableScope.schema, undefined, true, undefined, ["routine"], false, { requireComplete: true });
-            for (const object of objects) {
-              const item = createRoutineItem(object, database, tableScope.schema ?? object.schema, catalog);
-              if (item) addScopeItem(item);
+          if (!catalog) {
+            try {
+              assertCurrent();
+              // The completion endpoint caps results at 1,000 and does not expose a next page.
+              const objects = await connectionStore.listCompletionObjects(connection.id, database, "", METADATA_INDEX_ROUTINE_LIMIT, tableScope.schema, undefined, tableScope.schema === undefined, undefined, ["routine"], false, { requireComplete: true });
+              if (objects.length >= METADATA_INDEX_ROUTINE_LIMIT) scopeComplete = false;
+              for (const object of objects) {
+                const item = createRoutineItem(object, database, object.schema ?? tableScope.schema, catalog);
+                if (item) addScopeItem(item);
+              }
+            } catch (error) {
+              if (error instanceof MetadataIndexBuildCancelled) throw error;
+              scopeComplete = false;
             }
           }
+          assertCurrent();
           for (const item of scopeItems.values()) addItem(item);
-          coveredScopes.push({ database, catalog, schema: tableScope.schema });
+          (scopeComplete ? coveredScopes : incompleteScopes).push(tableScope);
         } catch (error) {
           if (error instanceof MetadataIndexBuildCancelled) throw error;
           failedScopes.push({ database, catalog, schema: tableScope.schema });
         }
       });
     }
-    return { items: [...items.values()], failedScopes, coveredScopes, incomplete };
+    return { items: [...items.values()], failedScopes, incompleteScopes, coveredScopes, incomplete };
   }
 
   async function rebuildMetadataIndex(connectionId: string): Promise<boolean> {
@@ -1609,10 +1635,11 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
         assertCurrent();
         const buildResult = await loadAllMetadataIndexObjects(connection, assertCurrent);
         assertCurrent();
-        if (buildResult.failedScopes.length > 0 && buildResult.coveredScopes.length === 0 && !buildResult.incomplete) throw new Error(`Metadata index collection failed for ${buildResult.failedScopes.length} scope(s)`);
-        const partial = buildResult.failedScopes.length > 0 || buildResult.incomplete;
+        if (buildResult.failedScopes.length > 0 && buildResult.coveredScopes.length === 0 && buildResult.incompleteScopes.length === 0 && !buildResult.incomplete) throw new Error(`Metadata index collection failed for ${buildResult.failedScopes.length} scope(s)`);
+        const partial = buildResult.failedScopes.length > 0 || buildResult.incompleteScopes.length > 0 || buildResult.incomplete;
         const failedScopeText = buildResult.failedScopes.map(metadataIndexScopeLabel).join(", ");
-        const statusError = [buildResult.incomplete ? "Database discovery was incomplete" : "", failedScopeText ? `Failed scopes: ${failedScopeText}` : ""].filter(Boolean).join("; ");
+        const incompleteScopeText = buildResult.incompleteScopes.map(metadataIndexScopeLabel).join(", ");
+        const statusError = [buildResult.incomplete ? "Database discovery was incomplete" : "", failedScopeText ? `Failed scopes: ${failedScopeText}` : "", incompleteScopeText ? `Incomplete scopes: ${incompleteScopeText}` : ""].filter(Boolean).join("; ");
         await persistLiveQuickOpenMetadata(buildResult.items, {
           ...(partial ? { replaceScopes: buildResult.coveredScopes } : { replaceConnectionId: connectionId }),
           throwOnError: true,
@@ -1628,16 +1655,15 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
         const persistedStatus = payload ? quickOpenIndexStatus(connectionId, payload) : undefined;
         metadataIndexStatuses.value = {
           ...metadataIndexStatuses.value,
-          [connectionId]:
-            buildResult.failedScopes.length > 0 || buildResult.incomplete
-              ? {
-                  connectionId,
-                  state: "partial",
-                  itemCount: persistedStatus?.itemCount ?? buildResult.items.length,
-                  capturedAt: persistedStatus?.capturedAt,
-                  error: [buildResult.incomplete ? "Database discovery was incomplete" : "", failedScopeText ? `Failed scopes: ${failedScopeText}` : ""].filter(Boolean).join("; "),
-                }
-              : (persistedStatus ?? { connectionId, state: "ready", itemCount: buildResult.items.length }),
+          [connectionId]: partial
+            ? {
+                connectionId,
+                state: "partial",
+                itemCount: persistedStatus?.itemCount ?? buildResult.items.length,
+                capturedAt: persistedStatus?.capturedAt,
+                error: statusError,
+              }
+            : (persistedStatus ?? { connectionId, state: "ready", itemCount: buildResult.items.length }),
         };
         return true;
       } catch (error) {
@@ -1671,10 +1697,20 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
 
   async function rebuildAllMetadataIndexes(): Promise<boolean> {
     const indexable = connectionStore.connections.filter((connection) => isQuickOpenMetadataIndexSupported(connection.db_type));
-    const results = await Promise.allSettled(indexable.map((connection) => rebuildMetadataIndex(connection.id)));
-    const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (failures.length > 0) throw new Error(`${failures.length} search index build(s) failed`);
-    return results.some((result): result is PromiseFulfilledResult<boolean> => result.status === "fulfilled" && result.value);
+    const generation = metadataIndexBatchGeneration;
+    let failures = 0;
+    const results = await mapWithConcurrency(indexable, METADATA_INDEX_CONNECTION_CONCURRENCY, async (connection) => {
+      if (generation !== metadataIndexBatchGeneration) return false;
+      try {
+        return await rebuildMetadataIndex(connection.id);
+      } catch {
+        failures += 1;
+        return false;
+      }
+    });
+    if (generation !== metadataIndexBatchGeneration) return false;
+    if (failures > 0) throw new Error(`${failures} search index build(s) failed`);
+    return results.some(Boolean);
   }
 
   async function clearMetadataIndex(connectionId: string): Promise<void> {
@@ -2071,6 +2107,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   function cancelSearch(): void {
     remoteSearchGeneration += 1;
     contentSearchGeneration += 1;
+    metadataIndexBatchGeneration += 1;
     for (const connectionId of metadataIndexBuilds.keys()) metadataIndexBuildGenerations.set(connectionId, (metadataIndexBuildGenerations.get(connectionId) ?? 0) + 1);
     cancelActiveContentSearch();
     if (remoteSearchTimer) clearTimeout(remoteSearchTimer);

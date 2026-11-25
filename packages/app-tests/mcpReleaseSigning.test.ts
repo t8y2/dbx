@@ -363,7 +363,7 @@ test("standalone archive workflow preserves npm signatures and produces Homebrew
   assert.equal(readFileSync(join(scenario.root, "release-assets/SHA256SUMS"), "utf8").trim().split("\n").length, 6);
   const sums = spawnSync("shasum", ["-a", "256", "-c", "SHA256SUMS"], { cwd: join(scenario.root, "release-assets"), encoding: "utf8" });
   assert.equal(sums.status, 0, sums.stderr);
-}, 60_000);
+});
 
 test("interruption waits for the signing command to stop and restores the keychain search list", async () => {
   const scenario = fixture({ pause: "import" });

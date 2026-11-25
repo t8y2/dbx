@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { FileCode, FileText } from "@lucide/vue";
@@ -54,6 +54,25 @@ const contentRows = computed<ContentRow[]>(() => {
   return rows;
 });
 
+const contentScroller = ref<{ $el: HTMLElement; scrollToItem: (index: number, options: { align: "nearest" }) => void } | null>(null);
+const virtualizeContent = computed(() => props.contentMode && !props.contentSearching && contentRows.value.length > 100);
+
+watch(
+  () => props.selectedIndex,
+  (selectedIndex) => {
+    const scroller = contentScroller.value;
+    if (!scroller || selectedIndex < 0) return;
+    const selectedRow = scroller.$el.querySelector('[data-selected="true"]');
+    if (selectedRow) {
+      selectedRow.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    const rowIndex = contentRows.value.findIndex((row) => row.flatIndex === selectedIndex);
+    if (rowIndex >= 0) scroller.scrollToItem(rowIndex, { align: "nearest" });
+  },
+  { flush: "post" },
+);
+
 const resultRows = computed<ResultRow[]>(() => {
   const rows: ResultRow[] = [];
   for (const [itemIndex, item] of props.items.entries()) {
@@ -68,7 +87,7 @@ const resultRows = computed<ResultRow[]>(() => {
 </script>
 
 <template>
-  <div class="min-h-0 overflow-y-auto" :class="props.contentMode ? 'max-h-[min(50vh,480px)]' : 'max-h-[min(58vh,560px)]'">
+  <div class="min-h-0" :class="virtualizeContent ? undefined : props.contentMode ? 'max-h-[min(50vh,480px)] overflow-y-auto' : 'max-h-[min(58vh,560px)] overflow-y-auto'">
     <template v-if="props.contentMode">
       <div v-if="props.contentSearching" class="px-4 py-8 text-center text-muted-foreground">{{ t("quickOpen.searchingContent") }}</div>
       <template v-else>
@@ -81,7 +100,7 @@ const resultRows = computed<ResultRow[]>(() => {
           <p v-if="!props.searchQuery.trim()">{{ t("quickOpen.emptyPlaceholder") }}</p>
           <p v-else>{{ t("quickOpen.noResults") }}</p>
         </div>
-        <DynamicScroller v-if="contentRows.length > 100" :items="contentRows" :min-item-size="32" :buffer="400" :skip-hover="true" key-field="id" class="divide-y">
+        <DynamicScroller v-if="virtualizeContent" ref="contentScroller" data-quick-open-virtual-list :items="contentRows" :min-item-size="32" :buffer="400" :skip-hover="true" key-field="id" class="h-[min(50vh,480px)] divide-y overflow-y-auto">
           <template #default="{ item: row, active, index }">
             <DynamicScrollerItem :item="row" :active="active" :data-index="index" :size-dependencies="[row.isHeader, row.id]">
               <div v-if="row.isHeader" class="flex items-center justify-between gap-3 bg-muted/50 px-4 py-1.5">

@@ -44,6 +44,7 @@ vi.mock("@/stores/connectionStore", () => ({
     loadTreeNodeChildren: mocks.loadTreeNodeChildren,
     loadAllObjectGroupChildren: mocks.loadAllObjectGroupChildren,
     getConfig: mocks.getConfig,
+    listCompletionObjects: async () => [],
   }),
 }));
 vi.mock("@/stores/savedSqlStore", () => ({ useSavedSqlStore: () => ({ allFiles: [] }) }));
@@ -80,6 +81,7 @@ vi.mock("@/lib/globalSearch/globalSearchSettings", async () => {
 });
 vi.mock("@/lib/backend/api", () => ({
   listPlugins: async () => [],
+  listTables: async () => [],
   saveSchemaCache: mocks.saveSchemaCache,
   loadSchemaCache: mocks.loadSchemaCache,
   deleteSchemaCachePrefix: mocks.deleteSchemaCachePrefix,

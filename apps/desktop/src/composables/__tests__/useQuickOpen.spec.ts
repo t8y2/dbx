@@ -20,6 +20,7 @@ vi.mock("@/stores/savedSqlStore", () => ({
 
 vi.mock("@/lib/backend/api", () => ({
   listSqlFilesInFolder: vi.fn(),
+  listTables: vi.fn(),
   readExternalSqlFile: vi.fn(),
   listPlugins: vi.fn(),
   buildDatabaseStructureSearchSql: vi.fn(),
@@ -148,6 +149,10 @@ describe("useQuickOpen", () => {
   });
 
   describe("metadata index management", () => {
+    beforeEach(() => {
+      vi.mocked(api.listTables).mockReset().mockResolvedValue([]);
+    });
+
     it("keeps the previous index status when rebuilding fails before persistence", async () => {
       const connection = { id: "failed-index", name: "Failed", db_type: "postgres", database: "app" } as any;
       const store = {
@@ -200,14 +205,14 @@ describe("useQuickOpen", () => {
         ensureConnected: vi.fn().mockResolvedValue(undefined),
         listCompletionDatabases: vi.fn().mockResolvedValue(["app"]),
         listCompletionSchemas: vi.fn().mockResolvedValue(["public", "private"]),
-        listCompletionTables: vi.fn().mockImplementation(async (_id: string, _db: string, _filter: string, _limit: unknown, schema: string) => {
-          if (schema === "private") throw new Error("schema unavailable");
-          return [{ name: "users", schema, type: "table" }];
-        }),
         listCompletionColumns: vi.fn().mockResolvedValue([]),
         listCompletionObjects: vi.fn().mockResolvedValue([]),
       };
       vi.mocked(useConnectionStore).mockReturnValue(store as any);
+      vi.mocked(api.listTables).mockImplementation(async (_id, _database, schema) => {
+        if (schema === "private") throw new Error("schema unavailable");
+        return [{ name: "users", schema, table_type: "TABLE", comment: null }];
+      });
       vi.mocked(api.loadSchemaCache).mockResolvedValue(null);
       const scope = effectScope();
       try {
@@ -215,7 +220,7 @@ describe("useQuickOpen", () => {
         await state.rebuildMetadataIndex(connection.id);
         expect(state.metadataIndexStatuses.value[connection.id]?.state).toBe("partial");
         expect(state.metadataIndexStatuses.value[connection.id]?.error).toContain("private");
-        expect(store.listCompletionTables).toHaveBeenCalledTimes(2);
+        expect(api.listTables).toHaveBeenCalledTimes(2);
 
         store.treeNodes.push({ id: "recovered-table", connectionId: connection.id, type: "table", database: "app", schema: "private", label: "recovered", children: [] });
         await flushAsyncWork();
@@ -241,11 +246,11 @@ describe("useQuickOpen", () => {
         loadAllObjectGroupChildren: vi.fn().mockResolvedValue(undefined),
         listCompletionDatabases: vi.fn().mockResolvedValue(["app"]),
         listCompletionSchemas: vi.fn().mockResolvedValue(["public"]),
-        listCompletionTables: vi.fn().mockResolvedValue([{ name: "users", schema: "public", type: "table", comment: "Users" }]),
         listCompletionColumns: vi.fn().mockResolvedValue([{ name: "email", table: "users", schema: "public", dataType: "text", comment: "Email" }]),
         listCompletionObjects: vi.fn().mockResolvedValue([]),
       };
       vi.mocked(useConnectionStore).mockReturnValue(store as any);
+      vi.mocked(api.listTables).mockResolvedValue([{ name: "users", schema: "public", table_type: "TABLE", comment: "Users" }]);
       vi.mocked(api.loadSchemaCache).mockResolvedValue(null);
       const scope = effectScope();
       try {
@@ -260,6 +265,86 @@ describe("useQuickOpen", () => {
         await state.clearMetadataIndex("indexed");
         expect(vi.mocked(api.deleteSchemaCachePrefix)).toHaveBeenCalledWith(quickOpenMetadataCacheKey("indexed"));
         expect(state.metadataIndexStatuses.value.indexed?.state).toBe("not-built");
+      } finally {
+        scope.stop();
+      }
+    });
+    it("indexes all 1,005 tables and their columns across metadata pages", async () => {
+      const connection = { id: "paged", name: "Paged", db_type: "sqlite", database: "main" } as const;
+      const tables = Array.from({ length: 1005 }, (_, index) => ({ name: `table_${index}`, table_type: "TABLE", comment: null }));
+      const listCompletionColumns = vi.fn().mockResolvedValue([{ name: "value", schema: "main" }]);
+      vi.mocked(useConnectionStore).mockReturnValue({
+        connections: [connection],
+        treeNodes: [],
+        connectedIds: new Set([connection.id]),
+        ensureConnected: vi.fn(),
+        listCompletionDatabases: vi.fn().mockResolvedValue(["main"]),
+        listCompletionColumns,
+        listCompletionObjects: vi.fn().mockResolvedValue([]),
+      } as any);
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(null);
+      vi.mocked(api.listTables).mockImplementation(async (_id, _database, _schema, _filter, limit, offset = 0) => tables.slice(offset, offset + limit!));
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await state.rebuildMetadataIndex(connection.id);
+        expect(api.listTables).toHaveBeenCalledTimes(6);
+        expect(listCompletionColumns).toHaveBeenCalledTimes(1005);
+        expect(state.metadataIndexStatuses.value[connection.id]).toMatchObject({ state: "ready", itemCount: 2011 });
+        expect(api.saveSchemaCache).toHaveBeenCalledWith(quickOpenMetadataCacheKey(connection.id), expect.objectContaining({ items: expect.arrayContaining([expect.objectContaining({ type: "column", tableName: "table_1004" })]) }));
+      } finally {
+        scope.stop();
+      }
+    });
+
+    it("keeps the previous snapshot when the routine listing reaches its cap", async () => {
+      const connection = { id: "capped", name: "Capped", db_type: "postgres", database: "app" } as const;
+      const objects = Array.from({ length: 1000 }, (_, index) => ({ name: `routine_${index}`, type: "function", schema: "public" }));
+      vi.mocked(useConnectionStore).mockReturnValue({
+        connections: [connection],
+        treeNodes: [],
+        connectedIds: new Set([connection.id]),
+        ensureConnected: vi.fn(),
+        listCompletionDatabases: vi.fn().mockResolvedValue(["app"]),
+        listCompletionSchemas: vi.fn().mockResolvedValue(["public"]),
+        listCompletionObjects: vi.fn().mockResolvedValue(objects),
+      } as any);
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(encodeQuickOpenMetadataCache(connection.id, quickOpenMetadataConnectionFingerprint(connection as any), [{ type: "function", label: "old_routine", objectName: "old_routine", connectionId: connection.id, database: "app", schema: "public" }]));
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await state.rebuildMetadataIndex(connection.id);
+        expect(state.metadataIndexStatuses.value[connection.id]?.state).toBe("partial");
+        expect(api.saveSchemaCache).toHaveBeenCalledWith(quickOpenMetadataCacheKey(connection.id), expect.objectContaining({ state: "partial", items: expect.arrayContaining([expect.objectContaining({ label: "old_routine" }), expect.objectContaining({ label: "routine_999" })]) }));
+      } finally {
+        scope.stop();
+      }
+    });
+
+    it.each([false, true])("starts at most two connections and handles queued work when cancelled=%s", async (cancelled) => {
+      const connections = ["first", "second", "third"].map((id) => ({ id, name: id, db_type: "sqlite", database: "main" }));
+      const first = deferred<void>();
+      const second = deferred<void>();
+      const ensureConnected = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise).mockResolvedValue(undefined);
+      vi.mocked(useConnectionStore).mockReturnValue({
+        connections,
+        treeNodes: [],
+        connectedIds: new Set(connections.map(({ id }) => id)),
+        ensureConnected,
+        listCompletionDatabases: vi.fn().mockResolvedValue(["main"]),
+        listCompletionObjects: vi.fn().mockResolvedValue([]),
+      } as any);
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(null);
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        const build = state.rebuildAllMetadataIndexes();
+        expect(ensureConnected).toHaveBeenCalledTimes(2);
+        if (cancelled) state.cancelSearch();
+        first.resolve(undefined);
+        second.resolve(undefined);
+        await expect(build).resolves.toBe(!cancelled);
+        expect(ensureConnected).toHaveBeenCalledTimes(cancelled ? 2 : 3);
       } finally {
         scope.stop();
       }

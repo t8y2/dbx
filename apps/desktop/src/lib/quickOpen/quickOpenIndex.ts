@@ -1,4 +1,4 @@
-import { decodeQuickOpenMetadataCache, type QuickOpenMetadataCache } from "@/lib/quickOpen/quickOpenMetadataCache";
+import { decodeQuickOpenMetadataCache } from "@/lib/quickOpen/quickOpenMetadataCache";
 
 const QUICK_OPEN_METADATA_INDEX_UNSUPPORTED_TYPES = new Set([
   "redis",
@@ -44,13 +44,11 @@ export interface QuickOpenIndexStatus {
 
 export function quickOpenIndexStatus(connectionId: string, payload: unknown, nowMs = Date.now()): QuickOpenIndexStatus {
   const cache = decodeQuickOpenMetadataCache(payload, nowMs);
-  return cache && cache.connectionId === connectionId ? quickOpenIndexStatusFromCache(connectionId, cache) : { connectionId, state: "not-built", itemCount: 0 };
-}
-
-export function quickOpenIndexStatusFromCache(connectionId: string, cache: Pick<QuickOpenMetadataCache, "items" | "capturedAt" | "state" | "error">): QuickOpenIndexStatus {
+  // Older and passively collected snapshots are usable for search without a recorded build.
+  if (!cache?.state || cache.connectionId !== connectionId) return { connectionId, state: "not-built", itemCount: 0 };
   return {
     connectionId,
-    state: cache.state ?? "ready",
+    state: cache.state,
     itemCount: cache.items.length,
     capturedAt: cache.capturedAt,
     ...(cache.error ? { error: cache.error } : {}),

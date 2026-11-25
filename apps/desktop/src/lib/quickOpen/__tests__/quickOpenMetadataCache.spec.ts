@@ -41,10 +41,14 @@ describe("quick open metadata cache", () => {
     expect(isQuickOpenMetadataIndexSupported("plugin")).toBe(false);
   });
 
-  it("reports a ready index from a valid cache and not-built for missing data", () => {
-    const payload = encodeQuickOpenMetadataCache("conn", "fingerprint", items, Date.parse("2026-05-10T12:00:00.000Z"));
-    expect(quickOpenIndexStatus("conn", payload, Date.parse("2026-05-11T12:00:00.000Z"))).toMatchObject({ state: "ready", itemCount: 1, capturedAt: "2026-05-10T12:00:00.000Z" });
-    expect(quickOpenIndexStatus("conn", null)).toMatchObject({ state: "not-built", itemCount: 0 });
+  it("requires an explicit build state to report an index as built", () => {
+    const capturedAt = "2026-05-10T12:00:00.000Z";
+    const now = Date.parse("2026-05-11T12:00:00.000Z");
+    const payload = encodeQuickOpenMetadataCache("conn/1", "fingerprint", items, Date.parse(capturedAt));
+    expect(quickOpenIndexStatus("conn/1", payload, now)).toEqual({ connectionId: "conn/1", state: "not-built", itemCount: 0 });
+    expect(quickOpenIndexStatus("conn/1", null, now)).toMatchObject({ state: "not-built", itemCount: 0 });
+    expect(quickOpenIndexStatus("conn/1", { ...payload, state: "ready" }, now)).toMatchObject({ state: "ready", itemCount: 1, capturedAt });
+    expect(quickOpenIndexStatus("conn/1", { ...payload, state: "partial", error: "Unreachable schema" }, now)).toMatchObject({ state: "partial", itemCount: 1, capturedAt, error: "Unreachable schema" });
   });
 
   it("encodes connection ids in cache keys without prefix collisions", () => {

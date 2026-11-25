@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   activeConnectionId: undefined as string | undefined,
   connectedIds: new Set<string>(),
   commands: [] as any[],
+  savedSqlFiles: [] as Array<{ id: string; name: string; connectionId: string; folderId: string }>,
   pluginOpen: vi.fn(),
   matchMode: "precise" as "precise" | "enhanced",
   showQuickFilters: true,
@@ -47,7 +48,7 @@ vi.mock("@/stores/connectionStore", () => ({
     listCompletionObjects: async () => [],
   }),
 }));
-vi.mock("@/stores/savedSqlStore", () => ({ useSavedSqlStore: () => ({ allFiles: [] }) }));
+vi.mock("@/stores/savedSqlStore", () => ({ useSavedSqlStore: () => ({ allFiles: mocks.savedSqlFiles, getFile: (id: string) => mocks.savedSqlFiles.find((file) => file.id === id) }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { shortcuts: {}, fontSize: 13, fontFamily: "monospace", theme: "app" } }) }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false }, themePalette: { value: "pearl" } }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
@@ -135,6 +136,7 @@ async function mountSearch() {
 beforeEach(() => {
   setQuickOpenScopeIds([]);
   mocks.commands = [];
+  mocks.savedSqlFiles = [];
   mocks.pluginOpen.mockReset().mockReturnValue({});
   mocks.folders = [];
   mocks.connections = [];
@@ -599,6 +601,31 @@ describe("search categories and connection scope", () => {
 });
 
 describe("object search metadata regression", () => {
+  it("opens both same-name SQL library files by their own IDs", async () => {
+    mocks.connections = [{ id: "shared", name: "Shared", db_type: "postgres" }];
+    mocks.savedSqlFiles = [
+      { id: "sales-report", name: "report.sql", connectionId: "shared", folderId: "sales" },
+      { id: "support-report", name: "report.sql", connectionId: "shared", folderId: "support" },
+    ];
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    const props = reactive({ open: false, onSelect: mocks.select, "onUpdate:open": mocks.updateOpen });
+    app = createApp({ render: () => h(QuickOpenDialog, props) });
+    app.use(i18n);
+    app.mount(host);
+    props.open = true;
+    await nextTick();
+    const input = host.querySelector<HTMLInputElement>("input")!;
+    input.value = "report.sql";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    const rows = [...host.querySelectorAll<HTMLElement>("[data-selected]")];
+    expect(rows).toHaveLength(2);
+    for (const row of rows) row.click();
+    expect(mocks.select.mock.calls.map(([item]) => item.sqlFileId).sort()).toEqual(["sales-report", "support-report"]);
+  });
+
   it("removes false matches and opens the correct file after keyboard navigation", async () => {
     mocks.matchMode = "enhanced";
     mocks.folders = ["/order-reports"];

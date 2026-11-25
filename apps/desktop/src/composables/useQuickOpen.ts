@@ -18,6 +18,7 @@ import {
   quickOpenMetadataConnectionFingerprint,
   type PersistedQuickOpenItem,
   type PersistedQuickOpenResultType,
+  type QuickOpenMetadataCache,
 } from "@/lib/quickOpen/quickOpenMetadataCache";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -398,7 +399,8 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   let persistedMetadataLoadGeneration = 0;
   let persistedMetadataConnectionSignature = "";
   const persistedMetadataWriteQueues = new Map<string, Promise<void>>();
-  const persistedMetadataWriteSignatures = new Map<string, { generation: number; signature: string }>();
+  type MetadataBuildStatus = Pick<QuickOpenMetadataCache, "state" | "error">;
+  const persistedMetadataWriteSignatures = new Map<string, { generation: number; connectionFingerprint: string; signature: string; status: MetadataBuildStatus }>();
   const metadataIndexStatuses = ref<Record<string, QuickOpenIndexStatus>>({});
   const metadataIndexBuilds = new Map<string, Promise<boolean>>();
   const metadataIndexBuildGenerations = new Map<string, number>();
@@ -1153,6 +1155,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   function quickOpenItemKey(item: QuickOpenItem): string {
     if (item.type === "plugin_command" || item.type === "plugin_workbench") return JSON.stringify(["plugin", item.id]);
     if (item.type === "sql_file" && item.filePath) return JSON.stringify(["file", item.filePath]);
+    if (item.type === "sql_library_file") return JSON.stringify(["library-file", item.sqlFileId ?? item.id]);
     if (item.type === "column") {
       return JSON.stringify(["column", item.connectionId, item.catalog ?? "", item.database ?? "", item.schema ?? "", item.tableName ?? "", item.columnName ?? item.label]);
     }
@@ -1276,8 +1279,9 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     return scope.schema === undefined || (item.schema ?? "") === scope.schema;
   }
 
-  async function persistLiveQuickOpenMetadata(items: readonly QuickOpenItem[], options: { replaceConnectionId?: string; replaceScopes?: readonly MetadataIndexScope[]; throwOnError?: boolean; status?: { state?: "ready" | "partial"; error?: string } } = {}): Promise<void> {
+  async function persistLiveQuickOpenMetadata(items: readonly QuickOpenItem[], options: { replaceConnectionId?: string; replaceScopes?: readonly MetadataIndexScope[]; throwOnError?: boolean; status?: MetadataBuildStatus } = {}): Promise<void> {
     if (persistedMetadataDisposed) return;
+    const loadSchemaCache = optionalQuickOpenCacheApiMethod("loadSchemaCache");
     const saveSchemaCache = optionalQuickOpenCacheApiMethod("saveSchemaCache");
     if (!saveSchemaCache) return;
     const deleteSchemaCachePrefix = optionalQuickOpenCacheApiMethod("deleteSchemaCachePrefix");
@@ -1303,24 +1307,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
           return snapshot ? [snapshot] : [];
         });
         if (snapshots.length === 0 && options.replaceConnectionId !== connectionId && !options.replaceScopes?.some((scope) => scope.database === conn.database)) return;
-        const mergedByKey = new Map<string, PersistedQuickOpenItem>();
-        if (options.replaceConnectionId !== connectionId) {
-          const replaceScopes = options.replaceScopes ?? [];
-          for (const item of persistedMetadataItems.value) {
-            if (item.connectionId !== connectionId) continue;
-            const snapshot = persistedQuickOpenSnapshot(item);
-            if (!snapshot || replaceScopes.some((scope) => persistedItemMatchesMetadataScope(snapshot, scope))) continue;
-            mergedByKey.set(persistedQuickOpenItemKey(snapshot), snapshot);
-          }
-        }
-        for (const snapshot of snapshots) mergedByKey.set(persistedQuickOpenItemKey(snapshot), snapshot);
-        const merged = [...mergedByKey.values()];
-        const existingStatus = metadataIndexStatuses.value[connectionId];
-        const status = options.status ?? (existingStatus?.state === "partial" ? { state: "partial" as const, ...(existingStatus.error ? { error: existingStatus.error } : {}) } : undefined);
-        const writeSignature = JSON.stringify({ connectionFingerprint, items: merged, status: status ?? {} });
         const cacheKey = quickOpenMetadataCacheKey(connectionId);
-        const previousWrite = persistedMetadataWriteSignatures.get(cacheKey);
-        if (previousWrite?.generation === cacheGeneration && previousWrite.signature === writeSignature) return;
         const previous = persistedMetadataWriteQueues.get(cacheKey) ?? Promise.resolve();
         const pending = previous
           .catch(() => undefined)
@@ -1328,6 +1315,29 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
             if (persistedMetadataDisposed || quickOpenMetadataCacheGeneration(connectionId) !== cacheGeneration) return;
             const current = typeof connectionStore.getConfig === "function" ? connectionStore.getConfig(connectionId) : connectionStore.connections.find((candidate) => candidate.id === connectionId);
             if (!current || quickOpenMetadataConnectionFingerprint(current) !== connectionFingerprint) return;
+            const lastWrite = persistedMetadataWriteSignatures.get(cacheKey);
+            const sameCache = lastWrite?.generation === cacheGeneration && lastWrite.connectionFingerprint === connectionFingerprint;
+            let status = options.status ?? (sameCache ? lastWrite.status : {});
+            if (!options.status && !sameCache && loadSchemaCache) {
+              // A passive update must preserve a previous explicit build, including after restart.
+              const stored = decodeQuickOpenMetadataCache(await loadSchemaCache(cacheKey));
+              if (stored?.connectionId === connectionId && stored.connectionFingerprint === connectionFingerprint && stored.state) status = { state: stored.state, error: stored.error };
+              if (persistedMetadataDisposed || quickOpenMetadataCacheGeneration(connectionId) !== cacheGeneration) return;
+            }
+            const mergedByKey = new Map<string, PersistedQuickOpenItem>();
+            if (options.replaceConnectionId !== connectionId) {
+              const replaceScopes = options.replaceScopes ?? [];
+              for (const item of persistedMetadataItems.value) {
+                if (item.connectionId !== connectionId) continue;
+                const snapshot = persistedQuickOpenSnapshot(item);
+                if (!snapshot || replaceScopes.some((scope) => persistedItemMatchesMetadataScope(snapshot, scope))) continue;
+                mergedByKey.set(persistedQuickOpenItemKey(snapshot), snapshot);
+              }
+            }
+            for (const snapshot of snapshots) mergedByKey.set(persistedQuickOpenItemKey(snapshot), snapshot);
+            const merged = [...mergedByKey.values()];
+            const writeSignature = JSON.stringify({ connectionFingerprint, items: merged, status });
+            if (sameCache && lastWrite.signature === writeSignature) return;
             await saveSchemaCache(cacheKey, encodeQuickOpenMetadataCache(connectionId, connectionFingerprint, merged, Date.now(), status));
             if (quickOpenMetadataCacheGeneration(connectionId) !== cacheGeneration) {
               if (deleteSchemaCachePrefix) await deleteSchemaCachePrefix(cacheKey).catch(() => undefined);
@@ -1336,7 +1346,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
             if (persistedMetadataDisposed) return;
             const latest = typeof connectionStore.getConfig === "function" ? connectionStore.getConfig(connectionId) : connectionStore.connections.find((candidate) => candidate.id === connectionId);
             if (!latest || quickOpenMetadataConnectionFingerprint(latest) !== connectionFingerprint) return;
-            persistedMetadataWriteSignatures.set(cacheKey, { generation: cacheGeneration, signature: writeSignature });
+            persistedMetadataWriteSignatures.set(cacheKey, { generation: cacheGeneration, connectionFingerprint, signature: writeSignature, status });
             const cachedItems = merged.flatMap((item) => {
               const cached = cachedQuickOpenItem(item, latest);
               return cached ? [cached] : [];

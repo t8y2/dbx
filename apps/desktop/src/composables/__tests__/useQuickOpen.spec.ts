@@ -449,9 +449,33 @@ describe("useQuickOpen", () => {
         await flushAsyncWork();
         await flushAsyncWork();
         expect(state.matchingItems.value.find((item) => item.type === "column" && item.label === "email")).toMatchObject({ source: "cache", tableName: "users" });
+        expect(state.metadataIndexStatuses.value[connection.id]).toMatchObject({ state: "not-built", itemCount: 0 });
         state.setQuery("email");
         expect(state.matchingItems.value.some((item) => item.type === "column" && item.label === "email")).toBe(true);
         expect(ensureConnected).not.toHaveBeenCalled();
+      } finally {
+        scope.stop();
+      }
+    });
+
+    it.each([undefined, "ready", "partial"] as const)("keeps the stored build state %s on the first passive write after startup", async (buildState) => {
+      const connection = { id: "stored-index", name: "Stored index", db_type: "postgres", database: "app" } as const;
+      const status = { state: buildState, error: buildState === "partial" ? "Unreachable schema" : undefined };
+      const cachedItem = { type: "table", label: "old_users", tableName: "old_users", connectionId: connection.id, database: "app", schema: "public" } as const;
+      const treeNodes = reactive([{ id: "table-reports", type: "table", label: "live_reports", connectionId: connection.id, database: "app", schema: "public", children: [] }]);
+      const payload = encodeQuickOpenMetadataCache(connection.id, quickOpenMetadataConnectionFingerprint(connection as any), [cachedItem], Date.now(), status);
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(payload);
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [connection], treeNodes, connectedIds: new Set() } as any);
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await vi.waitFor(() => {
+          const saved = vi.mocked(api.saveSchemaCache).mock.calls.at(-1)?.[1] as typeof payload;
+          expect(saved?.items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "old_users" }), expect.objectContaining({ label: "live_reports" })]));
+          expect(saved.state).toBe(buildState);
+          expect(saved.error).toBe(status.error);
+          expect(state.metadataIndexStatuses.value[connection.id]?.state).toBe(buildState ?? "not-built");
+        });
       } finally {
         scope.stop();
       }

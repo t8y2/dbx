@@ -131,7 +131,8 @@ async fn test_agent_connection(
 
     let response = match result {
         Ok(response) => response,
-        Err(err) => {
+        Err(dbx_core::agent_runtime::AgentDaemonCallError::Startup(error)) => return Err(error),
+        Err(dbx_core::agent_runtime::AgentDaemonCallError::Call(err)) => {
             if let Some(alternate_config) = oracle_alternate_connect_config(config, &err) {
                 state
                     .agent_manager
@@ -239,6 +240,42 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tauri::Manager;
+
+    #[tokio::test]
+    async fn test_connection_does_not_treat_launch_paths_as_oracle_listener_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            directory.path().join("plugins"),
+            directory.path().join("agents"),
+            "test",
+        ));
+        let driver_dir = state.agent_manager.driver_dir("oracle");
+        std::fs::create_dir_all(&driver_dir).unwrap();
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "oracle-test", "name": "Oracle", "db_type": "oracle", "host": "localhost", "port": 1521,
+            "username": "user", "password": "", "database": "service", "oracle_connection_type": "service_name"
+        }))
+        .unwrap();
+        for (marker, unexpected) in
+            [("ORA-12514", "alternate Oracle descriptor"), ("ORA-12541", "Oracle listener was not reachable")]
+        {
+            std::fs::write(
+                state.agent_manager.driver_launch_config_path("oracle"),
+                serde_json::json!({"command": driver_dir.join(marker), "working_dir": "{driver_dir}"}).to_string(),
+            )
+            .unwrap();
+            for env in [vec![], vec![("DBX_FIXTURE".to_string(), "test".to_string())]] {
+                let error = super::test_agent_connection(&state, &config, "localhost", 1521, &env, None)
+                    .await
+                    .expect_err("the agent executable does not exist");
+                assert!(error.contains("Failed to spawn agent process"), "{error}");
+                assert!(error.contains(marker) && error.contains("working directory:"), "{error}");
+                assert!(!error.contains(unexpected), "{error}");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn tauri_load_response_is_flat_and_does_not_put_hint_in_storage_or_runtime_cache() {

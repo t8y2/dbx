@@ -669,7 +669,7 @@ mod tests {
             .expect("native launch should resolve");
 
         assert_eq!(launch.program, native);
-        assert_eq!(launch.args, Vec::<String>::new());
+        assert_eq!(launch.args(), Vec::<String>::new());
         assert_eq!(launch.working_dir.as_deref(), Some(manager.driver_dir("dameng").as_path()));
     }
 
@@ -685,7 +685,7 @@ mod tests {
             .expect("Hive native launch should not require a JRE");
 
         assert_eq!(launch.program, native);
-        assert_eq!(launch.args, Vec::<String>::new());
+        assert_eq!(launch.args(), Vec::<String>::new());
         assert_eq!(launch.working_dir.as_deref(), Some(manager.driver_dir("hive").as_path()));
     }
 
@@ -705,7 +705,7 @@ mod tests {
 
         assert!(launch.program.is_absolute());
         assert_eq!(launch.program, expected_program);
-        assert_eq!(launch.args, Vec::<String>::new());
+        assert_eq!(launch.args(), Vec::<String>::new());
         assert_eq!(launch.working_dir.as_deref(), Some(expected_working_dir.as_path()));
 
         fs::remove_dir_all(base_dir).unwrap();
@@ -746,9 +746,9 @@ mod tests {
         assert_eq!(launch.program, driver_dir.join("bin").join("dameng-agent"));
         // 比较 Path：模板里写的是正斜杠，而 Path::join 在 Windows 上产出反斜杠，
         // 直接比字符串会在 Windows 上误报。
-        assert_eq!(launch.args.len(), 2);
-        assert_eq!(launch.args[0], "--config");
-        assert_eq!(std::path::PathBuf::from(&launch.args[1]), driver_dir.join("config.json"));
+        assert_eq!(launch.args().len(), 2);
+        assert_eq!(launch.args()[0], "--config");
+        assert_eq!(std::path::PathBuf::from(&launch.args()[1]), driver_dir.join("config.json"));
         assert_eq!(launch.working_dir.as_deref(), Some(driver_dir.as_path()));
     }
 
@@ -768,7 +768,7 @@ mod tests {
             .expect("manifest launch with UTF-8 BOM should resolve");
 
         assert_eq!(launch.program, PathBuf::from("java"));
-        assert_eq!(launch.args, vec!["-jar".to_string(), format!("{}/agent.jar", driver_dir.to_string_lossy())]);
+        assert_eq!(launch.args(), vec!["-jar".to_string(), format!("{}/agent.jar", driver_dir.to_string_lossy())]);
     }
 
     #[test]
@@ -1570,7 +1570,7 @@ impl AgentManager {
         params: serde_json::Value,
         timeout_duration: Option<Duration>,
         env: &[(String, String)],
-    ) -> Result<T, String> {
+    ) -> Result<T, crate::agent_runtime::AgentDaemonCallError> {
         crate::agent_runtime::call_daemon_method_with_timeout_and_env(
             self,
             db_type,

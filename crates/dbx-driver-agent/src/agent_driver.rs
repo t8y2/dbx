@@ -86,8 +86,45 @@ pub struct AgentRuntimeClient {
     pl_debug_in_flight: Arc<tokio::sync::Semaphore>,
 }
 
+pub(crate) enum AgentRuntimeStartupError {
+    Startup(String),
+    UnsupportedProtocol(String),
+}
+
+impl From<String> for AgentRuntimeStartupError {
+    fn from(message: String) -> Self {
+        Self::Startup(message)
+    }
+}
+
+impl From<AgentRuntimeStartupError> for String {
+    fn from(error: AgentRuntimeStartupError) -> Self {
+        match error {
+            AgentRuntimeStartupError::Startup(message) | AgentRuntimeStartupError::UnsupportedProtocol(message) => {
+                message
+            }
+        }
+    }
+}
+
+impl AgentRuntimeStartupError {
+    fn unsupported_protocol(launch: &AgentLaunchSpec) -> Self {
+        Self::UnsupportedProtocol(with_launch_command(
+            "Agent runtime does not support multi_session protocol v2".to_owned(),
+            &launch_display(launch),
+        ))
+    }
+}
+
 impl AgentRuntimeClient {
     pub async fn spawn(launch: AgentLaunchSpec, app_version: &str) -> Result<Arc<Self>, String> {
+        Self::spawn_classified(launch, app_version).await.map_err(Into::into)
+    }
+
+    pub(crate) async fn spawn_classified(
+        launch: AgentLaunchSpec,
+        app_version: &str,
+    ) -> Result<Arc<Self>, AgentRuntimeStartupError> {
         Self::spawn_internal(launch, app_version, None, None).await
     }
 
@@ -96,7 +133,7 @@ impl AgentRuntimeClient {
         app_version: &str,
         deadline: Instant,
     ) -> Result<Arc<Self>, String> {
-        Self::spawn_internal(launch, app_version, Some(deadline), None).await
+        Self::spawn_internal(launch, app_version, Some(deadline), None).await.map_err(Into::into)
     }
 
     pub(crate) async fn spawn_before_observed(
@@ -105,7 +142,7 @@ impl AgentRuntimeClient {
         deadline: Instant,
         startup: &StartupCleanupGuard,
     ) -> Result<Arc<Self>, String> {
-        Self::spawn_internal(launch, app_version, Some(deadline), Some(startup)).await
+        Self::spawn_internal(launch, app_version, Some(deadline), Some(startup)).await.map_err(Into::into)
     }
 
     async fn spawn_internal(
@@ -113,7 +150,7 @@ impl AgentRuntimeClient {
         app_version: &str,
         deadline: Option<Instant>,
         startup: Option<&StartupCleanupGuard>,
-    ) -> Result<Arc<Self>, String> {
+    ) -> Result<Arc<Self>, AgentRuntimeStartupError> {
         let ReadyAgentProcess { child, stdin, stdout, stderr_tail, startup_exit } = match deadline {
             Some(deadline) => spawn_ready_agent_process_before(&launch, deadline, startup).await?,
             None => spawn_ready_agent_process(&launch).await?,
@@ -157,24 +194,20 @@ impl AgentRuntimeClient {
             .await
         {
             Ok(handshake) => handshake,
-            Err(error) if is_unsupported_handshake_error(&error.to_string()) => {
+            Err(AgentCallError::Structured { message, .. } | AgentCallError::Legacy { message, .. })
+                if is_unsupported_handshake_error(&message) =>
+            {
                 runtime.kill();
-                return Err(with_launch_command(
-                    "Agent runtime does not support multi_session protocol v2".to_string(),
-                    &launch_display(&launch),
-                ));
+                return Err(AgentRuntimeStartupError::unsupported_protocol(&launch));
             }
             Err(error) => {
                 runtime.kill();
-                return Err(with_launch_command(error.into_legacy_string(), &launch_display(&launch)));
+                return Err(with_launch_command(error.into_legacy_string(), &launch_display(&launch)).into());
             }
         };
         if handshake.protocol_version < 2 || !handshake.supports(AgentCapability::MultiSession) {
             runtime.kill();
-            return Err(with_launch_command(
-                "Agent runtime does not support multi_session protocol v2".to_string(),
-                &launch_display(&launch),
-            ));
+            return Err(AgentRuntimeStartupError::unsupported_protocol(&launch));
         }
         if let Some(deadline) = deadline {
             startup_remaining(deadline).map_err(|cause| with_launch_command(cause, &launch_display(&launch)))?;
@@ -1285,19 +1318,28 @@ impl PooledAgentClient {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct AgentLaunchSpec {
     pub program: PathBuf,
-    pub args: Vec<String>,
+    args: Vec<String>,
+    // Only the Java builder knows which arguments DBX produced. Generic
+    // launches are opaque, including values that look like a JAR or JVM flag.
+    configured_java_args: Option<std::ops::Range<usize>>,
     pub working_dir: Option<PathBuf>,
     /// Extra environment variables handed to the agent process.
     ///
     /// This is part of the launch *identity*, not just the launch mechanics:
-    /// [`crate::agent_runtime::shared_runtime_key`] hashes it, so two launches
+    /// [`crate::agent_runtime::shared_runtime_key`] includes it, so two launches
     /// that differ only in `env` get separate agent processes. That is what
     /// makes process-scoped Oracle Client settings (`NLS_LANG`) safe to set per
     /// connection instead of leaking across connections that share a process.
     pub env: Vec<(String, String)>,
+}
+
+impl fmt::Debug for AgentLaunchSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("AgentLaunchSpec").field(&launch_display(self)).finish()
+    }
 }
 
 /// The Java launcher cannot open a jar through a verbatim path: `java -jar
@@ -1356,7 +1398,7 @@ fn java_compatible_path(path: &Path) -> PathBuf {
 
 impl AgentLaunchSpec {
     pub fn new(program: impl Into<PathBuf>) -> Self {
-        Self { program: program.into(), args: Vec::new(), working_dir: None, env: Vec::new() }
+        Self { program: program.into(), ..Self::default() }
     }
 
     pub fn java_jar(java_path: impl Into<PathBuf>, jar_path: impl AsRef<Path>) -> Self {
@@ -1370,9 +1412,15 @@ impl AgentLaunchSpec {
     ) -> Self {
         let jar_path = jar_path.as_ref();
         let launch_jar_path = java_compatible_path(jar_path);
+        let (args, configured_java_args) = build_agent_java_args(
+            &launch_jar_path.to_string_lossy(),
+            std::env::var(AGENT_JAVA_OPTS_ENV).ok().as_deref(),
+            extra_java_args,
+        );
         Self {
             program: java_path.into(),
-            args: agent_java_args_with_extra_args(&launch_jar_path.to_string_lossy(), extra_java_args),
+            args,
+            configured_java_args: Some(configured_java_args),
             working_dir: jar_path.parent().map(Path::to_path_buf),
             env: Vec::new(),
         }
@@ -1380,7 +1428,12 @@ impl AgentLaunchSpec {
 
     pub fn with_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.args = args.into_iter().map(Into::into).collect();
+        self.configured_java_args = None;
         self
+    }
+
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
     }
 
     pub fn with_working_dir(mut self, working_dir: impl Into<PathBuf>) -> Self {
@@ -4145,8 +4198,13 @@ fn agent_java_args_with_extra(jar_path: &str, extra_opts: Option<&str>) -> Vec<S
     agent_java_args_with_extra_opts(jar_path, extra_opts, &[])
 }
 
-fn agent_java_args_with_extra_args(jar_path: &str, extra_java_args: &[String]) -> Vec<String> {
-    agent_java_args_with_extra_opts(jar_path, std::env::var(AGENT_JAVA_OPTS_ENV).ok().as_deref(), extra_java_args)
+#[cfg(test)]
+fn agent_java_args_with_extra_opts(
+    jar_path: &str,
+    extra_opts: Option<&str>,
+    extra_java_args: &[String],
+) -> Vec<String> {
+    build_agent_java_args(jar_path, extra_opts, extra_java_args).0
 }
 
 pub fn validate_dameng_java_system_properties(options: &[String]) -> Result<(), String> {
@@ -4170,11 +4228,11 @@ fn java_system_property_error(index: usize) -> String {
     )
 }
 
-fn agent_java_args_with_extra_opts(
+fn build_agent_java_args(
     jar_path: &str,
     extra_opts: Option<&str>,
     extra_java_args: &[String],
-) -> Vec<String> {
+) -> (Vec<String>, std::ops::Range<usize>) {
     // Java 8 and older reject the module flags below while starting up
     // ("Unrecognized option: --add-opens=..."), so the agent dies before it can
     // load a class and the real diagnosis (agent bytecode needs Java 21) is
@@ -4234,16 +4292,18 @@ fn agent_java_args_with_extra_opts(
 
     // Hive/Kerberos JDBC drivers read JAAS and krb5 settings during JVM startup,
     // so users need a process-level escape hatch before the agent jar is loaded.
+    let configured_start = args.len();
     if let Some(extra) = extra_opts {
         args.extend(parse_agent_java_opts(extra));
     }
     args.extend(extra_java_args.iter().map(|arg| arg.trim()).filter(|arg| !arg.is_empty()).map(str::to_string));
+    let configured_end = args.len();
 
     args.push("--add-opens=java.sql/java.sql=ALL-UNNAMED".to_string());
 
     args.extend(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-jar", jar_path].into_iter().map(str::to_string));
 
-    args
+    (args, configured_start..configured_end)
 }
 
 fn parse_agent_java_opts(opts: &str) -> Vec<String> {
@@ -4287,128 +4347,22 @@ fn agent_jar_path_matches_key(jar_path: &str, key: &str) -> bool {
     Path::new(jar_path).components().any(|component| component.as_os_str().to_string_lossy() == key)
 }
 
-/// Placeholder that replaces credential values in diagnostic output.
-const REDACTED_LAUNCH_VALUE: &str = "***";
-
-/// Prefix of the only option whose inline value is structural, never user data.
-///
-/// DBX composes `--add-opens=java.base/<package>=ALL-UNNAMED` itself, so a value
-/// in that exact shape keeps "is one `--add-opens` missing?" answerable from the
-/// log. Anything else behind the prefix came from a custom launch config.
-const ADD_OPENS_PREFIX: &str = "--add-opens=";
-
-/// Renders a launch for the debug log and for startup errors.
-///
-/// What makes the report actionable is which program, which jar and which
-/// working directory were used, so those stay verbatim. Every other argument
-/// keeps its option name but loses its value: the launch is assembled from
-/// `DBX_AGENT_JAVA_OPTS`, per-connection `agent_java_options` and, for custom
-/// launches, an arbitrary `agent-launch.json` argument list, so any value — an
-/// inline `-Dservice.key=…`, a separated `--key …`, or a JDBC URL carrying the
-/// password — may be a credential, and no list of credential-like names can
-/// enumerate them all.
+/// Renders declared paths and DBX-generated arguments, never arbitrary argv.
 fn launch_display(launch: &AgentLaunchSpec) -> String {
-    let mut rendered = Vec::with_capacity(launch.args.len() + 2);
-    rendered.push(quote_launch_argument(&launch.program.to_string_lossy()));
-    let jar_argument = launch_jar_argument_index(&launch.args);
-    let mut separate_value_expected = false;
+    let mut command = quote_launch_argument(&launch.program.to_string_lossy());
     for (index, argument) in launch.args.iter().enumerate() {
-        let rendered_argument = if Some(index) == jar_argument {
-            if looks_like_agent_jar_path(argument) {
-                argument.clone()
-            } else {
-                REDACTED_LAUNCH_VALUE.to_string()
-            }
-        } else if separate_value_expected && !keeps_a_structural_argument(argument) {
-            // The previous argument is a bare option, so this one carries its
-            // value. A value is a value even when it starts with `-`.
-            REDACTED_LAUNCH_VALUE.to_string()
-        } else if keeps_its_launch_value(argument) {
-            argument.clone()
+        command.push(' ');
+        if launch.configured_java_args.as_ref().is_some_and(|configured| !configured.contains(&index)) {
+            command.push_str(&quote_launch_argument(argument));
         } else {
-            redact_launch_argument(argument)
-        };
-        separate_value_expected = takes_a_separate_value(argument);
-        rendered.push(quote_launch_argument(&rendered_argument));
-    }
-    let command = rendered.join(" ");
-    match &launch.working_dir {
-        Some(working_dir) => {
-            format!("{command} (working directory: {})", quote_launch_argument(&working_dir.to_string_lossy()))
+            command.push_str("***");
         }
-        None => command,
     }
-}
-
-/// Index of the jar path, which is the argument right after `-jar`.
-fn launch_jar_argument_index(args: &[String]) -> Option<usize> {
-    let jar_flag = args.iter().position(|argument| argument == "-jar")?;
-    let jar_index = jar_flag + 1;
-    (jar_index < args.len()).then_some(jar_index)
-}
-
-/// True only for a `--add-opens` value in the shape DBX itself composes:
-/// `<java module>/<java package>=ALL-UNNAMED`.
-fn keeps_its_launch_value(argument: &str) -> bool {
-    let Some(value) = argument.strip_prefix(ADD_OPENS_PREFIX) else {
-        return false;
-    };
-    let Some((target, access)) = value.rsplit_once('=') else {
-        return false;
-    };
-    let Some((module, package)) = target.split_once('/') else {
-        return false;
-    };
-    access == "ALL-UNNAMED" && module.starts_with("java.") && is_java_path(module) && is_java_path(package)
-}
-
-/// A dotted Java identifier path, such as `java.base` or `java.lang.reflect`.
-fn is_java_path(value: &str) -> bool {
-    value.split('.').all(|segment| {
-        let mut characters = segment.chars();
-        characters.next().is_some_and(|character| character.is_ascii_lowercase())
-            && characters
-                .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_')
-    })
-}
-
-/// A jar path, as opposed to arbitrary text that happens to follow `-jar`.
-fn looks_like_agent_jar_path(argument: &str) -> bool {
-    argument.ends_with(".jar")
-        && !argument.contains("://")
-        && !argument.contains('=')
-        && !argument.chars().any(char::is_control)
-}
-
-/// An option that carries its value in the next argument instead of inline.
-///
-/// `-Xmx512m`, `-ea` or `-verbose:gc` are flags, not value takers: treating one
-/// as a value taker would mask the option that follows it and lose the only
-/// diagnostic a customer has for a startup problem.
-fn takes_a_separate_value(argument: &str) -> bool {
-    !argument.contains('=') && (argument.starts_with("--") || argument.starts_with("-D") || argument == "-cp")
-}
-
-/// An argument worth keeping as a name even when the previous option takes a
-/// separate value. A value that merely looks like an option (`--password -Dsecret`)
-/// is not one of these: over-masking a name costs less than printing a credential.
-fn keeps_a_structural_argument(argument: &str) -> bool {
-    matches!(argument, "-jar" | "-cp") || argument.starts_with(ADD_OPENS_PREFIX)
-}
-
-/// Keeps the option name and drops the value.
-fn redact_launch_argument(argument: &str) -> String {
-    let Some((name, _value)) = argument.split_once('=') else {
-        // A value that follows a bare option is masked by the caller; what is
-        // left here is the bare option's own name.
-        return if argument.starts_with('-') { argument.to_string() } else { REDACTED_LAUNCH_VALUE.to_string() };
-    };
-    if !name.starts_with('-') {
-        // A positional argument with an inline value, such as a JDBC URL, is not
-        // an option at all: no part of it is a name worth reporting.
-        return REDACTED_LAUNCH_VALUE.to_string();
+    if let Some(working_dir) = &launch.working_dir {
+        use std::fmt::Write as _;
+        let _ = write!(command, " (working directory: {})", quote_launch_argument(&working_dir.to_string_lossy()));
     }
-    format!("{name}={REDACTED_LAUNCH_VALUE}")
+    command
 }
 
 /// Quotes an argument and escapes control characters so one diagnostic is one line.
@@ -5953,191 +5907,50 @@ for line in sys.stdin:
         let error = AgentRuntimeClient::spawn(launch, "test").await.err().expect("startup should fail");
         let (_, command) = error.split_once("launch command: ").expect("startup error should name the command");
         assert!(command.starts_with(test_python()), "command should start with the agent program: {command}");
-        assert!(command.contains("-c"), "command should keep the agent arguments: {command}");
+        assert!(!command.contains("-c"), "command must hide configured arguments: {command}");
         assert!(error.contains("com.dbx.agent.iris.IrisAgent"), "stderr tail should still be reported: {error}");
     }
 
     #[test]
-    fn launch_display_masks_credentials_but_keeps_the_diagnosis() {
-        let launch = AgentLaunchSpec::new("java").with_args([
-            "-Dkeystore.password=hunter2",
-            "-Ddbx.token=abc123",
-            "--api-key=xyz",
-            "--passphrase",
-            "topsecret",
-            "-Dfile.encoding=UTF-8",
-            "--add-opens=java.base/java.lang=ALL-UNNAMED",
-            "-jar",
-            "agent.jar",
-        ]);
-
-        let display = launch_display(&launch);
-
-        for secret in ["hunter2", "abc123", "xyz", "topsecret", "UTF-8"] {
-            assert!(!display.contains(secret), "credential leaked into {display}");
-        }
-        assert_eq!(
-            display,
-            "java -Dkeystore.password=*** -Ddbx.token=*** --api-key=*** --passphrase *** \
-             -Dfile.encoding=*** --add-opens=java.base/java.lang=ALL-UNNAMED -jar agent.jar"
+    fn launch_display_hides_both_sources_of_configured_java_options() {
+        let jar = "drivers/dameng/agent.jar";
+        let (args, configured) = super::build_agent_java_args(
+            jar,
+            Some("'-Dservice.key=env-configured' -jar env-configured.jar"),
+            &["--add-opens=java.base/connection-configured=ALL-UNNAMED".to_owned()],
         );
+        assert_eq!(
+            &args[configured.clone()],
+            [
+                "-Dservice.key=env-configured",
+                "-jar",
+                "env-configured.jar",
+                "--add-opens=java.base/connection-configured=ALL-UNNAMED",
+            ]
+        );
+        let launch = AgentLaunchSpec { args, configured_java_args: Some(configured), ..AgentLaunchSpec::new("java") };
+        let display = launch_display(&launch);
+        assert!(display.contains("-jar drivers/dameng/agent.jar"), "{display}");
+        assert!(display.contains("--add-opens=java.base/java.net=ALL-UNNAMED"), "{display}");
+        assert!(!display.contains("env-configured") && !display.contains("connection-configured"), "{display}");
     }
 
     #[test]
-    fn launch_display_masks_values_under_generic_option_names() {
-        // A custom `agent-launch.json` can name its options anything, and a JDBC
-        // URL carries the password as a positional argument, so the redaction
-        // cannot rely on a list of credential-like names.
-        let launch = AgentLaunchSpec::new("java")
-            .with_args([
-                "-Dservice.key=super-secret",
-                "--key",
-                "another-secret",
-                "-jar",
-                "agent.jar",
-                "jdbc:oracle:thin:scott/tiger@db.example.com:1521/svc",
-            ])
-            .with_working_dir("drivers/oracle");
+    fn launch_display_does_not_trust_replacements_for_dbx_generated_arguments() {
+        let launch = AgentLaunchSpec::java_jar("java", "drivers/oracle/agent.jar")
+            .with_args(["-jar", "private.jar", "--add-opens=java.base/private=ALL-UNNAMED"])
+            .with_env([("KEY".to_string(), "private-env".to_string())]);
 
-        let display = launch_display(&launch);
-
-        for leaked in ["super-secret", "another-secret", "tiger"] {
-            assert!(!display.contains(leaked), "credential leaked into {display}");
-        }
-        assert!(display.contains("-Dservice.key=***"), "{display}");
-        assert!(display.contains("--key ***"), "{display}");
-        assert!(display.contains("-jar agent.jar"), "{display}");
-        assert!(display.contains("(working directory: drivers/oracle)"), "{display}");
+        assert_eq!(launch_display(&launch), "java *** *** *** (working directory: drivers/oracle)");
+        assert!(!format!("{launch:?}").contains("private"));
     }
 
     #[test]
     fn launch_display_escapes_control_characters() {
-        // Control characters in a kept field would otherwise turn one diagnostic
-        // line into several.
-        let launch =
-            AgentLaunchSpec::new("java\nbin").with_args(["-jar", "agent.jar"]).with_working_dir("drivers\ntab\tdir");
-
+        let launch = AgentLaunchSpec::new("java\nbin").with_working_dir("drivers\ntab\tdir");
         let display = launch_display(&launch);
 
-        assert!(!display.contains('\n'), "newline leaked into {display:?}");
-        assert!(!display.contains('\t'), "tab leaked into {display:?}");
-        assert!(display.contains("\\n"), "{display}");
-        assert!(display.contains("\\t"), "{display}");
-        assert!(display.contains("drivers\\ntab\\tdir"), "{display}");
-    }
-
-    #[test]
-    fn launch_display_masks_a_positional_argument_that_carries_a_value() {
-        // A connection URI carries the password after `?`, and it is not an
-        // option: keeping everything before the first `=` would leak the user
-        // and password that come before it.
-        let launch = AgentLaunchSpec::new("java").with_args([
-            "-jar",
-            "agent.jar",
-            "jdbc:oracle:thin:scott/tiger@db.example.com:1521/svc?password=hunter2",
-        ]);
-
-        let display = launch_display(&launch);
-
-        for leaked in ["scott", "tiger", "hunter2"] {
-            assert!(!display.contains(leaked), "credential leaked into {display}");
-        }
-        assert!(display.contains("-jar agent.jar ***"), "{display}");
-    }
-
-    #[test]
-    fn launch_display_keeps_a_jvm_flag_name_after_a_plain_option() {
-        let launch = AgentLaunchSpec::new("java").with_args([
-            "-Xmx512m",
-            "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005",
-            "-ea",
-            "-jar",
-            "agent.jar",
-        ]);
-
-        let display = launch_display(&launch);
-
-        assert!(display.contains("-Xmx512m"), "{display}");
-        assert!(display.contains("-agentlib:jdwp=***"), "the jdwp name must stay readable: {display}");
-        assert!(!display.contains("dt_socket"), "{display}");
-        assert!(display.contains("-ea"), "{display}");
-    }
-
-    #[test]
-    fn launch_display_masks_a_value_that_arrives_after_a_property_option() {
-        let launch = AgentLaunchSpec::new("java").with_args([
-            "-Dkeystore.password",
-            "hunter2",
-            "-Dfile.encoding=UTF-8",
-            "-jar",
-            "agent.jar",
-        ]);
-
-        let display = launch_display(&launch);
-
-        assert!(!display.contains("hunter2"), "{display}");
-        assert!(display.contains("-Dkeystore.password ***"), "{display}");
-        assert!(display.contains("-Dfile.encoding=***"), "{display}");
-    }
-
-    #[test]
-    fn launch_display_masks_an_option_shaped_value_that_carries_its_own_value() {
-        let launch = AgentLaunchSpec::new("java").with_args(["--password", "-Dsecret=abc", "-jar", "agent.jar"]);
-
-        let display = launch_display(&launch);
-
-        assert!(!display.contains("secret"), "{display}");
-        assert!(!display.contains("abc"), "{display}");
-        assert!(display.contains("-jar agent.jar"), "{display}");
-    }
-
-    #[test]
-    fn launch_display_masks_a_jar_argument_that_is_not_a_jar_path() {
-        // A custom `agent-launch.json` decides what follows `-jar`; only a path
-        // shaped like a jar keeps its text.
-        let launch = AgentLaunchSpec::new("java").with_args(["-jar", "--key=hunter2"]);
-
-        let display = launch_display(&launch);
-
-        assert!(!display.contains("hunter2"), "credential leaked into {display}");
-        assert!(display.contains("-jar ***"), "{display}");
-    }
-
-    #[test]
-    fn launch_display_masks_add_opens_values_that_dbx_did_not_compose() {
-        let launch = AgentLaunchSpec::new("java").with_args([
-            "--add-opens=java.base/java.lang=ALL-UNNAMED",
-            "--add-opens=/etc/passwd=hunter2",
-            "-jar",
-            "agent.jar",
-        ]);
-
-        let display = launch_display(&launch);
-
-        assert!(display.contains("--add-opens=java.base/java.lang=ALL-UNNAMED"), "{display}");
-        assert!(!display.contains("hunter2"), "credential leaked into {display}");
-        assert!(!display.contains("passwd"), "configured text leaked into {display}");
-    }
-
-    #[test]
-    fn launch_display_masks_a_separated_value_that_looks_like_an_option() {
-        let launch = AgentLaunchSpec::new("java")
-            .with_args(["--password", "-p@ssw0rd", "-jar", "agent.jar"])
-            .with_working_dir("drivers/oracle");
-
-        let display = launch_display(&launch);
-
-        assert!(!display.contains("p@ssw0rd"), "a separated credential leaked: {display}");
-        assert!(display.contains("--password ***"), "the option name must stay readable: {display}");
-        assert!(display.contains("-jar agent.jar"), "{display}");
-
-        // A value that itself looks like an option is still a value.
-        let launch = AgentLaunchSpec::new("java").with_args(["--token", "--abc", "-jar", "agent.jar"]);
-
-        let display = launch_display(&launch);
-
-        assert!(!display.contains("--abc"), "a credential shaped like an option leaked: {display}");
-        assert!(display.contains("--token ***"), "{display}");
+        assert_eq!(display, "\"java\\nbin\" (working directory: \"drivers\\ntab\\tdir\")");
     }
 
     #[tokio::test]
@@ -6249,22 +6062,17 @@ sys.stdin.read()
 
     #[test]
     fn launch_display_quotes_paths_with_spaces_and_names_the_working_directory() {
-        let launch = AgentLaunchSpec::new("C:\\Program Files\\Java\\bin\\java.exe")
-            .with_args(["-jar", "C:\\data dir\\agents\\agent.jar"])
-            .with_working_dir("C:\\data dir\\agents");
-
-        assert_eq!(
-            launch_display(&launch),
-            "\"C:\\Program Files\\Java\\bin\\java.exe\" -jar \"C:\\data dir\\agents\\agent.jar\" \
-             (working directory: \"C:\\data dir\\agents\")"
-        );
+        let launch = AgentLaunchSpec::java_jar("java path/bin", "data dir/agent.jar");
+        let display = launch_display(&launch);
+        assert!(display.starts_with("\"java path/bin\" "), "{display}");
+        assert!(display.ends_with(" -jar \"data dir/agent.jar\" (working directory: \"data dir\")"), "{display}");
     }
 
     #[test]
     fn launch_display_names_the_working_directory_of_a_relative_jar() {
-        let launch = AgentLaunchSpec::new("java").with_args(["-jar", "agent.jar"]).with_working_dir("drivers/iris");
-
-        assert_eq!(launch_display(&launch), "java -jar agent.jar (working directory: drivers/iris)");
+        let launch = AgentLaunchSpec::java_jar("java", "agent.jar").with_working_dir("drivers/iris");
+        let display = launch_display(&launch);
+        assert!(display.ends_with(" -jar agent.jar (working directory: drivers/iris)"), "{display}");
     }
 
     #[tokio::test]

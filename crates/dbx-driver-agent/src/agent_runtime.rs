@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 use crate::agent_manager::{AgentManager, DEFAULT_JRE_KEY};
 use crate::agent_recovery::{RecoveryPolicy, RecoveryScope};
 use crate::database_capabilities;
-use crate::db::agent_driver::{AgentCallError, AgentDriverClient, AgentLaunchSpec, AgentMethod, AgentRuntimeClient};
+use crate::db::agent_driver::{
+    AgentCallError, AgentDriverClient, AgentLaunchSpec, AgentMethod, AgentRuntimeClient, AgentRuntimeStartupError,
+};
 use crate::models::connection::DatabaseType;
 pub use crate::pl_debug_channel::PlDebugAgentChannel;
 use crate::startup_cleanup::StartupReservationCleanup;
@@ -64,13 +66,45 @@ struct ReservedSharedRuntime {
 }
 
 pub struct SharedConnectionOpenError {
+    pub kind: SharedConnectionOpenErrorKind,
     pub message: String,
     pub runtime: Option<std::sync::Arc<AgentRuntimeClient>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SharedConnectionOpenErrorKind {
+    Startup,
+    UnsupportedProtocol,
+    OpenSession,
+}
+
+impl SharedConnectionOpenError {
+    /// Only OpenSession errors can describe failures at the database endpoint.
+    pub fn open_session_message(&self) -> Option<&str> {
+        (self.kind == SharedConnectionOpenErrorKind::OpenSession).then_some(self.message.as_str())
+    }
+}
+
+impl std::fmt::Display for SharedConnectionOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 impl From<String> for SharedConnectionOpenError {
     fn from(message: String) -> Self {
-        Self { message, runtime: None }
+        Self { kind: SharedConnectionOpenErrorKind::Startup, message, runtime: None }
+    }
+}
+
+impl From<AgentRuntimeStartupError> for SharedConnectionOpenError {
+    fn from(error: AgentRuntimeStartupError) -> Self {
+        match error {
+            AgentRuntimeStartupError::Startup(message) => Self::from(message),
+            AgentRuntimeStartupError::UnsupportedProtocol(message) => {
+                Self { kind: SharedConnectionOpenErrorKind::UnsupportedProtocol, message, runtime: None }
+            }
+        }
     }
 }
 
@@ -328,7 +362,7 @@ async fn reserve_shared_connection_runtime(
     driver_profile: Option<&str>,
     extra_java_args: &[String],
     agent_env: &[(String, String)],
-) -> Result<ReservedSharedRuntime, String> {
+) -> Result<ReservedSharedRuntime, AgentRuntimeStartupError> {
     let (runtime_key, launch) =
         resolve_shared_runtime_launch(manager, db_type, driver_profile, extra_java_args, agent_env)?;
     let (runtime_cell, runtime) = loop {
@@ -343,7 +377,7 @@ async fn reserve_shared_connection_runtime(
                 .clone()
         };
         let runtime = runtime_cell
-            .get_or_try_init(|| AgentRuntimeClient::spawn(launch.clone(), manager.agent_app_version()))
+            .get_or_try_init(|| AgentRuntimeClient::spawn_classified(launch.clone(), manager.agent_app_version()))
             .await?
             .clone();
 
@@ -360,7 +394,11 @@ fn shared_connection_open_error(
     runtime: std::sync::Arc<AgentRuntimeClient>,
 ) -> SharedConnectionOpenError {
     let runtime = RecoveryPolicy::decide(&error, RecoveryScope::ConnectionOpen).replaces_runtime().then_some(runtime);
-    SharedConnectionOpenError { message: error.into_legacy_string(), runtime }
+    SharedConnectionOpenError {
+        kind: SharedConnectionOpenErrorKind::OpenSession,
+        message: error.into_legacy_string(),
+        runtime,
+    }
 }
 
 async fn forget_unused_runtime_after_failed_open(
@@ -419,7 +457,7 @@ fn shared_runtime_key(agent_key: &str, launch: &crate::db::agent_driver::AgentLa
         "{}|{}|{}|{}|{}",
         agent_key,
         launch.program.display(),
-        launch.args.join("\u{1f}"),
+        launch.args().join("\u{1f}"),
         launch.working_dir.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
         env
     )
@@ -465,14 +503,42 @@ pub async fn call_daemon_with_timeout<T: DeserializeOwned + Send + 'static>(
     params: serde_json::Value,
     timeout_duration: Option<Duration>,
 ) -> Result<T, String> {
+    call_daemon_with_timeout_classified(manager, db_type, driver_profile, method, params, timeout_duration)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Startup diagnostics must not drive recovery for a database RPC that did not run.
+#[derive(Debug)]
+pub enum AgentDaemonCallError {
+    Startup(String),
+    Call(String),
+}
+
+impl std::fmt::Display for AgentDaemonCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Startup(message) | Self::Call(message) => f.write_str(message),
+        }
+    }
+}
+
+async fn call_daemon_with_timeout_classified<T: DeserializeOwned + Send + 'static>(
+    manager: &AgentManager,
+    db_type: &DatabaseType,
+    driver_profile: Option<&str>,
+    method: &str,
+    params: serde_json::Value,
+    timeout_duration: Option<Duration>,
+) -> Result<T, AgentDaemonCallError> {
     let keys = runtime_agent_key_candidates(db_type, driver_profile)
-        .ok_or_else(|| format!("{:?} is not an agent-driven database type", db_type))?;
+        .ok_or_else(|| AgentDaemonCallError::Startup(format!("{:?} is not an agent-driven database type", db_type)))?;
     let key = first_installed_agent_key(manager, &keys).unwrap_or(keys[0]).to_string();
 
     let mut daemons = manager.daemons.lock().await;
 
     if !daemons.contains_key(&key) {
-        let client = spawn_client_for_key(manager, &key, &[], &[]).await?;
+        let client = spawn_client_for_key(manager, &key, &[], &[]).await.map_err(AgentDaemonCallError::Startup)?;
         daemons.insert(key.clone(), client);
     }
 
@@ -482,8 +548,12 @@ pub async fn call_daemon_with_timeout<T: DeserializeOwned + Send + 'static>(
         Err(err) => {
             log::warn!("[agent] daemon call failed, respawning: {err}");
             daemons.remove(&key);
-            let mut new_client = spawn_client_for_key(manager, &key, &[], &[]).await?;
-            let result = new_client.call_with_timeout::<T>(method, params, timeout_duration).await?;
+            let mut new_client =
+                spawn_client_for_key(manager, &key, &[], &[]).await.map_err(AgentDaemonCallError::Startup)?;
+            let result = new_client
+                .call_with_timeout::<T>(method, params, timeout_duration)
+                .await
+                .map_err(AgentDaemonCallError::Call)?;
             daemons.insert(key, new_client);
             Ok(result)
         }
@@ -525,16 +595,23 @@ pub async fn call_daemon_method_with_timeout_and_env<T: DeserializeOwned + Send 
     params: serde_json::Value,
     timeout_duration: Option<Duration>,
     env: &[(String, String)],
-) -> Result<T, String> {
+) -> Result<T, AgentDaemonCallError> {
     if env.is_empty() {
-        return call_daemon_with_timeout(manager, db_type, driver_profile, method.as_str(), params, timeout_duration)
-            .await;
+        return call_daemon_with_timeout_classified(
+            manager,
+            db_type,
+            driver_profile,
+            method.as_str(),
+            params,
+            timeout_duration,
+        )
+        .await;
     }
     let keys = runtime_agent_key_candidates(db_type, driver_profile)
-        .ok_or_else(|| format!("{:?} is not an agent-driven database type", db_type))?;
+        .ok_or_else(|| AgentDaemonCallError::Startup(format!("{:?} is not an agent-driven database type", db_type)))?;
     let key = first_installed_agent_key(manager, &keys).unwrap_or(keys[0]).to_string();
-    let mut client = spawn_client_for_key(manager, &key, &[], env).await?;
-    client.call_with_timeout::<T>(method.as_str(), params, timeout_duration).await
+    let mut client = spawn_client_for_key(manager, &key, &[], env).await.map_err(AgentDaemonCallError::Startup)?;
+    client.call_with_timeout::<T>(method.as_str(), params, timeout_duration).await.map_err(AgentDaemonCallError::Call)
 }
 
 fn runtime_agent_key_candidates(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option<Vec<&'static str>> {

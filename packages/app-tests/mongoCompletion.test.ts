@@ -44,6 +44,13 @@ function labels(text: string, input = {}) {
   return buildMongoCompletionItems(text, text.length, input).map((item) => item.label);
 }
 
+test("preserves command offsets after emoji in comments and refreshes the active database on edits", () => {
+  for (const database of ["analytics", "reporting"]) {
+    const text = `// 🐋🐋🐋\nuse ${database}\ndb.`;
+    assert.equal(getMongoCompletionContext(text, text.length).database, database);
+  }
+});
+
 test("suggests MongoDB root snippets and methods", () => {
   const items = buildMongoCompletionItems("fi", 2);
 

@@ -2334,6 +2334,7 @@ function skipMongoStringOrComment(text: string, i: number, end: number): number 
  * document, which is several times the price of the native regex scans it is there to qualify.
  */
 let cachedLiteralText = "";
+let cachedMaskedText: string | undefined;
 let cachedLiteralRanges: Array<[number, number]> = [];
 
 function mongoLiteralRanges(text: string): Array<[number, number]> {
@@ -2349,6 +2350,7 @@ function mongoLiteralRanges(text: string): Array<[number, number]> {
       i++;
     }
   }
+  cachedMaskedText = undefined;
   cachedLiteralText = text;
   cachedLiteralRanges = ranges;
   return ranges;
@@ -2421,20 +2423,19 @@ function isAfterCallResultDot(beforeCursor: string): boolean {
 
 /** Blank out string/comment CONTENT (preserving length, so offsets stay valid) before pattern matching. */
 function maskMongoLiterals(text: string): string {
-  const chars = [...text];
-  let i = 0;
-  while (i < chars.length) {
-    const skipped = skipMongoStringOrComment(text, i, text.length);
-    if (skipped > i) {
-      for (let j = i; j < skipped; j++) {
-        if (chars[j] !== "\n") chars[j] = " ";
-      }
-      i = skipped;
-    } else {
-      i++;
-    }
+  const ranges = mongoLiteralRanges(text);
+  if (ranges.length === 0) return text;
+  if (cachedMaskedText !== undefined) return cachedMaskedText;
+
+  const parts: string[] = [];
+  let start = 0;
+  for (const [from, to] of ranges) {
+    parts.push(text.slice(start, from), text.slice(from, to).replace(/[^\n]+/g, (run) => " ".repeat(run.length)));
+    start = to;
   }
-  return chars.join("");
+  parts.push(text.slice(start));
+  cachedMaskedText = parts.join("");
+  return cachedMaskedText;
 }
 
 function findInnermostMongoCall(beforeCursor: string): { method: string; openParenIndex: number } | null {

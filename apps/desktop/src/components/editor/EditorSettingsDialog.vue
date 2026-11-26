@@ -8029,7 +8029,6 @@ async function copyAiTestError() {
   }, 1500);
 }
 
-
 async function ensureCliMcpStatus() {
   if (isWeb || activeSettingsTab.value !== "ai" || !aiIsCliProvider.value || mcpStatus.value || mcpStatusLoading.value) return;
   await refreshMcpStatus();

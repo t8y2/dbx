@@ -3503,12 +3503,12 @@ fn classify_error(msg: &str) -> &'static str {
         "tokenLimit"
     } else if lower.contains("safety filter") || lower.contains("prompt was blocked") {
         "safety"
-    } else if mentions_server_error_status(&lower) {
-        // A 5xx from the provider (often a self-hosted gateway or proxy that
-        // returns an empty body) says nothing about the key or the model, so it
-        // gets its own category instead of falling through to `unknown`
-        // (#15393: "API error (HTTP 500: empty response body)" told the user
-        // nothing about where the failure came from).
+    } else if mentions_server_error_status(&lower) && !lower.contains("502") && !lower.contains("503") {
+        // A 5xx the network branch does not already claim (502/503 are transport
+        // shapes and stay retryable `network`) says nothing about the key or the
+        // model, so it gets its own category instead of falling through to
+        // `unknown` — #15393: "API error (HTTP 500: empty response body)" told
+        // the user nothing about where the failure came from.
         "serverError"
     } else if lower.contains("no text")
         || lower.contains("response body was empty")
@@ -6471,8 +6471,9 @@ mod tests {
     fn classifies_server_errors_and_empty_bodies_for_gateway_failures() {
         // 自建网关/代理返回 5xx 且 body 为空：应指向服务端，而不是笼统的 unknown
         assert_eq!(classify_error("API error (HTTP 500: empty response body)"), "serverError");
-        assert_eq!(classify_error("HTTP 502 Bad Gateway"), "serverError");
-        assert_eq!(classify_error("status 503 service unavailable"), "serverError");
+        // 502/503 是传输层形态，保持既有 network 分类（可重试），不被 serverError 抢走
+        assert_eq!(classify_error("HTTP 502 Bad Gateway"), "network");
+        assert_eq!(classify_error("status 503 service unavailable"), "network");
         // 5xx 之前的既有分类优先（429 仍是限流、504 仍是超时）
         assert_eq!(classify_error("HTTP 429: empty response body"), "rateLimit");
         assert_eq!(classify_error("HTTP 504: gateway timeout"), "timeout");

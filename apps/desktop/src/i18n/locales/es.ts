@@ -5543,6 +5543,8 @@ export default withEnglishFallback({
       optimizeSuccess: "Tabla «{name}» OPTIMIZE TABLE: {message}",
       repairSuccess: "Tabla «{name}» REPAIR TABLE: {message}",
     },
+    hideProcedureTabSignatures: "Ocultar los parámetros del procedimiento almacenado en los títulos de las pestañas",
+    showProcedureTabSignatures: "Mostrar los parámetros del procedimiento almacenado en los títulos de las pestañas",
   },
   visibleDatabases: {
     title: "Bases de datos visibles",

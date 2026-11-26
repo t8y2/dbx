@@ -5350,6 +5350,8 @@ export default withEnglishFallback({
       optimizeSuccess: 'Tabela "{name}" OPTIMIZE TABLE: {message}',
       repairSuccess: 'Tabela "{name}" REPAIR TABLE: {message}',
     },
+    hideProcedureTabSignatures: "Ocultar parâmetros do procedimento armazenado no título da aba",
+    showProcedureTabSignatures: "Mostrar parâmetros do procedimento armazenado no título da aba",
   },
   visibleDatabases: {
     title: "Bancos de dados visíveis",

@@ -5711,6 +5711,8 @@ export default withEnglishFallback({
       optimizeSuccess: "テーブル「{name}」OPTIMIZE TABLE: {message}",
       repairSuccess: "テーブル「{name}」REPAIR TABLE: {message}",
     },
+    hideProcedureTabSignatures: "タブタイトルでストアドプロシージャのパラメータを非表示にする",
+    showProcedureTabSignatures: "タブタイトルでストアドプロシージャのパラメータを表示する",
   },
   visibleDatabases: {
     title: "表示するデータベース",

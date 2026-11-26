@@ -5287,6 +5287,8 @@ export default withEnglishFallback({
       optimizeSuccess: "테이블 '{name}' OPTIMIZE TABLE: {message}",
       repairSuccess: "테이블 '{name}' REPAIR TABLE: {message}",
     },
+    hideProcedureTabSignatures: "탭 제목에서 저장 프로시저 매개변수 숨기기",
+    showProcedureTabSignatures: "탭 제목에 저장 프로시저 매개변수 표시",
   },
   visibleDatabases: {
     title: "표시할 데이터베이스",

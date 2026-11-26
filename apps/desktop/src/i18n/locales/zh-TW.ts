@@ -5326,6 +5326,8 @@ export default withEnglishFallback({
       optimizeSuccess: "資料表「{name}」OPTIMIZE TABLE：{message}",
       repairSuccess: "資料表「{name}」REPAIR TABLE：{message}",
     },
+    hideProcedureTabSignatures: "在索引標籤標題中隱藏預存程序參數",
+    showProcedureTabSignatures: "在索引標籤標題中顯示預存程序參數",
   },
   visibleDatabases: {
     title: "顯示資料庫",

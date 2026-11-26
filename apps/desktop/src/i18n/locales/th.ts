@@ -5649,6 +5649,8 @@ export default withEnglishFallback({
       optimizeSuccess: "ตาราง「{name}」OPTIMIZE TABLE: {message}",
       repairSuccess: "ตาราง「{name}」REPAIR TABLE: {message}",
     },
+    hideProcedureTabSignatures: "ซ่อนพารามิเตอร์ของสโตรด์โพรซีเดอร์ในชื่อแท็บ",
+    showProcedureTabSignatures: "แสดงพารามิเตอร์ของสโตรด์โพรซีเดอร์ในชื่อแท็บ",
   },
   visibleDatabases: {
     title: "ฐานข้อมูลที่มองเห็นได้",

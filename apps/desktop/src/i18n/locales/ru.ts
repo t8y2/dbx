@@ -5473,6 +5473,8 @@ export default withEnglishFallback({
       optimizeSuccess: "Таблица «{name}» OPTIMIZE TABLE: {message}",
       repairSuccess: "Таблица «{name}» REPAIR TABLE: {message}",
     },
+    hideProcedureTabSignatures: "Скрыть параметры хранимой процедуры в заголовке вкладки",
+    showProcedureTabSignatures: "Показать параметры хранимой процедуры в заголовке вкладки",
   },
   visibleDatabases: {
     title: "Видимые базы данных",

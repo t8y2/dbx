@@ -1,5 +1,6 @@
 import { foldService, syntaxTree } from "@codemirror/language";
 import type { EditorState } from "@codemirror/state";
+import { Decoration, ViewPlugin, type DecorationSet, type EditorView, type ViewUpdate } from "@codemirror/view";
 import { elasticsearchRestRequestRanges } from "@/lib/sql/sqlStatementRanges";
 import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 
@@ -95,6 +96,7 @@ function isSqlServerTransactionBegin(state: EditorState, tokens: SyntaxNode[], i
 // background -- both produce a new `Tree` without a new `Text`, so keying on `Text` alone would
 // keep serving ranges computed from a stale or partial parse.
 const rangeCache = new WeakMap<Tree, Map<string, Map<number, FoldRange>>>();
+const blockPairsCache = new WeakMap<Tree, Array<{ opener: SyntaxNode; closer: SyntaxNode }>>();
 
 function addMultilineFoldRange(state: EditorState, ranges: Map<number, FoldRange>, openerPosition: number, endPosition: number, overwrite = false) {
   const openerLine = state.doc.lineAt(openerPosition);
@@ -190,21 +192,9 @@ function addRestRequestFoldRanges(state: EditorState, ranges: Map<number, FoldRa
   return true;
 }
 
-export function computeBlockFoldRanges(state: EditorState, databaseType?: DatabaseType, tree: Tree = syntaxTree(state)): Map<number, FoldRange> {
-  const cacheByDatabaseType = rangeCache.get(tree);
-  const cacheKey = databaseType ?? "auto-detect";
-  const cached = cacheByDatabaseType?.get(cacheKey);
+function sqlBlockPairs(state: EditorState, tree: Tree) {
+  const cached = blockPairsCache.get(tree);
   if (cached) return cached;
-
-  const byOpenerLine = new Map<number, FoldRange>();
-  const isRestDocument = addRestRequestFoldRanges(state, byOpenerLine, databaseType);
-  if (isRestDocument) {
-    const nextCacheByDatabaseType = cacheByDatabaseType ?? new Map<string, Map<number, FoldRange>>();
-    nextCacheByDatabaseType.set(cacheKey, byOpenerLine);
-    rangeCache.set(tree, nextCacheByDatabaseType);
-    return byOpenerLine;
-  }
-
   const tokens: SyntaxNode[] = [];
   tree.iterate({
     enter(node) {
@@ -212,6 +202,7 @@ export function computeBlockFoldRanges(state: EditorState, databaseType?: Databa
     },
   });
 
+  const pairs: Array<{ opener: SyntaxNode; closer: SyntaxNode }> = [];
   const stack: SyntaxNode[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -225,28 +216,65 @@ export function computeBlockFoldRanges(state: EditorState, databaseType?: Databa
       }
       if (continuation && TRACKED_END_CONTINUATIONS.has(continuation)) i++; // "END CASE" -- consume the word, not a new opener
       const opener = stack.pop();
-      if (opener) {
-        const openerLine = state.doc.lineAt(opener.to);
-        const endLine = state.doc.lineAt(token.from);
-        // Same source line as its opener (e.g. "BEGIN END"): nothing to collapse, and the
-        // from/to formula below would otherwise invert (from > to) since `from` is the end of
-        // that shared line while `to` is a position earlier on it.
-        if (openerLine.number !== endLine.number) {
-          addMultilineFoldRange(state, byOpenerLine, opener.from, token.from, true);
-        }
-      }
+      if (opener) pairs.push({ opener, closer: token });
     } else if (BLOCK_OPENERS.has(text) && (text !== "BEGIN" || !isSqlServerTransactionBegin(state, tokens, i))) {
       stack.push(token);
     }
   }
+  blockPairsCache.set(tree, pairs);
+  return pairs;
+}
 
-  addQueryStructureFoldRanges(state, tree, byOpenerLine);
+export function computeBlockFoldRanges(state: EditorState, databaseType?: DatabaseType, tree: Tree = syntaxTree(state)): Map<number, FoldRange> {
+  const cacheByDatabaseType = rangeCache.get(tree);
+  const cacheKey = databaseType ?? "auto-detect";
+  const cached = cacheByDatabaseType?.get(cacheKey);
+  if (cached) return cached;
 
+  const byOpenerLine = new Map<number, FoldRange>();
+  if (!addRestRequestFoldRanges(state, byOpenerLine, databaseType)) {
+    for (const { opener, closer } of sqlBlockPairs(state, tree)) {
+      addMultilineFoldRange(state, byOpenerLine, opener.from, closer.from, true);
+    }
+    addQueryStructureFoldRanges(state, tree, byOpenerLine);
+  }
   const nextCacheByDatabaseType = cacheByDatabaseType ?? new Map<string, Map<number, FoldRange>>();
   nextCacheByDatabaseType.set(cacheKey, byOpenerLine);
   rangeCache.set(tree, nextCacheByDatabaseType);
   return byOpenerLine;
 }
+
+const matchingBlockKeyword = Decoration.mark({ class: "cm-matchingBracket" });
+
+function beginEndDecorations(state: EditorState): DecorationSet {
+  const selection = state.selection.main;
+  if (!selection.empty) return Decoration.none;
+  const tree = syntaxTree(state);
+  for (const side of [-1, 1] as const) {
+    const token = tree.resolveInner(selection.head, side);
+    if (token.name !== "Keyword" || !/^(BEGIN|END)$/i.test(state.sliceDoc(token.from, token.to))) continue;
+    const pair = sqlBlockPairs(state, tree).find(({ opener, closer }) => (opener.from === token.from || closer.from === token.from) && state.sliceDoc(opener.from, opener.to).toUpperCase() === "BEGIN");
+    if (pair) return Decoration.set([matchingBlockKeyword.range(pair.opener.from, pair.opener.to), matchingBlockKeyword.range(pair.closer.from, pair.closer.to)]);
+  }
+  return Decoration.none;
+}
+
+export const sqlBeginEndMatching = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+
+    constructor(view: EditorView) {
+      this.decorations = beginEndDecorations(view.state);
+    }
+
+    update(update: ViewUpdate) {
+      if (update.selectionSet || update.docChanged || syntaxTree(update.startState) !== syntaxTree(update.state)) {
+        this.decorations = beginEndDecorations(update.state);
+      }
+    }
+  },
+  { decorations: (plugin) => plugin.decorations },
+);
 
 /** Creates folding for REST requests, procedural blocks, query parentheses, and UNION branches. */
 export function createSqlBlockFoldService(databaseType?: DatabaseType | (() => DatabaseType | undefined), cachedRange?: (state: EditorState, lineStart: number) => FoldRange | null | undefined) {

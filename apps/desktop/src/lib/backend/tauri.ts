@@ -4081,8 +4081,8 @@ export async function redisGetTtl(connectionId: string, db: number, keyRaw: stri
   return invoke("redis_get_ttl", { connectionId, db, keyRaw });
 }
 
-export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string): Promise<RedisStreamPage> {
-  return invoke("redis_get_stream_entries", { connectionId, db, keyRaw, cursor });
+export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string, newestFirst?: boolean): Promise<RedisStreamPage> {
+  return invoke("redis_get_stream_entries", { connectionId, db, keyRaw, cursor, ...(newestFirst ? { newestFirst } : {}) });
 }
 
 export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {

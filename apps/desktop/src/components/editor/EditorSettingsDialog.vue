@@ -343,6 +343,7 @@ import { useToast } from "@/composables/useToast";
 import type { ConnectionConfig, InstalledPlugin, DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
 import { getCcSwitchPluginStatus, isCcSwitchPluginAvailable, isMagpieImportAvailable, MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION } from "@/lib/ai/ccSwitch";
 import { uuid } from "@/lib/common/utils";
+import { MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES, mergeImportedVscodeSnippets, parseVscodeSnippetsFile, readVscodeSnippetsFile, serializeVscodeSnippetsFile, type VscodeSnippetsImportError, type VscodeSnippetsParseResult } from "@/lib/sql/vscodeSnippetsImport";
 import { DEFAULT_SQL_SHORTCUT_SELECT_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
 import {
   BUILTIN_SQL_SHORTCUT_COUNT_ID,
@@ -1782,6 +1783,134 @@ function confirmDeleteSnippet(snippet: SqlSnippet) {
     deleteSnippet(snippet.id);
   }
 }
+// --- Snippet import (VS Code snippets JSON) ---
+
+const snippetsImporting = ref(false);
+const snippetsFileInputRef = ref<HTMLInputElement | null>(null);
+
+function onImportSnippetsClick() {
+  if (snippetsImporting.value) return;
+  if (isTauriRuntime()) {
+    void importSnippetsFromDesktop();
+    return;
+  }
+  snippetsFileInputRef.value?.click();
+}
+
+async function importSnippetsFromDesktop() {
+  snippetsImporting.value = true;
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "VS Code Snippets", extensions: ["json", "code-snippets"] }],
+    });
+    if (typeof selected !== "string") return;
+    const { open: openFile } = await import("@tauri-apps/plugin-fs");
+    const file = await openFile(selected, { read: true });
+    try {
+      applyImportedSnippets(await readVscodeSnippetsFile(file));
+    } finally {
+      await file.close();
+    }
+  } catch (error) {
+    toast(t("settings.snippetsImportReadFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    snippetsImporting.value = false;
+  }
+}
+
+async function handleSnippetsFileInputChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  // Reject oversized files before reading them into memory.
+  if (file.size > MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES) {
+    toast(translateSnippetsImportError({ code: "too-large" }), 5000);
+    return;
+  }
+  snippetsImporting.value = true;
+  try {
+    applyImportedSnippets(parseVscodeSnippetsFile(await file.text()));
+  } catch (error) {
+    toast(t("settings.snippetsImportReadFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    snippetsImporting.value = false;
+  }
+}
+
+// Import only updates the draft; the snippets tab is Apply-based, so the dirty
+// check and Apply footer pick the change up without touching the store here.
+function applyImportedSnippets(result: VscodeSnippetsParseResult) {
+  if (!result.ok) {
+    toast(translateSnippetsImportError(result.error), 5000);
+    return;
+  }
+  const merged = mergeImportedVscodeSnippets(editSnippets.value, result.value);
+  editSnippets.value = merged.snippets;
+  toast(merged.renamedCount > 0 ? t("settings.snippetsImportSuccessRenamed", { count: merged.importedCount, renamed: merged.renamedCount }) : t("settings.snippetsImportSuccess", { count: merged.importedCount }), 2500);
+}
+
+function translateSnippetsImportError(error: VscodeSnippetsImportError): string {
+  switch (error.code) {
+    case "too-large":
+      return t("settings.snippetsImportFileTooLarge", { limit: `${MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES / (1024 * 1024)} MB` });
+    case "invalid-json":
+      return t("settings.snippetsImportInvalidJson");
+    case "invalid-structure":
+      return t("settings.snippetsImportInvalidStructure");
+    case "no-valid-snippets":
+      return t("settings.snippetsImportNoValidSnippets");
+  }
+}
+
+// --- Snippet export (VS Code snippets JSON) ---
+
+const snippetsExporting = ref(false);
+
+function onExportSnippetsClick() {
+  if (snippetsExporting.value || editSnippets.value.length === 0) return;
+  if (isTauriRuntime()) {
+    void exportSnippetsToDesktop();
+    return;
+  }
+  exportSnippetsToBrowser();
+}
+
+async function exportSnippetsToDesktop() {
+  snippetsExporting.value = true;
+  try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const target = await save({
+      defaultPath: "dbx-snippets.json",
+      filters: [{ name: "VS Code Snippets", extensions: ["json", "code-snippets"] }],
+    });
+    if (typeof target !== "string") return;
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    await writeTextFile(target, serializeVscodeSnippetsFile(editSnippets.value));
+    toast(t("settings.snippetsExportSuccess", { count: editSnippets.value.length }), 2500);
+  } catch (error) {
+    toast(t("settings.snippetsExportWriteFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    snippetsExporting.value = false;
+  }
+}
+
+function exportSnippetsToBrowser() {
+  try {
+    const blob = new Blob([serializeVscodeSnippetsFile(editSnippets.value)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "dbx-snippets.json";
+    anchor.click();
+    URL.revokeObjectURL(url);
+    toast(t("settings.snippetsExportSuccess", { count: editSnippets.value.length }), 2500);
+  } catch (error) {
+    toast(t("settings.snippetsExportWriteFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
 
 function openAddSqlShortcutDialog() {
   sqlShortcutEditingId.value = null;
@@ -2582,6 +2711,7 @@ const collapsedShortcutScopes = ref<Set<ShortcutScope>>(new Set());
 const formatterEditorShortcutIds: ShortcutActionId[] = [
   "formatSql",
   "toggleLineComment",
+  "toggleLineCommentAndAdvance",
   "find",
   "replace",
   "saveSql",
@@ -11963,6 +12093,16 @@ onUnmounted(() => {
                     <Trash2 class="mr-2 h-4 w-4" />
                     {{ t("settings.snippetsDeleteSelected", { count: selectedSnippetCount }) }}
                   </Button>
+                  <Button variant="outline" size="sm" :disabled="snippetsImporting" @click="onImportSnippetsClick">
+                    <Loader2 v-if="snippetsImporting" class="mr-2 h-4 w-4 animate-spin" />
+                    <Upload v-else class="mr-2 h-4 w-4" />
+                    {{ t("settings.snippetsImport") }}
+                  </Button>
+                  <Button variant="outline" size="sm" :disabled="snippetsExporting || editSnippets.length === 0" @click="onExportSnippetsClick">
+                    <Loader2 v-if="snippetsExporting" class="mr-2 h-4 w-4 animate-spin" />
+                    <Download v-else class="mr-2 h-4 w-4" />
+                    {{ t("settings.snippetsExport") }}
+                  </Button>
                   <Button variant="outline" size="sm" @click="openAddSnippetDialog">
                     <Plus class="mr-2 h-4 w-4" />
                     {{ t("settings.snippetsAdd") }}
@@ -12081,6 +12221,7 @@ LIMIT 100;</pre>
                   </tbody>
                 </table>
               </div>
+              <input ref="snippetsFileInputRef" type="file" accept=".json,.code-snippets,application/json" class="hidden" @change="handleSnippetsFileInputChange" />
             </section>
 
             <section v-else-if="activeSettingsTab === 'backups'" data-settings-search-id="backups" :class="['py-2', settingsSearchTargetClass('backups')]">

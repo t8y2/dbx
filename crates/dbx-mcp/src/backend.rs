@@ -1,3 +1,4 @@
+use std::time::Duration;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -617,6 +618,7 @@ pub trait DbxBackend: Send + Sync {
 pub struct LocalBackend {
     state: Arc<AppState>,
     data_dir: std::path::PathBuf,
+    wait_for_writes: bool,
     transaction_owners: Arc<TransactionOwnerRegistry>,
     transaction_owner_config: TransactionOwnerConfig,
 }
@@ -899,6 +901,7 @@ impl LocalBackend {
         Self {
             state,
             data_dir,
+            wait_for_writes: false,
             transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
             transaction_owner_config: TransactionOwnerConfig::from_env(),
         }
@@ -963,9 +966,31 @@ impl LocalBackend {
         Ok(Self {
             state,
             data_dir,
+            wait_for_writes: false,
             transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
             transaction_owner_config: TransactionOwnerConfig::from_env(),
         })
+    }
+
+    /// One-shot CLI commands must keep their runtime alive until writes finish.
+    pub fn wait_for_writes(mut self) -> Self {
+        self.wait_for_writes = true;
+        self
+    }
+
+    async fn detached_write_wait(
+        &self,
+        connection_id: &str,
+        sql: &str,
+        read_override: Option<u64>,
+    ) -> Option<Duration> {
+        if self.wait_for_writes {
+            return None;
+        }
+        match dbx_core::query::connection_statement_timeout(&self.state, connection_id, sql, read_override).await {
+            dbx_core::query::StatementTimeout::Detach(wait) => Some(wait),
+            _ => None,
+        }
     }
 
     #[cfg(feature = "transaction-test-hooks")]
@@ -1043,13 +1068,26 @@ impl LocalBackend {
             if config.plugin_id.as_deref() != Some(plugin_id) {
                 return Err(format!("Connection \"{connection_id}\" is not bound to plugin \"{plugin_id}\""));
             }
-            let lifecycle = self.state.plugin_host.connection_params_standalone(&config)?;
+            let lifecycle = self.plugin_tool_lifecycle(&config).await?;
             params["lifecycle"] = lifecycle;
         }
         self.state
             .plugin_host
             .invoke(plugin_id, "mcp/call", params, None, Some(std::time::Duration::from_secs(300)))
             .await
+    }
+
+    async fn plugin_tool_lifecycle(&self, config: &ConnectionConfig) -> Result<Value, String> {
+        // Validate the saved provider before starting its transport. Keep the
+        // logical endpoint intact for SSH host-key checks and let the shared
+        // host transport resolve profiles, proxy chains and tunnel reuse.
+        let mut lifecycle = self.state.plugin_host.connection_params_standalone(config)?;
+        let endpoint = self.state.plugin_connection_endpoint(&config.id, config).await?;
+        lifecycle["runtime"] = json!({ "host": endpoint.host, "port": endpoint.port });
+        if let Some(proxy) = endpoint.proxy {
+            lifecycle["runtime"]["proxy"] = serde_json::to_value(proxy).map_err(|error| error.to_string())?;
+        }
+        Ok(lifecycle)
     }
 
     /// Opt-in, parallel `mcp/tools` discovery for the external surface:
@@ -1567,6 +1605,28 @@ impl DbxBackend for LocalBackend {
         max_rows: Option<usize>,
         timeout_secs: Option<u64>,
     ) -> Result<dbx_core::db::QueryResult, String> {
+        let options = dbx_core::query::QueryExecutionOptions { max_rows, timeout_secs, ..Default::default() };
+        // A configured write limit only stops the wait; it must never cancel the
+        // server statement, because then the caller cannot tell whether the rows
+        // landed.
+        if let Some(wait) = self.detached_write_wait(&connection.id, sql, timeout_secs).await {
+            let detached = dbx_core::query::spawn_detached_statement(
+                self.state.clone(),
+                connection.id.clone(),
+                database.to_string(),
+                sql.to_string(),
+                None,
+                None,
+                options,
+                (),
+                None,
+            );
+            return match tokio::time::timeout(wait, detached).await {
+                Ok(Ok(result)) => result.map_err(dbx_core::query::QueryExecutionError::into_legacy_string),
+                Ok(Err(_)) => Err("Statement task stopped unexpectedly".to_string()),
+                Err(_) => Err(dbx_core::query::detached_write_timeout_message(wait)),
+            };
+        }
         dbx_core::query::execute_sql_statement_with_options(
             &self.state,
             &connection.id,
@@ -1574,7 +1634,7 @@ impl DbxBackend for LocalBackend {
             sql,
             None,
             None,
-            dbx_core::query::QueryExecutionOptions { max_rows, timeout_secs, ..Default::default() },
+            options,
         )
         .await
     }
@@ -1587,6 +1647,30 @@ impl DbxBackend for LocalBackend {
         sql: &str,
         options: dbx_core::query::QueryExecutionOptions,
     ) -> Result<Vec<BatchStatementResult>, String> {
+        if let Some(wait) = self.detached_write_wait(&connection.id, sql, options.timeout_secs).await {
+            let state = self.state.clone();
+            let connection_id = connection.id.clone();
+            let database = database.to_owned();
+            let schema = schema.map(str::to_owned);
+            let sql = sql.to_owned();
+            let task = tokio::spawn(async move {
+                Box::pin(dbx_core::query::execute_multi_core_with_options_for_client(
+                    &state,
+                    &connection_id,
+                    &database,
+                    &sql,
+                    schema.as_deref(),
+                    None,
+                    options,
+                ))
+                .await
+            });
+            return match tokio::time::timeout(wait, task).await {
+                Ok(Ok(result)) => result.map(|rows| rows.into_iter().map(BatchStatementResult::from).collect()),
+                Ok(Err(_)) => Err("Statement task stopped unexpectedly".to_string()),
+                Err(_) => Err(dbx_core::query::detached_write_timeout_message(wait)),
+            };
+        }
         // The multi-statement executor dispatches across every database engine
         // and produces a very large future. Boxing it keeps the async-trait
         // implementation below Rust's type-layout recursion limit (query depth
@@ -3393,6 +3477,158 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    async fn plugin_transport_backend(data_dir: &Path, proxy_route: bool) -> (LocalBackend, ConnectionConfig) {
+        let plugins_dir = data_dir.join("plugins");
+        let plugin_dir = plugins_dir.join("sample.transport");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // Lifecycle preparation resolves the provider but never launches it.
+        std::fs::write(plugin_dir.join("unused.exe"), b"").unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            json!({
+                "manifest_version": 1,
+                "id": "sample.transport",
+                "name": "Transport fixture",
+                "version": "1.0.0",
+                "publisher": "sample",
+                "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                "entrypoints": { "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "unused.exe"
+                } },
+                "contributions": [{
+                    "type": "connection-provider",
+                    "id": "sample.transport.connection",
+                    "database_type": "sample",
+                    "capabilities": ["connect"],
+                    "proxy_route": proxy_route
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&data_dir.join("dbx.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir_and_app_version(storage, plugins_dir, "0.7.0");
+        let backend = LocalBackend::from_app_state(Arc::new(state), data_dir.to_path_buf());
+        let mut config = mutation_test_connection();
+        config.db_type = DatabaseType::Plugin;
+        config.host = "192.0.2.65".to_string();
+        config.port = 61050;
+        config.plugin_id = Some("sample.transport".to_string());
+        config.plugin_connection_provider = Some("sample.transport.connection".to_string());
+        config.plugin_connection_type = Some("sample".to_string());
+        (backend, config)
+    }
+
+    #[tokio::test]
+    async fn plugin_mcp_direct_lifecycle_preserves_logical_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let (backend, config) = plugin_transport_backend(dir.path(), false).await;
+        let lifecycle = backend.plugin_tool_lifecycle(&config).await.unwrap();
+        assert_eq!(lifecycle["connection"]["host"], config.host);
+        assert_eq!(lifecycle["connection"]["port"], config.port);
+        assert_eq!(lifecycle["runtime"]["host"], config.host);
+        assert_eq!(lifecycle["runtime"]["port"], config.port);
+        assert!(lifecycle["runtime"].get("proxy").is_none());
+    }
+
+    #[tokio::test]
+    async fn plugin_mcp_saved_proxy_routes_traffic_without_changing_host_key_identity() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        // Both static-endpoint providers (SSH) and proxy-route providers
+        // (multi-endpoint services) must inherit the saved host transport.
+        for proxy_route in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (backend, mut config) = plugin_transport_backend(dir.path(), proxy_route).await;
+            let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let proxy_port = proxy.local_addr().unwrap().port();
+            config.transport_layers = serde_json::from_value(json!([{
+                "type": "proxy", "id": "test-proxy", "enabled": true,
+                "proxy_type": "socks5", "host": "127.0.0.1", "port": proxy_port
+            }]))
+            .unwrap();
+            let fake_proxy = tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let (mut stream, _) = proxy.accept().await.unwrap();
+                    let mut greeting = [0; 2];
+                    stream.read_exact(&mut greeting).await.unwrap();
+                    assert_eq!(greeting[0], 5);
+                    let mut methods = vec![0; greeting[1] as usize];
+                    stream.read_exact(&mut methods).await.unwrap();
+                    assert!(methods.contains(&0));
+                    stream.write_all(&[5, 0]).await.unwrap();
+                    let mut request = [0; 4];
+                    stream.read_exact(&mut request).await.unwrap();
+                    assert_eq!(&request[..3], &[5, 1, 0]);
+                    match request[3] {
+                        1 => {
+                            let mut host = [0; 4];
+                            stream.read_exact(&mut host).await.unwrap();
+                            assert_eq!(host, [192, 0, 2, 65]);
+                        }
+                        3 => {
+                            let len = stream.read_u8().await.unwrap();
+                            let mut host = vec![0; len as usize];
+                            stream.read_exact(&mut host).await.unwrap();
+                            assert_eq!(host, b"192.0.2.65");
+                        }
+                        other => panic!("Unexpected SOCKS5 address type: {other}"),
+                    }
+                    assert_eq!(stream.read_u16().await.unwrap(), 61050);
+                    stream.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 22]).await.unwrap();
+                    stream.write_all(b"SSH-2.0-fixture\r\n").await.unwrap();
+                    // Exercise both relay directions, not just the handshake.
+                    let mut message = [0; 4];
+                    stream.read_exact(&mut message).await.unwrap();
+                    assert_eq!(&message, b"ping");
+                    stream.write_all(b"pong").await.unwrap();
+                })
+                .await
+                .expect("saved proxy was not used");
+            });
+
+            let lifecycle = backend.plugin_tool_lifecycle(&config).await.unwrap();
+            assert_eq!(lifecycle["connection"]["host"], "192.0.2.65");
+            assert_eq!(lifecycle["connection"]["port"], 61050);
+            let runtime = &lifecycle["runtime"];
+            let dial = if proxy_route {
+                assert_eq!(runtime["proxy"]["type"], "socks5");
+                &runtime["proxy"]
+            } else {
+                assert!(runtime.get("proxy").is_none());
+                runtime
+            };
+            assert_eq!(dial["host"], "127.0.0.1");
+            let port = u16::try_from(dial["port"].as_u64().unwrap()).unwrap();
+            let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            if proxy_route {
+                client.write_all(&[5, 1, 0]).await.unwrap();
+                let mut greeting = [0; 2];
+                client.read_exact(&mut greeting).await.unwrap();
+                assert_eq!(greeting, [5, 0]);
+                client.write_all(&[5, 1, 0, 1, 192, 0, 2, 65, 238, 122]).await.unwrap();
+                let mut response = [0; 10];
+                client.read_exact(&mut response).await.unwrap();
+                assert_eq!(&response[..4], &[5, 0, 0, 1]);
+            }
+            let exchange = async {
+                let mut banner = [0; 17];
+                client.read_exact(&mut banner).await.unwrap();
+                assert_eq!(&banner, b"SSH-2.0-fixture\r\n");
+                client.write_all(b"ping").await.unwrap();
+                let mut reply = [0; 4];
+                client.read_exact(&mut reply).await.unwrap();
+                assert_eq!(&reply, b"pong");
+            };
+            tokio::time::timeout(Duration::from_secs(5), exchange).await.unwrap();
+            drop(client);
+            fake_proxy.await.unwrap();
+            backend.state.reset_connection_transport_for_config(&config.id, &config).await;
+        }
     }
 
     #[test]

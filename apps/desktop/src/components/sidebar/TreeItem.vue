@@ -960,7 +960,8 @@ const databaseOpenVisual = computed(() => {
 
 const connectionColor = computed(() => {
   const connectionId = activeNode.value.connectionId;
-  return connectionId ? connectionStore.getConfig(connectionId)?.color || "" : "";
+  const explicitColor = connectionId ? connectionStore.getConfig(connectionId)?.color : undefined;
+  return explicitColor || activeNode.value.sidebarColor || "";
 });
 
 const isActiveConnectionScope = computed(() => !!activeNode.value.connectionId && connectionStore.activeConnectionId === activeNode.value.connectionId);
@@ -1285,20 +1286,10 @@ function updateTreeDragTarget(event: MouseEvent) {
   if (activeNode.value.vgroupKind === "databases") return;
   updateTarget(event, activeNode.value.id, activeNode.value.type);
   // While the list is display-sorted, the underlying manual order used for
-  // before/after positioning is invisible, so a before/after drop is only
-  // coherent when it changes the dragged row's parent group: moving it into
-  // a different group, or back out to the root level. A same-parent
-  // before/after drop would only reorder the invisible manual order, so it
-  // stays blocked; dropping inside a group was never blocked.
+  // before/after positioning is invisible, so only moving into a different
+  // group (a display-order-independent operation) is a coherent drop.
   if (props.moveToGroupOnly && dragState.dropPosition !== "inside") {
-    const draggedId = dragState.draggedId;
-    if (draggedId !== null) {
-      const draggedParentGroupId = connectionStore.parentGroupIdForSidebarEntry(draggedId);
-      const targetParentGroupId = connectionStore.parentGroupIdForSidebarEntry(activeNode.value.id);
-      if (draggedParentGroupId === targetParentGroupId) {
-        clearTarget(activeNode.value.id);
-      }
-    }
+    clearTarget(activeNode.value.id);
   }
 }
 

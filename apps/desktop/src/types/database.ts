@@ -178,6 +178,8 @@ export interface ConnectionConfig {
   connect_timeout_secs?: number;
   connect_timeout_inherit?: boolean;
   query_timeout_secs?: number;
+  /** Timeout for data writes. 0 (default) means unlimited; schema changes ignore it. */
+  write_timeout_secs?: number;
   query_timeout_inherit?: boolean;
   idle_timeout_secs?: number;
   /** Seconds a manual transaction may sit idle before DBX rolls it back. */
@@ -2256,6 +2258,7 @@ export interface ConnectionGroup {
   id: string;
   name: string;
   collapsed: boolean;
+  color?: string;
 }
 
 export type SidebarOrderEntry = { type: "group"; id: string; children?: SidebarOrderEntry[]; connectionIds?: string[] } | { type: "connection"; id: string };
@@ -2279,6 +2282,8 @@ export interface TreeNode {
   id: string;
   label: string;
   type: TreeNodeType;
+  /** Color of a sidebar connection group or the color inherited by a connection row. */
+  sidebarColor?: string;
   /** Additional values matched by sidebar search without rendering them. */
   searchAliases?: string[];
   children?: TreeNode[];
@@ -2859,7 +2864,7 @@ export interface QueryTab {
     eventOpenRequestId?: number;
     /** 显式的"新建事件"请求：单调递增，用于让已复用 tab 也能重复进入 CREATE 编辑器 */
     eventCreateRequestId?: number;
-    initialObjectFilter?: "tables" | "events" | "indexes";
+    initialObjectFilter?: ObjectBrowserFilter;
     indexRequestSequence?: number;
     indexCreateRequestId?: number;
     initialViewTarget?: SchemaIndexIdentity;

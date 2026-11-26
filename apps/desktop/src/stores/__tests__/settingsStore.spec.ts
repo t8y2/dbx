@@ -799,6 +799,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ dataGridCopyExtractor: "invalid" as any }).dataGridCopyExtractor).toBe("smart");
   });
 
+  it("normalizes the persisted Smart Copy single-column format", () => {
+    expect(normalizeEditorSettings({}).dataGridSmartSingleColumnFormat).toBe("default");
+    expect(normalizeEditorSettings({ dataGridSmartSingleColumnFormat: "json" }).dataGridSmartSingleColumnFormat).toBe("json");
+    expect(normalizeEditorSettings({ dataGridSmartSingleColumnFormat: "sql-inserts" as any }).dataGridSmartSingleColumnFormat).toBe("default");
+    expect(normalizeEditorSettings({ dataGridSmartSingleColumnFormat: "invalid" as any }).dataGridSmartSingleColumnFormat).toBe("default");
+  });
+
   it("normalizes persistent extractor configuration fail-fast defaults", () => {
     const defaults = normalizeEditorSettings({}).dataGridExtractorOptions;
     expect(defaults.dsv).toMatchObject({
@@ -1610,31 +1617,6 @@ describe("settingsStore AI API key normalization", () => {
     expect(getAiProviderPresetId("openai-compatible", " HTTPS://API.MODELVERSE.CN/v1/ ")).toBe("astraflow");
     expect(getAiProviderPreset("openai-compatible", "https://example.com/v1")).toBe(AI_PROVIDER_PRESETS["openai-compatible"]);
     expect(getAiProviderPresetOption("hualong-ai").model).toBe("deepseek-v4.1-flash");
-  });
-
-  it("adds HiAPI as a sponsored partner preset", () => {
-    const preset = getAiProviderPresetOption("hiapi");
-
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((candidate) => candidate.id === "hiapi")).toBe(preset);
-    expect(preset).toMatchObject({
-      id: "hiapi",
-      label: "HiAPI",
-      iconPath: "/icons/ai/hiapi.png",
-      group: "partner",
-      provider: "openai-compatible",
-      endpoint: "https://api.hiapi.ai/v1",
-      model: "",
-      models: [{ name: "glm-5.3" }, { name: "deepseek-v4-flash" }, { name: "deepseek-v4.1-flash" }, { name: "gpt-6-astra" }, { name: "claude-sonnet-4-6" }, { name: "kimi-k3" }],
-      apiStyle: "completions",
-      authMethod: "bearer",
-      requiresApiKey: true,
-      websiteUrl: "https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=ai-provider",
-      apiKeyUrl: "https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=ai-provider",
-      descriptionKey: "ai.hiapiDescription",
-      badgeKey: "ai.hiapiSponsored",
-    });
-    expect(getAiProviderPreset("openai-compatible", "https://api.hiapi.ai/v1")).toBe(preset);
-    expect(getAiProviderPresetId("openai-compatible", " HTTPS://API.HIAPI.AI/v1/ ")).toBe("hiapi");
   });
 
   it("adds PackyAPI as a sponsored partner preset without a default model", () => {

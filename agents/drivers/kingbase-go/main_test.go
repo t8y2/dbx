@@ -5199,6 +5199,10 @@ func TestNormalizeValueDecodesBitColumnPayloads(t *testing.T) {
 		{name: "binary bit(1) one is msb aligned", payload: []byte{0, 0, 0, 1, 0x80}, columnType: "bit(1)", want: "1"},
 		{name: "binary bit(8) one", payload: []byte{0, 0, 0, 8, 0x01}, columnType: "bit(8)", want: "00000001"},
 		{name: "raw bit field without declared width", payload: []byte{0x0a}, columnType: "bit", want: "1010"},
+		// Mirror of the JDBC width guard: a raw MySQL-compat bit(n>1) value of
+		// 0x30/0x31 is NOT single-char text — it must expand LSB over the full width.
+		{name: "raw bit(8) ascii-looking byte expands", payload: []byte{0x30}, columnType: "bit(8)", want: "00110000"},
+		{name: "raw bit(8) ascii-looking one expands", payload: []byte{0x31}, columnType: "bit(8)", want: "00110001"},
 	}
 
 	for _, test := range tests {

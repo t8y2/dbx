@@ -2023,7 +2023,11 @@ func decodeKingbaseBitString(raw []byte, declaredWidth int) (string, bool) {
 			return expandKingbaseBitsMSB(payload, bitLen), true
 		}
 	}
-	if isKingbaseBitText(raw) {
+	// Mirror the JDBC rule (DbxJdbcPlugin#bitStringFromPayload): an ASCII '0'/'1'
+	// payload is text only when it matches the declared width; otherwise a raw
+	// MySQL-compat bit(n>1) value of 0x30/0x31 must expand LSB over the full width
+	// instead of rendering a single '0'/'1'.
+	if isKingbaseBitText(raw) && (declaredWidth <= 0 || len(raw) == declaredWidth) {
 		return string(raw), true
 	}
 	width := declaredWidth

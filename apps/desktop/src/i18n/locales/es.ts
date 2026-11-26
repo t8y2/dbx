@@ -5025,6 +5025,7 @@ export default withEnglishFallback({
     editMessage: "Editar mensaje",
     editResend: "Reenviar",
     editCancel: "Cancelar",
+    testErrorServer: "El servidor devolvió un código de estado de error (normalmente 5xx), que suele provenir de una puerta de enlace o un proxy propios; comprueba si la puerta de enlace reenvía correctamente, si devuelve una página de error y si el servicio backend está disponible.",
   },
   contextMenu: {
     splitTab: "Dividir",

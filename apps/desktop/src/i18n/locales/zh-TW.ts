@@ -4832,6 +4832,7 @@ export default withEnglishFallback({
     setDatabaseTarget: "設為目標庫",
     searchDatabases: "搜尋資料庫…",
     noDatabasesFound: "未找到資料庫",
+    testErrorServer: "伺服器端傳回了錯誤狀態碼（多為 5xx），通常來自自建閘道或代理——請檢查閘道是否正常轉發、是否回傳了錯誤頁面，以及後端服務是否可用。",
   },
   contextMenu: {
     splitTab: "分割",

@@ -4858,6 +4858,7 @@ export default withEnglishFallback({
     editMessage: "Editar mensagem",
     editResend: "Reenviar",
     editCancel: "Cancelar",
+    testErrorServer: "O servidor retornou um código de status de erro (geralmente 5xx), normalmente proveniente de um gateway ou proxy próprio — verifique se o gateway está encaminhando corretamente as requisições, se está retornando uma página de erro e se o serviço de backend está disponível.",
   },
   contextMenu: {
     splitTab: "Dividir",

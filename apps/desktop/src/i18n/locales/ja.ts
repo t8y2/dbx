@@ -5193,6 +5193,7 @@ export default withEnglishFallback({
     deepLinkClipboardEmpty: "クリップボードに API キーが見つかりません。手動で入力してください。",
     deepLinkClipboardInvalid: "クリップボードの内容が有効な単一行の API キーではありません。手動で入力してください。",
     deepLinkClipboardReadFailed: "クリップボードの読み取りに失敗しました: {message}",
+    testErrorServer: "サーバーがエラーステータスコード（多くは 5xx）を返しました。これは通常、自前のゲートウェイまたはプロキシによるものです。ゲートウェイが正常に転送しているか、エラーページを返していないか、バックエンドサービスが利用可能かを確認してください。",
   },
   contextMenu: {
     splitTab: "分割",

@@ -397,7 +397,12 @@ function formatStructureDdl(ddl: string): Promise<string> {
       databaseType: databaseType.value,
       database: props.database,
       catalog: props.catalog,
-      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      // Kingbase can resolve an unqualified DDL target to a system table with
+      // the same name (#15579), so the editable DDL tab must keep the backend's
+      // schema qualifier. `ddlQualifiedPartCount` has no kingbase entry, so
+      // forcing the flag on only skips the stripping pass — no database segment
+      // is ever inserted.
+      includeDatabaseName: databaseType.value === "kingbase" ? true : settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
     },
     settingsStore.editorSettings.sqlFormatter,

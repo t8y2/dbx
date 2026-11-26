@@ -54,7 +54,12 @@ export function parseHeatmapSpec(spec: Record<string, unknown>, raw: string): Ai
   // Two rows naming the same (x, y) cell would paint on top of each other and the
   // visible value would depend on ECharts' internal ordering rather than on the
   // model's intent, so a duplicate is rejected instead of silently collapsed.
-  const populatedCells = new Set<string>();
+  // The key is built from the axis POSITIONS, not the category strings: a
+  // string key would need a separator, and a category value may itself contain
+  // that separator (e.g. x "a\u0000b" + y "c" vs x "a" + y "b\u0000c"), which
+  // would falsely mark two distinct cells as duplicates.
+  const yCount = yAxisResult.values.length;
+  const populatedCells = new Set<number>();
   for (let i = 0; i < data.length; i++) {
     const entry = data[i];
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
@@ -64,13 +69,17 @@ export function parseHeatmapSpec(spec: Record<string, unknown>, raw: string): Ai
     if (!isCategoryKey(record.x) || !isCategoryKey(record.y)) {
       return { ok: false, reason: `heatmap data[${i}] requires string or number x and y`, raw };
     }
-    if (!xIndex.has(categoryKey(record.x))) {
+    const xPosition = xIndex.get(categoryKey(record.x));
+    if (xPosition === undefined) {
       return { ok: false, reason: `heatmap data[${i}].x "${String(record.x)}" is not in xAxis.values`, raw };
     }
-    if (!yIndex.has(categoryKey(record.y))) {
+    const yPosition = yIndex.get(categoryKey(record.y));
+    if (yPosition === undefined) {
       return { ok: false, reason: `heatmap data[${i}].y "${String(record.y)}" is not in yAxis.values`, raw };
     }
-    const cellKey = `${categoryKey(record.x)}\u0000${categoryKey(record.y)}`;
+    // Indices are separator-free by construction, so distinct cells always get
+    // distinct keys.
+    const cellKey = xPosition * yCount + yPosition;
     if (populatedCells.has(cellKey)) {
       return { ok: false, reason: `heatmap data[${i}] repeats the cell (${String(record.x)}, ${String(record.y)})`, raw };
     }

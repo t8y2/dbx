@@ -39,6 +39,20 @@ function renderSvg(spec: AiChartSpec): string {
   }
 }
 
+/** Every `<text>` node with its absolute y position (translate offset + own y). */
+function textRows(svg: string): { text: string; y: number }[] {
+  return [...svg.matchAll(/<text([^>]*)>([^<]*)<\/text>/g)].map((match) => {
+    const translate = match[1].match(/translate\(([-\d.]+) ([-\d.]+)\)/);
+    const ownY = match[1].match(/(?:^| )y="([-\d.]+)"/);
+    return { text: match[2], y: Number(translate?.[2] ?? 0) + Number(ownY?.[1] ?? 0) };
+  });
+}
+
+/** All SVG path geometry, concatenated — used to tell straight segments from Beziers. */
+function pathData(svg: string): string {
+  return [...svg.matchAll(/<path[^>]*\sd="([^"]+)"/g)].map((match) => match[1]).join("");
+}
+
 const CASES: [string, unknown][] = [
   [
     "line with area, step, stack and markLine",
@@ -139,6 +153,93 @@ describe("AI chart render smoke test", () => {
     // markLine adds path/label markup, so the output must grow.
     expect(withMarks.length).toBeGreaterThan(withoutMarks.length);
     expect(withMarks).toContain("target");
+  });
+
+  it("keeps the reference line when business series are hidden from the legend", () => {
+    // A chart-level reference line must not die with a series toggle. ECharts
+    // hides a series' markLine together with the series, so the line lives on
+    // its own legend-excluded series — this test pins that behaviour down.
+    const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 480, height: 320 });
+    try {
+      chart.setOption(
+        buildAiChartOption(
+          specOf({
+            version: 1,
+            type: "line",
+            marks: [{ name: "target", value: 180 }],
+            xAxis: { values: ["Jan", "Feb", "Mar"] },
+            series: [
+              { name: "a", data: [120, 200, 150] },
+              { name: "b", data: [60, 90, 70] },
+            ],
+          }),
+          { isDark: false },
+        ),
+      );
+      expect(chart.renderToSVGString()).toContain("target");
+
+      chart.dispatchAction({ type: "legendToggleSelect", name: "a" });
+      expect(chart.renderToSVGString()).toContain("target");
+
+      // Hiding the second series (and re-showing the first) keeps it too.
+      chart.dispatchAction({ type: "legendToggleSelect", name: "a" });
+      chart.dispatchAction({ type: "legendToggleSelect", name: "b" });
+      expect(chart.renderToSVGString()).toContain("target");
+    } finally {
+      chart.dispose();
+    }
+  });
+
+  it("draws a step line as straight segments, never as a smoothed curve", () => {
+    // ECharts converts the line to stair geometry FIRST and applies smoothing
+    // AFTER, which would round every right-angle corner. A step line must stay
+    // piecewise-linear (`L` commands); only the smooth counterpart emits
+    // Beziers (`C`).
+    const step = renderSvg(
+      specOf({
+        version: 1,
+        type: "line",
+        step: "middle",
+        xAxis: { values: ["a", "b", "c"] },
+        series: [{ name: "s", data: [1, 3, 2] }],
+      }),
+    );
+    expect(pathData(step)).not.toMatch(/[Cc]/);
+
+    const smooth = renderSvg(
+      specOf({
+        version: 1,
+        type: "line",
+        xAxis: { values: ["a", "b", "c"] },
+        series: [{ name: "s", data: [1, 3, 2] }],
+      }),
+    );
+    expect(pathData(smooth)).toMatch(/[Cc]/);
+  });
+
+  it("keeps funnel stages in input order instead of sorting them by value", () => {
+    // Values are deliberately non-monotonic: with ECharts' default
+    // `sort: "descending"` "big" (80) would be drawn above "mid" (30),
+    // reordering the process the data describes.
+    const rows = textRows(
+      renderSvg(
+        specOf({
+          version: 1,
+          type: "funnel",
+          data: [
+            { name: "wide", value: 100 },
+            { name: "mid", value: 30 },
+            { name: "big", value: 80 },
+          ],
+        }),
+      ),
+    );
+    // Each stage label appears twice — once inside the funnel, once in the
+    // legend row at the bottom. The funnel labels come first in document
+    // order; the legend copies all share the same y.
+    const stageY = (name: string) => rows.find((row) => row.text === name)!.y;
+    expect(stageY("wide")).toBeLessThan(stageY("mid"));
+    expect(stageY("mid")).toBeLessThan(stageY("big"));
   });
 
   it("still draws a reference line that lies outside the series extent", () => {

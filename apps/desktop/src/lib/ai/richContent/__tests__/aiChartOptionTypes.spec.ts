@@ -32,10 +32,18 @@ describe("cartesian option extras", () => {
     expect(option.series[0]).not.toHaveProperty("areaStyle");
   });
 
-  it("maps step to the series step field", () => {
+  it("maps step to the series step field and turns smoothing off", () => {
     const option = buildAiChartOption(specOf(lineBar({ step: "middle" })), light);
     if (!Array.isArray(option.series)) throw new Error("expected a series array");
-    expect(option.series[0]).toMatchObject({ step: "middle" });
+    // ECharts applies `smooth` to the stair geometry itself, which would round
+    // every step corner away — a step line must stay piecewise-linear.
+    expect(option.series[0]).toMatchObject({ step: "middle", smooth: false });
+  });
+
+  it("keeps smoothing on a plain line series", () => {
+    const option = buildAiChartOption(specOf(lineBar({ type: "line" })), light);
+    if (!Array.isArray(option.series)) throw new Error("expected a series array");
+    expect(option.series[0]).toMatchObject({ smooth: true });
   });
 
   it("gives every series the same stack id", () => {
@@ -55,7 +63,7 @@ describe("cartesian option extras", () => {
     expect(option.series.map((series) => (series as { stack?: string }).stack)).toEqual(["total", "total"]);
   });
 
-  it("emits markLine with `yAxis` (never `value`) and only on the first series", () => {
+  it("emits markLine with `yAxis` (never `value`) on a dedicated legend-excluded series", () => {
     // `{ name, value }` makes ECharts 6 log "Invalid markLine data." and then
     // throw, in dev AND production — the shape is pinned here on purpose.
     const option = buildAiChartOption(
@@ -71,8 +79,32 @@ describe("cartesian option extras", () => {
       light,
     );
     if (!Array.isArray(option.series)) throw new Error("expected a series array");
-    expect(option.series[0]).toMatchObject({ markLine: { data: [{ name: "target", yAxis: 180 }] } });
+    // Business series carry no markLine: a legend toggle hides a series and its
+    // markLine together, so the reference line needs a lifetime of its own.
+    expect(option.series[0]).not.toHaveProperty("markLine");
     expect(option.series[1]).not.toHaveProperty("markLine");
+    const marks = option.series[2] as { name: string; data: unknown[]; markLine: { data: unknown[] } };
+    expect(marks.data).toEqual([]);
+    expect(marks.markLine.data).toEqual([{ name: "target", yAxis: 180 }]);
+    // The marks series gets no legend entry, which requires the legend to list
+    // the business series explicitly (an unlisted series is not collected).
+    expect(option.legend).toMatchObject({ data: ["a", "b"] });
+    expect((option.legend as { data: string[] }).data).not.toContain(marks.name);
+  });
+
+  it("gives the marks series a name no business series can collide with", () => {
+    const option = buildAiChartOption(
+      specOf(
+        lineBar({
+          marks: [{ value: 1 }],
+          series: [{ name: "__marks__", data: [1, 2, 3] }],
+        }),
+      ),
+      light,
+    );
+    if (!Array.isArray(option.series)) throw new Error("expected a series array");
+    const names = option.series.map((series) => (series as { name: string }).name);
+    expect(new Set(names).size).toBe(names.length);
   });
 
   it("maps pictorialBar to a pictorialBar series with a symbol", () => {
@@ -176,7 +208,7 @@ describe("heatmap option", () => {
 });
 
 describe("funnel option", () => {
-  it("emits a descending vertical funnel over the same name/value payload as pie", () => {
+  it("emits a vertical funnel that keeps the input stage order", () => {
     const option = buildAiChartOption(
       specOf({
         version: 1,
@@ -189,9 +221,11 @@ describe("funnel option", () => {
       light,
     );
     if (!Array.isArray(option.series)) throw new Error("expected a series array");
+    // 'none' (not ECharts' default 'descending'): the stages are listed in
+    // process order and a non-monotonic value sequence must not reshuffle them.
     expect(option.series[0]).toMatchObject({
       type: "funnel",
-      sort: "descending",
+      sort: "none",
       data: [
         { name: "visit", value: 100 },
         { name: "cart", value: 40 },

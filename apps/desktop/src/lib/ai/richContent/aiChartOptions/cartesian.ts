@@ -16,6 +16,7 @@ const DENSE_CATEGORY_THRESHOLD = 12;
 export function buildCartesianOption(spec: LineBarAiChartSpec | PictorialBarAiChartSpec, theme: AiChartTheme): EChartsOption {
   const denseCategories = spec.xAxis.values.length > DENSE_CATEGORY_THRESHOLD;
   const pictorial = spec.type === "pictorialBar";
+  const marksName = spec.marks !== undefined ? marksSeriesName(spec.series.map((series) => series.name)) : undefined;
 
   // The slider dataZoom band owns the canvas bottom edge (bottom: 0). The legend
   // must sit ABOVE that band — an unplaced legend (bottom: 0) would overlap the
@@ -23,7 +24,14 @@ export function buildCartesianOption(spec: LineBarAiChartSpec | PictorialBarAiCh
   return {
     aria: { enabled: true },
     tooltip: { trigger: "axis" },
-    legend: denseCategories ? { bottom: 32, textStyle: legendTextStyle(theme) } : { bottom: 0, textStyle: legendTextStyle(theme) },
+    legend: {
+      ...(denseCategories ? { bottom: 32 } : { bottom: 0 }),
+      textStyle: legendTextStyle(theme),
+      // Listing the business series explicitly keeps the internal marks series
+      // out of the legend (an unlisted series gets no entry and no toggle).
+      // Omitted without marks so the no-marks option stays as it was.
+      ...(marksName !== undefined ? { data: spec.series.map((series) => series.name) } : {}),
+    },
     title: chartTitleOption(spec.title, theme),
     // A reference line is labelled at the grid's top edge. When a title already
     // occupies that row the label lands on top of it (measured at 480px: title
@@ -56,38 +64,77 @@ export function buildCartesianOption(spec: LineBarAiChartSpec | PictorialBarAiCh
       // marks exist so the no-marks option is byte-identical to before.
       ...(spec.marks !== undefined ? valueAxisExtentForMarks(spec.marks) : {}),
     },
-    series: spec.series.map((series, index) => {
-      const base: Record<string, unknown> = {
-        name: series.name,
-        type: spec.type,
-        data: series.data,
-      };
-      if (pictorial) {
-        base.symbol = (spec as PictorialBarAiChartSpec).symbol ?? "circle";
-      } else {
-        base.smooth = spec.type === "line";
-      }
-      if (spec.stack !== undefined) base.stack = spec.stack;
-      if (!pictorial) {
-        const cartesian = spec as LineBarAiChartSpec;
-        if (cartesian.area) base.areaStyle = {};
-        if (cartesian.step !== undefined) base.step = cartesian.step;
-      }
-      // Reference lines span the whole grid, so attaching them to every series
-      // would draw the same dashed line and label once per series. The first
-      // series owns them.
-      if (index === 0 && spec.marks !== undefined) {
-        base.markLine = {
-          data: spec.marks.map(markLineEntry),
-          // ECharts' markLine label defaults to the raw y value, which makes a
-          // named threshold ("target") indistinguishable from the axis tick. Show
-          // the name alongside the value when the model supplied one.
-          label: { show: true, position: "insideEndTop", formatter: markLineLabel },
+    series: [
+      ...spec.series.map((series) => {
+        const base: Record<string, unknown> = {
+          name: series.name,
+          type: spec.type,
+          data: series.data,
         };
-      }
-      return base;
-    }),
+        if (pictorial) {
+          base.symbol = (spec as PictorialBarAiChartSpec).symbol ?? "circle";
+        } else {
+          const cartesian = spec as LineBarAiChartSpec;
+          if (cartesian.step !== undefined) {
+            base.step = cartesian.step;
+            // Step and smooth cancel each other out: ECharts first converts the
+            // line into stair geometry and only then applies the smooth Bezier
+            // over those points (LineView renders step, then sets shape.smooth),
+            // which rounds every right-angle corner away. A step line must stay
+            // piecewise-linear, so smooth is forced off.
+            base.smooth = false;
+          } else {
+            // Smooth only matters for line; a bar has nothing to smooth.
+            base.smooth = spec.type === "line";
+          }
+          if (cartesian.area) base.areaStyle = {};
+        }
+        if (spec.stack !== undefined) base.stack = spec.stack;
+        return base;
+      }),
+      ...(marksName !== undefined && spec.marks !== undefined ? [marksSeries(marksName, spec.marks)] : []),
+    ],
   } as EChartsOption;
+}
+
+/**
+ * A chart-unique name for the marks series that no business series can collide
+ * with (a shared name would make a legend toggle hide both).
+ */
+function marksSeriesName(taken: readonly string[]): string {
+  const names = new Set(taken);
+  let name = "__marks__";
+  while (names.has(name)) name += "_";
+  return name;
+}
+
+/**
+ * Reference lines live on their own legend-excluded series.
+ *
+ * Attaching them to the first business series ties their lifetime to that
+ * series: hiding it from the legend hides its markLine too (verified against
+ * echarts 6.1.0 — `legendToggleSelect` on the owner removes the line AND its
+ * label), even though the reference line belongs to the whole chart. A series
+ * with no data draws nothing but its markLine, `silent` keeps it out of
+ * tooltips/hover, and `legend.data` (business names only) keeps it out of the
+ * legend.
+ */
+function marksSeries(name: string, marks: AiChartMark[]): Record<string, unknown> {
+  return {
+    name,
+    type: "line",
+    data: [],
+    silent: true,
+    animation: false,
+    tooltip: { show: false },
+    markLine: {
+      data: marks.map(markLineEntry),
+      // ECharts' markLine label defaults to the raw y value, which makes a
+      // named threshold ("target") indistinguishable from the axis tick. Show
+      // the name alongside the value when the model supplied one.
+      label: { show: true, position: "insideEndTop", formatter: markLineLabel },
+    },
+  };
 }
 
 /**

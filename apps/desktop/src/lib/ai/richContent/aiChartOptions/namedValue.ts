@@ -2,8 +2,8 @@
  * Option builders for the `{ name, value }`-only family: `pie` and `funnel`.
  *
  * Both take the same payload; a funnel merely replaces the donut radius with its
- * own layout defaults (descending sort, centered). Keeping them together keeps
- * the shared legend/tooltip/theme treatment in one place.
+ * own layout defaults (input order, centered). Keeping them together keeps the
+ * shared legend/tooltip/theme treatment in one place.
  */
 
 import type { EChartsOption } from "echarts";
@@ -35,10 +35,12 @@ export function buildFunnelOption(spec: FunnelAiChartSpec, theme: AiChartTheme):
     series: [
       {
         type: "funnel",
-        // ECharts defaults are descending / vertical / centered, but they are
-        // stated explicitly so a future default change cannot reorder the stages
-        // the model already listed in priority order.
-        sort: "descending",
+        // `sort: "none"` keeps the data order. ECharts' default ('descending')
+        // sorts the stages by value (funnelLayout: `sort !== 'none'` triggers the
+        // value comparator), which reorders the business process itself whenever
+        // the model's stages are not monotonic. The stages are listed in process
+        // order, so that order must win over the magnitude.
+        sort: "none",
         gap: 2,
         left: "10%",
         right: "10%",

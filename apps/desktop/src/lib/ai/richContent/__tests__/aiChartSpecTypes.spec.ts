@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { AI_CHART_MAX_FUNNEL_ENTRIES, AI_CHART_MAX_HEATMAP_AXIS_CATEGORIES, AI_CHART_MAX_HEATMAP_CELLS, AI_CHART_MAX_HEATMAP_GRID, AI_CHART_MAX_MARKS, AI_CHART_MAX_SCATTER_SYMBOL_SIZE, AI_CHART_MAX_SYMBOL_PATH_LENGTH, parseAiChartSpec } from "@/lib/ai/richContent/aiChartSpec";
+import {
+  AI_CHART_MAX_FUNNEL_ENTRIES,
+  AI_CHART_MAX_HEATMAP_AXIS_CATEGORIES,
+  AI_CHART_MAX_HEATMAP_CELLS,
+  AI_CHART_MAX_HEATMAP_GRID,
+  AI_CHART_MAX_MARKS,
+  AI_CHART_MAX_SCATTER_SYMBOL_SIZE,
+  AI_CHART_MAX_SYMBOL_PATH_LENGTH,
+  AI_CHART_MAX_TEXT_LENGTH,
+  parseAiChartSpec,
+} from "@/lib/ai/richContent/aiChartSpec";
 
 function parsed(json: unknown) {
   const result = parseAiChartSpec(typeof json === "string" ? json : JSON.stringify(json));
@@ -137,6 +147,19 @@ describe("pictorialBar", () => {
   it("rejects an over-long path:// definition", () => {
     const longPath = `path://M0,0${"L1,1".repeat(AI_CHART_MAX_SYMBOL_PATH_LENGTH)}`;
     expect(reasonOf(lineBar({ type: "pictorialBar", symbol: longPath }))).toContain(`${AI_CHART_MAX_SYMBOL_PATH_LENGTH} characters`);
+  });
+
+  it("rejects path:// data that is not SVG path commands starting with a moveto", () => {
+    // zrender silently ignores unrecognised path input, so garbage would render
+    // an empty or arbitrary symbol instead of failing.
+    expect(reasonOf(lineBar({ type: "pictorialBar", symbol: "path://" }))).toContain("SVG path commands");
+    expect(reasonOf(lineBar({ type: "pictorialBar", symbol: "path://not a path" }))).toContain("SVG path commands");
+    expect(reasonOf(lineBar({ type: "pictorialBar", symbol: "path://L10,10" }))).toContain("SVG path commands");
+    // A relative moveto and the full command/separator vocabulary stay valid.
+    const relative = "path://m0 0 l10 0 l0 10 z";
+    const parsedRelative = parsed(lineBar({ type: "pictorialBar", symbol: relative }));
+    if (parsedRelative.type !== "pictorialBar") throw new Error("expected a pictorialBar spec");
+    expect(parsedRelative.symbol).toBe(relative);
   });
 });
 
@@ -285,6 +308,35 @@ describe("heatmap", () => {
     expect(reasonOf(duplicated)).toContain("repeats the cell");
   });
 
+  it("keys cells by axis position, so category values containing NUL cannot collide", () => {
+    // "a\u0000b" + "c" and "a" + "b\u0000c" are different cells, but a
+    // `${x}\u0000${y}` string key would map both to "a\u0000b\u0000c".
+    const axes = { xAxis: { values: ["a\u0000b", "a"] }, yAxis: { values: ["c", "b\u0000c"] } };
+    const spec = parsed(
+      heatmap({
+        ...axes,
+        data: [
+          { x: "a\u0000b", y: "c", value: 1 },
+          { x: "a", y: "b\u0000c", value: 2 },
+        ],
+      }),
+    );
+    if (spec.type !== "heatmap") throw new Error("expected a heatmap spec");
+    expect(spec.data).toHaveLength(2);
+    // The genuine duplicate of the first cell is still caught.
+    expect(
+      reasonOf(
+        heatmap({
+          ...axes,
+          data: [
+            { x: "a\u0000b", y: "c", value: 1 },
+            { x: "a\u0000b", y: "c", value: 2 },
+          ],
+        }),
+      ),
+    ).toContain("repeats the cell");
+  });
+
   it("rejects a non-finite cell value", () => {
     expect(reasonOf(heatmap({ data: [{ x: "Mon", y: "9am", value: "Infinity" }] }))).toContain("must be a finite number");
   });
@@ -307,6 +359,19 @@ describe("heatmap", () => {
     const wide = Array.from({ length: 70 }, (_, i) => `x${i}`);
     const tall = Array.from({ length: 70 }, (_, i) => `y${i}`);
     expect(reasonOf(heatmap({ xAxis: { values: wide }, yAxis: { values: tall }, data: [{ x: "x0", y: "y0", value: 1 }] }))).toContain(`${AI_CHART_MAX_HEATMAP_GRID}`);
+  });
+});
+
+describe("text fields", () => {
+  it("caps free-text fields at the shared budget", () => {
+    const atLimit = "x".repeat(AI_CHART_MAX_TEXT_LENGTH);
+    const overLimit = "x".repeat(AI_CHART_MAX_TEXT_LENGTH + 1);
+    expect(parsed(lineBar({ title: atLimit })).title).toBe(atLimit);
+    expect(reasonOf(lineBar({ title: overLimit }))).toContain(`at most ${AI_CHART_MAX_TEXT_LENGTH} characters`);
+    expect(reasonOf(lineBar({ series: [{ name: overLimit, data: [1, 2, 3] }] }))).toContain(`at most ${AI_CHART_MAX_TEXT_LENGTH} characters`);
+    expect(reasonOf(lineBar({ marks: [{ name: overLimit, value: 1 }] }))).toContain(`at most ${AI_CHART_MAX_TEXT_LENGTH} characters`);
+    expect(reasonOf({ version: 1, type: "pie", data: [{ name: overLimit, value: 1 }] })).toContain(`at most ${AI_CHART_MAX_TEXT_LENGTH} characters`);
+    expect(reasonOf({ version: 1, type: "scatter", xAxis: { label: overLimit }, series: [{ name: "s", data: [[1, 2]] }] })).toContain(`at most ${AI_CHART_MAX_TEXT_LENGTH} characters`);
   });
 });
 

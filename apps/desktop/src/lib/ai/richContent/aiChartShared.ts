@@ -22,8 +22,15 @@ export const AI_CHART_MAX_SERIES = 8;
 export const AI_CHART_MAX_POINTS_PER_ARRAY = 5000;
 /** Max total data points across all cartesian series. */
 export const AI_CHART_MAX_TOTAL_POINTS = 10_000;
-/** Max length of a single category axis value string. */
+/** Max length of a category axis value string. */
 export const AI_CHART_MAX_CATEGORY_STRING_LENGTH = 256;
+/**
+ * Max length of any free-text field (title, axis labels, series names, mark
+ * names, pie/funnel entry names). These are rendered as chart text, so an
+ * unbounded value only gets truncated to illegibility or pushes the layout
+ * apart; the raw-JSON cap alone would still allow a ~200KB title.
+ */
+export const AI_CHART_MAX_TEXT_LENGTH = 256;
 /**
  * Max funnel stages. Beyond a few dozen stages a funnel is unreadable, and the
  * pie-shaped `{ name, value }[]` payload is not otherwise bounded as tightly.
@@ -41,11 +48,12 @@ export const AI_CHART_MAX_HEATMAP_AXIS_CATEGORIES = 100;
 /**
  * Max number of heatmap cells.
  *
- * Also the binding constraint in practice: at ~25 JSON characters per
- * `{ "x", "y", "value" }` row, the 256KB raw-JSON gate would fire around 10 000
- * rows, so a lower cap here keeps the rejection reason the meaningful one.
+ * Deliberately the same budget as {@link AI_CHART_MAX_HEATMAP_GRID}: every cell
+ * must name an (x, y) pair from the two axes and duplicates are rejected, so a
+ * dataset can never have more than `xCategories × yCategories` populated cells.
+ * A separate higher cap would only change which rejection reason fires.
  */
-export const AI_CHART_MAX_HEATMAP_CELLS = 5_000;
+export const AI_CHART_MAX_HEATMAP_CELLS = 4_000;
 /**
  * Max `xCategories * yCategories` for a heatmap.
  *
@@ -54,7 +62,7 @@ export const AI_CHART_MAX_HEATMAP_CELLS = 5_000;
  * readable on a chat-sized canvas.
  */
 export const AI_CHART_MAX_HEATMAP_GRID = 4_000;
-/** Max reference lines per chart (they are drawn once, on the first series). */
+/** Max reference lines per chart (they are drawn once per chart, on a dedicated legend-excluded series). */
 export const AI_CHART_MAX_MARKS = 10;
 /**
  * Max bubble diameter in px. A point larger than the card is not readable, and an
@@ -215,11 +223,14 @@ export function coerceNumericColumn(value: unknown): number | null {
   return null;
 }
 
-/** Optional string field validator. */
+/** Optional string field validator (also enforces {@link AI_CHART_MAX_TEXT_LENGTH}). */
 export function optionalString(value: unknown, field: string): { ok: true; value?: string } | { ok: false; reason: string } {
   if (value === undefined) return { ok: true };
-  if (typeof value === "string") return { ok: true, value };
-  return { ok: false, reason: `${field} must be a string` };
+  if (typeof value !== "string") return { ok: false, reason: `${field} must be a string` };
+  if (value.length > AI_CHART_MAX_TEXT_LENGTH) {
+    return { ok: false, reason: `${field} must be at most ${AI_CHART_MAX_TEXT_LENGTH} characters` };
+  }
+  return { ok: true, value };
 }
 
 /**
@@ -311,6 +322,16 @@ export function readSymbol(value: unknown): { ok: true; symbol?: string } | { ok
   if (symbol.startsWith("path://")) {
     if (symbol.length > AI_CHART_MAX_SYMBOL_PATH_LENGTH) {
       return { ok: false, reason: `symbol path exceeds ${AI_CHART_MAX_SYMBOL_PATH_LENGTH} characters` };
+    }
+    // The renderer feeds the rest straight into zrender's path parser, which
+    // silently ignores anything it does not recognise (`commandReg` matches
+    // only mlhvzcqtsa). A string that is not path data therefore produces an
+    // empty or arbitrary symbol instead of an error, so the grammar is checked
+    // here: allowed commands/numbers/separators only, and it must start with a
+    // moveto (a path without one draws nothing).
+    const pathData = symbol.slice("path://".length).trim();
+    if (!/^[mlhvzcqtsae0-9.+\-,\s]+$/i.test(pathData) || !/^[Mm]/.test(pathData)) {
+      return { ok: false, reason: "symbol path:// data must be SVG path commands starting with M/m" };
     }
     return { ok: true, symbol };
   }

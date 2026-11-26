@@ -5508,6 +5508,8 @@ export default withEnglishFallback({
     ddlOpenModeTab: "新标签打开",
     resizeDdlDialog: "调整 DDL 弹窗大小",
     ddlCopied: "DDL 已复制",
+    ddlCopyOptions: "DDL 复制选项",
+    copyDdlWithoutAutoIncrement: "复制 DDL 并省略 AUTO_INCREMENT 初始值",
     compactDdlSql: "紧凑 SQL",
     includeDdlStorage: "存储属性",
     separateDdlIndexes: "独立索引",

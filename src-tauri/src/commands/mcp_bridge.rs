@@ -90,13 +90,9 @@ struct ToolApprovalEvent {
     detail: String,
 }
 
-#[derive(Clone, Copy)]
-enum SqlApprovalDecision {
-    Once,
-    Hour,
-    Day,
-    Deny,
-}
+#[path = "mcp_approval_response.rs"]
+mod approval_response;
+use approval_response::SqlApprovalDecision;
 
 struct SqlApprovalGrant {
     connection: crate::models::connection::ConnectionConfig,
@@ -140,17 +136,16 @@ pub(crate) fn clear_mcp_sql_approvals() {
 }
 
 #[tauri::command]
-pub fn respond_mcp_sql_approval(window: tauri::Window, id: String, decision: String) -> Result<(), String> {
+pub fn respond_mcp_sql_approval(
+    window: tauri::Window,
+    id: String,
+    decision: String,
+    reason: Option<String>,
+) -> Result<(), String> {
     if window.label() != "main" {
         return Err("Only the main DBX window can approve MCP SQL.".to_string());
     }
-    let decision = match decision.as_str() {
-        "once" => SqlApprovalDecision::Once,
-        "hour" => SqlApprovalDecision::Hour,
-        "day" => SqlApprovalDecision::Day,
-        "deny" => SqlApprovalDecision::Deny,
-        _ => return Err("Invalid MCP SQL approval decision.".to_string()),
-    };
+    let decision = SqlApprovalDecision::from_response(&decision, reason)?;
     let sender = sql_approvals()
         .lock()
         .map_err(|_| "MCP approval state unavailable")?
@@ -1926,8 +1921,11 @@ async fn handle_sql_approval(app: &AppHandle, state: &Arc<AppState>, body: &str,
             }
         }
     };
-    if matches!(decision, SqlApprovalDecision::Deny) || (!allow_timed && !matches!(decision, SqlApprovalDecision::Once))
-    {
+    if let Some(message) = decision.denial_message("SQL_BLOCKED: MCP approval denied.") {
+        respond_error(stream, "403 Forbidden", &message).await;
+        return;
+    }
+    if !allow_timed && !matches!(decision, SqlApprovalDecision::Once) {
         respond_error(stream, "403 Forbidden", "SQL_BLOCKED: MCP approval denied.").await;
         return;
     }
@@ -2054,15 +2052,22 @@ async fn handle_tool_approval(app: &AppHandle, state: &Arc<AppState>, body: &str
     }
     let answer = tokio::time::timeout(Duration::from_secs(90), receiver).await;
     sql_approvals().lock().ok().map(|mut approvals| approvals.pending.remove(&id));
-    let approved = matches!(answer, Ok(Ok(decision)) if !matches!(decision, SqlApprovalDecision::Deny));
-    if !approved {
-        let message = if answer.is_err() {
-            "TOOL_BLOCKED: MCP confirmation timed out."
-        } else {
-            "TOOL_BLOCKED: MCP confirmation denied."
-        };
-        respond_error(stream, "403 Forbidden", message).await;
-        return;
+    match answer {
+        Ok(Ok(decision)) => {
+            if let Some(message) = decision.denial_message("TOOL_BLOCKED: MCP confirmation denied.") {
+                respond_error(stream, "403 Forbidden", &message).await;
+                return;
+            }
+        }
+        other => {
+            let message = if other.is_err() {
+                "TOOL_BLOCKED: MCP confirmation timed out."
+            } else {
+                "TOOL_BLOCKED: MCP confirmation denied."
+            };
+            respond_error(stream, "403 Forbidden", message).await;
+            return;
+        }
     }
     let revoked = sql_approvals().lock().map(|approvals| approvals.generation != generation).unwrap_or(true);
     if revoked {

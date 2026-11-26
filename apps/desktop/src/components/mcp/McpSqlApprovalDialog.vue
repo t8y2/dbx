@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import McpApprovalAiSummary from "./McpApprovalAiSummary.vue";
 import { ShieldAlert } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -51,6 +52,8 @@ const pending = ref<Approval[]>([]);
 const current = computed(() => pending.value[0]);
 const now = ref(Date.now());
 const rememberTool = ref(false);
+const rejecting = ref(false);
+const rejectionReason = ref("");
 let ticker: ReturnType<typeof setInterval> | undefined;
 const unlisteners: UnlistenFn[] = [];
 
@@ -123,6 +126,8 @@ const remainingPercent = computed(() => {
 
 watch(current, () => {
   rememberTool.value = false;
+  rejecting.value = false;
+  rejectionReason.value = "";
 });
 
 onMounted(async () => {
@@ -135,7 +140,7 @@ onUnmounted(() => {
   stopTicker();
 });
 
-async function decide(decision: "once" | "hour" | "day" | "deny") {
+async function decide(decision: "once" | "hour" | "day" | "deny", reason?: string) {
   const approval = current.value;
   if (!approval) return;
   pending.value.shift();
@@ -143,7 +148,13 @@ async function decide(decision: "once" | "hour" | "day" | "deny") {
   rememberTool.value = false;
   try {
     // One response channel for both kinds; tool approvals only accept once/deny.
-    await invoke("respond_mcp_sql_approval", { id: approval.id, decision: (approval.type === "tool" || approval.allow_timed === false) && decision !== "deny" ? "once" : decision });
+    const denialReason =
+      decision === "deny"
+        ? Array.from(reason?.trim() || "")
+            .slice(0, 1000)
+            .join("")
+        : "";
+    await invoke("respond_mcp_sql_approval", { ...(denialReason ? { reason: denialReason } : {}), id: approval.id, decision: (approval.type === "tool" || approval.allow_timed === false) && decision !== "deny" ? "once" : decision });
   } catch (error) {
     console.error("[DBX] MCP approval expired:", error);
   }
@@ -163,7 +174,7 @@ function toolTitle(approval: Extract<Approval, { type: "tool" }>): string {
       focus moves keep the dialog open, and only the explicit buttons (or Esc /
       the close button, which land here as update:open → deny) resolve it.
     -->
-    <DialogContent class="sm:max-w-[640px]" :data-mcp-approval="current?.type" @pointer-down-outside="(event) => event.preventDefault()" @interact-outside="(event) => event.preventDefault()" @focus-outside="(event) => event.preventDefault()">
+    <DialogContent class="max-h-[90dvh] overflow-y-auto sm:max-w-[640px]" :data-mcp-approval="current?.type" @pointer-down-outside="(event) => event.preventDefault()" @interact-outside="(event) => event.preventDefault()" @focus-outside="(event) => event.preventDefault()">
       <DialogHeader>
         <div class="flex items-center gap-2.5">
           <span class="grid size-8 shrink-0 place-items-center rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400" data-mcp-approval-icon>
@@ -197,6 +208,18 @@ function toolTitle(approval: Extract<Approval, { type: "tool" }>): string {
           {{ t("settings.mcpToolApprovalAutoApprove") }}
         </label>
       </div>
+      <McpApprovalAiSummary
+        v-if="current"
+        :key="current.id"
+        :approval="{
+          id: current.id,
+          kind: current.type === 'sql' ? 'sql' : current.kind,
+          tool: current.type === 'sql' ? 'SQL' : current.tool,
+          connection: current.connection_name,
+          database: current.database,
+          original: current.type === 'sql' ? current.sql : current.detail,
+        }"
+      />
       <DialogFooter class="flex-col items-stretch gap-3 sm:flex-col">
         <div class="space-y-1.5" data-mcp-approval-countdown>
           <div class="h-1 w-full overflow-hidden rounded-full bg-muted">
@@ -206,8 +229,25 @@ function toolTitle(approval: Extract<Approval, { type: "tool" }>): string {
             {{ t("settings.mcpApprovalExpires", { seconds: remainingSeconds }) }}
           </p>
         </div>
-        <div class="flex flex-wrap gap-2">
-          <Button variant="outline" @click="decide('deny')">{{ t("settings.mcpSqlApprovalDeny") }}</Button>
+        <div v-if="rejecting" class="space-y-2" data-mcp-rejection-form>
+          <label class="block space-y-1 text-xs">
+            <span>{{ t("settings.mcpApprovalRejectReason") }}</span>
+            <textarea v-model="rejectionReason" rows="3" maxlength="1000" class="w-full rounded border bg-background p-2 text-sm" :placeholder="t('settings.mcpApprovalRejectPlaceholder')" data-mcp-rejection-reason />
+          </label>
+          <div class="flex flex-wrap gap-2">
+            <Button variant="destructive" data-mcp-rejection-submit @click="decide('deny', rejectionReason)">{{ t("settings.mcpApprovalRejectConfirm") }}</Button>
+            <Button
+              variant="outline"
+              @click="
+                rejecting = false;
+                rejectionReason = '';
+              "
+              >{{ t("settings.mcpApprovalRejectBack") }}</Button
+            >
+          </div>
+        </div>
+        <div v-else class="flex flex-wrap gap-2">
+          <Button variant="outline" @click="rejecting = true">{{ t("settings.mcpSqlApprovalDeny") }}</Button>
           <template v-if="current?.type === 'sql' && current.allow_timed !== false">
             <Button variant="outline" @click="decide('once')">{{ t("settings.mcpSqlApprovalOnce") }}</Button>
             <Button variant="outline" @click="decide('hour')">{{ t("settings.mcpSqlApprovalHour") }}</Button>

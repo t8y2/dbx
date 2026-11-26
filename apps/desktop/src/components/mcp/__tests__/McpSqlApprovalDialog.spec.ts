@@ -10,6 +10,19 @@ const bridge = vi.hoisted(() => ({
   unlisten: vi.fn(),
 }));
 
+const ai = vi.hoisted(() => ({
+  complete: vi.fn<(...args: unknown[]) => Promise<string>>(),
+  init: vi.fn(async () => undefined),
+  settings: {
+    activeModel: { configId: "test", modelId: "chat-model" },
+    editorSettings: { mcpApprovalAi: { configId: "test", modelId: "review-model", autoGenerate: false } },
+    aiConfigs: [{ id: "test", provider: "openai", model: "review-model", endpoint: "https://example.invalid", apiKey: "test-key" }],
+    isConfigured: true,
+  },
+}));
+vi.mock("@/lib/backend/api", () => ({ aiComplete: ai.complete }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ ...ai.settings, initAiConfigs: ai.init, initEditorSettings: async () => undefined }) }));
+
 vi.mock("@tauri-apps/api/core", () => ({ invoke: bridge.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (name: string, handler: (event: { payload: Record<string, unknown> }) => void) => {
@@ -33,7 +46,6 @@ vi.mock("@/components/ui/dialog", () => ({
   DialogTitle: { template: "<div><slot /></div>" },
 }));
 
-import { h } from "vue";
 import McpSqlApprovalDialog from "../McpSqlApprovalDialog.vue";
 
 let dialogContentAttrs: Record<string, ((event: { preventDefault: () => void }) => void) | undefined> = {};
@@ -43,6 +55,11 @@ let app: ReturnType<typeof createApp>;
 
 beforeEach(async () => {
   vi.useFakeTimers();
+  ai.complete.mockReset().mockResolvedValue(JSON.stringify({ riskLevel: "high", summary: "Removes records.", risks: ["Data loss."] }));
+  ai.init.mockReset().mockResolvedValue(undefined);
+  ai.settings.isConfigured = true;
+  ai.settings.editorSettings.mcpApprovalAi = { configId: "test", modelId: "review-model", autoGenerate: false };
+  ai.settings.aiConfigs[0].provider = "openai";
   bridge.handlers = {};
   dialogContentAttrs = {};
   localStorage.clear();
@@ -59,6 +76,27 @@ beforeEach(async () => {
       messages: {
         en: {
           settings: {
+            mcpApprovalAiRegenerate: "Regenerate",
+            mcpApprovalAiRiskTitle: "Risk rating",
+            mcpApprovalAiRisk_low: "Low risk",
+            mcpApprovalAiRisk_medium: "Medium risk",
+            mcpApprovalAiRisk_high: "High risk",
+            mcpApprovalAiRisk_unknown: "Unknown risk",
+            mcpApprovalAiExecution: "Execution summary",
+            mcpApprovalAiRationale: "Risk explanation",
+            mcpApprovalRejectReason: "Rejection reason (optional)",
+            mcpApprovalRejectPlaceholder: "Tell the agent why",
+            mcpApprovalRejectConfirm: "Confirm rejection",
+            mcpApprovalRejectBack: "Back",
+            mcpApprovalAiTitle: "AI summary and risks",
+            mcpApprovalAiGenerate: "Generate AI summary",
+            mcpApprovalAiLoading: "Generating…",
+            mcpApprovalAiDisclosure: "Sends the original text to the selected AI service.",
+            mcpApprovalAiModel: "Model: {model}",
+            mcpApprovalAiTimeout: "Summary timed out. Approval deadline unchanged.",
+            mcpApprovalAiConfigure: "Configure an API model. CLI agents are unsupported.",
+            mcpApprovalAiFailed: "Summary failed. Please retry.",
+            mcpApprovalAiCaution: "Review the complete original text before approving.",
             mcpSqlApprovalTitle: "Approve SQL",
             mcpSqlApprovalScope: "Connection: {connection} / {database}",
             mcpSqlApprovalOnce: "Once",
@@ -190,7 +228,7 @@ it("confirms high-risk tool calls once only and queues them with SQL approvals",
   expect(host.textContent).toContain("Confirm Terminal tool");
   expect(host.textContent).toContain("dbx_ssh__exec");
   expect(host.textContent).toContain("rm -rf /tmp/x");
-  const labels = Array.from(host.querySelectorAll("button")).map((button) => button.textContent);
+  const labels = Array.from(host.querySelectorAll("button:not([data-mcp-approval-ai-generate])")).map((button) => button.textContent);
   expect(labels).toEqual(["Deny", "Once"]);
   Array.from(host.querySelectorAll("button"))
     .find((button) => button.textContent === "Once")
@@ -199,13 +237,13 @@ it("confirms high-risk tool calls once only and queues them with SQL approvals",
   expect(bridge.invoke).toHaveBeenCalledWith("respond_mcp_sql_approval", { id: "tool-1", decision: "once" });
   // The queued SQL approval comes next with its timed choices.
   expect(host.textContent).toContain("DROP TABLE important;");
-  expect(Array.from(host.querySelectorAll("button")).map((button) => button.textContent)).toContain("One hour");
+  expect(Array.from(host.querySelectorAll("button:not([data-mcp-approval-ai-generate])")).map((button) => button.textContent)).toContain("One hour");
 });
 
 it("offers only a single-call decision under the new SQL confirmation policy", async () => {
   bridge.handlers["mcp-sql-approval"]({ payload: { id: "new-policy", allow_timed: false, connection_name: "Local", database: "app", sql: "DROP TABLE items" } });
   await nextTick();
-  expect(Array.from(host.querySelectorAll("button")).map((button) => button.textContent)).toEqual(["Deny", "Once"]);
+  expect(Array.from(host.querySelectorAll("button:not([data-mcp-approval-ai-generate])")).map((button) => button.textContent)).toEqual(["Deny", "Once"]);
   host.querySelector<HTMLButtonElement>("[data-mcp-approval-allow-once]")!.click();
   await nextTick();
   expect(bridge.invoke).toHaveBeenCalledWith("respond_mcp_sql_approval", { id: "new-policy", decision: "once" });
@@ -219,5 +257,226 @@ it.each(["product_tool", "mongo_command", "connection_management"])("uses a gene
   const deny = Array.from(host.querySelectorAll("button")).find((button) => button.textContent === "Deny")!;
   deny.click();
   await nextTick();
+  host.querySelector<HTMLButtonElement>("[data-mcp-rejection-submit]")!.click();
+  await nextTick();
   expect(bridge.invoke).toHaveBeenCalledWith("respond_mcp_sql_approval", { id: kind, decision: "deny" });
+});
+
+async function flushAi() {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+  await nextTick();
+}
+
+function generateSummary() {
+  host.querySelector<HTMLButtonElement>("[data-mcp-approval-ai-generate]")!.click();
+}
+
+it("only sends the full original payload to AI after a click and never approves it", async () => {
+  const detail = JSON.stringify({ command: "中文🙂".repeat(5_000) + "; rm -rf /important" });
+  bridge.handlers["mcp-tool-approval"]({ payload: { id: "long-ai", kind: "plugin_tool", tool: "dbx_ssh__exec", connection_name: "Local", database: "test", detail } });
+  await nextTick();
+  expect(ai.init).toHaveBeenCalledOnce();
+  expect(ai.complete).not.toHaveBeenCalled();
+  generateSummary();
+  await flushAi();
+  const completion = ai.complete.mock.calls[0][0] as { config: { model: string }; messages: { content: string }[] };
+  expect(completion.config.model).toBe("review-model");
+  expect(JSON.parse(completion.messages[0].content)).toEqual({ kind: "plugin_tool", tool: "dbx_ssh__exec", connection: "Local", database: "test", original: detail });
+  expect(host.querySelector("pre")!.textContent).toBe(detail);
+  expect(host.querySelector("[data-mcp-approval-ai-result]")!.textContent).toContain("Data loss");
+  expect(bridge.invoke).not.toHaveBeenCalled();
+});
+
+it("keeps AI output as text and preserves the SQL while explaining risks", async () => {
+  ai.complete.mockResolvedValue(JSON.stringify({ riskLevel: "high", summary: "<script>alert(1)</script>", risks: ["Data loss"] }));
+  request("ai-text");
+  await nextTick();
+  generateSummary();
+  await flushAi();
+  expect(host.querySelector("[data-mcp-approval-ai-result]")!.textContent).toContain("<script>");
+  expect(host.querySelector("script")).toBeNull();
+  expect(host.querySelector("pre")!.textContent).toBe("DROP TABLE important;");
+  expect(bridge.invoke).not.toHaveBeenCalled();
+});
+
+it.each(["missing", "cli"])("allows manual review when the AI configuration is %s", async (kind) => {
+  if (kind === "missing") ai.settings.editorSettings.mcpApprovalAi.configId = "deleted";
+  if (kind === "cli") ai.settings.aiConfigs[0].provider = "codex-cli";
+  request("no-config");
+  await nextTick();
+  await flushAi();
+  expect(host.querySelector("[data-mcp-approval-ai-generate]")).toBeNull();
+  expect(host.textContent).toContain("Configure an API model");
+  expect(ai.complete).not.toHaveBeenCalled();
+  expect(host.querySelector("pre")!.textContent).toBe("DROP TABLE important;");
+  const once = Array.from(host.querySelectorAll("button")).find((button) => button.textContent === "Once")!;
+  once.click();
+  await flushAi();
+  expect(bridge.invoke).toHaveBeenCalledWith("respond_mcp_sql_approval", { id: "no-config", decision: "once" });
+});
+
+it.each(["error", "empty"])("shows a generic retryable failure for %s AI output without resolving the approval", async (kind) => {
+  if (kind === "error") ai.complete.mockRejectedValueOnce(new Error("secret-key-sensitive-payload"));
+  else ai.complete.mockResolvedValueOnce("   ");
+  request("ai-failure");
+  await nextTick();
+  generateSummary();
+  await flushAi();
+  expect(host.querySelector('[role="alert"]')!.textContent).toContain("Summary failed");
+  expect(host.textContent).not.toContain("secret-key-sensitive-payload");
+  expect(bridge.invoke).not.toHaveBeenCalled();
+  generateSummary();
+  await flushAi();
+  expect(host.querySelector("[data-mcp-approval-ai-result]")!.textContent).toContain("Data loss");
+});
+
+it("ignores a late response after a summary timeout and permits retry", async () => {
+  let resolveOld!: (value: string) => void;
+  ai.complete.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      }),
+  );
+  request("ai-timeout");
+  await nextTick();
+  generateSummary();
+  await flushAi();
+  expect(host.querySelector<HTMLButtonElement>("[data-mcp-approval-ai-generate]")!.disabled).toBe(true);
+  await vi.advanceTimersByTimeAsync(20_000);
+  await nextTick();
+  expect(host.querySelector('[role="alert"]')!.textContent).toContain("Summary timed out");
+  expect(host.textContent).toContain("Auto-deny in 70s");
+  generateSummary();
+  await flushAi();
+  resolveOld("stale unsafe summary");
+  await flushAi();
+  expect(host.querySelector("[data-mcp-approval-ai-result]")!.textContent).toContain("Data loss");
+  expect(host.textContent).not.toContain("stale unsafe summary");
+  expect(bridge.invoke).not.toHaveBeenCalled();
+});
+
+it("does not send a delayed configuration load after the summary timeout", async () => {
+  let resolveInit!: () => void;
+  ai.init.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveInit = resolve;
+      }),
+  );
+  request("ai-init-timeout");
+  await nextTick();
+  ai.settings.editorSettings.mcpApprovalAi.autoGenerate = true;
+  await vi.advanceTimersByTimeAsync(90_001);
+  resolveInit();
+  await flushAi();
+  expect(ai.complete).not.toHaveBeenCalled();
+  expect(bridge.invoke).not.toHaveBeenCalled();
+});
+
+it("discards a summary when the user denies that approval and the next request appears", async () => {
+  let resolveOld!: (value: string) => void;
+  ai.complete.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      }),
+  );
+  request("old-approval");
+  toolRequest("next-approval");
+  await nextTick();
+  generateSummary();
+  await flushAi();
+  Array.from(host.querySelectorAll("button"))
+    .find((button) => button.textContent === "Deny")!
+    .click();
+  await flushAi();
+  host.querySelector<HTMLButtonElement>("[data-mcp-rejection-submit]")!.click();
+  await flushAi();
+  resolveOld("summary for old approval");
+  await flushAi();
+  expect(host.textContent).not.toContain("summary for old approval");
+  expect(host.querySelector("[data-mcp-approval-ai-result]")).toBeNull();
+  expect(host.querySelector("pre")!.textContent).toContain("rm -rf /tmp/x");
+  expect(bridge.invoke).toHaveBeenCalledExactlyOnceWith("respond_mcp_sql_approval", { id: "old-approval", decision: "deny" });
+});
+
+it("keeps the original approval deadline while AI is pending", async () => {
+  let resolveOld!: (value: string) => void;
+  ai.complete.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      }),
+  );
+  request("approval-expiration");
+  await nextTick();
+  await vi.advanceTimersByTimeAsync(80_000);
+  generateSummary();
+  await flushAi();
+  await vi.advanceTimersByTimeAsync(10_001);
+  resolveOld("late after expiration");
+  await flushAi();
+  expect(host.querySelector("pre")).toBeNull();
+  expect(host.textContent).not.toContain("late after expiration");
+  expect(bridge.invoke).not.toHaveBeenCalled();
+});
+
+it("uses the saved approval model and automatically rates risks only when enabled", async () => {
+  ai.settings.editorSettings.mcpApprovalAi.autoGenerate = true;
+  request("auto-review");
+  await flushAi();
+  expect(ai.complete).toHaveBeenCalledOnce();
+  const completion = ai.complete.mock.calls[0][0] as { config: { model: string } };
+  expect(completion.config.model).toBe("review-model");
+  expect(host.querySelector("[data-mcp-approval-risk]")!.textContent).toContain("High risk");
+  expect(host.querySelector("[data-mcp-approval-ai-generate]")!.textContent?.trim()).toBe("Regenerate");
+  expect(bridge.invoke).not.toHaveBeenCalled();
+});
+
+it.each(["sql", "tool"])("returns an optional rejection reason for %s without executing", async (kind) => {
+  if (kind === "sql") request("reason");
+  else toolRequest("reason");
+  await flushAi();
+  Array.from(host.querySelectorAll("button"))
+    .find((button) => button.textContent === "Deny")!
+    .click();
+  await nextTick();
+  expect(bridge.invoke).not.toHaveBeenCalled();
+  const reason = host.querySelector<HTMLTextAreaElement>("[data-mcp-rejection-reason]")!;
+  reason.value = "  请先备份，缩小删除范围。  ";
+  reason.dispatchEvent(new Event("input", { bubbles: true }));
+  await nextTick();
+  host.querySelector<HTMLButtonElement>("[data-mcp-rejection-submit]")!.click();
+  await flushAi();
+  expect(bridge.invoke).toHaveBeenCalledExactlyOnceWith("respond_mcp_sql_approval", { id: "reason", decision: "deny", reason: "请先备份，缩小删除范围。" });
+});
+
+it("lets the user return from rejection without answering or carrying the draft to another request", async () => {
+  request("cancel-reject");
+  await flushAi();
+  Array.from(host.querySelectorAll("button"))
+    .find((button) => button.textContent === "Deny")!
+    .click();
+  await nextTick();
+  const reason = host.querySelector<HTMLTextAreaElement>("textarea")!;
+  reason.value = "draft reason";
+  reason.dispatchEvent(new Event("input", { bubbles: true }));
+  Array.from(host.querySelectorAll("button"))
+    .find((button) => button.textContent === "Back")!
+    .click();
+  await nextTick();
+  expect(host.querySelector("textarea")).toBeNull();
+  expect(bridge.invoke).not.toHaveBeenCalled();
+});
+
+it.each(["{bad json", JSON.stringify({ riskLevel: "safe", summary: "Trust me", risks: [] })])("does not display an invalid structured assessment", async (answer) => {
+  ai.complete.mockResolvedValue(answer);
+  request("bad-structure");
+  await nextTick();
+  generateSummary();
+  await flushAi();
+  expect(host.querySelector("[data-mcp-approval-ai-result]")).toBeNull();
+  expect(host.querySelector('[role="alert"]')!.textContent).toContain("Summary failed");
+  expect(bridge.invoke).not.toHaveBeenCalled();
 });

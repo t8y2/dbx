@@ -129,6 +129,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarObjectDisplay",
   "sidebarSimpleHideIndexes",
   "routineSourceOpenMode",
+  "sidebarShowDatabaseServiceInfoOnActivation",
   "sidebarTableSearchEnabled",
   "sidebarSearchOpenedDatabasesOnly",
   "autoSelectActiveSidebarNode",

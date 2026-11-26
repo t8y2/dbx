@@ -194,6 +194,7 @@ import {
   objectSourceTargetForTreeNode,
   shouldOpenQueryOnTreeNodeActivation,
   shouldRunTreeNodeRowAction,
+  shouldShowDatabaseServiceInfoOnActivation,
   treeNodeRowAction,
   treeNodeRowDoubleClickAction,
 } from "@/lib/sidebar/treeNodeClick";
@@ -1382,6 +1383,46 @@ async function toggle(requestId = beginNavigationRequest()) {
   }
 }
 
+function connectionSupportsActivationServerDashboard(connectionId: string | undefined): boolean {
+  if (!connectionId) return false;
+  const dbType = currentDatabaseType() ?? connectionStore.getConfig(connectionId)?.db_type;
+  if (dbType === "nacos" || dbType === "solr") return true;
+  const config = connectionStore.getConfig(connectionId);
+  return connectionSupportsXuguServerDashboard(config) || connectionSupportsPgServerDashboard(config) || connectionSupportsServerDashboard(config);
+}
+
+const SERVER_DASHBOARD_TAB_MODES = new Set(["mysql-dashboard", "postgres-dashboard", "xugu-dashboard", "nacos-dashboard", "solr-admin"]);
+
+function isServerDashboardTab(tab: { mode: string }): boolean {
+  return SERVER_DASHBOARD_TAB_MODES.has(tab.mode);
+}
+
+function closeServerDashboardTabsWhere(match: (connectionId: string) => boolean) {
+  const ids = queryStore.tabs.filter((tab) => isServerDashboardTab(tab) && match(tab.connectionId)).map((tab) => tab.id);
+  if (ids.length === 0) return;
+  queryStore.closeTabsByIds(ids);
+}
+
+/** Expand → open this connection's dashboard; collapse → close it (homepage when no other tabs). */
+function syncServerDashboardOnConnectionToggle(node: TreeNode, expanded: boolean) {
+  if (!shouldShowDatabaseServiceInfoOnActivation(node, settingsStore.editorSettings.sidebarShowDatabaseServiceInfoOnActivation, connectionSupportsActivationServerDashboard(node.connectionId))) {
+    return;
+  }
+  const connectionId = node.connectionId!;
+  if (expanded) {
+    closeServerDashboardTabsWhere((id) => id !== connectionId);
+    void (async () => {
+      await openServerDashboard();
+      // Collapse while connecting can still finish opening; close again if no longer expanded.
+      if (!connectionStore.findConnectionNode(connectionId)?.isExpanded) {
+        closeServerDashboardTabsWhere((id) => id === connectionId);
+      }
+    })();
+  } else {
+    closeServerDashboardTabsWhere((id) => id === connectionId);
+  }
+}
+
 function runRowClickAction(clickDetail: number) {
   const node = activeNode.value;
   if (node.type === "load-more") {
@@ -1424,9 +1465,10 @@ function runRowClickAction(clickDetail: number) {
   // makes the first click's pending connection/expansion request look stale.
   const requestId = beginNavigationRequest();
   // Activation preference: single-click activation also opens (or focuses)
-  // the connection's query page. It must stay behind the activation gate
-  // above so "double" activation keeps single clicks inert, and it must not
-  // return early: the native row action (expand, browse objects) still runs.
+  // the connection's query page. Server dashboard follows expand/collapse via
+  // emitNodeToggled instead. It must stay behind the activation gate above so
+  // "double" activation keeps single clicks inert, and it must not return early:
+  // the native row action (expand, browse objects) still runs.
   if (shouldOpenQueryOnActivation(node)) {
     void newQuery({ reuseQueryTabByScope: true });
   }
@@ -1928,12 +1970,15 @@ function requestDeleteSelectedNode(): boolean {
 
 function onDoubleClick(event: MouseEvent) {
   // In double-click activation mode the dblclick is the activation moment, so
-  // the query page opens here once. In single-click activation mode the first
-  // click of the sequence already opened it, and the trailing dblclick must
-  // keep its native gestures (for example the connection database browser).
-  if (settingsStore.editorSettings.sidebarActivation === "double" && shouldOpenQueryOnActivation(activeNode.value)) {
-    beginNavigationRequest();
-    void newQuery({ reuseQueryTabByScope: true });
+  // the query page opens here once. Server dashboard follows connection expand
+  // via emitNodeToggled. In single-click activation mode the first click of the
+  // sequence already opened the query page, and the trailing dblclick must keep
+  // its native gestures (for example the connection database browser).
+  if (settingsStore.editorSettings.sidebarActivation === "double") {
+    if (shouldOpenQueryOnActivation(activeNode.value)) {
+      beginNavigationRequest();
+      void newQuery({ reuseQueryTabByScope: true });
+    }
   }
   if (dataTabOpenModeFromTreeClick(activeNode.value.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
   if (activeNode.value.type === "table" && settingsStore.editorSettings.sidebarTableClickNavigation) {
@@ -9571,6 +9616,9 @@ function emitNodeToggled(node: TreeNode, wasExpanded: boolean, expandedOverride?
     }
   }
   emit("node-toggled", node, isExpanded);
+  if (liveNode.type === "connection") {
+    syncServerDashboardOnConnectionToggle(liveNode, isExpanded);
+  }
 }
 
 function activateActionTarget(target: SidebarActionTarget) {

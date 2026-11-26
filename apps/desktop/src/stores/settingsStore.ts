@@ -1189,6 +1189,7 @@ export interface EditorSettings {
   sidebarSimpleHideIndexes: boolean;
   routineSourceOpenMode: "query-tab" | "dialog";
   sidebarTableSearchEnabled: boolean;
+  sidebarShowDatabaseServiceInfoOnActivation: boolean;
   sidebarTableSearchLocal: boolean;
   sidebarGlobalSearchLocal: boolean;
   sidebarSearchOpenedDatabasesOnly: boolean;
@@ -1609,6 +1610,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarSimpleHideIndexes: false,
   routineSourceOpenMode: "query-tab",
   sidebarTableSearchEnabled: false,
+  sidebarShowDatabaseServiceInfoOnActivation: false,
   sidebarTableSearchLocal: true,
   sidebarGlobalSearchLocal: false,
   sidebarSearchOpenedDatabasesOnly: true,
@@ -2199,7 +2201,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     return [...DEFAULT_CUSTOM_THEMES];
   })();
   const activeCustomThemeId = settings.activeCustomThemeId && customThemes.some((t) => t.id === settings.activeCustomThemeId) ? settings.activeCustomThemeId : (customThemes[0]?.id ?? "default");
-  return {
+  const normalized: EditorSettings = {
     fontFamily: normalizeFontFamily(settings.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily, true),
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
     uiFontFamily: normalizeFontFamily(settings.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily),
@@ -2390,6 +2392,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarSimpleHideIndexes: settings.sidebarSimpleHideIndexes === true,
     routineSourceOpenMode: settings.routineSourceOpenMode === "query-tab" || settings.routineSourceOpenMode === "dialog" ? settings.routineSourceOpenMode : DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode,
     sidebarTableSearchEnabled: typeof settings.sidebarTableSearchEnabled === "boolean" ? settings.sidebarTableSearchEnabled : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled,
+    sidebarShowDatabaseServiceInfoOnActivation: typeof settings.sidebarShowDatabaseServiceInfoOnActivation === "boolean" ? settings.sidebarShowDatabaseServiceInfoOnActivation : DEFAULT_EDITOR_SETTINGS.sidebarShowDatabaseServiceInfoOnActivation,
     sidebarTableSearchLocal: typeof settings.sidebarTableSearchLocal === "boolean" ? settings.sidebarTableSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchLocal,
     sidebarGlobalSearchLocal: typeof settings.sidebarGlobalSearchLocal === "boolean" ? settings.sidebarGlobalSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarGlobalSearchLocal,
     sidebarSearchOpenedDatabasesOnly: typeof settings.sidebarSearchOpenedDatabasesOnly === "boolean" ? settings.sidebarSearchOpenedDatabasesOnly : DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly,
@@ -2539,6 +2542,10 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     keepExplicitTransactionInAutoCommit: settings.keepExplicitTransactionInAutoCommit === true,
     backgroundImage: normalizeBackgroundImageSettings(settings.backgroundImage),
   };
+  if (normalized.sidebarShowDatabaseServiceInfoOnActivation && normalized.openQueryOnConnectionOpen) {
+    normalized.openQueryOnConnectionOpen = false;
+  }
+  return normalized;
 }
 
 /**
@@ -3428,6 +3435,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarSimpleHideIndexes !== undefined) editorSettings.value.sidebarSimpleHideIndexes = partial.sidebarSimpleHideIndexes === true;
     if (partial.routineSourceOpenMode !== undefined) editorSettings.value.routineSourceOpenMode = partial.routineSourceOpenMode;
     if (partial.sidebarTableSearchEnabled !== undefined) editorSettings.value.sidebarTableSearchEnabled = partial.sidebarTableSearchEnabled;
+    if (partial.sidebarShowDatabaseServiceInfoOnActivation !== undefined) editorSettings.value.sidebarShowDatabaseServiceInfoOnActivation = partial.sidebarShowDatabaseServiceInfoOnActivation === true;
     if (partial.sidebarTableSearchLocal !== undefined) editorSettings.value.sidebarTableSearchLocal = partial.sidebarTableSearchLocal;
     if (partial.sidebarGlobalSearchLocal !== undefined) editorSettings.value.sidebarGlobalSearchLocal = partial.sidebarGlobalSearchLocal;
     if (partial.sidebarSearchOpenedDatabasesOnly !== undefined) editorSettings.value.sidebarSearchOpenedDatabasesOnly = partial.sidebarSearchOpenedDatabasesOnly;
@@ -3437,6 +3445,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarAutoExpandOnDatabaseActivation !== undefined) editorSettings.value.sidebarAutoExpandOnDatabaseActivation = partial.sidebarAutoExpandOnDatabaseActivation === true;
     if (partial.sidebarTableClickNavigation !== undefined) editorSettings.value.sidebarTableClickNavigation = partial.sidebarTableClickNavigation === true;
     if (partial.openQueryOnConnectionOpen !== undefined) editorSettings.value.openQueryOnConnectionOpen = partial.openQueryOnConnectionOpen === true;
+    if (partial.sidebarShowDatabaseServiceInfoOnActivation === true) editorSettings.value.openQueryOnConnectionOpen = false;
+    else if (partial.openQueryOnConnectionOpen === true) editorSettings.value.sidebarShowDatabaseServiceInfoOnActivation = false;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
     if (partial.autoReloadRestoredDataTabsOnOpen !== undefined) editorSettings.value.autoReloadRestoredDataTabsOnOpen = partial.autoReloadRestoredDataTabsOnOpen === true;
     if (partial.disconnectTabHandlingMode !== undefined) editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(partial.disconnectTabHandlingMode);

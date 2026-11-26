@@ -71,6 +71,7 @@ const databaseActivationNodeTypes = new Set<TreeNodeType>(["database", "schema",
 export function shouldBrowseObjectsOnDatabaseActivation(type: TreeNodeType, enabled: boolean): boolean {
   return enabled && databaseActivationNodeTypes.has(type);
 }
+
 const queryOnActivationNodeTypes = new Set<TreeNodeType>(["connection", "database", "schema", "mongo-db"]);
 
 /**
@@ -83,6 +84,11 @@ const queryOnActivationNodeTypes = new Set<TreeNodeType>(["connection", "databas
  */
 export function shouldOpenQueryOnTreeNodeActivation(node: Pick<TreeNode, "type" | "connectionId">, dbType: DatabaseType | undefined, enabled: boolean): boolean {
   return enabled && !!node.connectionId && queryOnActivationNodeTypes.has(node.type) && supportsConnectionQueryActions(dbType);
+}
+
+/** Server dashboard opens only for connection rows that are activated and expanded. */
+export function shouldShowDatabaseServiceInfoOnActivation(node: Pick<TreeNode, "type" | "connectionId">, enabled: boolean, supported = true): boolean {
+  return enabled && supported && !!node.connectionId && node.type === "connection";
 }
 const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "job", "package", "package-body", "type", "type-body"]);
 const savedSqlNodeTypes = new Set<TreeNodeType>(["saved-sql-file"]);

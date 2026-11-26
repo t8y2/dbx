@@ -407,6 +407,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     targetId: "navigation",
     keywordKeys: ["settings.sidebarObjectInfoModeCommentInline", "settings.sidebarObjectInfoModeCommentAligned", "settings.sidebarObjectInfoModeCommentRight", "settings.sidebarObjectInfoModeSize", "settings.sidebarObjectInfoModeCommentAndSize", "settings.sidebarObjectInfoModeHidden"],
   },
+  { id: "navigation-database-service-info", category: "navigation", titleKey: "settings.sidebarShowDatabaseServiceInfoOnActivation", descriptionKey: "settings.sidebarShowDatabaseServiceInfoOnActivationDescription", targetId: "navigation" },
   { id: "navigation-table-search", category: "navigation", titleKey: "settings.sidebarTableSearchEnabled", descriptionKey: "settings.sidebarTableSearchEnabledDescription", targetId: "navigation" },
   { id: "navigation-search-opened-databases-only", category: "navigation", titleKey: "settings.sidebarSearchOpenedDatabasesOnly", descriptionKey: "settings.sidebarSearchOpenedDatabasesOnlyDescription", targetId: "navigation" },
   { id: "navigation-active-node", category: "navigation", titleKey: "settings.autoSelectActiveSidebarNode", descriptionKey: "settings.autoSelectActiveSidebarNodeDescription", targetId: "navigation" },

@@ -11046,6 +11046,8 @@ export default {
     sidebarCopyTableNameIncludeSchemaDescription: "When enabled, copied or dragged table names use schema-qualified form with the active connection's identifier quoting rules.",
     sidebarTablePageSize: "Sidebar page size",
     sidebarTablePageSizeDescription: "Maximum number of tables/objects loaded per page in the sidebar tree. Increase if you have many tables and want fewer pages.",
+    sidebarShowDatabaseServiceInfoOnActivation: "Open server dashboard on connection open",
+    sidebarShowDatabaseServiceInfoOnActivationDescription: "When enabled, activating and expanding a connection opens the server dashboard on the right. Collapsing that connection closes the dashboard and returns to the home page.",
     sidebarTableSearchEnabled: "Enable table search inside databases",
     sidebarTableSearchEnabledDescription: "Show a local table search box under expanded databases, schemas, or table groups so each scope can filter tables independently.",
     sidebarSearchOpenedDatabasesOnly: "Search only opened databases",

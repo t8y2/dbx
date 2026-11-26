@@ -8,12 +8,16 @@ function event(kind: string): PluginHostObservationEvent {
 }
 
 describe("pluginObservation", () => {
-  it("maps every category prefix to its permission", () => {
+  it("maps every registered kind to its permission", () => {
     expect(pluginObservationPermission("query.started")).toBe(PLUGIN_OBSERVATION_PERMISSIONS.queries);
-    expect(pluginObservationPermission("connection.opened")).toBe(PLUGIN_OBSERVATION_PERMISSIONS.connections);
+    expect(pluginObservationPermission("query.message")).toBe(PLUGIN_OBSERVATION_PERMISSIONS.queries);
+    expect(pluginObservationPermission("connection.open_failed")).toBe(PLUGIN_OBSERVATION_PERMISSIONS.connections);
+    expect(pluginObservationPermission("connection.idle_closed")).toBe(PLUGIN_OBSERVATION_PERMISSIONS.connections);
     expect(pluginObservationPermission("ai.tool_call_started")).toBe(PLUGIN_OBSERVATION_PERMISSIONS.ai);
+    expect(pluginObservationPermission("ai.reasoning_delta")).toBe(PLUGIN_OBSERVATION_PERMISSIONS.ai);
     expect(pluginObservationPermission("transfer.progress")).toBe(PLUGIN_OBSERVATION_PERMISSIONS.transfers);
     expect(pluginObservationPermission("plugin.activated")).toBe(PLUGIN_OBSERVATION_PERMISSIONS.plugins);
+    expect(pluginObservationPermission("plugin.stopped")).toBe(PLUGIN_OBSERVATION_PERMISSIONS.plugins);
   });
 
   it("fails closed for unknown kinds", () => {
@@ -21,6 +25,19 @@ describe("pluginObservation", () => {
     expect(pluginObservationPermission("unknown.kind")).toBeUndefined();
     expect(pluginObservationPermission("")).toBeUndefined();
     expect(canObserveHostEvent(event("unknown.kind"), () => true)).toBe(false);
+  });
+
+  it("fails closed for unregistered kinds even under a known prefix", () => {
+    // Mirrors `OBSERVATION_KINDS` in dbx-types: only reviewed registrations
+    // are delivered, so a new `connection.credentials`-style event cannot
+    // inherit the connection permission by reusing its prefix.
+    expect(pluginObservationPermission("query.internal_data")).toBeUndefined();
+    expect(pluginObservationPermission("connection.credentials")).toBeUndefined();
+    expect(pluginObservationPermission("ai.internal_context")).toBeUndefined();
+    expect(canObserveHostEvent(event("connection.credentials"), () => true)).toBe(false);
+    // Prototype keys must not resolve either.
+    expect(pluginObservationCategory("toString")).toBeUndefined();
+    expect(pluginObservationCategory("constructor")).toBeUndefined();
   });
 
   it("gates delivery on the declared permission only", () => {

@@ -2314,7 +2314,9 @@ pub async fn connect_db(
         .after_debug_cleanup(async {
             let token = password.as_deref().and_then(|password| app.session_credentials.set("", &config.id, password));
             let result = connect_db_inner(state, config, client_attempt).await;
-            if app.host_observations.subscriber_count() > 0 {
+            if app.host_observations.is_enabled(dbx_core::models::observability::KIND_CONNECTION_OPENED)
+                || app.host_observations.is_enabled(dbx_core::models::observability::KIND_CONNECTION_OPEN_FAILED)
+            {
                 use dbx_core::models::observability::{
                     cap_observation_text, KIND_CONNECTION_OPENED, KIND_CONNECTION_OPEN_FAILED,
                 };
@@ -2952,7 +2954,10 @@ pub async fn disconnect_db(
             Ok(())
         })
         .await;
-    if result.is_ok() && had_pools && state.host_observations.subscriber_count() > 0 {
+    if result.is_ok()
+        && had_pools
+        && state.host_observations.is_enabled(dbx_core::models::observability::KIND_CONNECTION_CLOSED)
+    {
         state.host_observations.publish(
             dbx_core::models::observability::KIND_CONNECTION_CLOSED,
             Some(connection_id),
@@ -3054,7 +3059,7 @@ pub fn install_connection_liveness_bridge(app: &tauri::AppHandle, state: Arc<App
         loop {
             match events.recv().await {
                 Ok(message) => {
-                    if observations.subscriber_count() > 0 {
+                    if observations.is_enabled(dbx_core::models::observability::KIND_CONNECTION_LIVENESS_LOST) {
                         if let ConnectionLivenessMessage::Lost { connection_id, failure_kind } = &message {
                             observations.publish(
                                 dbx_core::models::observability::KIND_CONNECTION_LIVENESS_LOST,
@@ -3117,12 +3122,14 @@ pub fn install_connection_idle_closed_bridge(app: &tauri::AppHandle, state: Arc<
         loop {
             match events.recv().await {
                 Ok(event) => {
-                    observations.publish(
-                        dbx_core::models::observability::KIND_CONNECTION_IDLE_CLOSED,
-                        Some(event.connection_id.clone()),
-                        None,
-                        serde_json::json!({ "closedAtMs": event.closed_at_ms }),
-                    );
+                    if observations.is_enabled(dbx_core::models::observability::KIND_CONNECTION_IDLE_CLOSED) {
+                        observations.publish(
+                            dbx_core::models::observability::KIND_CONNECTION_IDLE_CLOSED,
+                            Some(event.connection_id.clone()),
+                            None,
+                            serde_json::json!({ "closedAtMs": event.closed_at_ms }),
+                        );
+                    }
                     let _ = app_handle.emit("dbx:connection-idle-closed", event);
                 }
                 // 丢弃事件不影响正确性：前端下次触发查询时会经 `ensureConnected` 自动重连，

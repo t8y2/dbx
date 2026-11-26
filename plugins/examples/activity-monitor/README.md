@@ -26,7 +26,8 @@ cargo run --manifest-path plugins/sdk/cli/Cargo.toml -- dev --path plugins/examp
 ```
 
 The dev host has no real DBX activity, so simulate events through the mock API
-(only kinds whose category permission is declared are delivered):
+(the dev host applies the same gate as the desktop bridge: only registered
+kinds whose category permission the manifest declares are delivered):
 
 ```bash
 curl -X POST http://127.0.0.1:5190/api/observations/publish \

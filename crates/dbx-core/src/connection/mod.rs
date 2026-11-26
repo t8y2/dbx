@@ -2234,13 +2234,17 @@ impl AppState {
         // the same bus so a plugin watching `host.observe:plugins` sees its
         // peers start/stop alongside queries and connections.
         let host_observations = crate::observability::HostObservationBus::new();
+        let observation_interest = host_observations.interest().clone();
         let plugin_host = {
             let bus = host_observations.clone();
             let sink: dbx_plugin_runtime::plugins::observation::PluginObservationSink =
                 Arc::new(move |observation: dbx_plugin_runtime::plugins::observation::PluginObservation| {
                     bus.publish(observation.kind, None, None, observation.payload);
                 });
-            PluginHost::new_with_observation_sink(plugins.clone(), Some(sink))
+            // The runtime registers the interest of every running sidecar that
+            // declared `host.observe:*`, so the bus only builds payloads while
+            // such a sidecar is actually alive.
+            PluginHost::with_observations(plugins.clone(), Some(sink), Some(observation_interest))
         };
         Self {
             connections: Arc::new(RwLock::new(ConnectionPoolRegistry::new())),
@@ -3643,7 +3647,7 @@ impl AppState {
         reason: &str,
         duration_ms: u64,
     ) {
-        if self.host_observations.subscriber_count() == 0 {
+        if !self.host_observations.is_enabled(KIND_CONNECTION_OPENED) {
             return;
         }
         self.host_observations.publish(
@@ -3667,7 +3671,7 @@ impl AppState {
         duration_ms: u64,
         error: &str,
     ) {
-        if self.host_observations.subscriber_count() == 0 {
+        if !self.host_observations.is_enabled(KIND_CONNECTION_OPEN_FAILED) {
             return;
         }
         let (message, truncated) = cap_observation_text(error);
@@ -9642,6 +9646,10 @@ mod tests {
         let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, directory.path().join("plugins"));
         let config = mysql_config(None);
+        state
+            .host_observations
+            .interest()
+            .acquire("test", &[dbx_types::models::observability::OBSERVE_CONNECTIONS_PERMISSION.to_string()]);
         let mut events = state.host_observations.subscribe();
 
         state.publish_connection_open_failed("conn-x", &config, Some("sales"), "on_demand", 42, "boom");

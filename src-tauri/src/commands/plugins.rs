@@ -201,16 +201,82 @@ pub fn install_host_observation_bridge(app: &tauri::AppHandle, state: Arc<AppSta
                     let Ok(params) = serde_json::to_value(&event) else {
                         continue;
                     };
-                    plugin_host.broadcast_observation(permission, HOST_OBSERVATION_SIDECAR_METHOD, params).await;
+                    plugin_host.broadcast_observation(permission, HOST_OBSERVATION_SIDECAR_METHOD, params);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     log::warn!("Desktop host observation sidecar bridge skipped {skipped} events");
-                    plugin_host.broadcast_observation_gap(skipped).await;
+                    plugin_host.broadcast_observation_gap(skipped);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
+}
+
+/// Register a plugin workbench as a host observation observer.
+///
+/// Interest is what gates payload construction upstream (see
+/// `HostObservationBus::is_enabled`): the shell bridges stay subscribed for the
+/// whole process, so their receivers cannot express "nobody is watching".
+/// `owner_id` is per workbench mount so several tabs of one plugin are
+/// refcounted independently; the permissions come from the installed manifest,
+/// never from the caller.
+///
+/// The owner id is scoped by the calling webview's label. A renderer can vanish
+/// without running its unmount path (window teardown, WebView2 renderer crash
+/// and reload), so the shell releases the whole `<label>/` scope on page load
+/// and window destruction instead of trusting the frontend cleanup.
+#[tauri::command]
+pub async fn set_plugin_observation_interest(
+    state: State<'_, Arc<AppState>>,
+    webview: tauri::Webview,
+    owner_id: String,
+    plugin_id: String,
+) -> Result<(), String> {
+    let owner_id = observation_interest_owner(webview.label(), &owner_id);
+    let registry = state.plugins.clone();
+    let permissions = tauri::async_runtime::spawn_blocking(move || {
+        Ok::<_, String>(registry.find_plugin(&plugin_id)?.map(|plugin| plugin.manifest.permissions))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    match permissions {
+        Some(permissions) => {
+            state.host_observations.interest().acquire(&owner_id, &permissions);
+        }
+        // Uninstalled between mount and registration: nothing to observe.
+        None => state.host_observations.interest().release(&owner_id),
+    }
+    Ok(())
+}
+
+/// Drop a workbench's observation interest (`set_plugin_observation_interest`'s
+/// counterpart). Unknown owners are a no-op.
+#[tauri::command]
+pub async fn clear_plugin_observation_interest(
+    state: State<'_, Arc<AppState>>,
+    webview: tauri::Webview,
+    owner_id: String,
+) -> Result<(), String> {
+    state.host_observations.interest().release(&observation_interest_owner(webview.label(), &owner_id));
+    Ok(())
+}
+
+/// Owner id namespace for one webview. `release_webview_observation_interest`
+/// drops everything under it, so a destroyed renderer cannot leave interest
+/// behind and keep payload construction enabled forever.
+pub fn observation_interest_owner(webview_label: &str, owner_id: &str) -> String {
+    format!("{webview_label}/{owner_id}")
+}
+
+/// Release every workbench interest registered by `webview_label`.
+///
+/// Called from renderer teardown paths that cannot run the frontend's unmount
+/// handler (webview destruction, renderer crash reload). Returns the number of
+/// owners released (0 is the common, harmless case).
+pub fn release_webview_observation_interest(state: &AppState, webview_label: &str) -> usize {
+    let prefix = format!("{webview_label}/");
+    state.host_observations.interest().release_prefix(&prefix)
 }
 
 pub fn install_plugin_event_bridge(app: &tauri::AppHandle, state: Arc<AppState>) {

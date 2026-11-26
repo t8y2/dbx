@@ -600,4 +600,12 @@ test("simulated observation events follow the host.observe permission gate", asy
     event: { id: 2, tsMs: Date.now(), kind: "ai.tool_call_started", payload: {} },
   });
   assert.equal(dropped.value.delivered, false);
+
+  // Only registered kinds are delivered: a kind under a category the manifest
+  // does observe still fails closed when it is not in the registry (this
+  // mirrors the exact-kind gate the real bridge applies).
+  const unregistered = await request("observations/publish", {
+    event: { id: 3, tsMs: Date.now(), kind: "query.internal_data", payload: {} },
+  });
+  assert.equal(unregistered.value.delivered, false);
 });

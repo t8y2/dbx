@@ -87,7 +87,7 @@ const TRANSFER_PROGRESS_FIELDS: &[&str] = &[
 /// [`TRANSFER_PROGRESS_FIELDS`] are published; everything else is dropped
 /// before the event reaches the bus.
 pub fn publish_transfer_progress<T: Serialize>(state: &AppState, task_kind: &str, task_id: &str, progress: &T) {
-    if state.host_observations.subscriber_count() == 0 {
+    if !state.host_observations.is_enabled(dbx_core::models::observability::KIND_TRANSFER_PROGRESS) {
         return;
     }
     let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(progress) else {
@@ -125,6 +125,10 @@ mod tests {
     #[tokio::test]
     async fn transfer_progress_payload_is_annotated_and_delivered() {
         let (_dir, state) = state_with_bus().await;
+        state
+            .host_observations
+            .interest()
+            .acquire("test", &[dbx_core::models::observability::OBSERVE_TRANSFERS_PERMISSION.to_string()]);
         let mut receiver = state.host_observations.subscribe();
 
         let progress = serde_json::json!({ "transferId": "t1", "rowsTransferred": 3 });
@@ -144,6 +148,10 @@ mod tests {
     #[tokio::test]
     async fn sql_file_progress_does_not_leak_statement_text_or_errors() {
         let (_dir, state) = state_with_bus().await;
+        state
+            .host_observations
+            .interest()
+            .acquire("test", &[dbx_core::models::observability::OBSERVE_TRANSFERS_PERMISSION.to_string()]);
         let mut receiver = state.host_observations.subscribe();
 
         let progress = serde_json::json!({
@@ -179,6 +187,10 @@ mod tests {
     #[tokio::test]
     async fn unlisted_progress_fields_are_dropped_by_default() {
         let (_dir, state) = state_with_bus().await;
+        state
+            .host_observations
+            .interest()
+            .acquire("test", &[dbx_core::models::observability::OBSERVE_TRANSFERS_PERMISSION.to_string()]);
         let mut receiver = state.host_observations.subscribe();
 
         let progress = serde_json::json!({
@@ -202,7 +214,7 @@ mod tests {
     #[test]
     fn transfer_progress_is_dropped_without_subscribers() {
         let bus = dbx_core::observability::HostObservationBus::new();
-        // Mirrors the AppState fast path: no subscriber, no allocation.
+        // Mirrors the AppState fast path: no observer, no allocation.
         assert_eq!(bus.subscriber_count(), 0);
         assert!(!bus.publish(
             dbx_core::models::observability::KIND_TRANSFER_PROGRESS,
@@ -210,5 +222,16 @@ mod tests {
             None,
             serde_json::json!({})
         ));
+    }
+
+    /// A receiver alone (the shell bridges hold one for the process lifetime)
+    /// must not turn the transfer tap back on.
+    #[test]
+    fn transfer_progress_stays_off_with_a_receiver_but_no_interest() {
+        let bus = dbx_core::observability::HostObservationBus::new();
+        let _receiver = bus.subscribe();
+        assert!(!bus.is_enabled(dbx_core::models::observability::KIND_TRANSFER_PROGRESS));
+        bus.interest().acquire("test", &[dbx_core::models::observability::OBSERVE_TRANSFERS_PERMISSION.to_string()]);
+        assert!(bus.is_enabled(dbx_core::models::observability::KIND_TRANSFER_PROGRESS));
     }
 }

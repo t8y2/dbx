@@ -457,14 +457,40 @@ export async function createMockHost(options) {
           if (!event || typeof event !== "object" || typeof event.kind !== "string" || !event.kind) {
             throw new Error("Invalid observation event");
           }
-          const permissionByCategory = {
-            query: "host.observe:queries",
-            connection: "host.observe:connections",
-            ai: "host.observe:ai",
-            transfer: "host.observe:transfers",
-            plugin: "host.observe:plugins",
+          // Mirrors `OBSERVATION_KINDS` in dbx-types (exact kinds, not
+          // prefixes): a kind that is not registered here is not delivered by
+          // the real host either, so the dev host must not leak it.
+          const permissionByKind = {
+            "query.started": "host.observe:queries",
+            "query.finished": "host.observe:queries",
+            "query.message": "host.observe:queries",
+            "connection.opened": "host.observe:connections",
+            "connection.open_failed": "host.observe:connections",
+            "connection.closed": "host.observe:connections",
+            "connection.liveness_lost": "host.observe:connections",
+            "connection.idle_closed": "host.observe:connections",
+            "ai.turn_started": "host.observe:ai",
+            "ai.turn_ended": "host.observe:ai",
+            "ai.text_delta": "host.observe:ai",
+            "ai.reasoning_delta": "host.observe:ai",
+            "ai.tool_call_started": "host.observe:ai",
+            "ai.tool_call_finished": "host.observe:ai",
+            "ai.approval_required": "host.observe:ai",
+            "ai.approval_resolved": "host.observe:ai",
+            "ai.write_sql_confirmation_required": "host.observe:ai",
+            "ai.production_write_blocked": "host.observe:ai",
+            "ai.response_complete": "host.observe:ai",
+            "ai.output_truncated": "host.observe:ai",
+            "ai.agent_finished": "host.observe:ai",
+            "ai.context_compacted": "host.observe:ai",
+            "ai.error": "host.observe:ai",
+            "transfer.progress": "host.observe:transfers",
+            "plugin.activated": "host.observe:plugins",
+            "plugin.activate_failed": "host.observe:plugins",
+            "plugin.status_changed": "host.observe:plugins",
+            "plugin.stopped": "host.observe:plugins",
           };
-          const permission = permissionByCategory[event.kind.split(".", 1)[0]];
+          const permission = Object.prototype.hasOwnProperty.call(permissionByKind, event.kind) ? permissionByKind[event.kind] : undefined;
           const delivered = Boolean(permission && manifest.permissions?.includes(permission));
           if (delivered) broadcast("hostevent", event);
           diagnostics.record("debug", "event", delivered ? "宿主观测事件已模拟" : "缺少对应 host.observe 权限，事件被丢弃", { kind: event.kind });

@@ -15,23 +15,56 @@ export const PLUGIN_OBSERVATION_PERMISSIONS = {
 
 export type PluginObservationCategory = keyof typeof PLUGIN_OBSERVATION_PERMISSIONS;
 
-const KIND_PREFIX_TO_CATEGORY: Record<string, PluginObservationCategory> = {
-  query: "queries",
-  connection: "connections",
-  ai: "ai",
-  transfer: "transfers",
-  plugin: "plugins",
+/**
+ * Registered event kinds and the category (and thus permission) that gates
+ * each one. Mirrors `OBSERVATION_KINDS` in
+ * `dbx_types::models::observability`, which is the source of truth: delivery
+ * looks kinds up by exact name, so a kind that is emitted without a
+ * registration here is dropped rather than inheriting its prefix's permission.
+ */
+const KIND_CATEGORIES: Record<string, PluginObservationCategory> = {
+  "query.started": "queries",
+  "query.finished": "queries",
+  "query.message": "queries",
+  "connection.opened": "connections",
+  "connection.open_failed": "connections",
+  "connection.closed": "connections",
+  "connection.liveness_lost": "connections",
+  "connection.idle_closed": "connections",
+  "ai.turn_started": "ai",
+  "ai.turn_ended": "ai",
+  "ai.text_delta": "ai",
+  "ai.reasoning_delta": "ai",
+  "ai.tool_call_started": "ai",
+  "ai.tool_call_finished": "ai",
+  "ai.approval_required": "ai",
+  "ai.approval_resolved": "ai",
+  "ai.write_sql_confirmation_required": "ai",
+  "ai.production_write_blocked": "ai",
+  "ai.response_complete": "ai",
+  "ai.output_truncated": "ai",
+  "ai.agent_finished": "ai",
+  "ai.context_compacted": "ai",
+  "ai.error": "ai",
+  "transfer.progress": "transfers",
+  "plugin.activated": "plugins",
+  "plugin.activate_failed": "plugins",
+  "plugin.status_changed": "plugins",
+  "plugin.stopped": "plugins",
 };
 
 /**
  * Category (and thus permission) for an event kind. Unknown kinds return
  * `undefined` and must be dropped by delivery layers (fail closed) so a future
- * kind that forgot its mapping cannot leak through an unrelated permission.
+ * kind that forgot its registration cannot leak through an unrelated
+ * permission.
  */
 export function pluginObservationCategory(kind: string): PluginObservationCategory | undefined {
-  const prefix = kind.split(".", 1)[0];
-  return KIND_PREFIX_TO_CATEGORY[prefix];
+  return Object.prototype.hasOwnProperty.call(KIND_CATEGORIES, kind) ? KIND_CATEGORIES[kind] : undefined;
 }
+
+/** Registered kinds with their category, exported for the registry-drift spec. */
+export const REGISTERED_OBSERVATION_KINDS: Readonly<Record<string, PluginObservationCategory>> = KIND_CATEGORIES;
 
 /** Permission string required to observe this event kind, if any. */
 export function pluginObservationPermission(kind: string): string | undefined {

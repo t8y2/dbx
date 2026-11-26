@@ -3440,6 +3440,24 @@ export async function subscribeHostObservations(onEvent: (event: PluginHostObser
 }
 
 /**
+ * Register a plugin workbench as an observer of the host observation bus.
+ *
+ * The shell's bridges stay subscribed for the whole process, so the Rust bus
+ * cannot infer observers from its receivers; it only builds payloads for
+ * categories with registered interest. `ownerId` is per workbench mount (two
+ * tabs of one plugin are refcounted separately); the permissions are read from
+ * the installed manifest on the Rust side.
+ */
+export async function setPluginObservationInterest(ownerId: string, pluginId: string): Promise<void> {
+  await invoke("set_plugin_observation_interest", { ownerId, pluginId });
+}
+
+/** Drop the interest registered by `setPluginObservationInterest`. */
+export async function clearPluginObservationInterest(ownerId: string): Promise<void> {
+  await invoke("clear_plugin_observation_interest", { ownerId });
+}
+
+/**
  * Subscribe to backend connection-liveness messages (#4339).
  *
  * The listener receives the message unwrapped; the web transport's SSE handler parses the same

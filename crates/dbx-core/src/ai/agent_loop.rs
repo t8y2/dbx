@@ -203,16 +203,19 @@ struct AgentObservationTap {
 impl AgentObservationTap {
     fn observe(&self, event: &AgentEvent) {
         // Fast path: every token delta lands here, so skip all payload work
-        // when no observability plugin is attached.
-        if self.observations.subscriber_count() == 0 {
-            return;
-        }
+        // unless a plugin actually observes AI events.
         let Some(kind) = agent_event_observation_kind(event) else {
             return;
         };
+        if !self.observations.is_enabled(kind) {
+            return;
+        }
         let mut payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
         self.insert_context(&mut payload);
-        cap_observation_fields(&mut payload, &["sql", "args", "result", "summary", "text"]);
+        // `delta` and `message` are capped too: a delta is not guaranteed to be
+        // small (the repair-exhaustion path re-emits the whole answer as one
+        // text delta) and error messages quote provider output.
+        cap_observation_fields(&mut payload, &["sql", "args", "result", "summary", "text", "delta", "message"]);
         if matches!(event, AgentEvent::Error { .. }) {
             // `finish` must not publish a second one for the same run.
             self.error_emitted.store(true, Ordering::Relaxed);
@@ -238,6 +241,11 @@ impl AgentObservationTap {
             Ok(text) => {
                 let content = self.text_payload(text);
                 let mut payload = self.take_pending_or_agent_end();
+                // The fallback payload (no `AgentEnd` ever arrived) is built
+                // from scratch, and merging the final text must not drop the
+                // run context either: observers correlate terminal events by
+                // `sessionId`/`provider`/`model`.
+                self.insert_context(&mut payload);
                 if let Some(object) = payload.as_object_mut() {
                     object.extend(content);
                 }
@@ -2029,6 +2037,7 @@ mod tests {
     }
 
     fn observation_tap(bus: crate::observability::HostObservationBus) -> AgentObservationTap {
+        bus.interest().acquire("test", &[dbx_types::models::observability::OBSERVE_AI_PERMISSION.to_string()]);
         AgentObservationTap {
             observations: bus,
             connection_id: "conn-1".into(),
@@ -2196,6 +2205,36 @@ mod tests {
         let terminal = receiver.recv().await.unwrap();
         assert_eq!(terminal.kind, KIND_AI_AGENT_FINISHED);
         assert_eq!(terminal.payload["text"], "answer");
+        // The fallback payload is not an `AgentEnd` echo, so the run context
+        // must be attached here or concurrent runs cannot be correlated.
+        assert_eq!(terminal.payload["sessionId"], "session-1");
+        assert_eq!(terminal.payload["provider"], "openai");
+        assert_eq!(terminal.payload["model"], "gpt-test");
+    }
+
+    /// Deltas and error text are not guaranteed to be small (the repair path
+    /// re-emits the whole answer as one delta; provider errors quote output),
+    /// so the tap caps them like the other text fields.
+    #[tokio::test]
+    async fn oversized_deltas_and_errors_are_capped() {
+        use dbx_types::models::observability::MAX_OBSERVATION_TEXT_BYTES;
+
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        let huge = "x".repeat(MAX_OBSERVATION_TEXT_BYTES * 2);
+
+        tap.observe(&AgentEvent::TextDelta { delta: huge.clone() });
+        let delta = receiver.recv().await.unwrap();
+        assert_eq!(delta.kind, KIND_AI_TEXT_DELTA);
+        assert_eq!(delta.payload["deltaTruncated"], true);
+        assert!(delta.payload["delta"].as_str().unwrap().len() <= MAX_OBSERVATION_TEXT_BYTES);
+
+        tap.observe(&AgentEvent::Error { message: huge.clone() });
+        let error = receiver.recv().await.unwrap();
+        assert_eq!(error.kind, KIND_AI_ERROR);
+        assert_eq!(error.payload["messageTruncated"], true);
+        assert!(error.payload["message"].as_str().unwrap().len() <= MAX_OBSERVATION_TEXT_BYTES);
     }
 
     fn plugin_tool_call(id: &str, name: &str) -> ToolCall {

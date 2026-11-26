@@ -3332,8 +3332,8 @@ type ExecutedSqlStatement<'a> =
 type ExecutedSqlStatementOutcome = Result<(db::QueryResult, Option<MysqlAutoCommitTransaction>), QueryExecutionError>;
 
 /// Publish `query.started` for one funnel execution. The caller must have
-/// checked `host_observations.subscriber_count()` first — this helper
-/// allocates unconditionally.
+/// checked `host_observations.is_enabled(KIND_QUERY_STARTED)` first — this
+/// helper allocates unconditionally.
 fn publish_query_started(
     state: &AppState,
     connection_id: &str,
@@ -3425,9 +3425,9 @@ pub(crate) async fn execute_sql_statement_with_options_typed_with_outcome(
     // Observability tap. This is the single funnel for standalone statements,
     // every statement of the generic sequential batch loop, AI agent tools and
     // SQL-file imports, so it is also the only place that must publish query
-    // events. The subscriber check keeps the hot path allocation-free when no
-    // observability plugin is attached.
-    let observe = state.host_observations.subscriber_count() > 0;
+    // events. The interest check keeps the hot path allocation-free unless a
+    // plugin actually observes queries.
+    let observe = state.host_observations.is_enabled(KIND_QUERY_STARTED);
     let observation_execution_id = options.execution_id.clone();
     if observe {
         publish_query_started(
@@ -4437,13 +4437,16 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
 /// Batch-scoped observation state for the native batch paths (MySQL
 /// multi-statement pipeline and SQL Server agent GO batches).
 ///
-/// A batch publishes one `query.started` and a `query.finished` per statement
-/// from the progress callback. Because a native batch can fail before the
-/// driver reports anything (read-only rejection, pool start failure,
-/// cancellation before the first statement), the terminal
-/// `query.finished` with `batchComplete: true` is published by
-/// [`BatchObservation::finish`] on every exit path, so observers never keep an
-/// execution open.
+/// Event shape: one `query.started` for the batch (`scope: "batch"`, with
+/// `statementCount`), one `query.finished` per reported statement
+/// (`scope: "statement"`, with `statementIndex`), and one terminal
+/// `query.finished` (`scope: "batch"`, `batchComplete: true`). `scope` is the
+/// stable discriminator: a consumer that counts statements must ignore
+/// `scope: "batch"` events, and only the `batchComplete` event closes the
+/// batch. Because a native batch can fail before the driver reports anything
+/// (read-only rejection, pool start failure, cancellation before the first
+/// statement), [`BatchObservation::finish`] publishes that terminal event on
+/// every exit path, so observers never keep an execution open.
 struct BatchObservation {
     bus: crate::observability::HostObservationBus,
     execution_id: Option<String>,
@@ -4476,6 +4479,7 @@ impl BatchObservation {
                 "schema": schema,
                 "statementCount": statement_count,
                 "batch": true,
+                "scope": "batch",
             }),
         );
         Self {
@@ -4510,6 +4514,7 @@ impl BatchObservation {
                 "durationMs": item.execution_time_ms as u64,
                 "affectedRows": item.affected_rows,
                 "batch": true,
+                "scope": "statement",
             });
             // The generic loop reports `statement_index + offset` for grouped
             // statements; `get` tolerates a report that runs past the split.
@@ -4540,6 +4545,7 @@ impl BatchObservation {
             "executionId": self.execution_id,
             "batch": true,
             "batchComplete": true,
+            "scope": "batch",
             "status": status,
             "statementCount": self.statement_count,
             "completedStatements": self.completed_statements.load(Ordering::Relaxed),
@@ -4756,7 +4762,7 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
     // `execute_sql_statement_with_options_typed` for each statement and is
     // already covered by the funnel; wrapping it again would double count.
     let native_batch = mysql_pool.is_some() || complete_sqlserver_agent_batch;
-    let batch_observation = if native_batch && state.host_observations.subscriber_count() > 0 {
+    let batch_observation = if native_batch && state.host_observations.is_enabled(KIND_QUERY_STARTED) {
         Some(BatchObservation::start(
             &state.host_observations,
             connection_id,
@@ -9660,7 +9666,15 @@ mod tests {
         state.configs.write().await.insert(connection_id.to_string(), config);
 
         // Attach the observer before the pool exists so the connection tap is
-        // exercised from the same funnel the query tap uses.
+        // exercised from the same funnel the query tap uses. Interest, not a
+        // bare receiver, is what enables publishing.
+        state.host_observations.interest().acquire(
+            "test",
+            &[
+                dbx_types::models::observability::OBSERVE_CONNECTIONS_PERMISSION.to_string(),
+                dbx_types::models::observability::OBSERVE_QUERIES_PERMISSION.to_string(),
+            ],
+        );
         let mut events = state.host_observations.subscribe();
 
         state.get_or_create_pool_for_session(connection_id, Some(""), None).await.expect("create SQLite pool");
@@ -15927,6 +15941,12 @@ for line in sys.stdin:
 mod batch_observation_tests {
     use super::*;
 
+    fn observing_bus() -> crate::observability::HostObservationBus {
+        let bus = crate::observability::HostObservationBus::new();
+        bus.interest().acquire("test", &[dbx_types::models::observability::OBSERVE_QUERIES_PERMISSION.to_string()]);
+        bus
+    }
+
     fn progress(statement_index: usize, total: usize) -> ExecuteMultiProgress {
         ExecuteMultiProgress {
             statement_index,
@@ -15944,7 +15964,7 @@ mod batch_observation_tests {
     /// otherwise observers keep a `query.started` open forever.
     #[tokio::test]
     async fn batch_terminal_is_published_when_no_statement_reported() {
-        let bus = crate::observability::HostObservationBus::new();
+        let bus = observing_bus();
         let mut receiver = bus.subscribe();
         let observation = BatchObservation::start(
             &bus,
@@ -15960,12 +15980,14 @@ mod batch_observation_tests {
         let started = receiver.recv().await.expect("query.started");
         assert_eq!(started.kind, KIND_QUERY_STARTED);
         assert_eq!(started.payload["batch"], true);
+        assert_eq!(started.payload["scope"], "batch");
         assert_eq!(started.payload["statementCount"], 2);
         assert_eq!(started.payload["sql"], "insert into t values (1); delete from t");
 
         let terminal = receiver.recv().await.expect("batch terminal");
         assert_eq!(terminal.kind, KIND_QUERY_FINISHED);
         assert_eq!(terminal.payload["batchComplete"], true);
+        assert_eq!(terminal.payload["scope"], "batch");
         assert_eq!(terminal.payload["status"], "error");
         assert_eq!(terminal.payload["completedStatements"], 0);
         assert_eq!(terminal.payload["error"], "read-only connection");
@@ -15973,7 +15995,7 @@ mod batch_observation_tests {
 
     #[tokio::test]
     async fn batch_terminal_counts_reported_statements() {
-        let bus = crate::observability::HostObservationBus::new();
+        let bus = observing_bus();
         let mut receiver = bus.subscribe();
         let observation = BatchObservation::start(&bus, "conn-1", "db", "select 1; select 2", None, 2, None);
         let callback = observation.progress_callback(vec!["select 1".into(), "select 2".into()], None);
@@ -15986,6 +16008,7 @@ mod batch_observation_tests {
             let statement = receiver.recv().await.expect("statement finished");
             assert_eq!(statement.kind, KIND_QUERY_FINISHED);
             assert_eq!(statement.payload["batch"], true);
+            assert_eq!(statement.payload["scope"], "statement");
             assert_eq!(statement.payload["statementIndex"], index);
             assert_eq!(statement.payload["status"], "ok");
         }

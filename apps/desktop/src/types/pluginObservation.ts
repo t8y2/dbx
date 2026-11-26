@@ -12,7 +12,7 @@ export interface PluginHostObservationEvent {
   id: number;
   /** Wall-clock epoch milliseconds. */
   tsMs: number;
-  /** Dotted kind, e.g. `query.finished`. The prefix selects the permission. */
+  /** Dotted kind, e.g. `query.finished`. Only registered kinds are delivered. */
   kind: string;
   connectionId?: string;
   database?: string;

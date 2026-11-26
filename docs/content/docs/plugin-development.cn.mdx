@@ -732,11 +732,11 @@ const unsubscribe = window.dbxPlugin.onHostEvent((event) => {
 
 先检查 init 消息中的 `capabilities.observations`：没有观测总线的宿主会省略该字段，而较旧的 DBX 也会在安装时拒绝未知权限。
 
-每个事件包含宿主全局单调递增的 `id`、墙钟时间 `tsMs`、点分格式的 `kind`、可选的 `connectionId` / `database`，以及按 kind 定义的 `payload`。`kind` 前缀决定所需权限：`query.*` → `host.observe:queries`，`connection.*` → `host.observe:connections`，`ai.*` → `host.observe:ai`，`transfer.*` → `host.observe:transfers`，`plugin.*` → `host.observe:plugins`。未映射的 kind 永远不会下发。
+每个事件包含宿主全局单调递增的 `id`、墙钟时间 `tsMs`、点分格式的 `kind`、可选的 `connectionId` / `database`，以及按 kind 定义的 `payload`。宿主只下发**已登记**的事件类型：每个 kind 在下表中固定归属一个 `host.observe:*` 权限，未登记的 kind 永远不会下发，因此新事件不会仅凭同前缀就继承相邻类别的权限。工作台仅在打开期间接收事件，宿主也只为确实存在观察者的类别构建载荷。
 
 `id` 只用于排序和去重，**不能**用来判断丢事件：id 由整个宿主统一分配，而下发按权限过滤，因此出现缺口是正常的（其他类别被过滤掉了），并发发布时相邻 id 也可能略有乱序。真正的丢事件由宿主显式通知，见下文「背压与事件丢弃」。
 
-原生批量路径（MySQL 多语句管道、SQL Server `GO` 批次）会发出一个带 `batch: true` 与 `statementCount` 的 `query.started`、每条语句一个带 `batch: true` 与 `statementIndex` 的 `query.finished`，以及恰好一个带 `batchComplete: true` 的终态 `query.finished`（含 `status`：`ok` / `error` / `cancelled`、`completedStatements`、`failedStatements`，失败时附带上限截断的 `error`）。即使批次在跑任何语句之前就失败（只读拒绝、连接池启动失败、取消），终态事件也会发出，因此请用 `batchComplete` 而不是逐语句事件来配对 `query.started`。批次成功返回但内部含失败结果的情况（如获取连接失败，或 `continue_on_error` 批次中部分语句失败）同样会得到 `status: "error"`；用户取消优先于语句错误。
+原生批量路径（MySQL 多语句管道、SQL Server `GO` 批次）会发出一个 `query.started` 与恰好一个 `scope: "batch"` 的终态 `query.finished`（终态事件带 `batchComplete: true`，起始事件带 `statementCount`），以及每条已上报语句一个 `scope: "statement"`、带 `statementIndex` 的 `query.finished`。区分两种生命周期请使用 `scope` 字段而不是事件名：终态事件含 `status`：`ok` / `error` / `cancelled`、`completedStatements`、`failedStatements`，失败时附带上限截断的 `error`。即使批次在跑任何语句之前就失败（只读拒绝、连接池启动失败、取消），终态事件也会发出，因此请用 `batchComplete` 而不是逐语句事件来配对 `query.started`。批次成功返回但内部含失败结果的情况（如获取连接失败，或 `continue_on_error` 批次中部分语句失败）同样会得到 `status: "error"`；用户取消优先于语句错误。
 
 | 类别   | 事件类型                                                                                                                                                                                                                                                                                                                                                              |
 | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -746,7 +746,7 @@ const unsubscribe = window.dbxPlugin.onHostEvent((event) => {
 | 传输   | `transfer.progress` —— `payload.taskKind` 取值为 `transfer`、`database-export`、`table-import`、`table-export`、`sql-file`、`mongo-dump`、`mongo-restore`、`mongo-import`、`mongo-export`、`query-result-export`、`dameng-dump`                                                                                                                                       |
 | 插件   | `plugin.activated`、`plugin.activate_failed`、`plugin.status_changed`、`plugin.stopped`                                                                                                                                                                                                                                                                                |
 
-SQL 文本、工具参数、工具结果和上下文摘要上限为 16 KiB；被截断的字段会在 `payload` 中设置 `<field>Truncated: true`。`ai.text_delta` 与 `ai.reasoning_delta` 属高频事件，仅投递到工作台 UI —— 声明 `host.observe:ai` 的 sidecar 会收到其他所有 AI 事件但收不到增量，因此请从 `ai.agent_finished` 的 `text` 字段持久化最终回答（即运行返回的最终文本，上限 16 KiB，被截断时带 `textTruncated`）。`ai.response_complete` 只有 CLI 适配器会发出，且明确是非终态事件。被取消的运行同样会以 `ai.agent_finished` 结束，其 `text` 包含宿主追加的取消提示。自身没有发出终态事件的失败运行会以 `ai.error` 结束（`message` 有限截断，用户主动停止时带 `cancelled: true`），因此每次运行都会关闭；循环自身已发出的 `ai.error` 不会被重复发送。
+SQL 文本、工具参数、工具结果、上下文摘要、AI 增量与错误信息上限为 16 KiB；被截断的字段会在 `payload` 中设置 `<field>Truncated: true`。宿主还会对任何载荷中的每个字符串执行同样的上限，作为最后一道保护，新增字段无法绕过；整体超出体积预算的载荷会被替换为 `{ "truncated": true, "reason": "payload_too_large" }`。`ai.text_delta` 与 `ai.reasoning_delta` 属高频事件，仅投递到工作台 UI —— 声明 `host.observe:ai` 的 sidecar 会收到其他所有 AI 事件但收不到增量，因此请从 `ai.agent_finished` 的 `text` 字段持久化最终回答（即运行返回的最终文本，上限 16 KiB，被截断时带 `textTruncated`）。`ai.response_complete` 只有 CLI 适配器会发出，且明确是非终态事件。被取消的运行同样会以 `ai.agent_finished` 结束，其 `text` 包含宿主追加的取消提示。自身没有发出终态事件的失败运行会以 `ai.error` 结束（`message` 有限截断，用户主动停止时带 `cancelled: true`），因此每次运行都会关闭；循环自身已发出的 `ai.error` 不会被重复发送。
 
 `transfer.progress` 按设计不含内容：只发布白名单内的 id、状态、计数器、耗时和对象名。SQL 语句、驱动错误文本、导入的行/文档数据和本地文件路径都不会进入传输事件流；它们属于已经单独授权的 `host.observe:queries` / `host.observe:ai`。
 
@@ -768,7 +768,7 @@ sidecar 收到的同样是事件内容，但以无 id 的 JSON-RPC 通知下发�
 {"jsonrpc":"2.0","method":"host/observation","params":{"id":42,"tsMs":1730000000000,"kind":"query.finished","connectionId":"…","database":"…","payload":{…}}}
 ```
 
-通知只投递给清单中声明了对应权限且**已在运行**的 sidecar；观测不会自行激活插件。处理应保持轻量、持久化异步执行，因为该帧与常规 RPC 共用 stdin。
+通知只投递给清单中声明了对应权限且**已在运行**的 sidecar；观测不会自行激活插件。每个在运行的观察者拥有独立的有界队列，因此某个 sidecar 停止读取 stdin 时只会丢失自己的事件（以 `host/observation_gap` 报告），不会拖慢其他 sidecar 或工作台 UI 的投递。超过投递时限仍无响应的 sidecar 会被停止并发出 `plugin.stopped`，而不是静默跳过——写了一半的 JSONL 帧会破坏 RPC 流。处理应保持轻量、持久化异步执行，因为该帧与常规 RPC 共用 stdin。
 
 总线落后时，sidecar 也会以同样方式收到无 id 的丢弃通知：
 

@@ -11,7 +11,7 @@ use dbx_core::sql::split_sql_statements;
 
 /// Mirror driver query messages onto the observation bus. Split from the
 /// Tauri callback so the payload contract is unit-testable without an
-/// `AppHandle`; the caller keeps the subscriber check so the non-observed
+/// `AppHandle`; the caller keeps the interest check so the non-observed
 /// hot path stays allocation-free.
 fn publish_query_message_events(
     bus: &dbx_core::observability::HostObservationBus,
@@ -38,7 +38,7 @@ fn query_messages_callback(
     // to the same executionId as query.started/finished.
     let observations = state.host_observations.clone();
     Some(Arc::new(move |messages| {
-        if observations.subscriber_count() > 0 {
+        if observations.is_enabled(dbx_core::models::observability::KIND_QUERY_MESSAGE) {
             publish_query_message_events(&observations, &execution_id, &messages);
         }
         let _ = app.emit("query-messages", serde_json::json!({ "executionId": execution_id, "messages": messages }));
@@ -1632,6 +1632,7 @@ mod tests {
     #[tokio::test]
     async fn query_message_events_carry_execution_id() {
         let bus = dbx_core::observability::HostObservationBus::new();
+        bus.interest().acquire("test", &[dbx_core::models::observability::OBSERVE_QUERIES_PERMISSION.to_string()]);
         let mut receiver = bus.subscribe();
         let messages = vec![
             serde_json::json!({ "severity": "NOTICE", "message": "done" }),

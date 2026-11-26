@@ -929,6 +929,15 @@ export async function subscribeHostObservations(_onEvent: (event: PluginHostObse
 }
 
 /**
+ * Observation interest is registered with the desktop bus only (see
+ * `subscribeHostObservations`); the web shell has no observation delivery, so
+ * both transport calls are no-ops there.
+ */
+export async function setPluginObservationInterest(_ownerId: string, _pluginId: string): Promise<void> {}
+
+export async function clearPluginObservationInterest(_ownerId: string): Promise<void> {}
+
+/**
  * Subscribe to backend connection-liveness messages (#4339).
  *
  * The SSE payload is one `ConnectionLivenessMessage`: the plugin stream's `{ kind }` wrapper

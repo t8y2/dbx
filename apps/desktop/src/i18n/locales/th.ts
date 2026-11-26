@@ -2662,6 +2662,7 @@ export default withEnglishFallback({
       selectAll: "เลือกทั้งหมด",
       addSnippet: "เพิ่มสแนปเป็ต",
       executeScriptFromHere: "เรียกใช้สคริปต์ SQL จากที่นี่",
+      compareWithClipboard: "เปรียบเทียบกับคลิปบอร์ด",
     },
     delimitedList: {
       title: "แปลงเป็นรายการคั่น",
@@ -2732,6 +2733,17 @@ export default withEnglishFallback({
     fullscreenResultsPane: "แสดงผลลัพธ์แบบเต็มหน้าจอ",
     exitFullscreenResultsPane: "ออกจากโหมดเต็มหน้าจอผลลัพธ์",
     executeScriptBoundaryMismatch: "ตำแหน่งนี้ขึ้นอยู่กับตัวคั่น SQL หรือขอบเขตแบตช์ก่อนหน้า โปรดเริ่มเรียกใช้จากบรรทัดที่มีตัวคั่น หรือเลือกสคริปต์ทั้งหมดเพื่อเรียกใช้",
+    clipboardCompare: {
+      title: "เปรียบเทียบกับคลิปบอร์ด",
+      editor: "ตัวแก้ไข",
+      selection: "เนื้อหาที่เลือก",
+      clipboard: "คลิปบอร์ด",
+      copyEditor: "คัดลอกเนื้อหาตัวแก้ไข",
+      copySelection: "คัดลอกเนื้อหาที่เลือก",
+      copyClipboard: "คัดลอกเนื้อหาคลิปบอร์ด",
+      copied: "คัดลอกแล้ว",
+      clipboardEmpty: "คลิปบอร์ดว่างเปล่า",
+    },
   },
   tabs: {
     sql: "SQL",

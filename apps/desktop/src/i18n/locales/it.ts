@@ -2502,6 +2502,7 @@ export default withEnglishFallback({
       convertNamingStyle: "Cambia stile di denominazione",
       addSnippet: "Aggiungi snippet",
       executeScriptFromHere: "Esegui script SQL da qui",
+      compareWithClipboard: "Confronta con gli appunti",
     },
     bookmarks: {
       workspaceTitle: "Segnalibri",
@@ -2580,6 +2581,17 @@ export default withEnglishFallback({
     fullscreenResultsPane: "Visualizza i risultati a schermo intero",
     exitFullscreenResultsPane: "Esci dallo schermo intero dei risultati",
     executeScriptBoundaryMismatch: "Questa posizione dipende dal delimitatore SQL precedente o dal confine del batch. Avvia l'esecuzione dalla riga del delimitatore oppure seleziona l'intero script da eseguire.",
+    clipboardCompare: {
+      title: "Confronta con gli appunti",
+      editor: "Editor",
+      selection: "Contenuto selezionato",
+      clipboard: "Appunti",
+      copyEditor: "Copia contenuto editor",
+      copySelection: "Copia contenuto selezionato",
+      copyClipboard: "Copia contenuto degli appunti",
+      copied: "Copiato",
+      clipboardEmpty: "Gli appunti sono vuoti.",
+    },
   },
   tabs: {
     sql: "SQL",

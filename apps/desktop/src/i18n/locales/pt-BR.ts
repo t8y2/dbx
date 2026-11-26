@@ -2590,6 +2590,7 @@ export default withEnglishFallback({
       convertNamingStyle: "Alternar estilo de nomenclatura",
       addSnippet: "Adicionar snippet",
       executeScriptFromHere: "Executar script SQL a partir daqui",
+      compareWithClipboard: "Comparar com a área de transferência",
     },
     bookmarks: {
       workspaceTitle: "Marcadores",
@@ -2668,6 +2669,17 @@ export default withEnglishFallback({
     fullscreenResultsPane: "Exibir resultados em tela cheia",
     exitFullscreenResultsPane: "Sair da tela cheia dos resultados",
     executeScriptBoundaryMismatch: "Este ponto depende do delimitador SQL anterior ou do limite do lote. Comece a execução a partir da linha do delimitador ou selecione o script completo para executar.",
+    clipboardCompare: {
+      title: "Comparar com a área de transferência",
+      editor: "Editor",
+      selection: "Seleção",
+      clipboard: "Área de transferência",
+      copyEditor: "Copiar conteúdo do editor",
+      copySelection: "Copiar seleção",
+      copyClipboard: "Copiar conteúdo da área de transferência",
+      copied: "Copiado",
+      clipboardEmpty: "A área de transferência está vazia.",
+    },
   },
   tabs: {
     sql: "SQL",

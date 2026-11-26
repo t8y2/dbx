@@ -2431,6 +2431,7 @@ export default withEnglishFallback({
       convertNamingStyle: "네이밍 스타일 전환",
       addSnippet: "스니펫 추가",
       executeScriptFromHere: "여기서 SQL 스크립트 실행",
+      compareWithClipboard: "클립보드와 비교",
     },
     delimitedList: {
       title: "구분자 목록으로 변환",
@@ -2503,6 +2504,17 @@ export default withEnglishFallback({
     fullscreenResultsPane: "결과 전체 화면 표시",
     exitFullscreenResultsPane: "결과 전체 화면 종료",
     executeScriptBoundaryMismatch: "이 위치는 앞의 SQL 구분 기호 또는 배치 경계에 의존합니다. 구분 기호가 있는 줄부터 실행하거나 전체 스크립트를 선택하여 실행하세요.",
+    clipboardCompare: {
+      title: "클립보드와 비교",
+      editor: "편집기",
+      selection: "선택 내용",
+      clipboard: "클립보드",
+      copyEditor: "편집기 내용 복사",
+      copySelection: "선택 내용 복사",
+      copyClipboard: "클립보드 내용 복사",
+      copied: "복사됨",
+      clipboardEmpty: "클립보드가 비어 있습니다.",
+    },
   },
   tabs: {
     sql: "SQL",

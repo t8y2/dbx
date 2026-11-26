@@ -76,7 +76,9 @@ describe("parseAiChartSpec", () => {
   });
 
   it("rejects an unsupported chart type", () => {
-    const result = parseAiChartSpec(JSON.stringify(barSpec({ type: "scatter" })));
+    // `scatter` used to be the unsupported example here; it is a supported type
+    // now, so the rejection is pinned on a type the protocol has not adopted.
+    const result = parseAiChartSpec(JSON.stringify(barSpec({ type: "sankey" })));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toContain("unsupported chart type");
   });

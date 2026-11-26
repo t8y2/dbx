@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Eye, EyeOff } from "@lucide/vue";
 import { Input } from "@/components/ui/input";
+import { revealSavedPassword } from "@/lib/backend/http";
 import { isSavedCredential, passwordViewerEnabled } from "@/lib/security/passwordViewer";
 
 defineOptions({ inheritAttrs: false });
@@ -26,30 +27,58 @@ const props = withDefaults(
 );
 
 const savedCredential = computed(() => isSavedCredential(model.value));
+const revealedPassword = ref("");
 const inputValue = computed({
-  get: () => (savedCredential.value ? "" : model.value),
+  get: () => (savedCredential.value ? revealedPassword.value : model.value),
   set: (value: string | undefined) => {
     model.value = value;
   },
 });
 const visible = ref(false);
+const revealing = ref(false);
 const { t } = useI18n();
-const showToggle = computed(() => props.showToggle && passwordViewerEnabled.value && !savedCredential.value);
+const showToggle = computed(() => props.showToggle && passwordViewerEnabled.value);
 const toggleLabel = computed(() => (visible.value ? props.hideLabel || t("common.hidePassword") : props.showLabel || t("common.showPassword")));
+
+watch([model, showToggle], () => {
+  revealedPassword.value = "";
+  visible.value = false;
+}, { flush: "sync" });
+
+async function toggleVisibility() {
+  const reference = model.value;
+  if (visible.value || !isSavedCredential(reference)) {
+    visible.value = !visible.value;
+    revealedPassword.value = "";
+    return;
+  }
+  revealing.value = true;
+  try {
+    const password = await revealSavedPassword(reference);
+    if (model.value === reference && showToggle.value) {
+      revealedPassword.value = password;
+      visible.value = true;
+    }
+  } catch {
+    revealedPassword.value = "";
+  } finally {
+    revealing.value = false;
+  }
+}
 </script>
 
 <template>
   <div :class="props.class" class="relative">
-    <Input v-model="inputValue" data-password-input :type="visible && showToggle ? 'text' : 'password'" :placeholder="savedCredential ? '••••••••' : placeholder" :disabled="disabled" :class="[props.inputClass, showToggle ? 'pr-8' : undefined]" v-bind="$attrs" />
+    <Input v-model="inputValue" data-password-input :type="visible && showToggle ? 'text' : 'password'" :placeholder="savedCredential ? '••••••••' : placeholder" :disabled="disabled" :readonly="savedCredential && visible" :class="[props.inputClass, showToggle ? 'pr-8' : undefined]" v-bind="$attrs" />
     <button
       v-if="showToggle"
       type="button"
-      :disabled="disabled"
+      :disabled="disabled || revealing"
       :tabindex="toggleTabIndex"
       class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
       :aria-label="toggleLabel"
       :title="toggleLabel"
-      @click="visible = !visible"
+      @click="toggleVisibility"
     >
       <Eye v-if="!visible" class="size-3.5" />
       <EyeOff v-else class="size-3.5" />

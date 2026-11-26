@@ -238,7 +238,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install nextest
-        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
         with:
           tool: cargo-nextest@0.9.137
 
@@ -1110,7 +1110,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
         with:
           tool: cargo-nextest@0.9.137
 
@@ -1580,7 +1580,7 @@ jobs:
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install nextest
-        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
         with:
           tool: cargo-nextest@0.9.137
       # mold -run wraps the whole process tree (see the packages job note);
@@ -1705,7 +1705,7 @@ jobs:
         if: matrix.driver == 'tdengine'
       - name: Install nextest
         if: matrix.driver == 'tdengine'
-        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
         with:
           tool: cargo-nextest@0.9.137
       - name: TDengine Rust cache

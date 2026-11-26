@@ -5587,6 +5587,8 @@ export default {
     ddlOpenModeTab: "Open in new tab",
     resizeDdlDialog: "Resize DDL dialog",
     ddlCopied: "DDL copied",
+    ddlCopyOptions: "DDL Copy Options",
+    copyDdlWithoutAutoIncrement: "Copy DDL Without AUTO_INCREMENT Value",
     compactDdlSql: "Compact SQL",
     includeDdlStorage: "Storage attributes",
     separateDdlIndexes: "Separate indexes",

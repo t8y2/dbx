@@ -5362,6 +5362,8 @@ export default withEnglishFallback({
       optimizeSuccess: "Tabella «{name}» OPTIMIZE TABLE: {message}",
       repairSuccess: "Tabella «{name}» REPAIR TABLE: {message}",
     },
+    ddlCopyOptions: "Opzioni di copia DDL",
+    copyDdlWithoutAutoIncrement: "Copia DDL e ometti il valore iniziale di AUTO_INCREMENT",
   },
   visibleDatabases: {
     title: "Database Visibili",

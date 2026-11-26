@@ -5665,6 +5665,8 @@ export default withEnglishFallback({
       optimizeSuccess: "ตาราง「{name}」OPTIMIZE TABLE: {message}",
       repairSuccess: "ตาราง「{name}」REPAIR TABLE: {message}",
     },
+    ddlCopyOptions: "ตัวเลือกการคัดลอก DDL",
+    copyDdlWithoutAutoIncrement: "คัดลอก DDL และละเว้นค่าเริ่มต้น AUTO_INCREMENT",
   },
   visibleDatabases: {
     title: "ฐานข้อมูลที่มองเห็นได้",

@@ -5727,6 +5727,8 @@ export default withEnglishFallback({
       optimizeSuccess: "テーブル「{name}」OPTIMIZE TABLE: {message}",
       repairSuccess: "テーブル「{name}」REPAIR TABLE: {message}",
     },
+    ddlCopyOptions: "DDL コピー オプション",
+    copyDdlWithoutAutoIncrement: "DDL をコピーし、AUTO_INCREMENT の初期値を省略",
   },
   visibleDatabases: {
     title: "表示するデータベース",

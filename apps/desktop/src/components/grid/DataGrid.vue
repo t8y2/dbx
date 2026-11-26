@@ -1434,6 +1434,8 @@ const allFilterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
   { value: "like", labelKey: "grid.filterBuilderContains" },
   { value: "not-like", labelKey: "grid.filterBuilderNotContains" },
+  { value: "ilike", labelKey: "grid.filterBuilderContainsCaseInsensitive" },
+  { value: "not-ilike", labelKey: "grid.filterBuilderNotContainsCaseInsensitive" },
   { value: "begins-with", labelKey: "grid.filterBuilderBeginsWith" },
   { value: "ends-with", labelKey: "grid.filterBuilderEndsWith" },
   { value: "not-begins-with", labelKey: "grid.filterBuilderNotBeginsWith" },

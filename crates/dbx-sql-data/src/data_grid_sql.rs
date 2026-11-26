@@ -242,6 +242,8 @@ pub enum DataGridContextFilterMode {
     IsNotBlank,
     Like,
     NotLike,
+    Ilike,
+    NotIlike,
     BeginsWith,
     EndsWith,
     NotBeginsWith,
@@ -261,6 +263,11 @@ fn supports_data_grid_context_filter_mode(
     mode: DataGridContextFilterMode,
 ) -> bool {
     if database_type == Some(DatabaseType::VictoriaMetrics) {
+        return false;
+    }
+    if matches!(mode, DataGridContextFilterMode::Ilike | DataGridContextFilterMode::NotIlike)
+        && !is_postgres_like_pattern_database(database_type)
+    {
         return false;
     }
     !matches!(
@@ -918,6 +925,18 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
         DataGridContextFilterMode::NotLike => Some(data_grid_like_condition(
             &like_column,
             "NOT LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::Contains, options.database_type),
+            options.database_type,
+        )),
+        DataGridContextFilterMode::Ilike => Some(data_grid_like_condition(
+            &like_column,
+            "ILIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::Contains, options.database_type),
+            options.database_type,
+        )),
+        DataGridContextFilterMode::NotIlike => Some(data_grid_like_condition(
+            &like_column,
+            "NOT ILIKE",
             data_grid_like_pattern(value, DataGridLikeTemplate::Contains, options.database_type),
             options.database_type,
         )),
@@ -7620,6 +7639,45 @@ mod tests {
             .as_deref(),
             Some("\"update_date\"::text NOT LIKE '12~_8%' ESCAPE '~'")
         );
+    }
+
+    #[test]
+    fn builds_case_insensitive_contains_filters_for_postgres_like_databases() {
+        let condition = |database_type: Option<DatabaseType>, mode: DataGridContextFilterMode, data_type: &str| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type,
+                identifier_quote: None,
+                column_name: "status".to_string(),
+                mode,
+                value: json!("Act_ve"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("status", data_type, true, None)),
+            })
+        };
+
+        assert_eq!(
+            condition(Some(DatabaseType::Postgres), DataGridContextFilterMode::Ilike, "varchar").as_deref(),
+            Some("\"status\" ILIKE '%Act~_ve%' ESCAPE '~'")
+        );
+        assert_eq!(
+            condition(Some(DatabaseType::Postgres), DataGridContextFilterMode::NotIlike, "varchar").as_deref(),
+            Some("\"status\" NOT ILIKE '%Act~_ve%' ESCAPE '~'")
+        );
+        // Non-textual columns are cast, as they are for LIKE.
+        assert_eq!(
+            condition(Some(DatabaseType::Postgres), DataGridContextFilterMode::Ilike, "uuid").as_deref(),
+            Some("\"status\"::text ILIKE '%Act~_ve%' ESCAPE '~'")
+        );
+        // Targets without ILIKE get no condition instead of invalid SQL.
+        for database_type in [None, Some(DatabaseType::Mysql), Some(DatabaseType::Sqlite)] {
+            for mode in [DataGridContextFilterMode::Ilike, DataGridContextFilterMode::NotIlike] {
+                assert_eq!(condition(database_type, mode, "varchar"), None);
+            }
+        }
+        // The frontend sends and receives these exact mode names.
+        assert_eq!(serde_json::to_value(DataGridContextFilterMode::Ilike).unwrap(), json!("ilike"));
+        assert_eq!(serde_json::to_value(DataGridContextFilterMode::NotIlike).unwrap(), json!("not-ilike"));
     }
 
     /// TDengine rejects `LIKE ... ESCAPE`, and ClickHouse only added the clause in

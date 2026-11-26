@@ -2628,6 +2628,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "Nie równa się",
     filterBuilderContains: "Zawiera",
     filterBuilderNotContains: "Nie zawiera",
+    filterBuilderContainsCaseInsensitive: "Zawiera (bez rozróżniania wielkości liter)",
+    filterBuilderNotContainsCaseInsensitive: "Nie zawiera (bez rozróżniania wielkości liter)",
     filterBuilderBeginsWith: "Zaczyna się od",
     filterBuilderEndsWith: "Kończy się na",
     filterBuilderNotBeginsWith: "Nie zaczyna się od",

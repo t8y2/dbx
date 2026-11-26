@@ -3023,6 +3023,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "Diverso da",
     filterBuilderContains: "Contiene",
     filterBuilderNotContains: "Non contiene",
+    filterBuilderContainsCaseInsensitive: "Contiene (senza distinzione tra maiuscole e minuscole)",
+    filterBuilderNotContainsCaseInsensitive: "Non contiene (senza distinzione tra maiuscole e minuscole)",
     filterBuilderBeginsWith: "Inizia con",
     filterBuilderEndsWith: "Termina con",
     filterBuilderNotBeginsWith: "Non inizia con",

@@ -3396,6 +3396,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "ไม่เท่ากับ",
     filterBuilderContains: "มี",
     filterBuilderNotContains: "ไม่มี",
+    filterBuilderContainsCaseInsensitive: "มี (ไม่คำนึงถึงตัวพิมพ์เล็ก-ใหญ่)",
+    filterBuilderNotContainsCaseInsensitive: "ไม่มี (ไม่คำนึงถึงตัวพิมพ์เล็ก-ใหญ่)",
     filterBuilderBeginsWith: "ขึ้นต้นด้วย",
     filterBuilderEndsWith: "ลงท้ายด้วย",
     filterBuilderNotBeginsWith: "ไม่ขึ้นต้นด้วย",

@@ -2269,6 +2269,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "Bərabər deyil",
     filterBuilderContains: "Ehtiva edir",
     filterBuilderNotContains: "Ehtiva etmir",
+    filterBuilderContainsCaseInsensitive: "Ehtiva edir (böyük-kiçik hərfə həssas deyil)",
+    filterBuilderNotContainsCaseInsensitive: "Ehtiva etmir (böyük-kiçik hərfə həssas deyil)",
     filterBuilderBeginsWith: "Bununla başlayır",
     filterBuilderEndsWith: "Bununla bitir",
     filterBuilderNotBeginsWith: "İlə başlamır",

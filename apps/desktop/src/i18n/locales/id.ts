@@ -2562,6 +2562,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "Tidak sama dengan",
     filterBuilderContains: "Mengandung",
     filterBuilderNotContains: "Tidak mengandung",
+    filterBuilderContainsCaseInsensitive: "Mengandung (tidak peka huruf besar/kecil)",
+    filterBuilderNotContainsCaseInsensitive: "Tidak mengandung (tidak peka huruf besar/kecil)",
     filterBuilderBeginsWith: "Diawali dengan",
     filterBuilderEndsWith: "Diakhiri dengan",
     filterBuilderNotBeginsWith: "Tidak diawali dengan",

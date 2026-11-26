@@ -76,6 +76,8 @@ export type DataGridContextFilterMode =
   | "is-not-blank"
   | "like"
   | "not-like"
+  | "ilike"
+  | "not-ilike"
   | "begins-with"
   | "ends-with"
   | "not-begins-with"

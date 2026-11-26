@@ -3150,6 +3150,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "같지 않음",
     filterBuilderContains: "포함",
     filterBuilderNotContains: "포함하지 않음",
+    filterBuilderContainsCaseInsensitive: "포함 (대소문자 구분 안 함)",
+    filterBuilderNotContainsCaseInsensitive: "포함하지 않음 (대소문자 구분 안 함)",
     filterBuilderBeginsWith: "…으로 시작",
     filterBuilderEndsWith: "…으로 끝",
     filterBuilderNotBeginsWith: "…로 시작하지 않음",

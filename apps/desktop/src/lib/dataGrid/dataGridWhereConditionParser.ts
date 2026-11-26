@@ -115,29 +115,26 @@ function sameColumn(candidate: string, columns: readonly string[]): string | nul
   return matches.length === 1 ? matches[0]! : null;
 }
 
-/**
- * Unwraps the quoted LIKE literal and classifies the pattern. The backend
- * re-adds wildcards per mode (Contains/StartsWith/EndsWith) and escapes LIKE
- * metacharacters in the stored value, so an exact round-trip requires the
- * pattern to use only edge `%` wildcards with no `_` and no interior `%`
- * anything else would change semantics and is rejected (#15448 review).
- */
+// Backslash escapes depend on the dialect and session settings. Accept only
+// one standard SQL string token, with doubled single quotes as its sole escape.
+function isSingleQuotedLiteral(value: string): boolean {
+  return /^'(?:[^'\\]|'')*'$/.test(value);
+}
+
+/** The structured filter only reproduces patterns with edge `%` wildcards. */
 function parseLikeLiteral(value: string): { mode: DataGridContextFilterMode; pattern: string } | null {
-  const literal = value.trim();
-  if (literal.length < 2 || !literal.startsWith("'") || !literal.endsWith("'")) return null;
-  const pattern = literal.slice(1, -1).replaceAll("''", "'");
-  if (pattern.includes("'") || !pattern) return null;
-  if (pattern.includes("_")) return null;
-  const startsWithWildcard = pattern.startsWith("%");
-  const endsWithWildcard = pattern.endsWith("%");
-  // A second `%` is only allowed as the trailing wildcard (`%x%`); an interior
-  // one changes what the pattern matches and is rejected.
-  const interiorWildcard = pattern.indexOf("%", 1);
-  if (interiorWildcard !== -1 && interiorWildcard !== pattern.length - 1) return null;
-  if (startsWithWildcard && endsWithWildcard) return { mode: "like", pattern: pattern.slice(1, -1) };
-  if (endsWithWildcard) return { mode: "begins-with", pattern: pattern.slice(0, -1) };
-  if (startsWithWildcard) return { mode: "ends-with", pattern: pattern.slice(1) };
-  return null;
+  if (!isSingleQuotedLiteral(value)) return null;
+  const literal = value.slice(1, -1);
+  const startsWithWildcard = literal.startsWith("%");
+  const endsWithWildcard = literal.endsWith("%");
+  if (!startsWithWildcard && !endsWithWildcard) return null;
+
+  const pattern = literal.slice(startsWithWildcard ? 1 : 0, endsWithWildcard ? -1 : undefined);
+  // Rule values are trimmed and unquoted before the backend restores the wildcards.
+  if (!pattern || pattern.trim() !== pattern || /['_%]/.test(pattern) || (pattern.startsWith('"') && pattern.endsWith('"'))) return null;
+
+  const mode = startsWithWildcard && endsWithWildcard ? "like" : startsWithWildcard ? "ends-with" : "begins-with";
+  return { mode, pattern };
 }
 
 /** The structured modes whose SQL template negates the matching LIKE shape. */
@@ -147,18 +144,9 @@ const NEGATED_LIKE_MODES: Record<string, DataGridContextFilterMode> = {
   "ends-with": "not-ends-with",
 };
 
-/**
- * Values the rule builder can reproduce byte-for-byte. The rebuilt condition
- * quotes the value as a string literal (`parseFilterValue` unwraps the user's
- * quotes and re-emits one), so only an already-quoted string or a numeric
- * literal round-trips. A bare identifier (`a = b`) compares two columns in
- * the hand-written SQL but becomes the constant `'b'` after the rebuild — a
- * different result set, so it must not be imported (#15448 review).
- */
+/** Only standalone string and numeric literals can become comparison values. */
 function isLosslessComparisonValue(value: string): boolean {
-  const trimmed = value.trim();
-  if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) return true;
-  return /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmed);
+  return isSingleQuotedLiteral(value) || /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value);
 }
 
 /** Splits an IN list on top-level commas (commas inside quotes stay put). */
@@ -214,9 +202,7 @@ function parseFragment(fragment: string, columns: readonly string[]): ParsedFrag
     return { column, mode: inMatch[2] ? "not-in" : "in", value: rawValue, conjunction: "AND" };
   }
 
-  // Comparison: identifier op value, with the value kept raw (quoted strings,
-  // numbers, bare identifiers) exactly as typed so the rule builder's own
-  // value handling applies unchanged.
+  // Keep the literal spelling for the rule builder. Expressions stay in the manual WHERE.
   const comparison = /^(\S+)\s*(=|!=|<>|>=|<=|>|<)\s*(.+)$/i.exec(text);
   if (!comparison) return null;
   const column = sameColumn(comparison[1]!, columns);

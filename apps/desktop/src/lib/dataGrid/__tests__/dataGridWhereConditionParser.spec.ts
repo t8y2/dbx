@@ -83,6 +83,14 @@ describe("parseDataGridWhereCondition (#15320)", () => {
     expect(parseValue("a IN ('x', b)")).toBeNull();
   });
 
+  it.each([String.raw`name LIKE 'abc\%'`, String.raw`name NOT LIKE 'abc\%'`, String.raw`name LIKE '%abc\\'`, "name LIKE 'abc%def'", "name LIKE ' abc%'"])("rejects LIKE patterns the rule would reinterpret: %s", (where) => {
+    expect(parseDataGridWhereCondition(where, ["name"], { databaseType: "postgres", columnTypes: ["text"] })).toBeNull();
+  });
+
+  it.each(["name = 'a' || 'b'", "name = 'a' 'b'", "name IN ('a' || 'b', 'c')", "task_id = 1 AND name <> 'a' || 'b'"])("rejects expressions that only look like string literals: %s", (where) => {
+    expect(parseDataGridWhereCondition(where, ["task_id", "name"], { databaseType: "sqlite" })).toBeNull();
+  });
+
   it("treats only a standalone NOT between IS and NULL as negated (#15448)", () => {
     const withNotice = ["notice", "note"];
     function parseOn(where: string) {

@@ -89,6 +89,16 @@ describe("useDataGridFilterBuilder imports the typed WHERE on open (#15320)", ()
       ]);
     });
 
+    it.each([String.raw`name LIKE 'abc\%'`, "name = 'a' || 'b'"])("leaves the builder blank and applies no structured condition for %s", async (where) => {
+      const builder = createRealBuilder(where);
+      builder.ensureRule();
+      builder.open.value = true;
+      await nextTick();
+
+      expect(builder.rules.value[0]?.columnName).toBe("");
+      expect(await builder.apply()).toBe("");
+    });
+
     it("keeps the raw WHERE when any fragment cannot be expressed losslessly", async () => {
       // NOT LIKE 'a_c%' 带 `_` 通配符、`LIKE 'a%c%'` 有内部通配：解析器整体拒绝
       const builder = createRealBuilder("name NOT LIKE 'a_c%' AND task_id = 1");

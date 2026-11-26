@@ -515,7 +515,6 @@ export default withEnglishFallback({
     cancel: "ยกเลิก",
     save: "บันทึก",
     unmatched: "ไม่ตรงกัน",
-    settlingWork: "กำลังหยุดคิวรีและงานที่กำลังทำงาน…",
     preparing: "กำลังอัปเดตกลุ่มที่โหลดแล้ว…",
     loadedOnly: "กลุ่มจะแสดงเฉพาะรายการที่ตรงกันและโหลดแล้ว การขยายจะไม่สแกน Redis",
     count: "({count} รายการที่โหลดแล้ว)",

@@ -535,7 +535,6 @@ export default withEnglishFallback({
     cancel: "Отмена",
     save: "Сохранить",
     unmatched: "Без совпадений",
-    settlingWork: "Останавливаем выполняемые запросы и задачи…",
     preparing: "Обновление загруженных групп…",
     loadedOnly: "Группы показывают только загруженные совпадения; разворачивание не сканирует Redis.",
     count: "({count} загружено)",

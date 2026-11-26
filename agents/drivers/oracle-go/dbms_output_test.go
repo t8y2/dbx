@@ -356,6 +356,8 @@ type oracleDBMSOutputDriver struct {
 	// compileErrors are the ALL_ERRORS rows (OWNER, NAME, TYPE, LINE, POSITION, TEXT)
 	// served to the compilation-error readback that follows a CREATE.
 	compileErrors [][]driver.Value
+	resetContexts []context.Context
+	queryContexts []context.Context
 }
 
 func openOracleDBMSOutputTestDB(t *testing.T) (*sql.DB, *oracleDBMSOutputDriver) {
@@ -477,6 +479,7 @@ func (c *oracleDBMSOutputConn) ExecContext(ctx context.Context, query string, ar
 	if query == dbmsOutputDisableSQL {
 		c.driver.disableCount++
 		c.driver.events = append(c.driver.events, "disable")
+		c.driver.resetContexts = append(c.driver.resetContexts, ctx)
 		if c.driver.disableErr != nil {
 			return nil, c.driver.disableErr
 		}
@@ -487,6 +490,7 @@ func (c *oracleDBMSOutputConn) ExecContext(ctx context.Context, query string, ar
 	if strings.Contains(query, "DBMS_OUTPUT.ENABLE") {
 		c.driver.enableCount++
 		c.driver.events = append(c.driver.events, "enable")
+		c.driver.resetContexts = append(c.driver.resetContexts, ctx)
 		if c.driver.enableErr != nil {
 			c.enabled = false
 			return nil, c.driver.enableErr
@@ -559,7 +563,7 @@ func (c *oracleDBMSOutputConn) ExecContext(ctx context.Context, query string, ar
 // QueryContext serves the SELECT a paged query starts. It is the same statement path as
 // ExecContext: the scripted lines enter the session buffer, so a capture around the
 // query reads exactly what the statement wrote before its first page.
-func (c *oracleDBMSOutputConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+func (c *oracleDBMSOutputConn) QueryContext(ctx context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	c.driver.mu.Lock()
 	defer c.driver.mu.Unlock()
 	c.driver.statements = append(c.driver.statements, query)
@@ -570,6 +574,7 @@ func (c *oracleDBMSOutputConn) QueryContext(_ context.Context, query string, _ [
 			values:  append([][]driver.Value(nil), c.driver.compileErrors...),
 		}, nil
 	}
+	c.driver.queryContexts = append(c.driver.queryContexts, ctx)
 	lines := c.driver.takeStatementLines()
 	if c.enabled {
 		c.buffer = append(c.buffer, lines...)
@@ -1860,5 +1865,63 @@ func TestDBMSOutputBindFailureDetection(t *testing.T) {
 	}
 	if dbmsOutputLooksLikeBindFailure(nil) {
 		t.Fatal("a nil error must not downgrade the register")
+	}
+}
+
+// Regression for issue #15520: ensureDBMSOutput resets DBMS_OUTPUT with a 2s
+// deadline context, while subsequent SELECTs (desktop 60s, paged 60s, MCP 0s)
+// run on the same pinned physical connection with a cancel-only context so open
+// cursors survive paging. The short reset context must stay scoped to the
+// DBMS_OUTPUT reset calls and never bleed into the query's own context.
+func TestDBMSOutputResetContextDoesNotBleedIntoSubsequentQueries(t *testing.T) {
+	db, drv := openOracleDBMSOutputTestDB(t)
+	s := newServer()
+	s.db = db
+	s.params = connectParams{DriverProfile: "oci"}
+
+	// Desktop executeQuery (60s timeout)
+	if _, err := s.executeQuery(queryOptions{SQL: "SELECT 1 FROM DUAL", TimeoutSecs: 60}); err != nil {
+		t.Fatalf("executeQuery (60s) failed: %v", err)
+	}
+	// MCP executeQuery (0 = unlimited)
+	if _, err := s.executeQuery(queryOptions{SQL: "SELECT 1 FROM DUAL", TimeoutSecs: 0}); err != nil {
+		t.Fatalf("executeQuery (0s) failed: %v", err)
+	}
+	// Desktop paged executeQueryPage (60s timeout)
+	page, err := s.executeQueryPage(queryOptions{SQL: "SELECT N FROM T", TimeoutSecs: 60}, 2)
+	if err != nil {
+		t.Fatalf("executeQueryPage (60s) failed: %v", err)
+	}
+	if page.SessionID != nil {
+		s.closeQuerySession(*page.SessionID)
+	}
+
+	drv.mu.Lock()
+	resetContexts := append([]context.Context(nil), drv.resetContexts...)
+	queryContexts := append([]context.Context(nil), drv.queryContexts...)
+	openCount := drv.openCount
+	drv.mu.Unlock()
+
+	if openCount != 1 {
+		t.Fatalf("opened %d physical connections, want 1", openCount)
+	}
+	if len(resetContexts) < 2 {
+		t.Fatalf("recorded %d DBMS_OUTPUT reset contexts, want at least 2 (DISABLE + ENABLE)", len(resetContexts))
+	}
+	for index, ctx := range resetContexts {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatalf("reset context %d had no deadline, want the 2s reset timeout", index)
+		}
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatalf("reset context %d err = %v, want context.Canceled after reset returns", index, ctx.Err())
+		}
+	}
+	if len(queryContexts) != 3 {
+		t.Fatalf("recorded %d query contexts, want 3", len(queryContexts))
+	}
+	for index, ctx := range queryContexts {
+		if _, hasDeadline := ctx.Deadline(); hasDeadline {
+			t.Fatalf("query context %d unexpectedly inherited a deadline", index)
+		}
 	}
 }

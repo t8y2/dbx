@@ -1267,6 +1267,7 @@ export default withEnglishFallback({
     backgroundTaskLabel: "งานเบื้องหลัง",
     settleItemRunning: "{target} ยังคงทำงานอยู่",
     preparationAiRuns: "บทสนทนา AI ยังคงทำงานอยู่ โปรดรอให้เสร็จหรือหยุดก่อนอัปเดต",
+    settlingWork: "กำลังหยุดคิวรีและงานที่กำลังดำเนินการ…",
   },
   pluginDock: {
     close: "ปิด Terminal",

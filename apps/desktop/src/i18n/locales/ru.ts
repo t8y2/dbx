@@ -1165,6 +1165,7 @@ export default withEnglishFallback({
     backgroundTaskLabel: "фоновая задача",
     settleItemRunning: "{target} всё ещё выполняется.",
     preparationAiRuns: "Диалог с ИИ всё ещё выполняется. Дождитесь его завершения или остановите его перед обновлением.",
+    settlingWork: "Остановка выполняющихся запросов и задач…",
   },
   pluginDock: {
     close: "Закрыть терминал",

@@ -1585,4 +1585,59 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(loaderMock).toHaveBeenCalledWith(connectionId, ...(extraCallArgs ?? []));
     expect(connectionNode.children?.map((node) => node.label)).toEqual([`${dbType} child`]);
   });
+
+  it.each([
+    ["group-tables", "tables"],
+    ["group-views", "views"],
+    ["group-procedures", "procedures"],
+    ["group-functions", "functions"],
+    ["group-triggers", "triggers"],
+    ["group-events", "events"],
+  ] as const)("double-clicking %s opens the object browser on the %s filter", async (type, expectedFilter) => {
+    const group: TreeNode = {
+      id: `mysql:basic:__${type}`,
+      label: `tree.${type}`,
+      type,
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: false,
+      children: [{ id: `mysql:basic:__${type}:item`, label: "ITEM", type: "table", connectionId: "mysql", database: "basic" }],
+    };
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: group, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value!.handleRowDoubleClick(group, new MouseEvent("dblclick"));
+
+    await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledOnce());
+    expect(queryStore.openObjectBrowser.mock.calls[0].slice(0, 7)).toEqual(["mysql", "basic", undefined, undefined, undefined, false, expectedFilter]);
+  });
+
+  it("single-clicking an object group expands the list without opening the object browser", async () => {
+    const group: TreeNode = {
+      id: "mysql:basic:__events",
+      label: "tree.events",
+      type: "group-events",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: false,
+      children: [{ id: "mysql:basic:__events:item", label: "EV", type: "event", connectionId: "mysql", database: "basic" }],
+    };
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: group, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value!.handleRowClick(group, 1);
+    await vi.waitFor(() => expect(group.isExpanded).toBe(true));
+
+    expect(queryStore.openObjectBrowser).not.toHaveBeenCalled();
+  });
 });

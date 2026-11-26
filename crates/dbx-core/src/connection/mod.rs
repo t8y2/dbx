@@ -3224,6 +3224,7 @@ impl AppState {
                 }
             };
             let shutdown = async {
+                #[allow(unused_mut)]
                 let mut removed_pools = self.drain_all_connection_pools().await;
                 #[cfg(feature = "mq-admin")]
                 self.persist_removed_mqtt_history(&mut removed_pools).await;
@@ -3244,6 +3245,7 @@ impl AppState {
             }
             return;
         }
+        #[allow(unused_mut)]
         let mut removed_pools = self.drain_all_connection_pools().await;
         #[cfg(feature = "mq-admin")]
         self.persist_removed_mqtt_history(&mut removed_pools).await;
@@ -7837,6 +7839,7 @@ impl AppState {
         let debug_fence = crate::query::pl_debug::drain_connection(self, connection_id, "connection_removed").await?;
         self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
+        #[allow(unused_mut)]
         let mut removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
         #[cfg(feature = "mq-admin")]
@@ -7881,6 +7884,7 @@ impl AppState {
         let debug_fence = crate::query::pl_debug::drain_connection(self, connection_id, "connection_removed").await?;
         self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
+        #[allow(unused_mut)]
         let mut removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
         #[cfg(feature = "mq-admin")]

@@ -34,6 +34,11 @@ import type { ConnectionConfig, TreeNode } from "@/types/database";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatRowsAsSpreadsheetTsv } from "@/lib/common/tableClipboard";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import { createDatabaseCollationOptionsForCharset, parseCreateDatabaseCharsetMetadata, type CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import { editableDatabasePropertyGroups } from "@/lib/database/databasePropertyEditing";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { MYSQL_CHARACTER_SETS_SQL, MYSQL_COLLATIONS_SQL, mysqlTableCharsetFromCollation, mysqlTableCollationBelongsToCharset } from "@/lib/table/mysqlTableCollation";
 
 type DatabaseRow = {
   name: string;
@@ -302,6 +307,135 @@ function displayValue(row: DatabaseRow, key: DatabaseBrowserColumnKey): string {
   if (key === "defaultCharset") return row.defaultCharset || "";
   if (key === "defaultCollation") return row.defaultCollation || "";
   return row.comment || "";
+}
+
+// ---- MySQL 数据库默认字符集 / 排序规则：下拉选择后执行 ALTER DATABASE ----
+const mysqlCharsetMetadata = ref<CreateDatabaseCharsetMetadata | undefined>();
+const mysqlCharsetMetadataLoading = ref(false);
+const mysqlCharsetMetadataError = ref("");
+let mysqlCharsetMetadataRequestId = 0;
+/** 同一时刻只允许打开一个下拉，避免虚拟滚动复用行时残留多个浮层。 */
+const mysqlCharsetMenuTarget = ref<{ database: string; kind: "charset" | "collation" } | null>(null);
+const mysqlCharsetOptions = computed<string[]>(() => mysqlCharsetMetadata.value?.charsets ?? []);
+const mysqlCharsetChangeTarget = ref<{ row: DatabaseRow; charset: string; collation: string } | null>(null);
+const mysqlCharsetChangeSql = ref("");
+const showMysqlCharsetChangeConfirm = ref(false);
+const mysqlCharsetChangeExecuting = ref(false);
+const mysqlCharsetChangeLabel = computed(() => (mysqlCharsetChangeTarget.value ? `\`${mysqlCharsetChangeTarget.value.row.name}\`` : ""));
+
+function canChangeDatabaseCharset(row: DatabaseRow): boolean {
+  return editableDatabasePropertyGroups(props.connection, { type: "database", database: row.name }).includes("charsetCollation");
+}
+
+function mysqlCollationOptionsForCharset(charset: string): string[] {
+  const metadata = mysqlCharsetMetadata.value;
+  if (!metadata) return [];
+  // 统计信息里没有数据库排序规则时，退回全量列表，选中后由排序规则反推字符集。
+  if (!charset.trim()) return Array.from(new Set(Object.values(metadata.collationsByCharset).flat()));
+  return createDatabaseCollationOptionsForCharset(charset, metadata.collationsByCharset);
+}
+
+async function loadMysqlCharsetMetadata(force = false) {
+  if (!force && (mysqlCharsetMetadataLoading.value || mysqlCharsetMetadata.value)) return;
+  const requestId = ++mysqlCharsetMetadataRequestId;
+  mysqlCharsetMetadataLoading.value = true;
+  mysqlCharsetMetadataError.value = "";
+  try {
+    await connectionStore.ensureConnected(props.connection.id);
+    const [charsetResult, collationResult] = await Promise.all([api.executeQuery(props.connection.id, "", MYSQL_CHARACTER_SETS_SQL, undefined, undefined, { maxRows: 1000 }), api.executeQuery(props.connection.id, "", MYSQL_COLLATIONS_SQL, undefined, undefined, { maxRows: 10000 })]);
+    if (requestId !== mysqlCharsetMetadataRequestId) return;
+    mysqlCharsetMetadata.value = parseCreateDatabaseCharsetMetadata(charsetResult, collationResult);
+  } catch (e: any) {
+    if (requestId !== mysqlCharsetMetadataRequestId) return;
+    mysqlCharsetMetadataError.value = translateBackendError(t, e);
+  } finally {
+    if (requestId === mysqlCharsetMetadataRequestId) mysqlCharsetMetadataLoading.value = false;
+  }
+}
+
+function setMysqlCharsetMenuOpen(row: DatabaseRow, kind: "charset" | "collation", open: boolean) {
+  const current = mysqlCharsetMenuTarget.value;
+  mysqlCharsetMenuTarget.value = open ? { database: row.name, kind } : current?.database === row.name && current?.kind === kind ? null : current;
+  if (open) void loadMysqlCharsetMetadata();
+}
+
+async function openMysqlCharsetChangeConfirm(row: DatabaseRow, charset: string, collation: string) {
+  const sql = await api
+    .buildUpdateDatabasePropertiesSql({
+      databaseType: props.connection.db_type,
+      driverProfile: props.connection.driver_profile,
+      target: "database",
+      name: row.name,
+      charset,
+      collation,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+    })
+    .catch(() => "");
+  if (!sql) {
+    toast(t("databaseBrowser.charsetChangeInvalid"), 5000);
+    return;
+  }
+  mysqlCharsetChangeSql.value = sql;
+  mysqlCharsetChangeTarget.value = { row, charset, collation };
+  showMysqlCharsetChangeConfirm.value = true;
+}
+
+/** 换字符集时保留仍然合法的排序规则，否则退回该字符集的默认排序规则（服务端返回的首项）。 */
+function mysqlCollationForCharset(row: DatabaseRow, charset: string): string {
+  const current = (row.defaultCollation ?? "").trim();
+  if (current && mysqlTableCollationBelongsToCharset(current, charset)) return current;
+  return mysqlCollationOptionsForCharset(charset)[0] ?? "";
+}
+
+function selectMysqlDatabaseCharset(row: DatabaseRow, charset: string) {
+  mysqlCharsetMenuTarget.value = null;
+  const next = charset.trim();
+  if (!next) return;
+  const collation = mysqlCollationForCharset(row, next);
+  if (next.toLowerCase() === (row.defaultCharset ?? "").trim().toLowerCase() && collation.toLowerCase() === (row.defaultCollation ?? "").trim().toLowerCase()) return;
+  void openMysqlCharsetChangeConfirm(row, next, collation);
+}
+
+function selectMysqlDatabaseCollation(row: DatabaseRow, collation: string) {
+  mysqlCharsetMenuTarget.value = null;
+  const next = collation.trim();
+  if (!next || next.toLowerCase() === (row.defaultCollation ?? "").trim().toLowerCase()) return;
+  const charset = (row.defaultCharset ?? "").trim() || mysqlTableCharsetFromCollation(next);
+  if (!charset) return;
+  void openMysqlCharsetChangeConfirm(row, charset, next);
+}
+
+async function confirmMysqlDatabaseCharsetChange() {
+  const target = mysqlCharsetChangeTarget.value;
+  if (!target || mysqlCharsetChangeExecuting.value || !mysqlCharsetChangeSql.value) return;
+  mysqlCharsetChangeExecuting.value = true;
+  try {
+    // Library-level charset/collation edits are DDL. Route them through the same
+    // production gate the sidebar database-properties editor uses, so a
+    // production target cannot be altered from a one-click dropdown.
+    const executed = await executeWithProductionSqlGuard({
+      connection: props.connection,
+      database: target.row.name,
+      sql: mysqlCharsetChangeSql.value,
+      source: t("production.sourceObjectBrowser"),
+      execute: async () => {
+        await api.executeQuery(props.connection.id, target.row.name, mysqlCharsetChangeSql.value);
+        return true;
+      },
+    });
+    // The guard declined (production confirmation cancelled, or the connection
+    // is read-only): the DDL was never sent, so report nothing as a success.
+    if (executed !== true) return;
+    toast(t("databaseBrowser.charsetChangeSuccess", { name: target.row.name, charset: target.charset, collation: target.collation }), 3000);
+    showMysqlCharsetChangeConfirm.value = false;
+    mysqlCharsetChangeTarget.value = null;
+    await refresh();
+    await connectionStore.loadDatabases?.(props.connection.id, { force: true }).catch(() => {});
+  } catch (e: any) {
+    toast(t("databaseBrowser.charsetChangeFailed", { message: translateBackendError(t, e) }), 5000);
+  } finally {
+    mysqlCharsetChangeExecuting.value = false;
+  }
 }
 
 function databaseBrowserCopyColumns() {
@@ -811,8 +945,56 @@ defineExpose({ focusSearch, refresh });
                   :class="{ 'flex items-center gap-2 text-[13px] font-medium text-foreground': key === 'name', 'tabular-nums': key === 'sizeBytes' || key === 'createdAt' || key === 'updatedAt' }"
                   :title="displayValue(row, key)"
                 >
-                  <Database v-if="key === 'name'" class="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                  {{ displayValue(row, key) || "-" }}
+                  <Popover
+                    v-if="(key === 'defaultCharset' || key === 'defaultCollation') && canChangeDatabaseCharset(row)"
+                    :open="mysqlCharsetMenuTarget?.database === row.name && mysqlCharsetMenuTarget?.kind === (key === 'defaultCharset' ? 'charset' : 'collation')"
+                    @update:open="setMysqlCharsetMenuOpen(row, key === 'defaultCharset' ? 'charset' : 'collation', $event)"
+                  >
+                    <PopoverTrigger as-child>
+                      <button type="button" class="flex h-6 w-full min-w-0 items-center gap-1 truncate rounded px-1 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground" :title="columnLabel(key)" data-database-charset-trigger @click.stop @dblclick.stop>
+                        <span class="truncate">{{ displayValue(row, key) || "—" }}</span>
+                        <ChevronDown class="h-3 w-3 shrink-0 opacity-60" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent align="start" class="w-64 p-1" @click.stop @dblclick.stop>
+                      <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ columnLabel(key) }}</div>
+                      <div v-if="mysqlCharsetMetadataLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+                        <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                        {{ t("common.loading") }}
+                      </div>
+                      <div v-else-if="mysqlCharsetMetadataError" class="space-y-2 px-2 py-2 text-xs text-destructive">
+                        <p class="whitespace-normal leading-4">{{ mysqlCharsetMetadataError }}</p>
+                        <Button variant="outline" size="sm" class="h-7 w-full text-xs" @click="loadMysqlCharsetMetadata(true)">{{ t("objects.engineLoadRetry") }}</Button>
+                      </div>
+                      <div v-else class="max-h-64 overflow-auto">
+                        <template v-if="key === 'defaultCharset'">
+                          <button v-for="charset in mysqlCharsetOptions" :key="charset" type="button" class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :data-database-charset-option="charset" @click="selectMysqlDatabaseCharset(row, charset)">
+                            <Check v-if="(row.defaultCharset || '').toLowerCase() === charset.toLowerCase()" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                            <span v-else class="h-3.5 w-3.5 shrink-0" />
+                            <span class="truncate">{{ charset }}</span>
+                          </button>
+                        </template>
+                        <template v-else>
+                          <button
+                            v-for="collation in mysqlCollationOptionsForCharset(row.defaultCharset || '')"
+                            :key="collation"
+                            type="button"
+                            class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent"
+                            :data-database-collation-option="collation"
+                            @click="selectMysqlDatabaseCollation(row, collation)"
+                          >
+                            <Check v-if="(row.defaultCollation || '').toLowerCase() === collation.toLowerCase()" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                            <span v-else class="h-3.5 w-3.5 shrink-0" />
+                            <span class="truncate">{{ collation }}</span>
+                          </button>
+                        </template>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                  <template v-else>
+                    <Database v-if="key === 'name'" class="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                    {{ displayValue(row, key) || "-" }}
+                  </template>
                 </div>
               </div>
             </CustomContextMenu>
@@ -859,6 +1041,15 @@ defineExpose({ focusSearch, refresh });
         </div>
       </div>
     </div>
+    <DangerConfirmDialog
+      v-model:open="showMysqlCharsetChangeConfirm"
+      :title="t('databaseBrowser.charsetChangeTitle')"
+      :message="t('databaseBrowser.charsetChangeMessage', { name: mysqlCharsetChangeLabel, charset: mysqlCharsetChangeTarget?.charset ?? '', collation: mysqlCharsetChangeTarget?.collation || '—' })"
+      :sql="mysqlCharsetChangeSql"
+      :loading="mysqlCharsetChangeExecuting"
+      :confirm-label="t('databaseBrowser.charsetChangeConfirm')"
+      @confirm="confirmMysqlDatabaseCharsetChange"
+    />
     <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
     <SidebarTreeRuntimeHost
       ref="sidebarRuntimeHost"

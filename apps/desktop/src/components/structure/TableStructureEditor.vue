@@ -113,7 +113,7 @@ import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { applyDdlDatabaseQualifier, formatDdlForDisplay, formatGeneratedDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard, eventTargetUsesNativeClipboard, isPlainClipboardShortcut } from "@/lib/common/clipboard";
-import { structureRowClickTargetOwnsFocus } from "@/lib/table/structureRowClickFocus";
+import { structureRowClickTargetOwnsFocus, structureRowClosestControl } from "@/lib/table/structureRowClickFocus";
 import { formatTsv } from "@/lib/export/exportFormats";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
@@ -4733,6 +4733,12 @@ function onColumnRowMouseDown(event: MouseEvent) {
   if (event.button === 0) {
     columnContextMenuButton = null;
     columnContextMenuCtrlKey = false;
+    // On macOS WebKit, <button> is not mouse-focusable, so mousedown on a popup
+    // trigger inside a focusable scroller moves focus to the scroller instead
+    // and triggers Reka DismissableLayer focusOutside on popovers/menus (#15596).
+    if (!event.ctrlKey && structureRowClosestControl(event.target, "[aria-haspopup]")) {
+      event.preventDefault();
+    }
   } else {
     columnContextMenuButton = event.button;
     columnContextMenuCtrlKey = event.ctrlKey;
@@ -4757,7 +4763,7 @@ function onColumnRowClick(column: EditableStructureColumn, event: MouseEvent) {
   // Focus the scroller only for inert cell content, so the row clipboard shortcuts keep
   // acting on the table. A control under the pointer must keep focus: moving it to the
   // scroller dismissed the dropdown/popover that the same click had just opened, because
-  // reka's popover and dropdown layers close on focus-outside (#15585).
+  // reka's popover and dropdown layers close on focus-outside (#15585, #15596).
   if (!eventTargetUsesNativeClipboard(event) && !structureRowClickTargetOwnsFocus(event.target)) structureScrollerElement(columnsScrollerRef.value)?.focus({ preventScroll: true });
   if (event.shiftKey) {
     selectColumnRangeFromAnchor(column);
@@ -8814,7 +8820,7 @@ watch(
             <CustomContextMenu :items="activeColumnContextMenuItems" @close="clearColumnContextMenuTarget" v-slot="columnContextMenuSlot">
               <RecycleScroller
                 ref="columnsScrollerRef"
-                class="structure-column-virtual-scroller structure-table-scroller h-full overflow-auto"
+                class="structure-column-virtual-scroller structure-table-scroller h-full overflow-auto outline-none"
                 :style="{
                   '--structure-column-table-width': columnTableWidth + 'px',
                   '--structure-column-row-height': structureColumnRowHeight + 'px',
@@ -8831,7 +8837,7 @@ watch(
                 key-field="id"
                 item-class="structure-column-virtual-row"
                 list-class="structure-column-virtual-list"
-                tabindex="0"
+                tabindex="-1"
                 @keydown="onColumnGridKeydown"
                 @paste="onColumnGridPaste"
                 @scroll.passive="onStructureContentScroll('columns', $event)"

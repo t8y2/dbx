@@ -3321,9 +3321,6 @@ export default withEnglishFallback({
     packyapiSponsored: "$1 pulsuz kredit",
     packyapiDescription:
       "⚡ PackyCode — aparıcı AI modelləri üçün stabil API releyidir: bir uç nöqtə, bir açar, avtomatik faylover və Codex/Claude Code üçün xüsusi sürətli marşrutlar.\n🎁 Yeni istifadəçilər $1 pulsuz kredit və ilk dolduruş endirimi alır; RMB ilə 1:1 ödəniş, qrup endirimləri 80%-ə qədər.",
-    hiapiSponsored: "200 pulsuz Credits",
-    hiapiDescription:
-      "HiAPI; şəkil, video, səs və mətn modelləri üçün tərtibatçı yönümlü API platformasıdır. Mətn modelləri OpenAI ilə uyğun uç nöqtələrdən istifadə edir, Remote MCP və Agent Skills isə eyni hesabı Claude Code, Cursor və digər kodlaşdırma agentlərinə qoşur.\n🎁 Yeni istifadəçilər qeydiyyatda 200 Credits, dolduruşlarda isə 10% əlavə Credits qazanır.",
     visitPartner: "Tərəfdaşın saytına keç",
     getApiKey: "API açarı əldə et",
     defaultModel: "Standart model",

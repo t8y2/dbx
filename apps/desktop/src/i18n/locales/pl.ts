@@ -3691,9 +3691,6 @@ export default withEnglishFallback({
       "    Oficjalny przekaźnik modeli dla zaawansowanych programistów AI! W 100% autentyczne serie Codex i Claude z weryfikowalnym rozliczaniem na poziomie tokenów, umowami korporacyjnymi i fakturami.\n Zarejestruj się z kodem promocyjnym DBX&HUALONG, aby otrzymać 1 $ darmowego kredytu!",
     astraflowDescription: "AstraFlow firmy UCloud udostępnia ponad 200 popularnych modeli AI za pomocą jednego klucza API zgodnego z OpenAI API.",
     astraflowSponsored: "¥50 bezpłatnych środków",
-    hiapiSponsored: "200 darmowych kredytów",
-    hiapiDescription:
-      "HiAPI to platforma API dla programistów obsługująca modele obrazu, wideo, dźwięku i tekstu. Modele tekstowe korzystają z interfejsów zgodnych z OpenAI, a Remote MCP i Agent Skills pozwalają używać tego samego konta w Claude Code, Cursor i innych agentach programistycznych.\n🎁 Nowi użytkownicy otrzymują 200 kredytów przy rejestracji oraz do 12% dodatkowych kredytów przy pierwszym doładowaniu.",
     visitPartner: "Odwiedź stronę partnera",
     getApiKey: "Uzyskaj klucz API",
     defaultModel: "Model domyślny",

@@ -3754,6 +3754,16 @@ function refreshGridScrollerMetrics() {
   scheduleVisibleLargeValuePreviewHydration();
 }
 
+let scrollerMetricsRefreshFrame: number | null = null;
+
+function scheduleScrollerMetricsRefresh() {
+  if (!gridScrollbarsRuntime.active || scrollerMetricsRefreshFrame !== null) return;
+  scrollerMetricsRefreshFrame = requestAnimationFrame(() => {
+    scrollerMetricsRefreshFrame = null;
+    if (gridScrollbarsRuntime.active) refreshGridScrollerMetrics();
+  });
+}
+
 let columnLayoutRefreshFrame = 0;
 function scheduleColumnLayoutRefresh() {
   if (columnLayoutRefreshFrame) return;
@@ -6719,13 +6729,7 @@ const hasVisibleRows = computed(() => displayRowCount.value > 0);
 const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !replaceOpen.value && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value || hasServerColumnFilters.value);
 const emptyTitle = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRows") : t("grid.noRows")));
 const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription")));
-watch(
-  () => [hasVisibleRows.value, props.result.columns.length] as const,
-  () => {
-    nextTick(refreshGridScrollerMetrics);
-  },
-  { immediate: true },
-);
+watch([hasVisibleRows, () => props.result.columns.length], scheduleScrollerMetricsRefresh, { flush: "post", immediate: true });
 const isErrorResult = computed(() => isQueryExecutionErrorResult(props.result) && props.result.rows.length > 0);
 const errorMessage = computed(() => (isErrorResult.value ? String(props.result.rows[0]?.[0] ?? "") : ""));
 // --- Selection composable ---
@@ -8961,16 +8965,9 @@ const { elapsedMs: resultViewUpdateMs, canvasDrawCompleted: completeResultCanvas
   () => (useCanvasGridRows.value ? "canvas" : "dom"),
 );
 
-watch(
-  () => [totalWidth.value, displayRowCount.value, useCanvasGridRows.value, props.result.columns.join("\u0000")],
-  () => {
-    nextTick(() => {
-      refreshGridScrollerMetrics();
-      observeGridHorizontalScrollbarScroller();
-    });
-  },
-  { flush: "post" },
-);
+// Width reads can force a full WebKit layout. Coalesce result changes outside
+// Vue's flush so the refresh cannot keep re-entering the same render cycle.
+watch([totalWidth, displayRowCount, useCanvasGridRows, () => props.result.columns.join("\u0000")], scheduleScrollerMetricsRefresh, { flush: "post" });
 
 function canvasScrollerElement(): HTMLElement | null {
   const scroller = scrollerRef.value;
@@ -9828,6 +9825,8 @@ function pauseCanvasGridWork() {
   lastPresentedCanvasBackingKey = null;
   stopCanvasResizeTracking();
   gridScrollbarsRuntime.pause();
+  if (scrollerMetricsRefreshFrame !== null) cancelAnimationFrame(scrollerMetricsRefreshFrame);
+  scrollerMetricsRefreshFrame = null;
   disconnectCellEditResizeObserver();
   dataGridTopbarResizeObserver?.disconnect();
   dataGridTopbarResizeObserver = null;
@@ -9851,8 +9850,7 @@ function resumeCanvasGridWork() {
     attachCanvasResizeObserver();
     observeDataGridTopbarWidth();
     observeTransposeViewport();
-    refreshGridScrollerMetrics();
-    observeGridHorizontalScrollbarScroller();
+    scheduleScrollerMetricsRefresh();
   });
 }
 

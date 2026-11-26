@@ -71,12 +71,15 @@ impl HostObservationBus {
         &self.interest
     }
 
-    /// Whether any observer asked for events of `kind`'s category. Taps call
-    /// this before building a payload; one atomic load plus a registry lookup.
-    /// Unregistered kinds report `false` (fail closed).
+    /// Whether an observer asked for events of `kind`'s category AND a
+    /// receiver is attached to deliver them. Taps call this before building a
+    /// payload, so a category nobody can receive (for example a sidecar that
+    /// declared `host.observe:*` in a shell without a bridge) costs nothing;
+    /// one atomic load plus a registry lookup. Unregistered kinds report
+    /// `false` (fail closed).
     pub fn is_enabled(&self, kind: &str) -> bool {
         match HostObservationEvent::category_for_kind(kind) {
-            Some(category) => self.interest.has(category),
+            Some(category) => self.interest.has(category) && self.sender.receiver_count() > 0,
             None => false,
         }
     }
@@ -92,11 +95,11 @@ impl HostObservationBus {
         database: Option<String>,
         mut payload: serde_json::Value,
     ) -> bool {
-        // Two independent gates: an observer must have registered interest in
-        // this category (the bridges keep receivers attached for the whole
-        // process, so a receiver count is not evidence of interest), and a
-        // receiver must actually be attached to deliver to.
-        if !self.is_enabled(kind) || self.sender.receiver_count() == 0 {
+        // Two independent gates, both inside `is_enabled`: an observer must
+        // have registered interest in this category (the bridges keep receivers
+        // attached for the whole process, so a receiver count is not evidence
+        // of interest), and a receiver must actually be attached to deliver to.
+        if !self.is_enabled(kind) {
             return false;
         }
         cap_observation_payload(&mut payload);
@@ -283,6 +286,19 @@ mod tests {
         assert!(!bus.is_enabled(KIND_AI_TEXT_DELTA));
     }
 
+    /// A sidecar can register interest in a shell that never attaches a bridge
+    /// receiver (web, MCP, CLI); taps must not build payloads nobody can get.
+    #[test]
+    fn interest_without_a_receiver_does_not_enable_publishing() {
+        let bus = HostObservationBus::new();
+        observe(&bus, "backend:plugin#1", OBSERVE_QUERIES_PERMISSION);
+        assert!(!bus.is_enabled(KIND_QUERY_STARTED));
+        assert!(!bus.publish(KIND_QUERY_STARTED, None, None, serde_json::json!({})));
+
+        let _receiver = bus.subscribe();
+        assert!(bus.is_enabled(KIND_QUERY_STARTED));
+    }
+
     #[test]
     fn unregistered_kinds_stay_disabled_even_with_interest() {
         let bus = HostObservationBus::new();
@@ -295,6 +311,7 @@ mod tests {
     #[test]
     fn interest_is_refcounted_per_owner_and_released() {
         let bus = HostObservationBus::new();
+        let _receiver = bus.subscribe();
         observe(&bus, "ui:1", OBSERVE_QUERIES_PERMISSION);
         observe(&bus, "ui:2", OBSERVE_QUERIES_PERMISSION);
         assert_eq!(bus.interest().count(ObservationCategory::Queries), 2);
@@ -318,6 +335,7 @@ mod tests {
     #[test]
     fn interest_can_change_categories_on_acquire() {
         let bus = HostObservationBus::new();
+        let _receiver = bus.subscribe();
         observe(&bus, "plugin:observer", OBSERVE_QUERIES_PERMISSION);
         bus.interest()
             .acquire("plugin:observer", &[OBSERVE_AI_PERMISSION.to_string(), OBSERVE_PLUGINS_PERMISSION.to_string()]);

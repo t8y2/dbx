@@ -76,6 +76,13 @@ describe("PluginHostBridge.forwardObservation", () => {
     expect(plainMessages[plainMessages.length - 1]).toMatchObject({ type: "init", capabilities: { observations: false } });
   });
 
+  it("does not advertise observations to a plugin that declared no observe permission", () => {
+    const messages: unknown[] = [];
+    const undeclared = new PluginHostBridge(plugin(["host.events"]), workbench, {}, () => messagesTarget(messages), minimalApi({ subscribeHostObservations: () => () => {} }));
+    undeclared.sendInit();
+    expect(messages[messages.length - 1]).toMatchObject({ type: "init", capabilities: { observations: false } });
+  });
+
   it("forwards drop gaps to any plugin that declared an observation permission", () => {
     const messages: unknown[] = [];
     const bridge = new PluginHostBridge(plugin(["host.observe:transfers"]), workbench, {}, () => messagesTarget(messages), minimalApi());

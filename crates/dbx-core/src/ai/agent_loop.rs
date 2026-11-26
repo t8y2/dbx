@@ -201,6 +201,12 @@ struct AgentObservationTap {
 }
 
 impl AgentObservationTap {
+    /// Whether any plugin observes AI events. Gates work that exists only for
+    /// observation, so an unobserved run behaves exactly as before.
+    fn is_enabled(&self) -> bool {
+        self.observations.is_enabled(KIND_AI_ERROR)
+    }
+
     fn observe(&self, event: &AgentEvent) {
         // Fast path: every token delta lands here, so skip all payload work
         // unless a plugin actually observes AI events.
@@ -388,8 +394,9 @@ pub async fn run_agent_loop(
     // The terminal observation carries the loop's authoritative final text, so
     // a repair-exhaustion re-emission cannot duplicate the answer. Cancellation
     // is read from the run's explicit error, not only from the token: the
-    // runner usually consumed the single `Notify` permit while waiting.
-    let cancel_probe = cancelled.notified().now_or_never().is_some();
+    // runner usually consumed the single `Notify` permit while waiting. The
+    // probe consumes a stored permit, so it only runs when someone observes.
+    let cancel_probe = observation_tap.is_enabled() && cancelled.notified().now_or_never().is_some();
     let outcome = result.as_deref().map_err(|error| error.as_str());
     observation_tap.finish(outcome, outcome_was_cancelled(outcome, cancel_probe));
     result

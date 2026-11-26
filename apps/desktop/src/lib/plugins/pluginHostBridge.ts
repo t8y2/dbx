@@ -557,9 +557,10 @@ export class PluginHostBridge {
         },
         [PLUGIN_CONNECTIONS_CAPABILITY]: !!this.api.listConnections || !!this.api.listAllConnections,
         [PLUGIN_CONNECTION_EDIT_CAPABILITY]: !!this.api.connectionEditor && this.hasPermission(PLUGIN_CONNECTION_EDIT_PERMISSION),
-        // Host observation bus: one flag; each event is still filtered by
-        // the matching host.observe:* permission in forwardObservation.
-        observations: !!this.api.subscribeHostObservations,
+        // Host observation bus: advertised only to a plugin that declared a
+        // host.observe:* permission on a host that can subscribe; each event is
+        // still filtered by the matching permission in forwardObservation.
+        observations: !!this.api.subscribeHostObservations && declaresAnyObservationPermission(this.plugin.manifest.permissions),
       },
       context: snapshotPluginWorkbenchContext(this.context),
     });

@@ -31,6 +31,36 @@ const OBSERVATION_QUEUE_CAPACITY: usize = 256;
 /// Notification method used to report dropped events to a sidecar observer.
 const OBSERVATION_GAP_METHOD: &str = "host/observation_gap";
 
+/// Write one observation notification to a sidecar. Returns `false` once the
+/// session was stopped and its worker must exit.
+///
+/// Every write goes through here so a timeout always has the same containment:
+/// dropping the in-flight `write_all` can leave a partial JSONL frame in the
+/// sidecar's stdin pipe, and every later frame (events and gap notices alike)
+/// would splice onto that fragment. Stopping the stalled session is the only
+/// safe containment; observers see it as `plugin.stopped`. Other observers are
+/// unaffected because each has its own worker.
+async fn deliver_observation(session: &PluginSidecarSession, method: &str, params: serde_json::Value) -> bool {
+    let plugin_id = session.plugin().manifest.id.clone();
+    match tokio::time::timeout(OBSERVATION_NOTIFY_TIMEOUT, session.notify(method, params, None)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            log::debug!("Failed to deliver host observation to plugin '{plugin_id}': {error}");
+            true
+        }
+        Err(_) => {
+            log::warn!(
+                "Host observation to plugin '{plugin_id}' timed out after {OBSERVATION_NOTIFY_TIMEOUT:?}; \
+                 stopping its session to avoid a corrupted stdin frame"
+            );
+            if let Err(stop_error) = session.shutdown().await {
+                log::warn!("Failed to stop stalled plugin '{plugin_id}' after observation timeout: {stop_error}");
+            }
+            false
+        }
+    }
+}
+
 /// One queued delivery for a single observer.
 enum ObservationDelivery {
     Event { method: String, params: serde_json::Value },
@@ -499,55 +529,21 @@ impl PluginHost {
                 let skipped = dropped.swap(0, std::sync::atomic::Ordering::Relaxed);
                 if skipped > 0 {
                     let gap = serde_json::json!({ "skipped": skipped });
-                    let _ = tokio::time::timeout(
-                        OBSERVATION_NOTIFY_TIMEOUT,
-                        worker_session.notify(OBSERVATION_GAP_METHOD, gap, None),
-                    )
-                    .await;
+                    if !deliver_observation(&worker_session, OBSERVATION_GAP_METHOD, gap).await {
+                        return;
+                    }
                 }
-                match delivery {
+                let delivered = match delivery {
                     ObservationDelivery::Gap { skipped } => {
                         let gap = serde_json::json!({ "skipped": skipped });
-                        let _ = tokio::time::timeout(
-                            OBSERVATION_NOTIFY_TIMEOUT,
-                            worker_session.notify(OBSERVATION_GAP_METHOD, gap, None),
-                        )
-                        .await;
+                        deliver_observation(&worker_session, OBSERVATION_GAP_METHOD, gap).await
                     }
                     ObservationDelivery::Event { method, params } => {
-                        let plugin_id = worker_session.plugin().manifest.id.clone();
-                        match tokio::time::timeout(
-                            OBSERVATION_NOTIFY_TIMEOUT,
-                            worker_session.notify(&method, params, None),
-                        )
-                        .await
-                        {
-                            Ok(Ok(())) => {}
-                            Ok(Err(error)) => {
-                                log::debug!("Failed to deliver host observation to plugin '{plugin_id}': {error}");
-                            }
-                            Err(_) => {
-                                // Cancel-safety containment: dropping the
-                                // in-flight `write_all` can leave a partial
-                                // JSONL frame in the sidecar's stdin pipe, and
-                                // every later frame would splice onto that
-                                // fragment. Stopping the stalled session is the
-                                // only safe containment; observers see it as
-                                // `plugin.stopped`. Other observers are
-                                // unaffected because each has its own worker.
-                                log::warn!(
-                                    "Host observation to plugin '{plugin_id}' timed out after {OBSERVATION_NOTIFY_TIMEOUT:?}; \
-                                     stopping its session to avoid a corrupted stdin frame"
-                                );
-                                if let Err(stop_error) = worker_session.shutdown().await {
-                                    log::warn!(
-                                        "Failed to stop stalled plugin '{plugin_id}' after observation timeout: {stop_error}"
-                                    );
-                                }
-                                return;
-                            }
-                        }
+                        deliver_observation(&worker_session, &method, params).await
                     }
+                };
+                if !delivered {
+                    return;
                 }
             }
         });

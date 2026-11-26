@@ -2430,7 +2430,10 @@ function maskMongoLiterals(text: string): string {
   const parts: string[] = [];
   let start = 0;
   for (const [from, to] of ranges) {
-    parts.push(text.slice(start, from), text.slice(from, to).replace(/[^\n]+/g, (run) => " ".repeat(run.length)));
+    parts.push(
+      text.slice(start, from),
+      text.slice(from, to).replace(/[^\n]+/g, (run) => " ".repeat(run.length)),
+    );
     start = to;
   }
   parts.push(text.slice(start));

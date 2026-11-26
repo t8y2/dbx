@@ -568,23 +568,36 @@ describe("QueryEditor completion Tab keymap", () => {
   });
 
   it("triggers completion on Alt+/ through the manual shortcut and skips while composing", () => {
-    const source = [extractDeclaration(/const COMPLETION_DEBOUNCE_DELAY_MS = \d+;/, "completion debounce delay"), "let imeCompositionActive = false;", "let imeCompositionRecovered = false;", extractFunction("isEditorComposing"), extractFunction("triggerSqlCompletion")].join("\n");
+    const source = [
+      "let imeCompositionActive = false;",
+      "let imeCompositionRecovered = false;",
+      'let activeCompletionOrigin: "typing" | "explicit" = "typing";',
+      "let typedCompletionActivationUntil = Number.POSITIVE_INFINITY;",
+      extractFunction("isEditorComposing"),
+      extractFunction("triggerSqlCompletion"),
+    ].join("\n");
     const javascript = ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
     }).outputText;
-    const factory = new Function("codeMirrorStartCompletion", `const runtime = { codeMirrorStartCompletion };\n${javascript}\nreturn { triggerSqlCompletion, isEditorComposing };`);
+    const factory = new Function("codeMirrorStartCompletion", "clearDeferredCompletionTrigger", `const runtime = { codeMirrorStartCompletion };\n${javascript}\nreturn { triggerSqlCompletion, getActivation: () => ({ activeCompletionOrigin, typedCompletionActivationUntil }) };`);
     const startCompletion = vi.fn(() => true);
-    const { triggerSqlCompletion } = factory(startCompletion) as {
+    const clearDeferredCompletionTrigger = vi.fn();
+    const { triggerSqlCompletion, getActivation } = factory(startCompletion, clearDeferredCompletionTrigger) as {
       triggerSqlCompletion: (view: MockView) => boolean;
+      getActivation: () => { activeCompletionOrigin: string; typedCompletionActivationUntil: number };
     };
     const view = createView();
 
     expect(triggerSqlCompletion(view)).toBe(true);
+    expect(clearDeferredCompletionTrigger).toHaveBeenCalledOnce();
     expect(startCompletion).toHaveBeenCalledWith(view);
+    expect(getActivation()).toEqual({ activeCompletionOrigin: "explicit", typedCompletionActivationUntil: 0 });
 
     startCompletion.mockClear();
+    clearDeferredCompletionTrigger.mockClear();
     (view as MockView & { composing: boolean }).composing = true;
     expect(triggerSqlCompletion(view)).toBe(false);
+    expect(clearDeferredCompletionTrigger).not.toHaveBeenCalled();
     expect(startCompletion).not.toHaveBeenCalled();
   });
 });

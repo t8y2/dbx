@@ -2124,6 +2124,20 @@ export interface SqlTextSpan {
   end_column: number;
 }
 
+export interface SqlSyntaxDiagnostic {
+  message: string;
+  severity: "error" | "warning";
+  span: SqlTextSpan;
+  expected?: string[];
+  found?: string;
+}
+
+export interface SqlEditorAnalysis {
+  references?: SqlReferenceAnalysis;
+  parserError?: string;
+  syntax: SqlSyntaxDiagnostic[];
+}
+
 export interface SqlTableReference {
   name: string;
   database?: string | null;

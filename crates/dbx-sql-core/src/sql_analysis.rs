@@ -1449,8 +1449,8 @@ fn normalize_clickhouse_join_order_for_parser(sql: &str) -> String {
 /// Both properties live together on purpose: adding a dialect to
 /// `normalize_dialect` forces a decision here instead of silently leaving the
 /// check off for it.
-struct NormalizedDialect {
-    id: &'static str,
+pub(crate) struct NormalizedDialect {
+    pub(crate) id: &'static str,
     scopes_qualifiers: bool,
 }
 
@@ -1468,7 +1468,7 @@ impl NormalizedDialect {
     }
 }
 
-fn normalize_dialect(dialect: Option<&str>) -> NormalizedDialect {
+pub(crate) fn normalize_dialect(dialect: Option<&str>) -> NormalizedDialect {
     match dialect.unwrap_or("generic").to_ascii_lowercase().as_str() {
         "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "highgo" | "uxdb" | "questdb" => {
             NormalizedDialect::scoped("postgres")

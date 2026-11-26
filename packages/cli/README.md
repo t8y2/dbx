@@ -70,6 +70,8 @@ dbx query local "select id, name from users" --format csv
 dbx query local "select * from users" --limit 50 --timeout 10s --json
 dbx query local --file ./query.sql --json
 dbx context local --tables users,orders
+dbx dbml local --out schema.dbml
+dbx docs local --out schema.html
 dbx open local users
 ```
 
@@ -87,6 +89,8 @@ dbx open local users
 | `dbx query <connection> <sql>`              | Execute one SQL statement                             |
 | `dbx query <connection> --file ./query.sql` | Execute SQL from a file                               |
 | `dbx context <connection>`                  | Print compact schema context for prompts              |
+| `dbx dbml <connection>`                     | Export the schema as DBML                             |
+| `dbx docs <connection>`                     | Export standalone HTML schema documentation           |
 | `dbx open <connection> <table>`             | Open a table in DBX Desktop                           |
 
 ## Output
@@ -129,7 +133,7 @@ Some CLI commands can run without DBX Desktop:
 - `query`
 - `context`
 
-Direct execution supports PostgreSQL/Redshift, MySQL-compatible databases (MySQL, Doris, StarRocks), and SQLite. Other database types use the DBX Desktop bridge or DBX Agent/JDBC infrastructure.
+The CLI binary currently lists PostgreSQL, Redshift, MySQL, Doris, StarRocks, Manticore Search, SQLite, rqlite, KWDB, and QuestDB as direct-query types; `dbx capabilities` is authoritative for the installed version. Other database types use the DBX Desktop bridge or DBX Agent/JDBC infrastructure.
 
 Use `dbx doctor` to check whether the DBX connection database, connection table, native SQLite loader, and desktop bridge are available. Use `dbx capabilities` to list direct-query and bridge-required database types.
 

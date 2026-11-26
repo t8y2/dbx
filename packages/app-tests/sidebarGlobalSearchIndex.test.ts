@@ -1,6 +1,6 @@
 import { expect, test, vi } from "vitest";
 import { collectSidebarGlobalSearchIndexes, sidebarIndexedObjectGroupTypes, type SidebarGlobalSearchIndexLoader } from "../../apps/desktop/src/lib/sidebar/sidebarGlobalSearchIndex.ts";
-import type { SidebarRegexIndexScope } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
+import { mergeSidebarRegexIndexScopes, type SidebarRegexIndexScope } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
 import { resolveSidebarSearchDatabaseScope } from "../../apps/desktop/src/lib/sidebar/sidebarSearchDatabaseScope.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
@@ -20,6 +20,57 @@ function fixture() {
   const run = (databaseScope: ReadonlySet<string> | null = null, shouldCancel = () => false) => collectSidebarGlobalSearchIndexes(loader, [root], "conn", databaseScope, shouldCancel);
   return { root, database, schema, tables, cached, loader, run };
 }
+
+test("indexes databases inside nested collapsed virtual folders", async () => {
+  const { root, database, tables, loader, run } = fixture();
+  const folder = (id: string, children: TreeNode[]): TreeNode => ({ id, type: "table-vgroup", label: id, vgroupKind: "databases", connectionId: "conn", isExpanded: false, children });
+  root.children = [folder("outer", [folder("inner", [database])])];
+  const result = await run();
+  expect(loader.loadIndex).toHaveBeenCalledExactlyOnceWith(tables);
+  expect(result[0].entries[0].name).toBe("late_table");
+  // Index paths contain metadata identities, not disposable UI folder identities.
+  expect(result[0].path?.some((node) => node.type === "table-vgroup")).toBe(false);
+  loader.loadIndex.mockClear();
+  await run(new Set(["conn:other"]));
+  expect(loader.loadIndex).not.toHaveBeenCalled();
+});
+
+test.each([false, true])("anchors old index paths to grouped live databases (unloaded descendants: %s)", (unloaded) => {
+  const { root, database, cached } = fixture();
+  if (unloaded) database.children = [];
+  root.children = [{ id: "folder", type: "table-vgroup", label: "Business", vgroupKind: "databases", connectionId: "conn", children: [database] }];
+  const before = structuredClone(root);
+  const merged = mergeSidebarRegexIndexScopes([root], [cached]);
+  expect(merged[0].children?.map((node) => node.id)).toEqual(["folder"]);
+  expect(merged[0].children?.[0].children?.[0].children?.[0].children?.[0].children?.[0].label).toBe("late_table");
+  expect(root).toEqual(before);
+});
+
+test.each(["hidden", "deleted", "moved"])("ignores stale virtual folder paths after a group is %s", (state) => {
+  const { root, database, cached } = fixture();
+  cached.path!.splice(1, 0, { id: "old-folder", type: "table-vgroup", label: "Old", connectionId: "conn" });
+  database.children = [];
+  if (state === "moved") root.children = [{ id: "new-folder", type: "table-vgroup", label: "New", vgroupKind: "databases", connectionId: "conn", children: [database] }];
+  const merged = mergeSidebarRegexIndexScopes([root], [cached]);
+  expect(merged[0].children?.map((node) => node.id)).toEqual([state === "moved" ? "new-folder" : database.id]);
+  const db = state === "moved" ? merged[0].children![0].children![0] : merged[0].children![0];
+  expect(db.children?.[0].children?.[0].children?.[0].label).toBe("late_table");
+});
+
+test("anchors same-named database indexes only to their matching catalog", () => {
+  const { root, database, cached } = fixture();
+  const databaseA: TreeNode = { ...database, id: "shared-db-id", catalog: "a", children: [] };
+  const databaseB: TreeNode = { ...database, id: "shared-db-id", catalog: "b", children: [] };
+  const catalogA: TreeNode = { id: "catalog-a", type: "doris-catalog", label: "A", connectionId: "conn", catalog: "a", children: [databaseA] };
+  const catalogB: TreeNode = { id: "catalog-b", type: "doris-catalog", label: "B", connectionId: "conn", catalog: "b", children: [{ id: "folder-b", type: "table-vgroup", label: "B group", vgroupKind: "databases", connectionId: "conn", catalog: "b", children: [databaseB] }] };
+  root.children = [catalogA, catalogB];
+  const scope: SidebarRegexIndexScope = { ...cached, catalog: "b", parentNodeId: "b-tables", path: [root, catalogB, databaseB, { id: "b-tables", type: "group-tables", label: "Tables", connectionId: "conn", database: "app", catalog: "b", schema: "public" }] };
+  const merged = mergeSidebarRegexIndexScopes([root], [scope]);
+  expect(merged[0].children![0].children![0].children).toEqual([]);
+  const groupedB = merged[0].children![1].children![0];
+  expect(groupedB.id).toBe("folder-b");
+  expect(groupedB.children![0].children![0].children![0].label).toBe("late_table");
+});
 
 test("builds a complete index once per leaf scope without loading table children", async () => {
   const { root, tables, loader, run } = fixture();

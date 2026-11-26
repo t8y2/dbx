@@ -95,10 +95,12 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
+import { handleTextInputCaseShortcut } from "@/lib/editor/textInputCaseShortcut";
 import { selectLineEndsDefaultShortcut, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { useSettingsStore, type StructureEditorDensity } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
+import { editorThemeAppearanceFor, resolveEditorThemeColors } from "@/lib/editor/editorThemeSettings";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { useToast } from "@/composables/useToast";
@@ -111,6 +113,7 @@ import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { applyDdlDatabaseQualifier, formatDdlForDisplay, formatGeneratedDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard, eventTargetUsesNativeClipboard, isPlainClipboardShortcut } from "@/lib/common/clipboard";
+import { structureRowClickTargetOwnsFocus, structureRowClosestControl } from "@/lib/table/structureRowClickFocus";
 import { formatTsv } from "@/lib/export/exportFormats";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
@@ -149,14 +152,14 @@ import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation
 import { PARTITION_TREE_INDENT_PX, flattenPgPartitionNodes, pgPartitionBoundText, pgPartitionKindLabelKey, pgPartitionNodeBoundText, pgPartitionRowHint, splitPgPartitionBoundValues, visiblePgPartitionRows, type PgPartitionTreeRow } from "@/lib/table/pgPartitionPresentation";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
-import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, localTableColumnDatabaseOrder, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 import { sortStructureIndexesByColumns, type StructureIndexColumnSort } from "@/lib/table/structureIndexSort";
 import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, normalizeUnsupportedConcurrentIndexes, type ConcurrentIndexAvailability } from "@/lib/table/concurrentIndexAvailability";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { postgresListRolesSql, usersFromPostgresRolesResult } from "@/lib/database/databaseUserAdmin";
-import type { CatalogInfo, ColumnInfo, ConnectionConfig, ConstraintInfo, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
+import type { CatalogInfo, ColumnInfo, ConnectionConfig, ConstraintInfo, ObjectSourceKind, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
   applyManticoreDdlColumnExtras,
   buildStructureTargetLabel,
@@ -224,7 +227,7 @@ import { EditorView } from "@codemirror/view";
 
 const ObjectSourceDialog = defineAsyncComponent(() => import("@/components/objects/ObjectSourceDialog.vue"));
 const { t } = useI18n();
-const { isDark, themePalette } = useTheme();
+const { isDark, themePalette, activeCustomUiColors } = useTheme();
 const store = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
 const queryStore = useQueryStore();
@@ -279,8 +282,8 @@ const props = defineProps<{
   catalog?: string;
   schema?: string;
   tableName: string;
-  /** `view` loads `CREATE OR REPLACE VIEW` instead of table DDL. */
-  tableType?: "table" | "view";
+  /** `view` and `materialized_view` load view-specific metadata instead of table DDL. */
+  tableType?: "table" | "view" | "materialized_view";
   initialTab?: TableInfoTab;
   initialTabRequestId?: number;
   initialTarget?: TableStructureEditorTarget;
@@ -475,7 +478,8 @@ async function initDdlEditor(content: string) {
   if (requestId !== ddlEditorInitRequestId || activeTab.value !== "ddl" || loading.value || ddlLoading.value || ddlEditorContainer.value !== container) return;
 
   const editorSettings = settingsStore.editorSettings;
-  const themeExt = await loadEditorTheme(editorSettings.theme, isDark.value ? "dark" : "light", undefined, themePalette.value);
+  const appAppearance = editorThemeAppearanceFor(isDark.value ? "dark" : "light", themePalette.value, themePalette.value === "custom" ? activeCustomUiColors.value : undefined);
+  const themeExt = await loadEditorTheme(editorSettings.theme, appAppearance, resolveEditorThemeColors(editorSettings), themePalette.value);
   if (requestId !== ddlEditorInitRequestId || activeTab.value !== "ddl" || loading.value || ddlLoading.value || ddlEditorContainer.value !== container) return;
 
   const fontExt = editorFontTheme(EditorView, editorSettings.fontSize, editorSettings.fontFamily, { fixedHeight: true, scrollable: true });
@@ -563,7 +567,7 @@ type StructureDdlRequest = {
   schema: string;
   tableName: string;
   catalog?: string;
-  objectType?: "VIEW";
+  objectType?: ObjectSourceKind;
   exactIdentity?: boolean;
 };
 
@@ -575,7 +579,7 @@ function ddlRequest(): StructureDdlRequest {
     schema: metadataSchema.value,
     tableName: props.tableName,
     catalog: props.catalog,
-    objectType: props.tableType === "view" ? "VIEW" : undefined,
+    objectType: props.tableType === "view" ? "VIEW" : props.tableType === "materialized_view" ? "MATERIALIZED_VIEW" : undefined,
     ...(props.exactIdentity ? { exactIdentity: true } : {}),
   };
 }
@@ -620,6 +624,9 @@ async function fetchDdl(force = false, options?: { preserveDraft?: boolean }) {
   }
 }
 const errorMessage = ref("");
+// A failed column read stays unloaded. Keep its error separate from preview
+// errors so automatic tab loading waits for an explicit metadata refresh.
+const columnsMetadataReadError = ref("");
 const secondaryMetadataErrors = ref<Partial<Record<ObjectMetadataFacet, string>>>({});
 // Keep the index write gate independent of display errors, which unrelated
 // facet loads and silent refreshes may clear or suppress.
@@ -1477,15 +1484,16 @@ const structureDensityStyle = computed(() => {
     "--structure-line-height": String(metric.lineHeight),
   };
 });
-const structureControlClass = "structure-grid-control h-[var(--structure-control-height)] min-w-0 rounded-[6px] px-[var(--structure-control-px)] py-0 text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25";
+const structureControlClass =
+  "structure-grid-control h-[var(--structure-control-height)] min-w-0 rounded-[6px] px-[var(--structure-control-px)] py-0 text-[length:var(--structure-font-size)] md:text-[length:var(--structure-font-size)] leading-[var(--structure-control-height)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25";
 const structureMonoControlClass = `${structureControlClass} font-mono`;
 const structureToolbarButtonClass = "h-[var(--structure-control-height)] gap-1 px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]";
 const structureIconButtonClass = "h-[var(--structure-control-height)] w-[var(--structure-control-height)]";
 const structureIconClass = "h-[var(--structure-icon-size)] w-[var(--structure-icon-size)]";
 const structureCheckboxClass = "h-[var(--structure-checkbox-size)] w-[var(--structure-checkbox-size)]";
-const structureHeaderCellClass = "relative min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-left last:border-r-0";
-const structureCellClass = "min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] last:border-r-0";
-const structureLastCellClass = "min-w-0 overflow-hidden border-b px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
+const structureHeaderCellClass = "relative min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-left";
+const structureCellClass = "min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
+const structureLastCellClass = "min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
 const structurePropertyListClass = "flex w-max min-w-0 items-center gap-0 overflow-hidden";
 const structurePropertyLabelClass = "flex min-w-0 items-center gap-1 whitespace-nowrap";
 const structureActionButtonClass = `${structureIconButtonClass} shrink-0`;
@@ -3472,12 +3480,13 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
         metadata?.parent && (metadata.scope === "TABLE" || metadata.scope === "VIEW")
           ? { owner: metadata.owner, parentType: metadata.scope }
           : !trigger.original && oracleTriggerReadOptions(databaseType.value) && metadataSchema.value
-            ? (trigger.oracleExact ?? { owner: metadataSchema.value, parentType: props.tableType === "view" ? ("VIEW" as const) : ("TABLE" as const) })
+            ? (trigger.oracleExact ?? { owner: metadataSchema.value, parentType: props.tableType === "view" || props.tableType === "materialized_view" ? ("VIEW" as const) : ("TABLE" as const) })
             : undefined;
       return { ...trigger, oracleExact };
     }),
     tableComment: tableComment.value,
     originalTableComment: isCreateMode.value ? undefined : originalTableComment.value,
+    tableType: isCreateMode.value ? undefined : props.tableType,
     mysqlAutoIncrementValue: isCreateMode.value && canEditMysqlAutoIncrement.value ? mysqlAutoIncrementValue.value || undefined : undefined,
     mysqlEngine: mysqlTableEngineSqlOption({ value: mysqlTableEngine.value, originalValue: originalMysqlTableEngine.value }, isCreateMode.value, supportsMysqlEngine.value && !mysqlTableEngineLoading.value && !mysqlTableEngineLoadError.value),
     transwarpCreate: isCreateMode.value && databaseType.value === "transwarp" ? buildInceptorCreateOptions(physicalOptions.value, columns.value) : undefined,
@@ -3831,7 +3840,7 @@ async function refreshSqlPreview() {
           owner: metadataSchema.value!,
           tableName: isCreateMode.value ? foldCreatedTableName(newTableName.value, databaseType.value) : props.tableName!,
           executionSchema: props.schema || metadataSchema.value!,
-          parentType: props.tableType === "view" ? "VIEW" : "TABLE",
+          parentType: props.tableType === "view" || props.tableType === "materialized_view" ? "VIEW" : "TABLE",
           databaseType: databaseType.value as "oracle" | "oceanbase-oracle" | "dameng",
           newTable: isCreateMode.value,
         },
@@ -3891,6 +3900,7 @@ function clearDraft() {
 }
 
 function resetState() {
+  columnsMetadataReadError.value = "";
   triggerStructurePlan.value = undefined;
   triggerStructureRecovery.value = undefined;
   invalidateDraftHydration();
@@ -4257,6 +4267,7 @@ async function loadStructure(
   const oracleIndexContext = !isCreateMode.value && (databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle");
   const needsOracleIndexBaseline = oracleIndexContext && scope.indexes;
   const effectiveScope = withRequiredPostgresPrimaryKeyMetadata(needsOracleIndexBaseline || (props.exactIdentity && scope.indexes) ? { ...scope, columns: true, indexes: true } : scope);
+  if (effectiveScope.columns) columnsMetadataReadError.value = "";
   if (oracleIndexContext && (scope.columns || scope.indexes)) invalidateOracleIndexReady();
   let loadEpoch = oracleIndexEpoch.value;
   const requestId = ++structureLoadRequestId;
@@ -4297,10 +4308,15 @@ async function loadStructure(
         : Promise.resolve({ known: true, status: { isPartitionedParent: false, isPartition: false, isForeign: false } });
     const columnsLoad = effectiveScope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => getStructureColumns(metadataRequest), { force: forceMetadata }) : undefined;
     const columnsPromise = columnsLoad
-      ? columnsLoad.then((result) => {
-          columnsServedFromCache = result.cacheStatus !== "remote";
-          return result.value;
-        })
+      ? columnsLoad
+          .then((result) => {
+            columnsServedFromCache = result.cacheStatus !== "remote";
+            return result.value;
+          })
+          .catch((error) => {
+            if (oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint)) columnsMetadataReadError.value = error instanceof Error ? error.message || String(error) : String(error);
+            throw error;
+          })
       : Promise.resolve(undefined);
     const indexesPromise = effectiveScope.indexes
       ? tableMetadataCapabilities.value.indexes
@@ -4596,7 +4612,15 @@ async function revalidateCachedStructureMetadata(loadRequestId: number, scope: {
     const [columnsResult, commentResult] = await Promise.allSettled([columnsPromise, commentPromise] as const);
     // A newer load or revalidation supersedes this one.
     if (!isCurrent()) return;
-    if (columnsResult.status === "rejected") console.warn("[DBX][structure-editor:columns-metadata-revalidation-failed]", columnsResult.reason);
+    if (columnsResult.status === "rejected") {
+      console.warn("[DBX][structure-editor:columns-metadata-revalidation-failed]", columnsResult.reason);
+      if (columns.value.length === 0) {
+        const error = columnsResult.reason;
+        columnsMetadataReadError.value = error instanceof Error ? error.message || String(error) : String(error);
+        errorMessage.value = columnsMetadataReadError.value;
+        loadedMetadataFacets.delete("columns");
+      }
+    }
     if (commentResult.status === "rejected") console.warn("[DBX][structure-editor:comment-metadata-revalidation-failed]", commentResult.reason);
 
     let applied = false;
@@ -4709,6 +4733,12 @@ function onColumnRowMouseDown(event: MouseEvent) {
   if (event.button === 0) {
     columnContextMenuButton = null;
     columnContextMenuCtrlKey = false;
+    // On macOS WebKit, <button> is not mouse-focusable, so mousedown on a popup
+    // trigger inside a focusable scroller moves focus to the scroller instead
+    // and triggers Reka DismissableLayer focusOutside on popovers/menus (#15596).
+    if (!event.ctrlKey && structureRowClosestControl(event.target, "[aria-haspopup]")) {
+      event.preventDefault();
+    }
   } else {
     columnContextMenuButton = event.button;
     columnContextMenuCtrlKey = event.ctrlKey;
@@ -4730,6 +4760,11 @@ function onColumnRowClick(column: EditableStructureColumn, event: MouseEvent) {
   columnContextMenuCtrlKey = false;
   columnPointerSelectionActive = false;
   if (!columnIsSelectable(column)) return;
+  // Focus the scroller only for inert cell content, so the row clipboard shortcuts keep
+  // acting on the table. A control under the pointer must keep focus: moving it to the
+  // scroller dismissed the dropdown/popover that the same click had just opened, because
+  // reka's popover and dropdown layers close on focus-outside (#15585, #15596).
+  if (!eventTargetUsesNativeClipboard(event) && !structureRowClickTargetOwnsFocus(event.target)) structureScrollerElement(columnsScrollerRef.value)?.focus({ preventScroll: true });
   if (event.shiftKey) {
     selectColumnRangeFromAnchor(column);
     return;
@@ -4975,20 +5010,36 @@ function toggleCopySourceColumns() {
   selectedCopySourceColumnNames.value = allCopyableSourceColumnsSelected.value ? [] : [...copyableSourceColumnNames.value];
 }
 
-function applyPastedColumns(text: string) {
-  if (!pasteColumnsDialogOpen.value || !canPasteColumns.value || activeTab.value !== "columns") return;
+function applyColumnDefinitions(text: string, reportDiagnostics = false): boolean {
+  if (!canPasteColumns.value || activeTab.value !== "columns") return false;
   // Revalidate at commit time, including names of drop-marked columns. Import
   // must never implicitly replace a field or use a stale dialog preview.
   const result = parseTableColumnDefinitions(
     text,
     columns.value.map((column) => column.name),
   );
-  if (result.diagnostics.length || !result.columns.length) return;
+  const diagnostic = result.diagnostics[0];
+  if (diagnostic || !result.columns.length) {
+    if (diagnostic && reportDiagnostics) toast(t(`tableColumnPaste.${diagnostic.code}`), 5000);
+    return false;
+  }
   const drafts = createPastedColumnDrafts(result.columns, uuid);
   columns.value.splice(resolveInsertColumnIndex(columns.value, selectedColumnId.value), 0, ...drafts);
   selectSingleColumn(drafts[drafts.length - 1]);
   if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
-  pasteColumnsDialogOpen.value = false;
+  return true;
+}
+
+function applyPastedColumns(text: string) {
+  if (pasteColumnsDialogOpen.value && applyColumnDefinitions(text)) pasteColumnsDialogOpen.value = false;
+}
+
+function onColumnGridPaste(event: ClipboardEvent) {
+  if (event.defaultPrevented || !canPasteColumns.value || eventTargetUsesNativeClipboard(event)) return;
+  const text = event.clipboardData?.getData("text/plain");
+  if (!text?.trim()) return;
+  event.preventDefault();
+  applyColumnDefinitions(text, true);
 }
 
 function applyCopiedColumns() {
@@ -5154,9 +5205,11 @@ const hasLocalColumnOrderChange = computed(() => {
 
 function applyStoredLocalColumnOrder(items: EditableStructureColumn[]): EditableStructureColumn[] {
   if (!usesLocalTableColumnOrder.value) return items;
-  const orderedKeys = loadTableDataGridColumnOrder(localTableColumnOrderScopeKey());
-  if (!orderedKeys.length) return items;
   const columnKeys = uniqueDataGridColumnOrderKeys(items.map((column) => column.name));
+  // `items` arrive in database order, so a table rebuilt with a new column
+  // order discards the arrangement saved against the old one.
+  const orderedKeys = loadTableDataGridColumnOrder(localTableColumnOrderScopeKey(), columnKeys);
+  if (!orderedKeys.length) return items;
   const indexes = orderedColumnIndexes({
     availableIndexes: items.map((_, index) => index),
     columnKeys,
@@ -5169,7 +5222,7 @@ function persistLocalColumnOrder(showNotice = true) {
   if (!usesLocalTableColumnOrder.value) return;
   const scopeKey = localTableColumnOrderScopeKey();
   if (hasLocalColumnOrderChange.value) {
-    saveTableDataGridColumnOrder(scopeKey, localColumnOrderKeys(columns.value));
+    saveTableDataGridColumnOrder(scopeKey, localColumnOrderKeys(columns.value), localColumnOrderKeys(localTableColumnDatabaseOrder(columns.value)));
   } else {
     removeTableDataGridColumnOrder(scopeKey);
   }
@@ -5714,6 +5767,55 @@ function dropOrRemoveColumns(targets: EditableStructureColumn[]) {
   }
 }
 
+function canCopyColumnDdl(targets: EditableStructureColumn[]): boolean {
+  const tableName = isCreateMode.value ? newTableName.value : props.tableName;
+  return canAddColumn.value && !!tableName.trim() && targets.length > 0 && targets.every((column) => !column.markedForDrop && !!column.name.trim() && !!column.dataType.trim());
+}
+
+async function copyColumnDdl(targets: EditableStructureColumn[]) {
+  if (!canCopyColumnDdl(targets)) return;
+  const options = structureChangeOptions();
+  const selectedIds = new Set(targets.map((column) => column.id));
+  const drafts = options.columns.filter((column) => selectedIds.has(column.id));
+  try {
+    const results = await Promise.all(
+      drafts.map((column) =>
+        api.buildSingleColumnAlterSql({
+          databaseType: options.databaseType,
+          driverProfile: options.driverProfile,
+          schema: options.schema,
+          tableName: options.tableName,
+          // Retain original metadata for generated column definitions.
+          column: { ...column, id: `ddl-preview:${column.id}` },
+        }),
+      ),
+    );
+    const warnings = results.flatMap((result) => result.warnings);
+    if (results.some((result) => result.statements.length === 0)) {
+      toast(warnings.join("\n") || t("customType.ddl.empty"), 5000);
+      return;
+    }
+    await copyToClipboard(
+      joinSqlStatementsForScript(
+        results.flatMap((result) => result.statements),
+        options.databaseType,
+      ),
+    );
+    toast(warnings.join("\n") || t("contextMenu.ddlCopied"), warnings.length ? 5000 : 2000);
+  } catch (error) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
+function onColumnGridKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented || !isPlainClipboardShortcut(event, "c") || eventTargetUsesNativeClipboard(event)) return;
+  const targets = selectedColumnsInOrder();
+  if (!canCopyColumnDdl(targets)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!event.repeat) void copyColumnDdl(targets);
+}
+
 /**
  * Context menu for a column row. When the right-clicked row is part of the
  * multi-selection the actions apply to the whole selection; otherwise they
@@ -5735,6 +5837,7 @@ function columnContextMenuItems(column: EditableStructureColumn): ContextMenuIte
       disabled: !canAddColumn.value,
       action: () => void copyColumnRows(targets),
     },
+    { label: t("grid.copyDdl"), icon: ClipboardList, disabled: !canCopyColumnDdl(targets), action: () => void copyColumnDdl(targets) },
     {
       label: isBatchContext ? t("structureEditor.dropSelectedColumns", { count }) : column.original ? t("structureEditor.drop") : t("structureEditor.remove"),
       icon: Trash2,
@@ -7862,8 +7965,11 @@ onMounted(() => {
   if (props.draft?.initialized) {
     // A clean persisted editor snapshot is not a live schema cache. After an
     // MCP DDL, restoring its loaded-facet flags would otherwise bypass the
-    // invalidated backend cache entirely. Legacy/dirty drafts remain intact.
-    const revalidateRestoredColumns = props.draft.dirty === false && !isCreateMode.value && loadedMetadataFacets.has("columns") && !(databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl);
+    // invalidated backend cache entirely. Empty legacy snapshots can also
+    // wrongly claim that columns were loaded; recheck those when no edits need
+    // preserving. Other legacy/dirty drafts remain intact.
+    const emptyLegacyColumns = props.draft.dirty === undefined && columns.value.length === 0 && !hasPendingStructureChanges() && !ddlDirty.value;
+    const revalidateRestoredColumns = (props.draft.dirty === false || emptyLegacyColumns) && !isCreateMode.value && loadedMetadataFacets.has("columns") && !(databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl);
     const restoredIdentity = draftTargetIdentity();
     void hydrateRestoredDraftFromDatabase().then((completed) => {
       if (completed) return initializeRestoredDraftMetadata(restoredIdentity, revalidateRestoredColumns);
@@ -8238,6 +8344,10 @@ async function loadActiveTableStructureMetadataIfNeeded() {
   }
   if (loading.value || secondaryMetadataLoading.value) return;
   const scope = withRequiredPostgresPrimaryKeyMetadata(unloadedTableStructureRefreshScope(activeTab.value, loadedMetadataFacets));
+  if (scope.columns && columnsMetadataReadError.value) {
+    errorMessage.value = columnsMetadataReadError.value;
+    return;
+  }
   // A rejected facet is still unloaded, but retrying it whenever loading
   // clears would loop indefinitely. The toolbar performs an explicit retry.
   if (indexMetadataReadError.value) scope.indexes = false;
@@ -8278,7 +8388,13 @@ watch(
 </script>
 
 <template>
-  <div ref="rootRef" class="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-[var(--structure-shell-padding)] text-[length:var(--structure-font-size)]" :data-structure-density="localStructureDensity" :style="structureDensityStyle">
+  <div
+    ref="rootRef"
+    class="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-[var(--structure-shell-padding)] text-[length:var(--structure-font-size)]"
+    :data-structure-density="localStructureDensity"
+    :style="structureDensityStyle"
+    @keydown="handleTextInputCaseShortcut($event, settingsStore.editorSettings.shortcuts)"
+  >
     <ObjectSourceDialog
       v-if="triggerSourceTarget"
       :key="JSON.stringify(triggerSourceTarget.target)"
@@ -8704,7 +8820,7 @@ watch(
             <CustomContextMenu :items="activeColumnContextMenuItems" @close="clearColumnContextMenuTarget" v-slot="columnContextMenuSlot">
               <RecycleScroller
                 ref="columnsScrollerRef"
-                class="structure-column-virtual-scroller structure-table-scroller h-full overflow-auto"
+                class="structure-column-virtual-scroller structure-table-scroller h-full overflow-auto outline-none"
                 :style="{
                   '--structure-column-table-width': columnTableWidth + 'px',
                   '--structure-column-row-height': structureColumnRowHeight + 'px',
@@ -8721,6 +8837,9 @@ watch(
                 key-field="id"
                 item-class="structure-column-virtual-row"
                 list-class="structure-column-virtual-list"
+                tabindex="-1"
+                @keydown="onColumnGridKeydown"
+                @paste="onColumnGridPaste"
                 @scroll.passive="onStructureContentScroll('columns', $event)"
                 @update="onColumnVirtualRowsUpdated"
               >
@@ -8863,22 +8982,24 @@ watch(
                             :allow-custom="true"
                             :option-tooltip="dataTypeTooltip"
                             :display-name="gaussdbMDataTypeDisplayName"
-                            :trigger-class="[structureMonoControlClass, 'w-full']"
+                            :trigger-class="[structureControlClass, 'w-full']"
+                            :content-style="structureDensityStyle"
+                            item-class="text-[length:var(--structure-font-size)]"
                             @update:model-value="(v: string) => updateColumnDataType(column, v)"
                           >
                             <template #option-label="{ option, label }">
-                              <span :class="['structure-data-type-option block truncate font-mono', structureDataTypeToneClass(option)]">{{ label }}</span>
+                              <span :class="['structure-data-type-option block truncate', structureDataTypeToneClass(option)]">{{ label }}</span>
                             </template>
                             <template #custom-option-label="{ value }">
-                              <span :class="['structure-data-type-option block truncate font-mono', structureDataTypeToneClass(value)]">{{ value }}</span>
+                              <span :class="['structure-data-type-option block truncate', structureDataTypeToneClass(value)]">{{ value }}</span>
                             </template>
                           </SearchableSelect>
-                          <Input v-else :model-value="gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType, column.dataType))" :class="[structureMonoControlClass, 'w-full']" disabled />
+                          <Input v-else :model-value="gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType, column.dataType))" :class="[structureControlClass, 'w-full']" disabled />
                         </td>
                         <td v-if="columnEditorControls.length" :class="[structureCellClass, structureColumnSelectionClass('length')]" :title="structureColumnClipboardValue(column, 'length') || undefined">
                           <Popover v-if="isMysqlEnumDataType(databaseType, column.dataType)">
                             <PopoverTrigger as-child>
-                              <Button variant="outline" size="sm" :class="[structureMonoControlClass, 'w-full justify-between px-2']" :disabled="isColumnTypeDisabled(column)">
+                              <Button variant="outline" size="sm" :class="[structureControlClass, 'w-full justify-between px-2']" :disabled="isColumnTypeDisabled(column)">
                                 <span>{{ t("structureEditor.enumValueCount", { count: column.enumValues?.length ?? 0 }) }}</span>
                                 <ListChevronsUpDown :class="structureIconClass" />
                               </Button>
@@ -8893,7 +9014,7 @@ watch(
                               </div>
                               <div class="max-h-64 space-y-1.5 overflow-y-auto pr-1">
                                 <div v-for="(value, valueIndex) in column.enumValues" :key="valueIndex" class="flex items-center gap-1.5">
-                                  <Input :model-value="value" :class="structureMonoControlClass" :placeholder="t('structureEditor.enumValuePlaceholder')" @update:model-value="updateMysqlEnumValue(column, Number(valueIndex), $event)" />
+                                  <Input :model-value="value" :class="structureControlClass" :placeholder="t('structureEditor.enumValuePlaceholder')" @update:model-value="updateMysqlEnumValue(column, Number(valueIndex), $event)" />
                                   <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" :disabled="(column.enumValues?.length ?? 0) <= 1" :title="t('structureEditor.removeEnumValue')" @click="removeMysqlEnumValue(column, Number(valueIndex))">
                                     <Trash2 class="h-3.5 w-3.5" />
                                   </Button>
@@ -8911,13 +9032,13 @@ watch(
                                 :placeholder="t('structureEditor.geometryTypePlaceholder')"
                                 :search-placeholder="t('structureEditor.geometryTypePlaceholder')"
                                 :empty-text="t('structureEditor.noMatchingType')"
-                                :trigger-class="[structureMonoControlClass, 'min-w-0 flex-1']"
+                                :trigger-class="[structureControlClass, 'min-w-0 flex-1']"
                                 :disabled="isColumnTypeDisabled(column)"
                                 @update:model-value="(v: string) => updatePostgresGeometryColumn(column, v, postgresGeometrySridValue(column.dataType))"
                               />
                               <Input
                                 :model-value="postgresGeometrySridValue(column.dataType)"
-                                :class="[structureMonoControlClass, 'w-20 shrink-0']"
+                                :class="[structureControlClass, 'w-20 shrink-0']"
                                 type="number"
                                 min="0"
                                 max="999999"
@@ -8932,14 +9053,9 @@ watch(
                             </p>
                           </div>
                           <div v-else class="flex min-w-0 items-center gap-1">
-                            <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="[structureMonoControlClass, 'min-w-0 flex-1']" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
+                            <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="[structureControlClass, 'min-w-0 flex-1']" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
                             <Select v-if="columnLengthUnitOptions(column).length" :model-value="dataTypeLengthUnitValue(databaseType, column.dataType) || '__default'" :disabled="isColumnLengthUnitDisabled(column)" @update:model-value="updateColumnDataTypeLengthUnit(column, $event)">
-                              <SelectTrigger
-                                :aria-label="t('structureEditor.lengthUnit')"
-                                :title="t('structureEditor.lengthUnit')"
-                                size="sm"
-                                class="structure-grid-control h-[var(--structure-control-height)] w-16 shrink-0 rounded-[6px] px-[var(--structure-control-px)] py-0 font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
-                              >
+                              <SelectTrigger :aria-label="t('structureEditor.lengthUnit')" :title="t('structureEditor.lengthUnit')" size="sm" :class="[structureControlClass, 'w-16 shrink-0']">
                                 <SelectValue :placeholder="t('structureEditor.unitPlaceholder')" />
                               </SelectTrigger>
                               <SelectContent>
@@ -8968,16 +9084,16 @@ watch(
                         </td>
                         <td v-if="columnEditorControls.defaultValue" :class="[structureCellClass, 'structure-column-default-value', structureDefaultValueToneClass(column.defaultValue, column.dataType), structureColumnSelectionClass('defaultValue')]" :title="column.defaultValue || undefined">
                           <div class="flex min-w-0 items-center gap-1">
-                            <Input v-model="column.defaultValue" :class="[structureMonoControlClass, 'flex-1']" :disabled="isColumnDefaultDisabled(column)" />
+                            <Input v-model="column.defaultValue" :class="[structureControlClass, 'flex-1']" :disabled="isColumnDefaultDisabled(column)" />
                             <DropdownMenu>
                               <DropdownMenuTrigger as-child>
                                 <Button variant="ghost" size="icon" :class="[structureIconButtonClass, 'shrink-0']" :disabled="isColumnDefaultDisabled(column)" :aria-label="t('structureEditor.defaultValuePresets')" :title="t('structureEditor.defaultValuePresets')">
                                   <ChevronDown :class="structureIconClass" />
                                 </Button>
                               </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end" class="max-h-56 w-max min-w-36 max-w-[calc(100vw-1rem)] overflow-y-auto">
+                              <DropdownMenuContent align="end" class="max-h-56 w-max min-w-36 max-w-[calc(100vw-1rem)] overflow-y-auto" :style="structureDensityStyle">
                                 <DropdownMenuItem v-for="preset in columnDefaultValuePresets(column)" :key="preset.value" @click="column.defaultValue = preset.value">
-                                  <code :class="['structure-data-type-option block truncate font-mono text-[length:var(--structure-font-size)]', structureDefaultValueToneClass(preset.value, preset.dataType)]">{{ preset.label }}</code>
+                                  <code :class="['structure-data-type-option block truncate [font-family:inherit] text-[length:var(--structure-font-size)]', structureDefaultValueToneClass(preset.value, preset.dataType)]">{{ preset.label }}</code>
                                 </DropdownMenuItem>
                               </DropdownMenuContent>
                             </DropdownMenu>
@@ -10464,15 +10580,16 @@ watch(
 .structure-card-scroller::-webkit-scrollbar-thumb {
   background: rgba(82, 82, 82, 0.3);
   background: color-mix(in oklab, var(--foreground) 30%, transparent);
-  border: 3px solid transparent;
+  border: var(--dbx-workspace-scrollbar-inset) solid transparent;
   background-clip: padding-box;
   border-radius: 999px;
 }
 
+/* Full-track thickness on hover, like the workspace and data grid scrollbars (#15585). */
 .structure-card-scroller::-webkit-scrollbar-thumb:hover {
   background: rgba(82, 82, 82, 0.48);
   background: color-mix(in oklab, var(--foreground) 48%, transparent);
-  border-width: 2px;
+  border-width: 0;
   background-clip: padding-box;
 }
 
@@ -10560,38 +10677,41 @@ watch(
   vertical-align: middle;
 }
 
+/* Mirrors `.data-grid-vertical-scrollbar` so both axes thicken the same way (#15585). */
 .structure-vertical-scrollbar {
   position: relative;
-  width: 10px;
+  width: var(--dbx-workspace-scrollbar-size);
   cursor: default;
   touch-action: none;
 }
 
 .structure-vertical-scrollbar__thumb {
   position: absolute;
-  left: 3px;
-  width: 4px;
+  inset-inline: 0;
   min-height: 24px;
+  border-inline: var(--dbx-workspace-scrollbar-inset) solid transparent;
   border-radius: 999px;
   background: rgba(82, 82, 82, 0.3);
   background: color-mix(in oklab, var(--foreground) 30%, transparent);
+  background-clip: padding-box;
   transition:
-    left 120ms ease,
-    width 120ms ease,
+    border-width 120ms ease,
     background-color 120ms ease;
 }
 
 .structure-vertical-scrollbar:hover .structure-vertical-scrollbar__thumb,
 .structure-vertical-scrollbar--dragging .structure-vertical-scrollbar__thumb {
-  left: 2px;
-  width: 6px;
+  border-width: 0;
   background: rgba(82, 82, 82, 0.48);
   background: color-mix(in oklab, var(--foreground) 48%, transparent);
 }
 
+/* Same thumb model as the data grid (`.data-grid-horizontal-scrollbar`): a 10px
+   track whose thumb grows from the inset look to the full track on hover/drag, so
+   the hover feedback in the structure editor matches 表右键 → 查看数据 (#15585). */
 .structure-horizontal-scrollbar {
   position: relative;
-  height: 10px;
+  height: var(--dbx-workspace-scrollbar-size);
   flex-shrink: 0;
   cursor: pointer;
   touch-action: none;
@@ -10600,22 +10720,21 @@ watch(
 
 .structure-horizontal-scrollbar__thumb {
   position: absolute;
-  top: 3px;
-  height: 4px;
+  inset-block: 0;
   min-width: 24px;
+  border-block: var(--dbx-workspace-scrollbar-inset) solid transparent;
   border-radius: 999px;
   background: rgba(82, 82, 82, 0.3);
   background: color-mix(in oklab, var(--foreground) 30%, transparent);
+  background-clip: padding-box;
   transition:
-    top 120ms ease,
-    height 120ms ease,
+    border-width 120ms ease,
     background-color 120ms ease;
 }
 
 .structure-horizontal-scrollbar:hover .structure-horizontal-scrollbar__thumb,
 .structure-horizontal-scrollbar--dragging .structure-horizontal-scrollbar__thumb {
-  top: 2px;
-  height: 6px;
+  border-width: 0;
   background: rgba(82, 82, 82, 0.48);
   background: color-mix(in oklab, var(--foreground) 48%, transparent);
 }
@@ -10627,6 +10746,8 @@ watch(
   max-height: var(--structure-control-height);
   padding-top: 0;
   padding-bottom: 0;
+  font-size: var(--structure-font-size);
+  line-height: var(--structure-control-height);
   border-color: transparent;
   border-radius: 0;
   background-color: transparent;
@@ -10639,6 +10760,8 @@ watch(
   max-height: var(--structure-control-height);
   padding-top: 0;
   padding-bottom: 0;
+  font-size: var(--structure-font-size);
+  line-height: var(--structure-control-height);
 }
 
 .structure-edit-grid > tbody > tr > td:hover,
@@ -10715,7 +10838,6 @@ watch(
 
 .structure-data-type-option {
   color: var(--structure-type-color);
-  font-weight: 500;
 }
 
 .structure-data-type-numeric,
@@ -10812,7 +10934,6 @@ watch(
 .structure-column-data-type :deep(.structure-grid-control),
 .structure-column-default-value :deep(.structure-grid-control) {
   color: var(--structure-type-color);
-  font-weight: 500;
 }
 
 /* --primary is rgb/oklch; use color-mix like DataGrid, not channel-based hsl wrappers. */

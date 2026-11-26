@@ -34,6 +34,79 @@ describe("case-sensitive database objects", () => {
     }
   });
 
+  it("keeps space-padded table identifiers as separate tree nodes", () => {
+    const nodes = buildTableTreeNodes({
+      ...context,
+      tables: [
+        { name: " orders", table_type: "BASE TABLE" },
+        { name: "orders", table_type: "BASE TABLE" },
+      ],
+    });
+
+    expect(nodes.map((node) => node.tableName)).toEqual(expect.arrayContaining([" orders", "orders"]));
+    expect(new Set(nodes.map((node) => node.id)).size).toBe(2);
+  });
+
+  it("keeps space-padded table identifiers as separate nodes in non-MySQL dialects too", () => {
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: " public ",
+      tables: [
+        { name: " orders ", table_type: "BASE TABLE" },
+        { name: "orders", table_type: "BASE TABLE" },
+      ],
+    });
+
+    expect(nodes.map((node) => node.label)).toEqual([" orders ", "orders"]);
+    expect(nodes.map((node) => node.tableName)).toEqual([" orders ", "orders"]);
+    expect(nodes.map((node) => node.schema)).toEqual([" public ", " public "]);
+    expect(new Set(nodes.map((node) => node.id)).size).toBe(2);
+  });
+
+  it.each(["mysql", "doris", "starrocks", "goldendb"] as const)("keeps space-padded table identifiers through the %s grouped object tree", (databaseType) => {
+    const objects: ObjectInfo[] = [
+      { name: " orders ", object_type: "TABLE", schema: " app " },
+      { name: "orders", object_type: "TABLE", schema: " app " },
+    ];
+
+    const grouped = buildGroupedObjectTreeNodes({ ...context, schema: "app", objects, databaseType });
+    const tableGroup = grouped.find((node) => node.type === "group-tables");
+
+    expect(tableGroup?.children?.map((node) => [node.tableName, node.schema, node.label])).toEqual([
+      [" orders ", " app ", " orders "],
+      ["orders", " app ", "orders"],
+    ]);
+    expect(new Set(tableGroup?.children?.map((node) => node.id) ?? []).size).toBe(2);
+  });
+
+  it("keeps space-padded table identifiers through a non-MySQL grouped object tree", () => {
+    const objects: ObjectInfo[] = [
+      { name: " orders ", object_type: "TABLE", schema: " Mixed " },
+      { name: "orders", object_type: "TABLE", schema: " Mixed " },
+    ];
+
+    const grouped = buildGroupedObjectTreeNodes({ ...context, schema: "Mixed", objects, databaseType: "oceanbase-oracle" });
+    const tableGroup = grouped.find((node) => node.type === "group-tables");
+
+    expect(tableGroup?.objectCount).toBe(2);
+    expect(tableGroup?.children?.map((node) => [node.tableName, node.schema])).toEqual([
+      [" orders ", " Mixed "],
+      ["orders", " Mixed "],
+    ]);
+  });
+
+  it("merges table metadata without folding a space-padded identifier", () => {
+    const tables: TableInfo[] = [
+      { name: " orders ", table_type: "TABLE" },
+      { name: "orders", table_type: "TABLE" },
+    ];
+
+    const merged = mergeTableInfosIntoObjects([], tables, "app");
+
+    expect(merged.map((object) => object.name)).toEqual([" orders ", "orders"]);
+    expect(merged.map((object) => object.schema)).toEqual(["app", "app"]);
+  });
+
   it("publishes each changed partition group once per page while retaining exact identities", () => {
     const current = buildTableTreeNodes({
       ...context,

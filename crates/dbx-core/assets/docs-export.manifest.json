@@ -31,7 +31,7 @@
     "apps/desktop/src/i18n/locales/docs/en.ts": "caacc3011fdf80e1810eb3fb8f48f658825a1312809cb9444f610d2db25407e7",
     "apps/desktop/src/i18n/locales/docs/es.ts": "950eeee11572cea85d4d226e0646484876fe62d8a9e7d641c3fb3704ec714258",
     "apps/desktop/src/i18n/locales/docs/it.ts": "878fb388813e994a4f9dafba0847d3cdaf06d7e9d1ecd18625c9ee772c149128",
-    "apps/desktop/src/i18n/locales/docs/ja.ts": "536d0ce1916d2931f161add8374463b13d2f7c3c561bd2bf260ba52d09ec7d00",
+    "apps/desktop/src/i18n/locales/docs/ja.ts": "5eec3ee03a254f64aadb4c458c58fecccc8a4b9b8ab3b7d0e3cd747b91acc195",
     "apps/desktop/src/i18n/locales/docs/ko.ts": "271d21eb054b6731d108621eae216c69b49dada868774239b085e399dcc0ecf3",
     "apps/desktop/src/i18n/locales/docs/pt-BR.ts": "f92c0b95b1b807c60a5136677808ed5014d9061dffd970aa5866eb1c82300dc5",
     "apps/desktop/src/i18n/locales/docs/zh-CN.ts": "2092c39277f2a6774405124d1f167bbcbc5f633d8f82bbd2b28ff5e12d78f3f7",
@@ -48,6 +48,6 @@
     "@vue/runtime-core": "3.5.44",
     "@vue/runtime-dom": "3.5.44",
     "@vue/shared": "3.5.44",
-    "marked": "18.1.1"
+    "marked": "18.1.3"
   }
 }

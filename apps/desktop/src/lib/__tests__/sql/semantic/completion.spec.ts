@@ -101,10 +101,10 @@ WHERE b.Workcenter_ID = :workcenter_ID`;
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).not.toContain("legacy_id");
   });
 
-  it("shows the column comment inline in the completion detail", () => {
+  it.each(["postgres", "mysql", "sqlserver"] as const)("shows the column comment inline in the %s completion detail", (databaseType) => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", [{ name: "nickname", table: "users", schema: "public", dataType: "text", comment: "用户昵称" }]]]);
 
-    const { items } = semanticCompletion("SELECT nick| FROM users", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+    const { items } = semanticCompletion("SELECT nick| FROM users", { columnsByTable }, { databaseType, dialect: databaseType });
 
     const nickname = items.find((item) => item.type === "column" && item.label === "nickname");
     expect(nickname?.detail).toContain("-- 用户昵称");
@@ -389,6 +389,60 @@ WHERE b.Workcenter_ID = :workcenter_ID`;
     expect(items.filter((item) => item.type === "column")).toEqual(
       expect.arrayContaining([expect.objectContaining({ label: "id", apply: "id", batchSelectionMode: "select", batchSelectionQualifier: "u" }), expect.objectContaining({ label: "name", apply: "name", batchSelectionMode: "select", batchSelectionQualifier: "u" })]),
     );
+  });
+
+  // #11330 / #15190: the repeated qualifier must stay exactly as typed. Oracle
+  // folds `ap` to AP, so quoting it as `"ap"` targets a different identifier.
+  it("keeps an unquoted Oracle batch qualifier unquoted", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id", "status"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion("SELECT ap.| FROM orders ap", { columnsByTable }, { databaseType: "oracle" });
+    const columns = items.filter((item) => item.type === "column");
+
+    expect(columns.length).toBeGreaterThan(0);
+    for (const item of columns) {
+      expect(item.batchSelectionQualifier).not.toContain('"');
+      // The semantic layer may fold the part to uppercase; both spellings are
+      // the same identifier on Oracle, a quoted one is not.
+      expect(item.batchSelectionQualifier?.toLowerCase()).toBe("ap");
+    }
+  });
+
+  it("keeps the quotes of a quoted Oracle batch qualifier", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion('SELECT "ap".| FROM orders "ap"', { columnsByTable }, { databaseType: "oracle" });
+
+    expect(items.filter((item) => item.type === "column").every((item) => item.batchSelectionQualifier === '"ap"')).toBe(true);
+  });
+
+  it("keeps an unquoted mixed-case PostgreSQL batch qualifier unquoted", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion("SELECT MyAlias.| FROM orders MyAlias", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+    const columns = items.filter((item) => item.type === "column");
+
+    expect(columns.length).toBeGreaterThan(0);
+    // Postgres folds the bare alias to lowercase, which is the same identifier;
+    // quoting it would not be.
+    expect(columns.every((item) => !item.batchSelectionQualifier?.includes('"'))).toBe(true);
+    expect(columns.every((item) => item.batchSelectionQualifier?.toLowerCase() === "myalias")).toBe(true);
+  });
+
+  it("still quotes a reserved-word PostgreSQL batch qualifier", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion('SELECT "select".| FROM orders "select"', { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(items.filter((item) => item.type === "column").every((item) => item.batchSelectionQualifier === '"select"')).toBe(true);
+  });
+
+  it("still quotes a MySQL batch qualifier that needs backticks", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion("SELECT `Order Alias`.| FROM orders AS `Order Alias`", { columnsByTable }, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(items.filter((item) => item.type === "column").every((item) => item.batchSelectionQualifier === "`Order Alias`")).toBe(true);
   });
 
   it("retains a typed table name when the referenced table also has an alias", () => {
@@ -794,5 +848,77 @@ FROM (
 
     expect(context.suggestKeywords).toBe(true);
     expect(items.filter((item) => item.type === "keyword").map((item) => item.label)).toEqual(expect.arrayContaining(["WHERE", "WHEN", "WITH"]));
+  });
+});
+
+describe("implicit join table lists end at the next clause (#14445)", () => {
+  const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+    ["emp", ["id", "emp_name"].map((name) => ({ name, table: "emp" }))],
+    ["dept", ["id", "dept_name"].map((name) => ({ name, table: "dept" }))],
+  ]);
+
+  it.each([
+    ["MySQL", { databaseType: "mysql", dialect: "mysql" }],
+    ["PostgreSQL", { databaseType: "postgres", dialect: "postgres" }],
+    ["Oracle", { databaseType: "oracle" }],
+  ] as const)("offers columns after WHERE in a %s comma join", (_label, options) => {
+    const { context, items } = semanticCompletion("SELECT * FROM emp e, dept d WHERE |", { columnsByTable }, options);
+
+    expect(context.contextKind).toBe("column");
+    expect(context.suggestColumns).toBe(true);
+    const labels = items.filter((item) => item.type === "column").map((item) => item.label);
+    expect(labels).toEqual(expect.arrayContaining(["e.emp_name", "d.dept_name"]));
+  });
+
+  it.each([
+    ["WHERE", "SELECT * FROM emp e, dept d WHERE e.id = 1 AND |"],
+    ["ORDER BY", "SELECT * FROM emp e, dept d ORDER BY |"],
+    ["GROUP BY", "SELECT * FROM emp e, dept d GROUP BY |"],
+  ] as const)("keeps column completion after %s in a comma join", (_label, markedSql) => {
+    const { context } = semanticCompletion(markedSql, { columnsByTable }, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.contextKind).toBe("column");
+    expect(context.suggestColumns).toBe(true);
+  });
+
+  it("still treats the slot after a FROM-list comma as a table name", () => {
+    const { context } = semanticCompletion("SELECT * FROM emp e, dept d, |", {}, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.contextKind).toBe("table");
+    expect(context.suggestTables).toBe(true);
+  });
+});
+
+describe("DROP TABLE IF EXISTS completion (#14113)", () => {
+  const mysql = { databaseType: "mysql", dialect: "mysql" } as const;
+  const tables = [{ name: "oblist_partition", type: "table" as const }];
+
+  it.each([
+    ["DROP TABLE IF EXISTS |", "oblist_partition"],
+    ["DROP TABLE IF EXISTS obl|", "oblist_partition"],
+    ["drop temporary table if exists |", "oblist_partition"],
+  ])("suggests table names after IF EXISTS: %s", (markedSql, expected) => {
+    const { context, items } = semanticCompletion(markedSql, { tables }, mysql);
+
+    expect(context.suggestTables).toBe(true);
+    expect(items.some((item) => item.type === "table" && item.label === expected)).toBe(true);
+  });
+
+  it.each([
+    ["DROP TABLE |", "IF"],
+    ["DROP TABLE I|", "IF"],
+    ["DROP TABLE IF |", "EXISTS"],
+    ["DROP TABLE IF E|", "EXISTS"],
+  ])("offers the optional %s keyword", (markedSql, keyword) => {
+    const { items } = semanticCompletion(markedSql, { tables }, mysql);
+
+    expect(items.some((item) => item.type === "keyword" && item.label === keyword)).toBe(true);
+  });
+
+  it("does not offer IF EXISTS words once a table name has been written", () => {
+    const { context } = semanticCompletion("DROP TABLE oblist_partition |", { tables }, mysql);
+
+    expect(context.preferredKeywords).not.toContain("IF");
+    expect(context.preferredKeywords).not.toContain("EXISTS");
   });
 });

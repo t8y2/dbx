@@ -18,6 +18,9 @@ describe("connectionStore table virtual groups during disk reload", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       listInstalledAgents: vi.fn().mockResolvedValue([]),
       listTables: vi.fn().mockResolvedValue([]),
+      listDatabases: vi.fn().mockResolvedValue([]),
+      listDorisCatalogs: vi.fn().mockResolvedValue([{ name: "internal", catalog_type: "internal" }]),
+      listDorisCatalogDatabases: vi.fn().mockResolvedValue([]),
       getColumns: vi.fn().mockResolvedValue([]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
@@ -38,6 +41,164 @@ describe("connectionStore table virtual groups during disk reload", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it.each(["before", "after"] as const)("keeps a database at the indicated %s position after refresh, pin sync and disk reload", async (position) => {
+    const api = await import("@/lib/backend/api");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { applyTableVGroupsToChildren, tableVGroupScopeKey } = await import("@/lib/table/tableVGroup");
+    const config: ConnectionConfig = { id: "db-order", name: "MySQL", db_type: "mysql", host: "localhost", port: 3306, username: "root", password: "" };
+    const scope = { connectionId: config.id, objectType: "databases" as const };
+    const key = tableVGroupScopeKey(scope)!;
+    const layout = { version: 1, groups: [{ id: "g", name: "Group", collapsed: false }], order: [{ type: "group" as const, id: "g", children: ["a", "b", "c"].map((name) => ({ type: "table" as const, name, rowType: "database" })) }] };
+    let saved: Record<string, unknown> = { [key]: layout };
+    vi.mocked(api.loadConnections).mockResolvedValue([config]);
+    vi.mocked(api.loadTableVGroups).mockImplementation(async () => JSON.parse(JSON.stringify(saved)));
+    vi.mocked(api.saveTableVGroups).mockImplementation(async (scopeKey, next) => {
+      saved = { ...saved, [scopeKey]: JSON.parse(JSON.stringify(next)) };
+    });
+    vi.mocked(api.listDatabases).mockResolvedValue(["a", "b", "c"].map((name) => ({ name })));
+    const store = useConnectionStore();
+    await store.initFromDisk();
+    store.connectedIds = new Set([config.id]);
+    const root = store.treeNodes[0]!;
+    const databases: TreeNode[] = ["a", "b", "c"].map((name) => ({ id: `${config.id}:${name}`, type: "database", label: name, connectionId: config.id, database: name, children: [] }));
+    root.children = applyTableVGroupsToChildren(databases, layout, scope);
+    const expected = position === "before" ? ["c", "a", "b"] : ["a", "c", "b"];
+    store.moveTableToVGroup(scope, "c", "g", "database", { target: databases[0], position });
+    const names = () => store.treeNodes[0].children!.find((node) => node.vgroupId === "g")!.children!.map((node) => node.database);
+    expect(names()).toEqual(expected);
+    store.syncPinnedTreeState(store.treeNodes);
+    expect(names()).toEqual(expected);
+    await store.loadDatabases(config.id, { force: true, connectedOnly: true });
+    expect(names()).toEqual(expected);
+    await store.initFromDisk();
+    expect(api.saveTableVGroups).toHaveBeenCalled();
+    expect(names()).toEqual(expected);
+    await store.loadDatabases(config.id, { force: true, connectedOnly: true });
+    expect(names()).toEqual(expected);
+    const { treeNodePinKey } = await import("@/lib/app/pinnedItems");
+    const group = store.treeNodes[0].children!.find((node) => node.vgroupId === "g")!;
+    const a = group.children!.find((node) => node.database === "a")!;
+    const b = group.children!.find((node) => node.database === "b")!;
+    store.toggleTreeNodePin(a);
+    store.toggleTreeNodePin(b);
+    expect(store.reorderPinnedTreeNodes(treeNodePinKey(b), treeNodePinKey(a), "before")).toBe(true);
+    expect(names()).toEqual(position === "before" ? ["c", "b", "a"] : ["b", "a", "c"]);
+    await store.initFromDisk();
+  });
+
+  it.each([false, true])("inserts between root folders and persists the order (catalog: %s)", async (catalogMode) => {
+    const api = await import("@/lib/backend/api");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { applyTableVGroupsToChildren, tableVGroupScopeKey } = await import("@/lib/table/tableVGroup");
+    const config: ConnectionConfig = { id: "root-order", name: "Connection", db_type: catalogMode ? "doris" : "mysql", host: "localhost", port: 3306, username: "root", password: "" };
+    const scope = { connectionId: config.id, catalog: catalogMode ? "internal" : undefined, objectType: "databases" as const };
+    const key = tableVGroupScopeKey(scope)!;
+    const layout = {
+      version: 1,
+      groups: [
+        { id: "g1", name: "G1", collapsed: false },
+        { id: "g2", name: "G2", collapsed: false },
+      ],
+      order: [
+        { type: "group" as const, id: "g1", children: [{ type: "table" as const, name: "a", rowType: "database" }] },
+        { type: "group" as const, id: "g2", children: [] },
+      ],
+    };
+    vi.mocked(api.loadConnections).mockResolvedValue([config]);
+    let saved: Record<string, unknown> = { [key]: layout };
+    vi.mocked(api.loadTableVGroups).mockImplementation(async () => JSON.parse(JSON.stringify(saved)));
+    vi.mocked(api.saveTableVGroups).mockImplementation(async (scopeKey, next) => {
+      saved = { ...saved, [scopeKey]: JSON.parse(JSON.stringify(next)) };
+    });
+    vi.mocked(api.listDatabases).mockResolvedValue([{ name: "a" }, { name: "b" }]);
+    vi.mocked(api.listDorisCatalogDatabases).mockResolvedValue([{ name: "a" }, { name: "b" }]);
+    const store = useConnectionStore();
+    await store.initFromDisk();
+    store.connectedIds = new Set([config.id]);
+    const databases: TreeNode[] = ["a", "b"].map((name) => ({ id: `${config.id}:${name}`, type: "database", label: name, connectionId: config.id, database: name, children: [] }));
+    if (catalogMode) store.treeNodes[0].children = [{ id: `${config.id}:catalog:internal`, type: "doris-catalog", label: "Internal", connectionId: config.id, catalog: "internal", catalogType: "internal", isExpanded: true, children: [] }];
+    const container = () => (catalogMode ? store.treeNodes[0].children![0] : store.treeNodes[0]);
+    container().children = applyTableVGroupsToChildren(databases, layout, scope);
+    const target = container().children![1];
+    store.moveTableToVGroup(scope, "a", null, "database", { target, position: "before" });
+    const names = () =>
+      container()
+        .children!.filter((node) => node.type === "database" || node.type === "table-vgroup")
+        .map((node) => node.label);
+    const refresh = () => (catalogMode ? store.loadDorisCatalogDatabases(container(), { force: true }) : store.loadDatabases(config.id, { force: true, connectedOnly: true }));
+    expect(names()).toEqual(["G1", "a", "G2", "b"]);
+    store.syncPinnedTreeState(store.treeNodes);
+    expect(names()).toEqual(["G1", "a", "G2", "b"]);
+    await refresh();
+    expect(names()).toEqual(["G1", "a", "G2", "b"]);
+    // A connection/catalog-header drop means the first layout slot below it.
+    store.moveTableToVGroup(scope, "b", null, "database", { target: container(), position: "after" });
+    expect(names()).toEqual(["b", "G1", "a", "G2"]);
+    await refresh();
+    expect(names()).toEqual(["b", "G1", "a", "G2"]);
+    await store.initFromDisk();
+    expect(names()).toEqual(["b", "G1", "a", "G2"]);
+    await refresh();
+    expect(names()).toEqual(["b", "G1", "a", "G2"]);
+  });
+
+  it.each([
+    [false, "before"],
+    [false, "after"],
+    [true, "before"],
+    [true, "after"],
+  ] as const)("reorders with the pin handle after ordinary dragging (grouped: %s, position: %s)", async (grouped, position) => {
+    const api = await import("@/lib/backend/api");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { applyTableVGroupsToChildren, tableVGroupScopeKey } = await import("@/lib/table/tableVGroup");
+    const { treeNodePinKey } = await import("@/lib/app/pinnedItems");
+    const config: ConnectionConfig = { id: "pin-after-drag", name: "MySQL", db_type: "mysql", host: "localhost", port: 3306, username: "root", password: "" };
+    const scope = { connectionId: config.id, objectType: "databases" as const };
+    const key = tableVGroupScopeKey(scope)!;
+    const members = ["a", "b"].map((name) => ({ type: "table" as const, name, rowType: "database" }));
+    const layout = { version: 1, groups: [{ id: "g", name: "Group", collapsed: false }], order: grouped ? [{ type: "group" as const, id: "g", children: members }] : [...members, { type: "group" as const, id: "g", children: [] }] };
+    let saved: Record<string, unknown> = { [key]: layout };
+    let savedPins: string[] = [];
+    vi.mocked(api.loadConnections).mockResolvedValue([config]);
+    vi.mocked(api.loadTableVGroups).mockImplementation(async () => JSON.parse(JSON.stringify(saved)));
+    vi.mocked(api.saveTableVGroups).mockImplementation(async (scopeKey, next) => {
+      saved = { ...saved, [scopeKey]: JSON.parse(JSON.stringify(next)) };
+    });
+    vi.mocked(api.loadPinnedTreeNodeIds).mockImplementation(async () => [...savedPins]);
+    vi.mocked(api.savePinnedTreeNodeIds).mockImplementation(async (ids) => {
+      savedPins = [...ids];
+    });
+    vi.mocked(api.listDatabases).mockResolvedValue([{ name: "a" }, { name: "b" }]);
+    const store = useConnectionStore();
+    await store.initFromDisk();
+    store.connectedIds = new Set([config.id]);
+    const databases: TreeNode[] = ["a", "b"].map((name) => ({ id: `${config.id}:${name}`, type: "database", label: name, database: name, connectionId: config.id, children: [] }));
+    store.treeNodes[0].children = applyTableVGroupsToChildren(databases, layout, scope);
+    const names = () => {
+      const root = store.treeNodes[0];
+      const children = grouped ? root.children!.find((node) => node.vgroupId === "g")!.children! : root.children!;
+      return children.filter((node) => node.type === "database").map((node) => node.database);
+    };
+    store.toggleTreeNodePin(databases[0]);
+    store.toggleTreeNodePin(databases[1]);
+    store.moveTableToVGroup(scope, "b", grouped ? "g" : null, "database", { target: databases[0], position: "before" });
+    expect(names()).toEqual(["b", "a"]);
+    const pinWrites = vi.mocked(api.savePinnedTreeNodeIds).mock.calls.length;
+    const source = position === "before" ? databases[0] : databases[1];
+    const target = position === "before" ? databases[1] : databases[0];
+    expect(store.reorderPinnedTreeNodes(treeNodePinKey(source), treeNodePinKey(target), position)).toBe(true);
+    expect(names()).toEqual(["a", "b"]);
+    // Only the layout changed; no redundant pin-order write is needed.
+    expect(api.savePinnedTreeNodeIds).toHaveBeenCalledTimes(pinWrites);
+    await store.initFromDisk();
+    await store.loadDatabases(config.id, { force: true, connectedOnly: true });
+    expect(names()).toEqual(["a", "b"]);
+    const layoutWrites = vi.mocked(api.saveTableVGroups).mock.calls.length;
+    expect(store.reorderPinnedTreeNodes(treeNodePinKey(source), treeNodePinKey(target), position)).toBe(false);
+    await store.initFromDisk();
+    expect(api.saveTableVGroups).toHaveBeenCalledTimes(layoutWrites);
   });
 
   async function paginatedGroupFixture(display: "simple" | "grouped", schema?: string) {

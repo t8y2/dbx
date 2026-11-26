@@ -11,7 +11,7 @@ The data grid displays query results and table data. It covers both read-only an
 
 The view options provide independent **Hide NULL** and **Hide NULL / empty-string columns** switches. The latter hides columns whose currently loaded values are all `NULL` or `""`, including mixtures of both. It does not hide zero, `false`, whitespace, or columns based on an empty result. Both switches default to off and preserve manually hidden columns when disabled.
 
-DBX uses virtual scrolling and renders only the visible area. Common browsing operations include:
+DBX uses virtual scrolling and renders only the visible area. The horizontal and vertical scrollbars match the SQL editor: the thumb widens when hovered or dragged without changing the viewport size. Common browsing operations include:
 
 - Dragging column edges to resize, or double-clicking to fit content
 - Dragging headers to reorder columns and saving the layout per table or query
@@ -102,6 +102,22 @@ Cell details handle values that do not fit well in the grid:
 - Truncated values, read-only explanations, and column metadata
 
 Formatting and preview actions usually affect display only. Actual edits still become pending changes and generate SQL.
+
+### Plugin Decoding
+
+When a column holds values encrypted or encoded with a custom business algorithm, install a native plugin that declares the
+`sql-value-codec-v1` capability. Right-click a cell and choose **Decode with Plugin**, or pick **Plugin decode** in the
+cell details **Convert preview** panel, then click **Convert** (when several decoder plugins are installed, choose one first). DBX shows the text or pretty-printed JSON the
+plugin returns. Binary columns offer plugin decoding only, and the plugin receives the original bytes.
+
+The current cell's value is sent to the selected plugin only when you click **Convert**. The plugin receives the database
+type, column name and column type, never the connection configuration or password. Input and the JSON-serialized result
+are each limited to 2 MiB, calls time out after 10 seconds, and NULL or partially loaded large values cannot be decoded.
+Without a codec plugin installed, neither the context menu nor the transform kinds show this option.
+
+Decoded results are a read-only preview: they are never written back to the database and never enter the grid, exports
+or AI context. Developers can follow the
+[SQL value codec protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md#sql-value-codec-capability).
 
 ## Transposed View
 

@@ -84,6 +84,12 @@ function keydown(target: HTMLElement, key: string) {
   return event;
 }
 
+function pressToggleLineCommentAndAdvance(view: EditorView) {
+  const event = new KeyboardEvent("keydown", { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true });
+  view.contentDOM.dispatchEvent(event);
+  return event;
+}
+
 function foldedRangeCount(view: EditorView): number {
   let count = 0;
   foldedRanges(view.state).between(0, view.state.doc.length, () => count++);
@@ -348,6 +354,21 @@ describe("QueryEditor component split integration", () => {
     expect(host.querySelector(".cm-editor")).toBe(view.dom);
   });
 
+  it("preselects the configured statement when offering a nested query", async () => {
+    const sql = "SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)";
+    const { editor, host, view, settingsStore, onExecute } = await mountEditor({ modelValue: sql });
+    settingsStore.editorSettings.showExecutionTargetPicker = true;
+    view.dispatch({ selection: { anchor: sql.indexOf("SELECT 1") + 3 } });
+    expect(editor.requestExecute()).toBe(true);
+    await nextTick();
+    const picker = host.querySelector<HTMLElement>('[role="listbox"]')!;
+    const options = picker.querySelectorAll('[role="option"]');
+    expect(options).toHaveLength(2);
+    expect(options[0].getAttribute("aria-selected")).toBe("false");
+    expect(options[1].getAttribute("aria-selected")).toBe("true");
+    expect(onExecute).not.toHaveBeenCalled();
+  });
+
   it.each(["redis", "mongodb", "elasticsearch"] as const)("preserves the non-SQL %s execution path", async (databaseType) => {
     const { editor, props, host, settingsStore, onExecute } = await mountEditor({ databaseType, modelValue: databaseType === "redis" ? "GET key" : "{}" });
     settingsStore.editorSettings.showExecutionTargetPicker = true;
@@ -356,6 +377,34 @@ describe("QueryEditor component split integration", () => {
     expect(onExecute).toHaveBeenCalledWith({ fullSql: props.modelValue, selectedSql: databaseType === "mongodb" ? "" : props.modelValue, cursorPos: 0, selectionFrom: 0, selectionTo: databaseType === "mongodb" ? 0 : props.modelValue.length });
     expect(host.querySelector('[role="listbox"]')).toBeNull();
     expect(await editor.pasteClipboardAsSqlInCondition()).toBe(false);
+  });
+
+  function pasteText(view: EditorView, text: string) {
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: { getData: (type: string) => (type === "text/plain" ? text : "") } });
+    view.contentDOM.dispatchEvent(event);
+  }
+
+  it.each(["", "SELECT 0;\n"])("runs the pasted statement immediately after a paste ending in blank lines (%j)", async (prefix) => {
+    const { editor, view, onExecute } = await mountEditor({ modelValue: prefix });
+    const sql = "SELECT 1;\nSELECT 2;";
+    view.dispatch({ selection: { anchor: prefix.length } });
+
+    pasteText(view, sql.replaceAll("\n", "\r\n") + "\r\n \r\n");
+    expect(view.state.doc.toString()).toBe(prefix + sql + "\n \n");
+    expect(editor.requestExecute({ bypassPicker: true })).toBe(true);
+    expect(onExecute).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ selectedSql: "SELECT 2", cursorPos: prefix.length + sql.length }));
+
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(prefix);
+  });
+
+  it("preserves the normal paste caret when inserting in the middle of a query", async () => {
+    const { view } = await mountEditor({ modelValue: "SELECT 2;" });
+    pasteText(view, "SELECT 1;\n");
+
+    expect(view.state.doc.toString()).toBe("SELECT 1;\nSELECT 2;");
+    expect(view.state.selection.main.head).toBe("SELECT 1;\n".length);
   });
 
   it.each([false, true])("preserves the blank-line execution fallback setting (%s)", async (fallback) => {
@@ -401,6 +450,29 @@ describe("QueryEditor component split integration", () => {
     expect(host.querySelector(".cm-editor")).toBe(view.dom);
   });
 
+  it("does not accumulate page styles while repeatedly restoring cached SQL tabs", async () => {
+    const { props, view, settingsStore } = await mountEditor({ modelValue: "SELECT 1;", tabId: "styles-a" });
+    settingsStore.editorSettings.theme = "cursor-light";
+    const activate = async (tabId: string, sql: string) => {
+      props.tabId = tabId;
+      props.modelValue = sql;
+      await nextTick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    await activate("styles-b", "SELECT 2;");
+    await activate("styles-a", "SELECT 1;");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const stylesheetSize = () => [...document.head.querySelectorAll("style")].reduce((total, style) => total + (style.textContent?.length ?? 0), 0);
+    const initialSize = stylesheetSize();
+    for (let index = 0; index < 20; index += 1) {
+      await activate("styles-b", "SELECT 2;");
+      await activate("styles-a", "SELECT 1;");
+    }
+    expect(stylesheetSize() - initialSize).toBe(0);
+    view.dispatch({ selection: { anchor: 0, head: 6 } });
+    expect(view.state.sliceDoc(0, 6)).toBe("SELECT");
+  });
+
   it("connects manual completion to the provider without preselecting a candidate", async () => {
     const { view, settingsStore } = await mountEditor({ modelValue: "SEL", initialSelection: { anchor: 3, head: 3 }, connectionId: "completion-test" });
     settingsStore.editorSettings.completionTriggerMode = "manual";
@@ -412,6 +484,47 @@ describe("QueryEditor component split integration", () => {
     expect(selectedCompletionIndex(view.state)).toBeNull();
     expect(view.state.doc.toString()).toBe("SEL");
     expect(closeCompletion(view)).toBe(true);
+  });
+
+  it("advances a single cursor after toggling a line comment and keeps the change undoable", async () => {
+    const source = "SELECT 1;\nSELECT 2;\nSELECT 3;";
+    const { view, settingsStore } = await mountEditor({ modelValue: source });
+    settingsStore.editorSettings.shortcuts.toggleLineCommentAndAdvance = "Ctrl+Shift+C";
+    await nextTick();
+    view.dispatch({ selection: { anchor: 2 } });
+
+    const event = pressToggleLineCommentAndAdvance(view);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(view.state.doc.toString()).toBe("-- SELECT 1;\nSELECT 2;\nSELECT 3;");
+    expect(view.state.selection.main.head).toBe(view.state.doc.line(2).from + 2);
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(source);
+  });
+
+  it("keeps a selected range on the commented line instead of advancing", async () => {
+    const { view, settingsStore } = await mountEditor({ modelValue: "SELECT 1;\nSELECT 2;" });
+    settingsStore.editorSettings.shortcuts.toggleLineCommentAndAdvance = "Ctrl+Shift+C";
+    await nextTick();
+    view.dispatch({ selection: EditorSelection.range(1, 7) });
+
+    pressToggleLineCommentAndAdvance(view);
+
+    expect(view.state.doc.toString()).toBe("-- SELECT 1;\nSELECT 2;");
+    expect(view.state.selection.main.from).toBeGreaterThanOrEqual(3);
+    expect(view.state.doc.lineAt(view.state.selection.main.head).number).toBe(1);
+  });
+
+  it("leaves the cursor on the last line after toggling its comment", async () => {
+    const { view, settingsStore } = await mountEditor({ modelValue: "SELECT 1;\nSELECT 2;" });
+    settingsStore.editorSettings.shortcuts.toggleLineCommentAndAdvance = "Ctrl+Shift+C";
+    await nextTick();
+    view.dispatch({ selection: { anchor: view.state.doc.line(2).from + 2 } });
+
+    pressToggleLineCommentAndAdvance(view);
+
+    expect(view.state.doc.toString()).toBe("SELECT 1;\n-- SELECT 2;");
+    expect(view.state.doc.lineAt(view.state.selection.main.head).number).toBe(2);
   });
 
   it("reconfigures language and wrapping extensions without replacing the view", async () => {
@@ -492,10 +605,15 @@ describe("QueryEditor component split integration", () => {
     const sql = "SELECT * FROM users";
     const { view, connectionStore, onClickTable } = await mountEditor({ modelValue: sql, connectionId: "navigation-test", database: "demo" });
     vi.spyOn(view, "posAtCoords").mockReturnValue(sql.indexOf("users") + 2);
+    // happy-dom has no text layout. The multi-cursor handler also needs the
+    // position and side returned by CodeMirror's mouse-selection hit test.
+    vi.spyOn(view, "posAndSideAtCoords").mockReturnValue({ pos: sql.indexOf("users") + 2, assoc: 1 });
     vi.spyOn(connectionStore, "lookupLocalCompletionTables").mockReturnValue([{ name: "users", schema: "demo" }]);
-    view.contentDOM.dispatchEvent(new MouseEvent("mousedown", { ctrlKey: true, altKey: true, button: 0, bubbles: true, cancelable: true }));
+    view.contentDOM.dispatchEvent(new MouseEvent("mousedown", { ctrlKey: true, altKey: true, button: 0, detail: 1, bubbles: true, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { ctrlKey: true, altKey: true, button: 0, detail: 1, bubbles: true, cancelable: true }));
     await nextTick();
     expect(onClickTable).not.toHaveBeenCalled();
+    expect(view.state.selection.main.head).toBe(sql.indexOf("users") + 2);
     view.dispatch({ selection: { anchor: 0 } });
     view.contentDOM.dispatchEvent(new MouseEvent("mousedown", { ctrlKey: true, button: 0, bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(onClickTable).toHaveBeenCalledWith(expect.objectContaining({ name: "users" })));

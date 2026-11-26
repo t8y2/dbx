@@ -3,6 +3,7 @@ import { apiUrl } from "@/lib/common/webPath";
 import type {
   MqClusterInfo,
   ClusterInfo,
+  KafkaBrokerConfig,
   TenantInfo,
   TenantConfig,
   NamespaceRef,
@@ -334,6 +335,10 @@ export async function mqAlterConsumerGroupConfig(connectionId: string, groupId: 
 
 export async function mqGetClusterInfo(connectionId: string): Promise<ClusterInfo> {
   return post("/api/mq/monitoring/cluster-info", { connectionId });
+}
+
+export async function mqGetBrokerConfig(connectionId: string, brokerId: number): Promise<KafkaBrokerConfig> {
+  return post("/api/mq/monitoring/broker-config", { connectionId, brokerId });
 }
 
 export async function mqGetTopicRoute(connectionId: string, topic: TopicRef): Promise<unknown> {

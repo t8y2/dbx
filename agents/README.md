@@ -85,7 +85,10 @@ The default maximum is 8 physical connections per immutable connection identity,
 | `dbx.agent.jdbc.pool.validationTimeoutMillis` | `DBX_AGENT_JDBC_POOL_VALIDATION_TIMEOUT_MILLIS` | `5000` |
 | `dbx.agent.jdbc.pool.idleTimeoutMillis` | `DBX_AGENT_JDBC_POOL_IDLE_TIMEOUT_MILLIS` | `120000` |
 | `dbx.agent.jdbc.pool.maxLifetimeMillis` | `DBX_AGENT_JDBC_POOL_MAX_LIFETIME_MILLIS` | `1800000` |
+| `dbx.agent.jdbc.pool.keepaliveTimeMillis` | `DBX_AGENT_JDBC_POOL_KEEPALIVE_TIME_MILLIS` | `30000` |
 | `dbx.agent.jdbc.pool.retireMillis` | `DBX_AGENT_JDBC_POOL_RETIRE_MILLIS` | `300000` |
+
+`keepaliveTimeMillis` is how often HikariCP validates an idle pooled connection, so that NAT gateways and tunnels do not silently drop an idle link. Set it to `0` to disable keepalive. Positive values below `30000` are raised to `30000` (HikariCP's minimum), and the value is always kept below `maxLifetimeMillis`; keepalive is disabled when `maxLifetimeMillis` is `30000`.
 
 HikariCP is shaded into each pooled Agent JAR. Existing installations already using the managed JRE 21 do not need to reinstall or replace the JRE.
 Set `DBX_AGENT_JDBC_POOL_ENABLED=false` for a runtime-level compatibility fallback to the previous one-connection-per-logical-session behavior.

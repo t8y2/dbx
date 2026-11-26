@@ -500,6 +500,8 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: dbx_core::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: dbx_core::models::connection::default_query_timeout_secs(),
+
+            write_timeout_secs: 0,
             idle_timeout_secs: dbx_core::models::connection::default_idle_timeout_secs(),
             manual_transaction_timeout_secs: dbx_core::models::connection::default_manual_transaction_timeout_secs(),
             idle_disconnect_secs: dbx_core::models::connection::default_idle_disconnect_secs(),
@@ -1240,6 +1242,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 保存任意连接都会重发整张连接表，`sync_connection_configs` 因此会在每次保存时
+    /// 重新比较所有连接。插件连接的池条目持有 sidecar 会话句柄，销毁池会发
+    /// connection/disconnect 杀掉该连接全部会话——一旦比较被派生字段/密钥差异判成
+    /// “已变更”，就会连带拆掉其他 tab 的活跃终端（dbx-plugin-ssh#251）。插件连接的
+    /// 自身配置变更由前端显式重连路径处理，持久化同步不得销毁插件池。
+    #[tokio::test]
+    async fn sync_connection_configs_never_drops_open_plugin_pools() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-plugin-sync-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let mut plugin = mongodb_config();
+        plugin.id = "ssh-a".to_string();
+        plugin.db_type = DatabaseType::Plugin;
+        plugin.plugin_id = Some("io.dbx.ssh".to_string());
+        plugin.plugin_connection_provider = Some("io.dbx.ssh.connection".to_string());
+        state.configs.write().await.insert(plugin.id.clone(), plugin.clone());
+
+        // 即使端点变化（会被 pool_equivalent 判为不同），插件池也不得由同步销毁。
+        let mut changed = plugin.clone();
+        changed.host = "other-host".to_string();
+        let sync = sync_connection_configs(&state, std::slice::from_ref(&changed)).await;
+        assert!(sync.connection_pool_ids_to_drop.is_empty());
+        assert_eq!(state.configs.read().await.get("ssh-a").map(|c| c.host.as_str()), Some("other-host"));
+
+        // 删除（不再出现在持久化列表）仍必须清理池，删除语义不受本豁免影响。
+        let sync_deleted = sync_connection_configs(&state, &[]).await;
+        assert_eq!(sync_deleted.connection_pool_ids_to_drop.as_slice(), &["ssh-a".to_string()]);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn sync_connection_configs_preserves_nacos_session_password_for_scope_updates() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-nacos-scope-{}", uuid::Uuid::new_v4()));
@@ -1365,6 +1399,19 @@ async fn sync_connection_configs(state: &AppState, configs: &[ConnectionConfig])
             }
             if previous.db_type == DatabaseType::MessageQueue {
                 mq_adapter_ids_to_drop.insert(config.id.clone());
+            }
+            // 插件连接的池条目持有 sidecar 会话句柄：关闭池会向插件发
+            // connection/disconnect（删注册表 + 杀掉该连接全部会话）。保存任意
+            // 连接都会重发整张连接表，这里一旦因派生字段/密钥差异把插件连接判成
+            // “已变更”，就会连带拆掉其他 tab 的活跃终端（dbx-plugin-ssh#251）。
+            // 插件连接自身的配置变更由前端显式重连路径负责——connect_db_inner 对
+            // Plugin 走 upsert-without-close 再建新会话；显式断开/删除仍走完整关闭
+            // 路径。因此持久化同步只清理会话凭据、绝不销毁插件池。
+            if config.db_type == DatabaseType::Plugin && previous.db_type == DatabaseType::Plugin {
+                if !connection_configs_session_credentials_compatible(&previous, config) {
+                    state.session_credentials.clear_connection(&config.id);
+                }
+                continue;
             }
             if !connection_configs_session_credentials_compatible(&previous, config) {
                 // 端点或认证身份变化后，旧密码不能安全复用。显示范围等本地设置
@@ -1717,6 +1764,17 @@ async fn test_connection_with_info_impl(
                 | DatabaseType::Questdb
                 | DatabaseType::OpenGauss => match db::postgres::connect(&url, connect_timeout).await {
                     Ok(pool) => {
+                        // Non-DWS native GaussDB reports its real version only through
+                        // `pg_settings`; surface it in the test result so the connection
+                        // dialog shows the server and hot-patch versions.
+                        if config.db_type == DatabaseType::Gaussdb
+                            && !dbx_core::query::plugin_plan::is_explicit_gaussdb_dws_profile(&config)
+                        {
+                            database_info = Some(
+                                dbx_core::connection::gaussdb_native_database_info(&pool, config.effective_database())
+                                    .await,
+                            );
+                        }
                         pool.close();
                         Ok("Connection successful".to_string())
                     }
@@ -1779,13 +1837,9 @@ async fn test_connection_with_info_impl(
                             })));
                     }
 
-                    let native_err = match db::mongo_driver::connect_with_oidc(
-                        &url,
-                        connect_timeout,
-                        idle_timeout,
-                        state.mongo_oidc_browser_opener(),
-                    )
-                    .await
+                    let native_err = match state
+                        .connect_native_mongodb(&url, connect_timeout, idle_timeout, runtime_proxy.as_ref())
+                        .await
                     {
                         Ok(client) => {
                             match db::mongo_driver::test_connection_for_url(
@@ -1812,7 +1866,7 @@ async fn test_connection_with_info_impl(
                         }
                         Err(e) => e,
                     };
-                    if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
+                    if runtime_proxy.is_none() && !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                         let mut client =
                             spawn_mongo_legacy_fallback_agent(state.as_ref(), &config.db_type, &native_err).await?;
                         client.connect(mongo_legacy_connect_params(&config, &host, port)?).await.map_err(|err| {
@@ -2084,10 +2138,10 @@ async fn test_connection_with_info_impl(
                     let validate_agent_target = consul_config.agent_target.is_some();
                     let original_host = consul_config.base_url.host_str().unwrap_or_default();
                     let original_port = consul_config.base_url.port_or_known_default().unwrap_or(config.port);
-                    if host != original_host || port != original_port {
+                    if runtime_proxy.is_some() || host != original_host || port != original_port {
                         consul_config = consul_config.with_connect_override(&host, port);
                     }
-                    let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+                    let client = dbx_core::consul::ConsulClient::new_with_proxy(consul_config, runtime_proxy).await?;
                     client.probe().await?;
                     let identity = if validate_agent_target {
                         Some(client.validate_configured_agent_target().await?)
@@ -2368,13 +2422,9 @@ async fn connect_db_inner(
                     state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                     PoolKind::agent(client)
                 } else {
-                    let native_err = match db::mongo_driver::connect_with_oidc(
-                        &url,
-                        connect_timeout,
-                        idle_timeout,
-                        state.mongo_oidc_browser_opener(),
-                    )
-                    .await
+                    let native_err = match state
+                        .connect_native_mongodb(&url, connect_timeout, idle_timeout, runtime_proxy.as_ref())
+                        .await
                     {
                         Ok(client) => {
                             state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
@@ -2411,7 +2461,7 @@ async fn connect_db_inner(
                         }
                         Err(e) => e,
                     };
-                    if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
+                    if runtime_proxy.is_none() && !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                         log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                         let mut client =
                             spawn_mongo_legacy_fallback_agent(state.inner().as_ref(), &db_config.db_type, &native_err)
@@ -2654,10 +2704,10 @@ async fn connect_db_inner(
                 let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&db_config)?;
                 let original_host = consul_config.base_url.host_str().unwrap_or_default();
                 let original_port = consul_config.base_url.port_or_known_default().unwrap_or(db_config.port);
-                if host != original_host || port != original_port {
+                if runtime_proxy.is_some() || host != original_host || port != original_port {
                     consul_config = consul_config.with_connect_override(&host, port);
                 }
-                let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+                let client = dbx_core::consul::ConsulClient::new_with_proxy(consul_config, runtime_proxy).await?;
                 client.probe().await?;
                 PoolKind::Consul(client)
             }

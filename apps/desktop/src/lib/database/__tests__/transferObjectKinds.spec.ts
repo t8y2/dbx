@@ -68,6 +68,10 @@ describe("transferObjectKinds", () => {
     expect(isTransferPairSupported("xugu", "xugu")).toBe(true);
     expect(isTransferPairSupported("xugu", "postgres")).toBe(false);
     expect(isTransferPairSupported("mysql", "xugu")).toBe(true);
+    expect(isTransferPairSupported("oracle", "xugu")).toBe(true);
+    expect(isTransferPairSupported("xugu", "oracle")).toBe(false);
+    expect(isTransferPairSupported("oceanbase-oracle", "xugu")).toBe(false);
+    expect(isTransferPairSupported("dameng", "xugu")).toBe(false);
     expect(isTransferPairSupported("xugu", "mysql")).toBe(false);
     expect(isTransferPairSupported("doris", "xugu")).toBe(false);
     expect(isTransferPairSupported("starrocks", "xugu")).toBe(false);

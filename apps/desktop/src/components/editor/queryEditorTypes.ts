@@ -9,12 +9,16 @@ export interface QueryEditorProps {
   modelValue: string;
   /** Identity of the tab owning the document. Changing it swaps in that tab's cached editor state (fresh undo history on first visit). */
   tabId?: string;
+  bookmarkLines?: number[];
+  /** When present, identifies the document these persisted lines already map to. */
+  bookmarkDocument?: string;
   connectionId?: string;
   catalog?: string;
   database?: string;
   /** Warm table metadata for the active database; only query tabs enable this. */
   prefetchCompletion?: boolean;
   schema?: string;
+  debugRoutine?: { schema?: string; name: string; objectType: "PROCEDURE" | "FUNCTION" };
   clientSessionId?: string;
   completionContextVersion?: number;
   databaseType?: DatabaseType;

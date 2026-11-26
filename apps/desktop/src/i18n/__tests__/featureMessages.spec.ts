@@ -58,6 +58,10 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     translated: true,
   },
   { feature: "plugin AI conversation", keys: ["ai.pluginHttpModelOnly", "ai.pluginWelcome", "ai.pluginFollowUp"] },
+  {
+    feature: "plugin update blocked by the host engine requirement",
+    keys: under("pluginPlatform", ["marketplaceStatus.requires-newer-dbx", "marketplaceStatus.incompatible", "requiresNewerDbx", "requiresNewerDbxWithRequirement", "pluginVersionIncompatible", "updateBlockedByNewerDbx", "upgradeDbx"]),
+  },
   { feature: "editor find whole word (#13287)", keys: ["editor.search.wholeWord"], translated: true },
   { feature: "quick open", keys: ["quickOpen.*", "settings.shortcutGlobalSearch"] },
   {
@@ -101,6 +105,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "plugin batch actions", keys: ["pluginPlatform.batchDuplicateSources", "pluginPlatform.batchRefreshFailed"], locales: EXCEPT_AZ_TR },
   { feature: "plugin marketplace sorting (#10078)", keys: under("pluginPlatform", ["sortBy", "sortByName", "sortByRecentlyUpdated", "sortByRecentlyListed", "sortByUpdatesFirst", "sortByInstalls", "installCount"]), locales: EXCEPT_AZ_TR, translated: true },
   { feature: "shared refresh action (#8768)", keys: ["common.refresh"] },
+  { feature: "shared column label", keys: ["common.column"], translated: true },
   {
     feature: "Xugu field lineage scope and coverage",
     keys: under("lineage", ["xuguScopeNotice", "xuguPartialCoverage"]),
@@ -110,6 +115,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "transfer bulk select", keys: under("transfer", ["bulkSelectObjects", "bulkSelectTitle", "bulkSelectHint", "bulkSelectPlaceholder", "bulkSelectConfirm", "bulkSelectMatched", "bulkSelectUnmatched", "noMatchingObjects"]), translated: true },
   { feature: "transfer background acknowledgement (#8649)", keys: ["transfer.backgroundStarted"], translated: true },
   { feature: "table info pin", keys: ["grid.pinTableInfo", "grid.unpinTableInfo"], translated: true },
+  { feature: "data grid row JSON preview", keys: ["grid.rowJsonPreview"], translated: true },
   {
     feature: "data grid structured sorting",
     keys: under("grid", [
@@ -167,11 +173,13 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     keys: under("settings", ["shortcutToggleBookmark", "shortcutNextBookmark", "shortcutPreviousBookmark"]),
     translated: true,
   },
+  { feature: "workspace bookmark list", keys: ["editor.bookmarks.*"], locales: ["en", "es", "it", "ja", "ko", "pt-BR", "ru", "th", "zh-CN", "zh-TW"], translated: true },
   { feature: "MCP history kind", keys: ["history.kinds.mcp"] },
   { feature: "editor selection to AI (#10058)", keys: under("ai", ["selectionChipLabel", "selectionChipDetail", "externalTargetUnavailable"]) },
   { feature: "SQL formatter layout style", keys: under("settings", ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic"]) },
   { feature: "sidebar table structure shortcut", keys: ["settings.shortcutEditSidebarTableStructure"], locales: ALL_LOCALES.filter((locale) => locale !== "th") },
   { feature: "MySQL AUTO_INCREMENT warnings", keys: under("structureEditor", ["mysqlAutoIncrementSingleColumn", "mysqlAutoIncrementRequiresIndex", "mysqlAutoIncrementRequiresNativeColumn"]) },
+  { feature: "MySQL system database visibility", keys: under("connection", ["showSystemDatabases", "showSystemDatabasesHint"]), translated: true },
 ];
 
 function lookup(messages: unknown, path: string): unknown {

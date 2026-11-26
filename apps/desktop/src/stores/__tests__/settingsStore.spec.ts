@@ -58,6 +58,18 @@ describe("normalizeEditorSettings", () => {
     expect(settings.editorSettings).toMatchObject(defaults);
   });
 
+  it("defaults dataGridOrderByVisible to true and dataGridWhereRatio to 0.5", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridOrderByVisible).toBe(true);
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({}).dataGridOrderByVisible).toBe(true);
+    expect(normalizeEditorSettings({}).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridOrderByVisible: false }).dataGridOrderByVisible).toBe(false);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.7 }).dataGridWhereRatio).toBe(0.7);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.1 as any }).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.95 as any }).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: "0.7" as any }).dataGridWhereRatio).toBe(0.5);
+  });
+
   it("defaults the selection statistic to sum and validates every saved metric", () => {
     expect(DEFAULT_EDITOR_SETTINGS.dataGridSelectionSummaryMetric).toBe("sum");
     expect(normalizeEditorSettings({}).dataGridSelectionSummaryMetric).toBe("sum");
@@ -465,6 +477,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sidebarDensity: 123 } as any).sidebarDensity).toBe("default");
   });
 
+  it("keeps original connection icons for missing or invalid saved preferences", () => {
+    expect(normalizeEditorSettings({}).sidebarConnectionIconStyle).toBe("classic");
+    expect(normalizeEditorSettings({ sidebarConnectionIconStyle: "badge" }).sidebarConnectionIconStyle).toBe("badge");
+    expect(normalizeEditorSettings({ sidebarConnectionIconStyle: "unknown" } as any).sidebarConnectionIconStyle).toBe("classic");
+  });
+
   it("uses inline comments by default and preserves legacy comment visibility", () => {
     expect(normalizeEditorSettings({}).sidebarObjectInfoMode).toBe("comment-inline");
     expect(normalizeEditorSettings({ sidebarObjectInfoMode: "comment-aligned" }).sidebarObjectInfoMode).toBe("comment-aligned");
@@ -781,6 +799,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ dataGridCopyExtractor: "invalid" as any }).dataGridCopyExtractor).toBe("smart");
   });
 
+  it("normalizes the persisted Smart Copy single-column format", () => {
+    expect(normalizeEditorSettings({}).dataGridSmartSingleColumnFormat).toBe("default");
+    expect(normalizeEditorSettings({ dataGridSmartSingleColumnFormat: "json" }).dataGridSmartSingleColumnFormat).toBe("json");
+    expect(normalizeEditorSettings({ dataGridSmartSingleColumnFormat: "sql-inserts" as any }).dataGridSmartSingleColumnFormat).toBe("default");
+    expect(normalizeEditorSettings({ dataGridSmartSingleColumnFormat: "invalid" as any }).dataGridSmartSingleColumnFormat).toBe("default");
+  });
+
   it("normalizes persistent extractor configuration fail-fast defaults", () => {
     const defaults = normalizeEditorSettings({}).dataGridExtractorOptions;
     expect(defaults.dsv).toMatchObject({
@@ -1087,6 +1112,13 @@ describe("normalizeDesktopSettings", () => {
     expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 513 }).metadata_cache_max_memory_mb).toBe(64);
   });
 
+  it("falls back non-positive sidebar table page sizes to the default", () => {
+    expect(normalizeDesktopSettings({}).sidebar_table_page_size).toBe(1000);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: 500 }).sidebar_table_page_size).toBe(500);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: 0 }).sidebar_table_page_size).toBe(1000);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: -10 }).sidebar_table_page_size).toBe(1000);
+  });
+
   it("defaults DuckDB worker process isolation to disabled for old settings", () => {
     expect(normalizeDesktopSettings({}).duckdb_worker_process_isolation).toBe(false);
   });
@@ -1372,6 +1404,14 @@ describe("normalizeEditorSettings - colorizeConnectionTabsScope", () => {
   });
 });
 
+describe("normalizeEditorSettings - crossWindowTabDragPreviewEnabled", () => {
+  it("defaults to enabled and only accepts booleans", () => {
+    expect(normalizeEditorSettings({}).crossWindowTabDragPreviewEnabled).toBe(true);
+    expect(normalizeEditorSettings({ crossWindowTabDragPreviewEnabled: false }).crossWindowTabDragPreviewEnabled).toBe(false);
+    expect(normalizeEditorSettings({ crossWindowTabDragPreviewEnabled: "false" } as any).crossWindowTabDragPreviewEnabled).toBe(true);
+  });
+});
+
 describe("normalizeEditorSettings - tabMaxWidth", () => {
   it("defaults tabMaxWidth to 0", () => {
     expect(normalizeEditorSettings({}).tabMaxWidth).toBe(0);
@@ -1536,21 +1576,9 @@ describe("settingsStore AI API key normalization", () => {
   });
 
   it("provides the current partner default models", () => {
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "jalapeno-cloud")).toMatchObject({
-      model: "GLM-5.3",
-      models: [{ name: "GLM-5.3" }, { name: "DeepSeek-V4-Pro" }, { name: "MiniMax-M3" }],
-    });
     expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "hualong-ai")).toMatchObject({
       model: "deepseek-v4.1-flash",
       models: [{ name: "deepseek-v4.1-flash" }],
-    });
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "aicodemirror")).toMatchObject({
-      endpoint: "https://api.aicodemirror.ai/v1",
-      provider: "openai-compatible",
-      authMethod: "bearer",
-      requiresApiKey: true,
-      websiteUrl: "https://www.aicodemirror.ai/register?invitecode=DK44NH",
-      badgeKey: "ai.aicodemirrorSponsored",
     });
   });
 
@@ -1589,31 +1617,6 @@ describe("settingsStore AI API key normalization", () => {
     expect(getAiProviderPresetId("openai-compatible", " HTTPS://API.MODELVERSE.CN/v1/ ")).toBe("astraflow");
     expect(getAiProviderPreset("openai-compatible", "https://example.com/v1")).toBe(AI_PROVIDER_PRESETS["openai-compatible"]);
     expect(getAiProviderPresetOption("hualong-ai").model).toBe("deepseek-v4.1-flash");
-  });
-
-  it("adds HiAPI as a sponsored partner preset", () => {
-    const preset = getAiProviderPresetOption("hiapi");
-
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((candidate) => candidate.id === "hiapi")).toBe(preset);
-    expect(preset).toMatchObject({
-      id: "hiapi",
-      label: "HiAPI",
-      iconPath: "/icons/ai/hiapi.png",
-      group: "partner",
-      provider: "openai-compatible",
-      endpoint: "https://api.hiapi.ai/v1",
-      model: "",
-      models: [{ name: "glm-5.3" }, { name: "deepseek-v4-flash" }, { name: "deepseek-v4.1-flash" }, { name: "gpt-6-astra" }, { name: "claude-sonnet-4-6" }, { name: "kimi-k3" }],
-      apiStyle: "completions",
-      authMethod: "bearer",
-      requiresApiKey: true,
-      websiteUrl: "https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=ai-provider",
-      apiKeyUrl: "https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=ai-provider",
-      descriptionKey: "ai.hiapiDescription",
-      badgeKey: "ai.hiapiSponsored",
-    });
-    expect(getAiProviderPreset("openai-compatible", "https://api.hiapi.ai/v1")).toBe(preset);
-    expect(getAiProviderPresetId("openai-compatible", " HTTPS://API.HIAPI.AI/v1/ ")).toBe("hiapi");
   });
 
   it("adds PackyAPI as a sponsored partner preset without a default model", () => {

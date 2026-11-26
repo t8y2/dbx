@@ -4,6 +4,8 @@ import { Copy, Plus, RotateCcw, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
+import DataGridLocalFilterSummary from "@/components/grid/DataGridLocalFilterSummary.vue";
+import type { DataGridLocalFilterSummaryItem } from "@/components/grid/DataGridLocalFilterSummary.vue";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import type { DataGridDistinctValueSource, DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
@@ -18,6 +20,9 @@ const props = defineProps<{
   columnSearch: string;
   applyOnlyBusy?: boolean;
   disabled?: boolean;
+  hasLocalColumnFilters?: boolean;
+  localFilterCount?: number;
+  localFilterSummaries?: DataGridLocalFilterSummaryItem[];
   valueSuggestions?: DataGridDistinctValueSuggestionState;
 }>();
 
@@ -29,6 +34,7 @@ const emit = defineEmits<{
   apply: [];
   reset: [];
   clear: [];
+  clearLocalFilter: [columnIndex?: number];
   copySql: [];
   removeRule: [id: string];
   moveRule: [id: string, targetIndex: number];
@@ -73,6 +79,7 @@ watch(
 <template>
   <section data-grid-filter-workbench class="shrink-0 border-b bg-muted/10 text-foreground">
     <div ref="rulesScrollerRef" data-filter-rules-scroll class="filter-rules-scroll min-h-11 overflow-auto px-3 py-2">
+      <DataGridLocalFilterSummary v-if="hasLocalColumnFilters" class="mb-1.5" :count="localFilterCount ?? 0" :summaries="localFilterSummaries ?? []" @clear-all="emit('clearLocalFilter')" @clear-column="(columnIndex) => emit('clearLocalFilter', columnIndex)" />
       <DataGridFilterBuilder
         ref="filterBuilderRef"
         class="min-w-[560px]"

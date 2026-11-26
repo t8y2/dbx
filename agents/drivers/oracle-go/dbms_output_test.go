@@ -356,8 +356,8 @@ type oracleDBMSOutputDriver struct {
 	// compileErrors are the ALL_ERRORS rows (OWNER, NAME, TYPE, LINE, POSITION, TEXT)
 	// served to the compilation-error readback that follows a CREATE.
 	compileErrors [][]driver.Value
-	resetContexts       []context.Context
-	queryContexts       []context.Context
+	resetContexts []context.Context
+	queryContexts []context.Context
 }
 
 func openOracleDBMSOutputTestDB(t *testing.T) (*sql.DB, *oracleDBMSOutputDriver) {
@@ -568,16 +568,13 @@ func (c *oracleDBMSOutputConn) QueryContext(ctx context.Context, query string, _
 	defer c.driver.mu.Unlock()
 	c.driver.statements = append(c.driver.statements, query)
 	c.driver.events = append(c.driver.events, "query")
-<<<<<<< HEAD
 	if strings.Contains(query, "FROM ALL_ERRORS") {
 		return &oracleDBMSOutputRows{
 			columns: []string{"OWNER", "NAME", "TYPE", "LINE", "POSITION", "TEXT"},
 			values:  append([][]driver.Value(nil), c.driver.compileErrors...),
 		}, nil
 	}
-=======
 	c.driver.queryContexts = append(c.driver.queryContexts, ctx)
->>>>>>> c0c416f4e (fix(oracle): upgrade godror to prevent stale OCI call timeout leak)
 	lines := c.driver.takeStatementLines()
 	if c.enabled {
 		c.buffer = append(c.buffer, lines...)

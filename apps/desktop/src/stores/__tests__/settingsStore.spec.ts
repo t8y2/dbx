@@ -28,7 +28,7 @@ import {
 } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION, DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
-import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
+import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
   it("defaults sidebar hover to enabled with a 300ms delay and validates saved values", () => {
@@ -997,6 +997,15 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({}).tableFontFamily).toBe(DEFAULT_DATA_GRID_FONT_FAMILY);
     expect(normalizeEditorSettings({ tableFontFamily: "'IBM Plex Mono', monospace" }).tableFontFamily).toBe("'IBM Plex Mono', monospace");
     expect(normalizeEditorSettings({ tableFontFamily: "   " }).tableFontFamily).toBe(DEFAULT_DATA_GRID_FONT_FAMILY);
+  });
+
+  it("migrates persisted legacy proportional default font families", () => {
+    const legacyUiFontFamily = `"Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif`;
+    const legacyDataGridFontFamily = `"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
+
+    expect(normalizeEditorSettings({ uiFontFamily: legacyUiFontFamily }).uiFontFamily).toBe(DEFAULT_UI_FONT_FAMILY);
+    expect(normalizeEditorSettings({ tableFontFamily: legacyDataGridFontFamily }).tableFontFamily).toBe(DEFAULT_DATA_GRID_FONT_FAMILY);
+    expect(normalizeEditorSettings({ uiFontFamily: `"Aptos", ${legacyUiFontFamily}` }).uiFontFamily).toBe(`"Aptos", ${legacyUiFontFamily}`);
   });
 
   it("defaults the editor font with CJK fallbacks and migrates legacy default presets", () => {

@@ -8,7 +8,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { aiConfigToItem, generateId, getConfigKey } from "@/lib/ai/aiConfigList";
 import { AI_CONVERSATION_FONT_FAMILY_DEFAULT, AI_CONVERSATION_FONT_SIZE_DEFAULT, normalizeAiConversationFontFamily, normalizeAiConversationFontSize } from "@/lib/ai/aiTypography";
-import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, LEGACY_PRESET_FONT_MAP } from "@/lib/app/appFonts";
+import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, LEGACY_PRESET_FONT_MAP, LEGACY_PROPORTIONAL_FONT_MAP } from "@/lib/app/appFonts";
 import { emitAlwaysOnTopToolbarVisibilityChanged } from "@/lib/app/windowAlwaysOnTop";
 import { defaultBackgroundImageSettings, normalizeBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import * as api from "@/lib/backend/api";
@@ -1737,6 +1737,11 @@ function normalizeFontFamily(value: unknown, fallback: string, migrateMonoPreset
   return (migrateMonoPresets ? LEGACY_PRESET_FONT_MAP[trimmed] : undefined) ?? trimmed;
 }
 
+function normalizeProportionalFontFamily(value: unknown, fallback: string): string {
+  const normalized = normalizeFontFamily(value, fallback);
+  return LEGACY_PROPORTIONAL_FONT_MAP[normalized] ?? normalized;
+}
+
 function normalizeDrawerWidth(value: unknown, min: number, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.min(900, Math.max(min, Math.round(value)));
@@ -2202,7 +2207,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   return {
     fontFamily: normalizeFontFamily(settings.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily, true),
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
-    uiFontFamily: normalizeFontFamily(settings.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily),
+    uiFontFamily: normalizeProportionalFontFamily(settings.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily),
     aiFontFamily: normalizeAiConversationFontFamily(settings.aiFontFamily),
     aiFontSize: normalizeAiConversationFontSize(settings.aiFontSize),
     uiScale: normalizeUiScale(settings.uiScale),
@@ -2365,7 +2370,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridBooleanDisplayMode: settings.dataGridBooleanDisplayMode === "checkbox" ? "checkbox" : "dropdown",
     dataGridBooleanValueStyle: normalizeDataGridBooleanValueStyle(settings.dataGridBooleanValueStyle),
     numericColumnRightAlign: typeof settings.numericColumnRightAlign === "boolean" ? settings.numericColumnRightAlign : DEFAULT_EDITOR_SETTINGS.numericColumnRightAlign,
-    tableFontFamily: normalizeFontFamily(settings.tableFontFamily, DEFAULT_EDITOR_SETTINGS.tableFontFamily),
+    tableFontFamily: normalizeProportionalFontFamily(settings.tableFontFamily, DEFAULT_EDITOR_SETTINGS.tableFontFamily),
     tableFontSize: normalizeTableFontSize(settings.tableFontSize),
     structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
     tableInfoActiveTab: normalizeTableInfoTab(settings.tableInfoActiveTab),
@@ -3212,7 +3217,7 @@ export const useSettingsStore = defineStore("settings", () => {
   function applyEditorSettingsPatch(partial: Partial<EditorSettings>) {
     if (partial.fontFamily !== undefined) editorSettings.value.fontFamily = normalizeFontFamily(partial.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily);
     if (partial.fontSize !== undefined) editorSettings.value.fontSize = partial.fontSize;
-    if (partial.uiFontFamily !== undefined) editorSettings.value.uiFontFamily = normalizeFontFamily(partial.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily);
+    if (partial.uiFontFamily !== undefined) editorSettings.value.uiFontFamily = normalizeProportionalFontFamily(partial.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily);
     if (partial.aiFontFamily !== undefined) editorSettings.value.aiFontFamily = normalizeAiConversationFontFamily(partial.aiFontFamily);
     if (partial.aiFontSize !== undefined) editorSettings.value.aiFontSize = normalizeAiConversationFontSize(partial.aiFontSize);
     if (partial.uiScale !== undefined) editorSettings.value.uiScale = normalizeUiScale(partial.uiScale);
@@ -3403,7 +3408,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridBooleanValueStyle !== undefined) editorSettings.value.dataGridBooleanValueStyle = normalizeDataGridBooleanValueStyle(partial.dataGridBooleanValueStyle);
     if (partial.dataGridBooleanDisplayMode !== undefined) editorSettings.value.dataGridBooleanDisplayMode = partial.dataGridBooleanDisplayMode === "dropdown" ? "dropdown" : "checkbox";
     if (partial.numericColumnRightAlign !== undefined) editorSettings.value.numericColumnRightAlign = partial.numericColumnRightAlign === true;
-    if (partial.tableFontFamily !== undefined) editorSettings.value.tableFontFamily = normalizeFontFamily(partial.tableFontFamily, DEFAULT_EDITOR_SETTINGS.tableFontFamily);
+    if (partial.tableFontFamily !== undefined) editorSettings.value.tableFontFamily = normalizeProportionalFontFamily(partial.tableFontFamily, DEFAULT_EDITOR_SETTINGS.tableFontFamily);
     if (partial.tableFontSize !== undefined) editorSettings.value.tableFontSize = normalizeTableFontSize(partial.tableFontSize);
     if (partial.structureEditorDensity !== undefined) editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);
     if (partial.tableInfoActiveTab !== undefined) editorSettings.value.tableInfoActiveTab = normalizeTableInfoTab(partial.tableInfoActiveTab);

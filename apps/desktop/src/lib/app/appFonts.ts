@@ -22,6 +22,13 @@ export const DEFAULT_MONO_FALLBACK_FONTS = `ui-monospace, SFMono-Regular, "SF Mo
 export const DEFAULT_MONO_FONT_FAMILY = `'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', ${DEFAULT_MONO_FALLBACK_FONTS}`;
 export const DEFAULT_DATA_GRID_FONT_FAMILY = `"Geist Variable Tabular", "Geist Variable", ${NON_CJK_SYSTEM_FALLBACK_FONTS}, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
 
+// Exact pre-fix defaults migrate even when a full settings object persisted them;
+// custom stacks remain untouched.
+export const LEGACY_PROPORTIONAL_FONT_MAP: Record<string, string> = {
+  [`"Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif`]: DEFAULT_UI_FONT_FAMILY,
+  [`"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`]: DEFAULT_DATA_GRID_FONT_FAMILY,
+};
+
 // Native-feeling UI option without DBX's bundled/brand font at the front of the stack.
 export const SYSTEM_UI_FONT_FAMILY = `system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
 

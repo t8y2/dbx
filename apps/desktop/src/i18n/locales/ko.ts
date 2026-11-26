@@ -3749,6 +3749,9 @@ export default withEnglishFallback({
     pasteCellTextFailed: "셀에 텍스트를 붙여넣을 수 없습니다: {message}",
     copyExtractorSingleColumnFormat: "스마트 복사 단일 열 형식",
     copyExtractorUseSmartDefaults: "스마트 복사 기본 형식 사용",
+    exportFormatMarkdownWide: "Markdown(와이드 테이블)",
+    exportSelectedRowsMarkdownWide: "선택한 행을 Markdown(와이드 테이블)로 내보내기",
+    exportMarkdownWideTruncated: "와이드 테이블 Markdown은 최대 {count}행까지만 내보내며, 초과된 부분은 잘렸습니다",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

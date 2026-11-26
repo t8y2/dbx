@@ -4057,6 +4057,9 @@ export default withEnglishFallback({
     pasteCellTextFailed: "ไม่สามารถวางข้อความลงในเซลล์: {message}",
     copyExtractorSingleColumnFormat: "รูปแบบคอลัมน์เดียวของการคัดลอกอัจฉริยะ",
     copyExtractorUseSmartDefaults: "ใช้รูปแบบเริ่มต้นของการคัดลอกอัจฉริยะ",
+    exportFormatMarkdownWide: "Markdown (ตารางแบบกว้าง)",
+    exportSelectedRowsMarkdownWide: "ส่งออกแถวที่เลือกเป็น Markdown (ตารางแบบกว้าง)",
+    exportMarkdownWideTruncated: "Markdown ตารางแบบกว้างส่งออกได้สูงสุด {count} แถว ส่วนที่เกินถูกตัดทิ้งแล้ว",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",

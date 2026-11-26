@@ -3927,6 +3927,9 @@ export default withEnglishFallback({
     pasteCellTextFailed: "No se puede pegar texto en la celda: {message}",
     copyExtractorSingleColumnFormat: "Formato de una sola columna de copia inteligente",
     copyExtractorUseSmartDefaults: "Usar el formato predeterminado de copia inteligente",
+    exportFormatMarkdownWide: "Markdown (tabla ancha)",
+    exportSelectedRowsMarkdownWide: "Exportar filas seleccionadas como Markdown (tabla ancha)",
+    exportMarkdownWideTruncated: "Markdown de tabla ancha exporta como máximo {count} filas; el exceso se ha truncado",
   },
   exportProgress: {
     recoveryTitle: "¿Eliminar la exportación cuyo final no se ha confirmado?",

@@ -4100,6 +4100,9 @@ export default withEnglishFallback({
     pasteCellTextFailed: "セルにテキストを貼り付けできません: {message}",
     copyExtractorSingleColumnFormat: "スマートコピーの単一列形式",
     copyExtractorUseSmartDefaults: "スマートコピーのデフォルト形式を使用",
+    exportFormatMarkdownWide: "Markdown（ワイドテーブル）",
+    exportSelectedRowsMarkdownWide: "選択行を Markdown（ワイドテーブル）としてエクスポート",
+    exportMarkdownWideTruncated: "ワイドテーブル Markdown は最大 {count} 行までエクスポートされ、超過分は切り捨てられました",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

@@ -3789,6 +3789,9 @@ export default withEnglishFallback({
     pasteCellTextFailed: "Impossibile incollare il testo nella cella: {message}",
     copyExtractorSingleColumnFormat: "Formato a colonna singola di Copia intelligente",
     copyExtractorUseSmartDefaults: "Usa il formato predefinito di Copia intelligente",
+    exportFormatMarkdownWide: "Markdown (tabella larga)",
+    exportSelectedRowsMarkdownWide: "Esporta righe selezionate come Markdown (tabella larga)",
+    exportMarkdownWideTruncated: "Per le tabelle larghe, Markdown esporta al massimo {count} righe; le righe in eccesso sono state troncate.",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

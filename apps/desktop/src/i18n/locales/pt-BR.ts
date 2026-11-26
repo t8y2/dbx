@@ -3787,6 +3787,9 @@ export default withEnglishFallback({
     pasteCellTextFailed: "Não foi possível colar o texto na célula: {message}",
     copyExtractorSingleColumnFormat: "Formato de coluna única do Smart Copy",
     copyExtractorUseSmartDefaults: "Usar o formato padrão do Smart Copy",
+    exportFormatMarkdownWide: "Markdown (tabela larga)",
+    exportSelectedRowsMarkdownWide: "Exportar linhas selecionadas como Markdown (tabela larga)",
+    exportMarkdownWideTruncated: "O Markdown de tabela larga exporta no máximo {count} linhas; o excedente foi truncado",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",

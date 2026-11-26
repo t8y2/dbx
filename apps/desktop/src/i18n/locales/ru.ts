@@ -3880,6 +3880,9 @@ export default withEnglishFallback({
     pasteCellTextFailed: "Не удалось вставить текст в ячейку: {message}",
     copyExtractorSingleColumnFormat: "Формат одного столбца для Smart Copy",
     copyExtractorUseSmartDefaults: "Использовать формат Smart Copy по умолчанию",
+    exportFormatMarkdownWide: "Markdown (широкая таблица)",
+    exportSelectedRowsMarkdownWide: "Экспорт выбранных строк в Markdown (широкая таблица)",
+    exportMarkdownWideTruncated: "В формате Markdown (широкая таблица) можно экспортировать не более {count} строк; лишние строки обрезаны",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

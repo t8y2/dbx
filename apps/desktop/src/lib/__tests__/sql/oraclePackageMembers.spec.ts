@@ -135,6 +135,45 @@ END P;`;
     expect(findOraclePackageMember(source, { name: "RUN", kind: "procedure", signature: "P_ID IN NUMBER" })?.line).toBe(2);
   });
 
+  it("distinguishes same-name parameters by datatype and avoids guessing when no signature is available", () => {
+    const source = `PACKAGE BODY P AS
+  PROCEDURE RUN(P_ID NUMBER) IS BEGIN NULL; END;
+  PROCEDURE RUN(P_ID VARCHAR2) IS BEGIN NULL; END;
+END P;`;
+    expect(findOraclePackageMember(source, { name: "RUN", signature: "P_ID IN NUMBER(10,0)" })?.line).toBe(2);
+    expect(findOraclePackageMember(source, { name: "RUN", signature: "P_ID IN VARCHAR2(30)" })?.line).toBe(3);
+    expect(findOraclePackageMember(source, { name: "RUN", signature: "P_ID IN DATE" })).toBeNull();
+    expect(findOraclePackageMember(source, { name: "RUN" })).toBeNull();
+  });
+
+  it("matches qualified datatypes after comparing exact types", () => {
+    const source = `PACKAGE BODY P AS
+  PROCEDURE RUN(P_ID VARCHAR2) IS BEGIN NULL; END;
+  PROCEDURE RUN(P_ID ID_LIST_TYPE) IS BEGIN NULL; END;
+END P;`;
+    expect(findOraclePackageMember(source, { name: "RUN", signature: "P_ID IN SCOTT.ID_LIST_TYPE" })?.line).toBe(3);
+  });
+
+  it("lists and locates only package-level members after a nested subprogram and control blocks", () => {
+    const source = `PACKAGE BODY P AS
+  PROCEDURE WRAPPER IS
+    PROCEDURE RUN(P_ID IN NUMBER) IS BEGIN NULL; END;
+  BEGIN
+    IF 1 = 1 THEN
+      FOR i IN 1..1 LOOP
+        BEGIN
+          RUN(CASE WHEN i = 1 THEN i ELSE 0 END);
+        END;
+      END LOOP;
+    END IF;
+    CASE WHEN 1 = 1 THEN NULL; ELSE NULL; END CASE;
+  END WRAPPER;
+  PROCEDURE RUN(P_ID IN NUMBER) IS BEGIN NULL; END;
+END P;`;
+    expect(oraclePackageMemberEntries(source).map((entry) => entry.name)).toEqual(["WRAPPER", "RUN"]);
+    expect(findOraclePackageMember(source, { name: "RUN", signature: "P_ID IN NUMBER" })?.line).toBe(14);
+  });
+
   it("separates a function from a procedure that shares its name", () => {
     const source = `PACKAGE BODY P AS
   PROCEDURE SAME IS

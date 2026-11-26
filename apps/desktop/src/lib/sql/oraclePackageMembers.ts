@@ -17,6 +17,8 @@ export interface OraclePackageMemberEntry {
   line: number;
   /** 形参名（大写，按声明顺序）；无参或空参数表为 `[]`。 */
   parameters: string[];
+  /** Datatypes without parameter modes, defaults, or precision modifiers. */
+  parameterTypes: string[];
   /** 头部后跟 `IS`/`AS`（包体实现）为 true；后跟 `;`（包头声明）为 false。 */
   implemented: boolean;
 }
@@ -33,42 +35,62 @@ function unquoteIdentifierText(raw: string): string {
   return text.length > 1 && text.startsWith('"') && text.endsWith('"') ? text.slice(1, -1).replaceAll('""', '"') : text;
 }
 
-/**
- * 从子程序头的参数表起点开始读出形参名，并判定这是实现还是声明。
- *
- * `start` 指向名字之后的第一个 token。参数表内的 token depth 为 1，嵌套括号
- * （默认值里的函数调用等）depth 更深，所以只认 depth === 1 的逗号与名字；
- * 函数的 `RETURN <type>` 落在参数表之后、`IS`/`AS`/`;` 之前，原样跳过即可。
- */
-function readMemberShape(tokens: SqlSemanticToken[], start: number): { parameters: string[]; implemented: boolean } {
+const PARAMETER_MODIFIERS = new Set(["in", "out", "nocopy"]);
+const EXTERNAL_BODY_PREFIXES = new Set(["language c", "language java", "language javascript", "external name", "external library", "mle module"]);
+
+function readParameter(tokens: SqlSemanticToken[], start: number, end: number): { name: string; type: string } | undefined {
+  const name = tokens[start];
+  if (!tokenIsIdentifier(name)) return undefined;
+  let index = start + 1;
+  while (index < end && (PARAMETER_MODIFIERS.has(tokens[index]!.normalized) || tokens[index]!.text === "/")) index += 1;
+  const type: string[] = [];
+  for (; index < end; index += 1) {
+    const token = tokens[index]!;
+    if (token.depth !== 1 || token.text === "(" || token.text === ")") continue;
+    if (token.text === ":" || token.normalized === "default") break;
+    type.push(token.kind === "quoted_identifier" ? token.text : token.text.toUpperCase());
+  }
+  return { name: unquoteSqlSemanticIdentifier(name).toUpperCase(), type: type.join(" ").replace(/ \. /g, ".") };
+}
+
+function readParameterList(tokens: SqlSemanticToken[], start: number) {
   const parameters: string[] = [];
+  const parameterTypes: string[] = [];
   let index = start;
   if (tokens[index]?.text === "(") {
     index += 1;
-    let expectName = true;
+    let parameterStart = index;
     for (; index < tokens.length; index += 1) {
       const token = tokens[index]!;
-      if (token.depth === 0 && token.text === ")") {
+      const closesList = token.depth === 0 && token.text === ")";
+      if (!closesList && (token.depth !== 1 || token.text !== ",")) continue;
+      if (parameterStart < index) {
+        const parameter = readParameter(tokens, parameterStart, index);
+        if (parameter) {
+          parameters.push(parameter.name);
+          parameterTypes.push(parameter.type);
+        }
+      }
+      parameterStart = index + 1;
+      if (closesList) {
         index += 1;
         break;
       }
-      if (token.depth !== 1) continue;
-      if (token.text === ",") {
-        expectName = true;
-        continue;
-      }
-      if (!expectName || !tokenIsIdentifier(token)) continue;
-      parameters.push(unquoteSqlSemanticIdentifier(token).toUpperCase());
-      expectName = false;
     }
   }
+  return { parameters, parameterTypes, index };
+}
+
+function readMemberShape(tokens: SqlSemanticToken[], start: number) {
+  const { parameters, parameterTypes, index: afterParameters } = readParameterList(tokens, start);
+  let index = afterParameters;
   for (; index < tokens.length; index += 1) {
     const token = tokens[index]!;
     if (token.depth !== 0) continue;
-    if (token.kind === "word" && (token.normalized === "is" || token.normalized === "as")) return { parameters, implemented: true };
-    if (token.text === ";") return { parameters, implemented: false };
+    if (token.kind === "word" && (token.normalized === "is" || token.normalized === "as")) return { parameters, parameterTypes, implemented: true, index };
+    if (token.text === ";") break;
   }
-  return { parameters, implemented: false };
+  return { parameters, parameterTypes, implemented: false, index };
 }
 
 /**
@@ -86,22 +108,51 @@ export function oraclePackageMemberEntries(source: string): readonly OraclePacka
   if (lastParsedPackage?.source === source) return lastParsedPackage.entries;
   const tokens = tokenizeSqlSemantic(source, "oracle").filter((token) => token.kind !== "comment");
   const entries: OraclePackageMemberEntry[] = [];
+  // Subprograms open a declarative scope before their first BEGIN. A nested
+  // subprogram can end while its parent is still in that declarative scope.
+  const scopes: ("declarations" | "block" | "case")[] = [];
   let line = 1;
   let lineEnd = source.indexOf("\n");
-  for (let index = 0; index < tokens.length - 2; index += 1) {
+  for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]!;
-    const name = tokens[index + 1];
-    const next = tokens[index + 2]!;
-    if (token.kind !== "word" || token.depth !== 0 || (token.normalized !== "procedure" && token.normalized !== "function")) continue;
-    if (!tokenIsIdentifier(name) || name.closed === false || tokens[index - 1]?.text === ".") continue;
-    const isFunction = token.normalized === "function";
-    if (next.text !== "(" && (isFunction ? next.normalized !== "return" : ![";", "is", "as"].includes(next.normalized))) continue;
-    const offset = token.span.start;
-    while (lineEnd !== -1 && lineEnd < offset) {
-      line += 1;
-      lineEnd = source.indexOf("\n", lineEnd + 1);
+    if (token.kind !== "word" || token.depth !== 0) continue;
+    const word = token.normalized;
+    if (word === "begin") {
+      if (scopes[scopes.length - 1] === "declarations") scopes.pop();
+      scopes.push("block");
+    } else if (word === "case") {
+      scopes.push("case");
+    } else if (word === "end") {
+      const suffix = tokens[index + 1]?.normalized;
+      // IF and LOOP always have named terminators. They do not own a BEGIN.
+      if (suffix === "if" || suffix === "loop") {
+        index += 1;
+      } else if (scopes.length > 0) {
+        scopes.pop();
+        if (suffix === "case") index += 1;
+      } else {
+        break;
+      }
+    } else if (word === "procedure" || word === "function") {
+      const name = tokens[index + 1];
+      const next = tokens[index + 2];
+      if (!next || !tokenIsIdentifier(name) || name.closed === false || tokens[index - 1]?.text === ".") continue;
+      const isFunction = word === "function";
+      if (next.text !== "(" && (isFunction ? next.normalized !== "return" : ![";", "is", "as"].includes(next.normalized))) continue;
+      const { index: headerEnd, ...shape } = readMemberShape(tokens, index + 2);
+      if (scopes.length === 0) {
+        const offset = token.span.start;
+        while (lineEnd !== -1 && lineEnd < offset) {
+          line += 1;
+          lineEnd = source.indexOf("\n", lineEnd + 1);
+        }
+        entries.push({ name: unquoteSqlSemanticIdentifier(name), isFunction, offset, line, ...shape });
+      }
+      // External call specifications end at their semicolon and have no BEGIN.
+      const bodyPrefix = `${tokens[headerEnd + 1]?.normalized} ${tokens[headerEnd + 2]?.normalized}`;
+      if (shape.implemented && !EXTERNAL_BODY_PREFIXES.has(bodyPrefix)) scopes.push("declarations");
+      index = headerEnd;
     }
-    entries.push({ name: unquoteSqlSemanticIdentifier(name), isFunction, offset, line, ...readMemberShape(tokens, index + 2) });
   }
   lastParsedPackage = { source, entries };
   return entries;
@@ -114,32 +165,39 @@ export function oraclePackageMemberEntries(source: string): readonly OraclePacka
 export function oracleRoutineSignatureParameters(signature: string): string[] {
   const text = signature.trim();
   if (!text) return [];
-  return readMemberShape(
-    tokenizeSqlSemantic(`(${text})`, "oracle").filter((token) => token.kind !== "comment"),
-    0,
-  ).parameters;
+  return readSignature(text).parameters;
 }
 
-/**
- * 在包源码里定位一个成员。找不到返回 null（调用方据此放弃定位，而不是把光标
- * 丢到一个猜出来的位置上——跳错比不跳更难发现）。
- *
- * 消歧顺序：名字（先精确、后大小写不敏感）→ 过程/函数 → 实现优先于前置声明 →
- * 形参名序列全等 → 形参个数相同 → 第一个候选。
- */
+function readSignature(signature: string) {
+  return readParameterList(
+    tokenizeSqlSemantic(`(${signature})`, "oracle").filter((token) => token.kind !== "comment"),
+    0,
+  );
+}
+
+function matchingTypes(candidate: string[], wanted: string[], allowUnqualified: boolean): boolean {
+  return candidate.every((type, index) => {
+    const other = wanted[index]!;
+    return !!type && !!other && (type === other || (allowUnqualified && (type.endsWith(`.${other}`) || other.endsWith(`.${type}`))));
+  });
+}
+
+/** Prefer implementations and use datatypes to distinguish otherwise matching signatures. */
 export function findOraclePackageMember(source: string, query: OraclePackageMemberQuery): OraclePackageMemberEntry | null {
   const wanted = unquoteIdentifierText(query.name);
   if (!wanted) return null;
-  const all = oraclePackageMemberEntries(source);
+  const all = oraclePackageMemberEntries(source).filter((entry) => !query.kind || entry.isFunction === (query.kind === "function"));
   const exactName = all.filter((entry) => entry.name === wanted);
   const named = exactName.length ? exactName : all.filter((entry) => entry.name.toUpperCase() === wanted.toUpperCase());
-  if (!named.length) return null;
-  const typed = query.kind ? named.filter((entry) => entry.isFunction === (query.kind === "function")) : [];
-  const candidates = typed.length ? typed : named;
+  const signature = query.signature === undefined ? undefined : readSignature(query.signature);
+  const candidates = signature ? named.filter((entry) => entry.parameters.length === signature.parameters.length && entry.parameters.every((name, index) => name === signature.parameters[index])) : named;
+  if (!candidates.length) return null;
   const implemented = candidates.filter((entry) => entry.implemented);
   const pool = implemented.length ? implemented : candidates;
   if (pool.length === 1) return pool[0]!;
-  const parameters = oracleRoutineSignatureParameters(query.signature || "");
-  const exact = pool.find((entry) => entry.parameters.length === parameters.length && entry.parameters.every((value, index) => value === parameters[index]));
-  return exact ?? pool.find((entry) => entry.parameters.length === parameters.length) ?? pool[0]!;
+  if (!signature) return null;
+  const exact = pool.filter((entry) => matchingTypes(entry.parameterTypes, signature.parameterTypes, false));
+  if (exact.length) return exact.length === 1 ? exact[0]! : null;
+  const unqualified = pool.filter((entry) => matchingTypes(entry.parameterTypes, signature.parameterTypes, true));
+  return unqualified.length === 1 ? unqualified[0]! : null;
 }

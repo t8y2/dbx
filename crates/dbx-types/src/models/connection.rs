@@ -152,6 +152,26 @@ pub enum ProductionBadgeScope {
     Table,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionWatermarkMode {
+    Auto,
+    Custom,
+    Off,
+}
+
+/// Visual settings for the connection's editor and data grids.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionWatermark {
+    pub mode: ConnectionWatermarkMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
 #[derive(Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -335,6 +355,8 @@ pub struct ConnectionConfig {
     pub production_databases: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production_badge_scope: Option<ProductionBadgeScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<ConnectionWatermark>,
     /// Metadata captured from the latest successful connection test for this saved config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_info: Option<DatabaseConnectionInfo>,
@@ -891,6 +913,8 @@ struct ConnectionConfigData {
     pub production_databases: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production_badge_scope: Option<ProductionBadgeScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<ConnectionWatermark>,
     #[serde(default)]
     pub database_info: Option<DatabaseConnectionInfo>,
 }
@@ -970,6 +994,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             is_production: data.is_production,
             production_databases: data.production_databases,
             production_badge_scope: data.production_badge_scope,
+            watermark: data.watermark,
             database_info: data.database_info,
         }
     }
@@ -3451,6 +3476,23 @@ mod tests {
     }
 
     #[test]
+    fn connection_watermark_round_trips_as_optional_presentation() {
+        let mut value = serde_json::to_value(mysql_config("root", "", Some("app"))).unwrap();
+        assert!(value.get("watermark").is_none());
+        assert!(serde_json::from_value::<ConnectionConfig>(value.clone()).unwrap().watermark.is_none());
+
+        for watermark in [
+            serde_json::json!({"mode": "auto"}),
+            serde_json::json!({"mode": "custom", "text": "UAT", "font_size": 48, "color": "#4488aa"}),
+            serde_json::json!({"mode": "off"}),
+        ] {
+            value["watermark"] = watermark.clone();
+            let config: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(config).unwrap()["watermark"], watermark);
+        }
+    }
+
+    #[test]
     fn production_badge_scope_legacy_and_all_options_round_trip() {
         let mut value = serde_json::to_value(mysql_config("root", "", Some("app"))).unwrap();
         value["is_production"] = serde_json::json!(true);
@@ -3589,6 +3631,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }

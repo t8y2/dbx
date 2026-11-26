@@ -172,6 +172,7 @@ fn credential_target(config: &ConnectionConfig) -> Value {
         "read_only",
         "is_production",
         "production_databases",
+        "watermark",
         "database_info",
     ] {
         fields.remove(key);
@@ -405,6 +406,20 @@ mod tests {
         }
         let saved = HashMap::from([(original.id.clone(), original.clone())]);
         assert_eq!(restore(public, &saved).unwrap(), original);
+    }
+
+    #[test]
+    fn watermark_edits_can_reuse_saved_credentials() {
+        let original = config();
+        let saved = HashMap::from([(original.id.clone(), original.clone())]);
+        let mut draft = serde_json::to_value(redact(&original)).unwrap();
+        let watermark = serde_json::json!({"mode": "custom", "text": "UAT", "font_size": 48, "color": "#4488aa"});
+        draft["watermark"] = watermark.clone();
+        let restored = restore(serde_json::from_value(draft).unwrap(), &saved).unwrap();
+        assert_eq!(restored.password, original.password);
+        assert!(dbx_core::connection::connection_configs_pool_equivalent(&original, &restored));
+        assert!(dbx_core::connection::connection_configs_session_credentials_compatible(&original, &restored));
+        assert_eq!(serde_json::to_value(restored).unwrap()["watermark"], watermark);
     }
 
     #[test]

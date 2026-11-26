@@ -302,3 +302,56 @@ describe("tree actions", () => {
     expect(mongoCanonicalToBrowserValue({ $oid: "65f0c0ffee0000000000aaaa" })).toEqual({ $oid: "65f0c0ffee0000000000aaaa" });
   });
 });
+
+describe("parseMongoTreeEditValue: strict numbers (review #15616)", () => {
+  const parse = async (text: string, original: unknown) => (await import("../mongoDocumentValues")).parseMongoTreeEditValue(text, original);
+
+  it("keeps Int32 within range and rejects overflow or fractions", async () => {
+    expect(await parse("2147483647", { $numberInt: "1" })).toEqual({ ok: true, value: { $numberInt: "2147483647" } });
+    expect(await parse("-2147483648", { $numberInt: "1" })).toEqual({ ok: true, value: { $numberInt: "-2147483648" } });
+    expect(await parse("2147483648", { $numberInt: "1" })).toEqual({ ok: false });
+    expect(await parse("-2147483649", { $numberInt: "1" })).toEqual({ ok: false });
+    expect(await parse("1.5", { $numberInt: "1" })).toEqual({ ok: false });
+    expect(await parse("1e3", { $numberInt: "1" })).toEqual({ ok: false });
+    expect(await parse("abc", { $numberInt: "1" })).toEqual({ ok: false });
+  });
+
+  it("keeps Int64 within range and never falls back to a string", async () => {
+    expect(await parse("9223372036854775807", { $numberLong: "1" })).toEqual({ ok: true, value: { $numberLong: "9223372036854775807" } });
+    expect(await parse("-9223372036854775808", { $numberLong: "1" })).toEqual({ ok: true, value: { $numberLong: "-9223372036854775808" } });
+    expect(await parse("9223372036854775808", { $numberLong: "1" })).toEqual({ ok: false });
+    expect(await parse("12.0", { $numberLong: "1" })).toEqual({ ok: false });
+  });
+
+  it("keeps Double finite unless NaN / Infinity is typed literally", async () => {
+    expect(await parse("1.25", { $numberDouble: "0.5" })).toEqual({ ok: true, value: { $numberDouble: "1.25" } });
+    expect(await parse("3", { $numberDouble: "0.5" })).toEqual({ ok: true, value: { $numberDouble: "3" } });
+    expect(await parse("1e999", { $numberDouble: "0.5" })).toEqual({ ok: false });
+    expect(await parse("NaN", { $numberDouble: "0.5" })).toEqual({ ok: true, value: { $numberDouble: "NaN" } });
+    expect(await parse("-infinity", { $numberDouble: "0.5" })).toEqual({ ok: true, value: { $numberDouble: "-Infinity" } });
+    expect(await parse("0x10", { $numberDouble: "0.5" })).toEqual({ ok: false });
+  });
+
+  it("keeps Decimal128 within 34 digits and its exponent range", async () => {
+    expect(await parse("1520.75", { $numberDecimal: "1" })).toEqual({ ok: true, value: { $numberDecimal: "1520.75" } });
+    expect(await parse("1234567890123456789012345678901234", { $numberDecimal: "1" })).toEqual({ ok: true, value: { $numberDecimal: "1234567890123456789012345678901234" } });
+    expect(await parse("12345678901234567890123456789012345", { $numberDecimal: "1" })).toEqual({ ok: false });
+    expect(await parse("1e6112", { $numberDecimal: "1" })).toEqual({ ok: false });
+    expect(await parse("1e-6177", { $numberDecimal: "1" })).toEqual({ ok: false });
+    expect(await parse("Infinity", { $numberDecimal: "1" })).toEqual({ ok: true, value: { $numberDecimal: "Infinity" } });
+  });
+
+  it("accepts a shell wrapper only for the same type", async () => {
+    expect(await parse('NumberLong("42")', { $numberLong: "1" })).toEqual({ ok: true, value: { $numberLong: "42" } });
+    expect(await parse("NumberInt(7)", { $numberInt: "1" })).toEqual({ ok: true, value: { $numberInt: "7" } });
+    expect(await parse('NumberLong("42")', { $numberInt: "1" })).toEqual({ ok: false });
+  });
+
+  it("refuses plain relaxed numbers, whose BSON type is unknown", async () => {
+    const { isMongoTreeEditable } = await import("../mongoDocumentTree");
+    expect(await parse("12", 3)).toEqual({ ok: false });
+    expect(await parse("2.75", 0.5)).toEqual({ ok: false });
+    expect(isMongoTreeEditable({ path: ["age"], expandable: false, value: 31, key: "age" })).toBe(false);
+    expect(isMongoTreeEditable({ path: ["age"], expandable: false, value: { $numberInt: "31" }, key: "age" })).toBe(true);
+  });
+});

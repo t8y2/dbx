@@ -201,8 +201,17 @@ const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize)
 const numericColumnRightAlign = computed(() => settingsStore.editorSettings.numericColumnRightAlign ?? true);
 const colorizeDataGridCellTypes = computed(() => settingsStore.editorSettings.colorizeDataGridCellTypes);
 const viewMode = computed<ViewMode>({
-  get: () => settingsStore.editorSettings.mongoViewMode,
-  set: (value) => settingsStore.updateEditorSettings({ mongoViewMode: value }),
+  // The view-mode preference is shared by every document store, but the Tree view is
+  // MongoDB-only: a saved "tree" reads as "document" elsewhere (the preference itself is
+  // left as is, so MongoDB pages keep opening in Tree view).
+  get: () => {
+    const mode = settingsStore.editorSettings.mongoViewMode;
+    return mode === "tree" && documentStoreProvider.value.kind !== "mongodb" ? "document" : mode;
+  },
+  set: (value) => {
+    if (value === "tree" && documentStoreProvider.value.kind !== "mongodb") return;
+    settingsStore.updateEditorSettings({ mongoViewMode: value });
+  },
 });
 const filterInput = ref(restoredDocumentBrowserState?.filterInput ?? "");
 const filterEnabled = ref(restoredDocumentBrowserState?.filterEnabled ?? true);
@@ -2991,7 +3000,7 @@ defineExpose({ focusSearch });
         <Button variant="ghost" size="icon" class="h-5 w-5 rounded-none" :class="{ 'bg-accent': viewMode === 'table' }" :title="t('mongo.tableView')" @click="viewMode = 'table'">
           <Table2 class="h-3 w-3" />
         </Button>
-        <Button variant="ghost" size="icon" class="h-5 w-5 rounded-none" :class="{ 'bg-accent': viewMode === 'tree' }" :title="t('mongo.treeView')" data-mongo-view-tree @click="viewMode = 'tree'">
+        <Button v-if="documentStoreProvider.kind === 'mongodb'" variant="ghost" size="icon" class="h-5 w-5 rounded-none" :class="{ 'bg-accent': viewMode === 'tree' }" :title="t('mongo.treeView')" data-mongo-view-tree @click="viewMode = 'tree'">
           <ListTree class="h-3 w-3" />
         </Button>
       </div>
@@ -3609,7 +3618,7 @@ defineExpose({ focusSearch });
     </DataGrid>
 
     <!-- Tree view (NoSQLBooster-style Key | Value | Type) -->
-    <div v-else-if="viewMode === 'tree'" class="flex flex-1 min-h-0 flex-col overflow-hidden">
+    <div v-else-if="viewMode === 'tree' && documentStoreProvider.kind === 'mongodb'" class="flex flex-1 min-h-0 flex-col overflow-hidden">
       <form class="flex shrink-0 items-center gap-2 border-b px-3 py-1 text-xs" data-mongo-tree-query @submit.prevent="applyFilter">
         <label class="flex shrink-0 items-center gap-1 font-medium select-none" :class="filterEnabled ? 'text-blue-600 dark:text-blue-400' : 'text-muted-foreground'">
           <input v-model="filterEnabled" type="checkbox" class="h-3.5 w-3.5 accent-primary" :aria-label="t('grid.applyFilter')" :disabled="loading" @change="applyFilter" />

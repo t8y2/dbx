@@ -717,6 +717,8 @@ export function mongoTreeEditText(value: unknown): string {
 export function isMongoTreeEditable(row: { path: MongoFieldPath; expandable: boolean; value: unknown; key: string }): boolean {
   if (!row.path.length || row.path[0] === "_id" || row.key === "…") return false;
   if (Array.isArray(row.value) || isMongoSubdocument(row.value)) return false;
+  // Without a BSON wrapper a number's exact type (Int32 / Int64 / Double) is unknown.
+  if (typeof row.value === "number" || typeof row.value === "bigint") return false;
   const type = mongoExtendedJsonValueType(row.value);
   return !type || ["date", "objectId", "int32", "int64", "double", "decimal128"].includes(type);
 }

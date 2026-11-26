@@ -343,4 +343,40 @@ describe("DocumentBrowser nested MongoDB views", () => {
     expect(tree.querySelector("[data-tree-edit-input]")).toBeNull();
     expect(rowByKey(tree, "name").textContent).toContain("Annie");
   });
+
+  it.each(["dynamodb", "elasticsearch", "solr"])("never shows the MongoDB Tree view on %s pages, even with a saved tree preference", async (databaseType) => {
+    settings.editorSettings.mongoViewMode = "tree";
+    app = createApp(DocumentBrowser, { connectionId: "conn-1", database: "test", collection: "people", databaseType, stateKey: `tab-${databaseType}` });
+    app.mount(root!);
+    await flushUi();
+    expect(root!.querySelector("[data-mongo-view-tree]")).toBeNull();
+    expect(root!.querySelector("[data-mongo-tree-view]")).toBeNull();
+    expect(backend.mongoListIndexSpecs).not.toHaveBeenCalled();
+    // The shared preference is left alone, so MongoDB pages still open in Tree view.
+    expect(settings.updateEditorSettings).not.toHaveBeenCalledWith({ mongoViewMode: "document" });
+  });
+
+  it("rejects an Int32 overflow in the tree editor instead of saving another type", async () => {
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [{ _id: { $oid: "65f0c0ffee0000000000aaaa" }, age: 31 }],
+      extended_documents: [{ _id: { $oid: "65f0c0ffee0000000000aaaa" }, age: { $numberInt: "31" } }],
+      total: 1,
+      total_is_exact: true,
+    });
+    const tree = await mountTree();
+    await menuAction(rowByKey(tree, "age"), "edit-value");
+    const input = tree.querySelector<HTMLInputElement>("[data-tree-edit-input]")!;
+    input.value = "2147483648";
+    input.dispatchEvent(new Event("input"));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flushUi();
+    expect(backend.documentUpdateDocument).not.toHaveBeenCalled();
+    input.value = "2147483647";
+    input.dispatchEvent(new Event("input"));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flushUi();
+    expect(backend.documentUpdateDocument).toHaveBeenCalledTimes(1);
+    // The $set keeps the Int32 wrapper.
+    expect(JSON.parse(backend.documentUpdateDocument.mock.calls[0]![4] as string)).toEqual({ $set: { age: { $numberInt: "2147483647" } } });
+  });
 });

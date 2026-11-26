@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildMongoCreateCollectionRequest,
+  defaultMongoCreateCollectionForm,
+  type MongoCreateCollectionForm,
+  mongoCollectionNameError,
+  mongoCreateCollectionPreview,
   buildMongoCreateIndexRequest,
   isCloneableMongoCollection,
   isProtectedMongoIndex,
@@ -517,5 +522,69 @@ describe("mongoCreateIndexRequestFromSpec", () => {
       bucketSize: 16,
       hidden: true,
     });
+  });
+});
+
+describe("create collection", () => {
+  it("previews createCollection on the target database", () => {
+    expect(mongoCreateCollectionPreview("app", 'orders "2026"')).toBe('db.getSiblingDB("app").createCollection("orders \\"2026\\"")');
+  });
+
+  it("flags names MongoDB rejects", () => {
+    expect(mongoCollectionNameError("")).toBe("required");
+    expect(mongoCollectionNameError("a$b")).toBe("dollar");
+    expect(mongoCollectionNameError("a\0b")).toBe("null-char");
+    expect(mongoCollectionNameError("system.users")).toBe("system-prefix");
+    expect(mongoCollectionNameError(".orders")).toBe("edge-dot");
+    expect(mongoCollectionNameError("orders.")).toBe("edge-dot");
+    expect(mongoCollectionNameError("orders.archive")).toBeNull();
+  });
+});
+
+describe("buildMongoCreateCollectionRequest", () => {
+  const form = (patch: Partial<MongoCreateCollectionForm>): MongoCreateCollectionForm => ({ ...defaultMongoCreateCollectionForm(), name: "events", ...patch });
+
+  it("creates a default collection without options", () => {
+    expect(buildMongoCreateCollectionRequest(form({}))).toEqual({ valid: true, name: "events", options: {} });
+  });
+
+  it("builds capped, time series and clustered options", () => {
+    expect(buildMongoCreateCollectionRequest(form({ kind: "capped", cappedSize: "1048576", cappedMax: "1000" }))).toEqual({ valid: true, name: "events", options: { capped: true, size: 1048576, max: 1000 } });
+    expect(buildMongoCreateCollectionRequest(form({ kind: "timeseries", timeField: "ts", metaField: "device", granularity: "minutes", expireAfterSeconds: "86400" }))).toEqual({
+      valid: true,
+      name: "events",
+      options: { timeseries: { timeField: "ts", metaField: "device", granularity: "minutes" }, expireAfterSeconds: 86400 },
+    });
+    expect(buildMongoCreateCollectionRequest(form({ kind: "clustered" }))).toEqual({ valid: true, name: "events", options: { clusteredIndex: { key: { _id: 1 }, unique: true } } });
+  });
+
+  it("only sends validation settings with a non-empty validator", () => {
+    expect(buildMongoCreateCollectionRequest(form({ validator: "{}", validationLevel: "moderate" }))).toEqual({ valid: true, name: "events", options: {} });
+    expect(buildMongoCreateCollectionRequest(form({ validator: '{"age": {"$gte": 0}}', validationAction: "warn" }))).toEqual({
+      valid: true,
+      name: "events",
+      options: { validator: { age: { $gte: 0 } }, validationLevel: "strict", validationAction: "warn" },
+    });
+  });
+
+  it("adds collation only when enabled", () => {
+    expect(buildMongoCreateCollectionRequest(form({ useCollation: true, collationLocale: "th", collationStrength: "2", collationNumericOrdering: true }))).toEqual({
+      valid: true,
+      name: "events",
+      options: { collation: { locale: "th", strength: 2, numericOrdering: true } },
+    });
+  });
+
+  it("reports what is missing or invalid", () => {
+    expect(buildMongoCreateCollectionRequest(form({ name: " " }))).toEqual({ valid: false, error: "name", reason: "required" });
+    expect(buildMongoCreateCollectionRequest(form({ kind: "capped" }))).toEqual({ valid: false, error: "capped-size-required" });
+    expect(buildMongoCreateCollectionRequest(form({ kind: "capped", cappedSize: "0" }))).toEqual({ valid: false, error: "capped-size-invalid" });
+    expect(buildMongoCreateCollectionRequest(form({ kind: "timeseries" }))).toEqual({ valid: false, error: "time-field-required" });
+    expect(buildMongoCreateCollectionRequest(form({ validator: "[1]" }))).toEqual({ valid: false, error: "validator-invalid" });
+    expect(buildMongoCreateCollectionRequest(form({ useCollation: true, collationLocale: "" }))).toEqual({ valid: false, error: "collation-locale-required" });
+  });
+
+  it("previews the options passed to createCollection", () => {
+    expect(mongoCreateCollectionPreview("app", "logs", { capped: true, size: 10 })).toBe('db.getSiblingDB("app").createCollection("logs", {\n  "capped": true,\n  "size": 10\n})');
   });
 });

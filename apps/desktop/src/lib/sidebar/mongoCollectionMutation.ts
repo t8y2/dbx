@@ -71,6 +71,143 @@ export function mongoCreateDatabasePreview(database: string): string {
   return `db.getSiblingDB(${JSON.stringify(database)}).createCollection("dbx_init");`;
 }
 
+export function mongoCreateCollectionPreview(database: string, collection: string, options: Record<string, unknown> = {}): string {
+  const optionsText = Object.keys(options).length ? `, ${JSON.stringify(options, null, 2)}` : "";
+  return `db.getSiblingDB(${JSON.stringify(database)}).createCollection(${JSON.stringify(collection)}${optionsText})`;
+}
+
+export type MongoCreateCollectionKind = "default" | "capped" | "timeseries" | "clustered";
+
+export interface MongoCreateCollectionForm {
+  name: string;
+  kind: MongoCreateCollectionKind;
+  /** Numbers stay text so an empty box is distinct from 0. */
+  cappedSize: string;
+  cappedMax: string;
+  timeField: string;
+  metaField: string;
+  granularity: "seconds" | "minutes" | "hours";
+  expireAfterSeconds: string;
+  clusteredIndexName: string;
+  validator: string;
+  validationLevel: "strict" | "moderate" | "off";
+  validationAction: "error" | "warn";
+  useCollation: boolean;
+  collationLocale: string;
+  /** "" leaves the server default. */
+  collationStrength: "" | "1" | "2" | "3" | "4" | "5";
+  collationCaseFirst: "" | "upper" | "lower" | "off";
+  collationNumericOrdering: boolean;
+}
+
+export function defaultMongoCreateCollectionForm(): MongoCreateCollectionForm {
+  return {
+    name: "",
+    kind: "default",
+    cappedSize: "",
+    cappedMax: "",
+    timeField: "",
+    metaField: "",
+    granularity: "seconds",
+    expireAfterSeconds: "",
+    clusteredIndexName: "",
+    validator: "{\n  \n}",
+    validationLevel: "strict",
+    validationAction: "error",
+    useCollation: false,
+    collationLocale: "en",
+    collationStrength: "",
+    collationCaseFirst: "",
+    collationNumericOrdering: false,
+  };
+}
+
+export type MongoCreateCollectionFormError = { error: "name"; reason: MongoCollectionNameError } | { error: "capped-size-required" | "capped-size-invalid" | "capped-max-invalid" | "time-field-required" | "expire-invalid" | "validator-invalid" | "collation-locale-required" };
+
+export type MongoCreateCollectionRequest = { valid: true; name: string; options: Record<string, unknown> } | ({ valid: false } & MongoCreateCollectionFormError);
+
+function positiveInteger(text: string): number | null {
+  const trimmed = text.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+/** Turns the Add Collection form into `createCollection` options (the `create` command minus its name). */
+export function buildMongoCreateCollectionRequest(form: MongoCreateCollectionForm): MongoCreateCollectionRequest {
+  const name = form.name.trim();
+  const nameError = mongoCollectionNameError(name);
+  if (nameError) return { valid: false, error: "name", reason: nameError };
+  const options: Record<string, unknown> = {};
+
+  if (form.kind === "capped") {
+    if (!form.cappedSize.trim()) return { valid: false, error: "capped-size-required" };
+    const size = positiveInteger(form.cappedSize);
+    if (size === null) return { valid: false, error: "capped-size-invalid" };
+    options.capped = true;
+    options.size = size;
+    if (form.cappedMax.trim()) {
+      const max = positiveInteger(form.cappedMax);
+      if (max === null) return { valid: false, error: "capped-max-invalid" };
+      options.max = max;
+    }
+  } else if (form.kind === "timeseries") {
+    const timeField = form.timeField.trim();
+    if (!timeField) return { valid: false, error: "time-field-required" };
+    const metaField = form.metaField.trim();
+    options.timeseries = { timeField, ...(metaField ? { metaField } : {}), granularity: form.granularity };
+    if (form.expireAfterSeconds.trim()) {
+      const expire = positiveInteger(form.expireAfterSeconds);
+      if (expire === null) return { valid: false, error: "expire-invalid" };
+      options.expireAfterSeconds = expire;
+    }
+  } else if (form.kind === "clustered") {
+    const indexName = form.clusteredIndexName.trim();
+    options.clusteredIndex = { key: { _id: 1 }, unique: true, ...(indexName ? { name: indexName } : {}) };
+  }
+
+  if (form.validator.trim()) {
+    let validator: unknown;
+    try {
+      validator = JSON.parse(form.validator);
+    } catch {
+      return { valid: false, error: "validator-invalid" };
+    }
+    if (!validator || typeof validator !== "object" || Array.isArray(validator)) return { valid: false, error: "validator-invalid" };
+    // An empty validator means "no validation"; level and action only apply alongside one.
+    if (Object.keys(validator).length) {
+      options.validator = validator;
+      options.validationLevel = form.validationLevel;
+      options.validationAction = form.validationAction;
+    }
+  }
+
+  if (form.useCollation) {
+    const locale = form.collationLocale.trim();
+    if (!locale) return { valid: false, error: "collation-locale-required" };
+    options.collation = {
+      locale,
+      ...(form.collationStrength ? { strength: Number(form.collationStrength) } : {}),
+      ...(form.collationCaseFirst ? { caseFirst: form.collationCaseFirst } : {}),
+      ...(form.collationNumericOrdering ? { numericOrdering: true } : {}),
+    };
+  }
+
+  return { valid: true, name, options };
+}
+
+export type MongoCollectionNameError = "required" | "dollar" | "null-char" | "system-prefix" | "edge-dot";
+
+/** Client-side checks for MongoDB's collection naming rules; the server stays the final word. */
+export function mongoCollectionNameError(name: string): MongoCollectionNameError | null {
+  if (!name) return "required";
+  if (name.includes("$")) return "dollar";
+  if (name.includes("\0")) return "null-char";
+  if (name.startsWith("system.")) return "system-prefix";
+  if (name.startsWith(".") || name.endsWith(".")) return "edge-dot";
+  return null;
+}
+
 export function toMongoCollectionKind(kind?: string | null): MongoCollectionKind {
   const normalized = (kind || "collection").toLowerCase();
   if (normalized === "view") return "view";

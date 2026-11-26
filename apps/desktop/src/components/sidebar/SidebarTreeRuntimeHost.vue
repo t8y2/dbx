@@ -477,6 +477,14 @@ const settingsStore = useSettingsStore();
 const savedSqlStore = useSavedSqlStore();
 
 const { toast, dismissToast } = useToast();
+const mongoCreateCollectionTarget = ref<{ connectionId: string; database: string } | null>(null);
+const mongoCreateCollectionOpen = ref(false);
+
+function openMongoCreateCollection(node: TreeNode) {
+  if (!node.connectionId || !node.database) return;
+  mongoCreateCollectionTarget.value = { connectionId: node.connectionId, database: node.database };
+  mongoCreateCollectionOpen.value = true;
+}
 const installedPlugins = ref<InstalledPlugin[]>([]);
 const sidebarPluginRegistry = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value));
 const pluginDialog = shallowRef<{ plugin: InstalledPlugin; contribution: PluginWorkbenchContribution; context: PluginWorkbenchContext; title: string } | null>(null);
@@ -514,6 +522,7 @@ const props = defineProps<{
 
 const SidebarBatchConnectionTestDialog = defineAsyncComponent(() => import("./SidebarBatchConnectionTestDialog.vue"));
 const ModelGenerateDialog = defineAsyncComponent(() => import("@/components/generate/ModelGenerateDialog.vue"));
+const MongoCreateCollectionDialog = defineAsyncComponent(() => import("./MongoCreateCollectionDialog.vue"));
 const OracleTableGrantsDialog = defineAsyncComponent(() => import("@/components/objects/OracleTableGrantsDialog.vue"));
 const modelGenerationTarget = shallowRef<TreeNode | null>(null);
 const oracleTableGrantsTarget = shallowRef<{ connectionId: string; database: string; schema: string; tableName: string; catalog?: string } | null>(null);
@@ -8439,7 +8448,11 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "redis-db" || node.type === "mongo-db" || node.type === "vector-database") {
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: FilePlus2, shortcut: settingsStore.editorSettings.shortcuts.newQuery });
-    if (canCreateDatabaseFromNode(node)) items.push(createDatabaseMenuItem(node));
+    // A MongoDB database offers Add Collection here; Create Database stays on the connection.
+    if (node.type !== "mongo-db" && canCreateDatabaseFromNode(node)) items.push(createDatabaseMenuItem(node));
+    if (node.type === "mongo-db" && canDropMongoDatabase.value && !connectionStore.getConfig(node.connectionId!)?.read_only) {
+      items.push({ label: t("mongo.createCollectionMenu"), action: () => openMongoCreateCollection(node), icon: FolderPlus });
+    }
     if (node.type === "mongo-db" && canOpenObjectBrowser.value) {
       items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
     }
@@ -9739,6 +9752,7 @@ defineExpose({
     @confirm="cloneDialog.confirm"
   />
   <SidebarBatchConnectionTestDialog v-if="batchTestConnectionIds.length" :connection-ids="batchTestConnectionIds" @close="batchTestConnectionIds = []" />
+  <MongoCreateCollectionDialog v-if="mongoCreateCollectionTarget" v-model:open="mongoCreateCollectionOpen" :connection-id="mongoCreateCollectionTarget.connectionId" :database="mongoCreateCollectionTarget.database" />
   <ModelGenerateDialog v-if="modelGenerationTarget" :key="modelGenerationTarget.id" :target="modelGenerationTarget" @close="modelGenerationTarget = null" />
   <SqlTemplateInsertRowsDialog v-model:open="insertTemplateRowsOpen" @confirm="confirmInsertTemplateRows" />
   <OracleTableGrantsDialog v-if="oracleTableGrantsTarget" :target="oracleTableGrantsTarget" @close="oracleTableGrantsTarget = null" />

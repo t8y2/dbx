@@ -47,10 +47,7 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
-  useConnectionStore: () => ({
-    ensureConnected: backend.ensureConnected,
-    listMongoCompletionFields: backend.listMongoCompletionFields,
-  }),
+  useConnectionStore: () => ({ getConfig: () => undefined, ensureConnected: backend.ensureConnected, listMongoCompletionFields: backend.listMongoCompletionFields }),
 }));
 
 vi.mock("@/stores/settingsStore", () => ({

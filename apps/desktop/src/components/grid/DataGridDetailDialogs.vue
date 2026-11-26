@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Code2, Copy, ListTree, Search, TableProperties } from "@lucide/vue";
+import { Braces, Code2, Copy, ListTree, Search, TableProperties } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import DataGridRowJsonPreview from "@/components/grid/DataGridRowJsonPreview.vue";
+import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { cellDetailPreviewText } from "@/lib/dataGrid/cellDetailPresentation";
 import { dataGridRowDetailPreviewFields, filterDataGridDetailFields, type DataGridCellDetail, type DataGridColumnDetail, type DataGridRowDetail } from "@/lib/dataGrid/dataGridDetail";
 import type { DatabaseType } from "@/types/database";
@@ -16,6 +17,8 @@ const props = defineProps<{
   rowDetail: DataGridRowDetail | null;
   columnDetail: DataGridColumnDetail | null;
   canPreviewRowJson?: boolean;
+  /** Stored document as formatted JSON (MongoDB); enables the Fields / JSON tabs. */
+  rowDocumentJson?: string;
   databaseType?: DatabaseType;
   typeColorClass: (type: string) => string;
   openImagePreview: (src: string, title: string) => void;
@@ -42,6 +45,9 @@ const showRowJsonPreview = computed(() => props.canPreviewRowJson && rowJsonPrev
 const rowJsonFields = computed(() => (showRowJsonPreview.value && props.rowDetail ? dataGridRowDetailPreviewFields(props.rowDetail, props.databaseType) : []));
 const filteredRowFields = computed(() => (props.rowDetail ? filterDataGridDetailFields(props.rowDetail.fields, rowSearch.value) : []));
 const filteredColumnFields = computed(() => (props.columnDetail ? filterDataGridDetailFields(props.columnDetail.fields, columnSearch.value) : []));
+
+const rowView = ref<"fields" | "json">("fields");
+const showRowDocumentJson = computed(() => rowView.value === "json" && props.rowDocumentJson !== undefined);
 
 watch(rowOpen, (open) => {
   if (!open) rowJsonPreview.value = false;
@@ -85,11 +91,20 @@ function onColumnDetailKeydown(event: KeyboardEvent) {
         >
       </DialogHeader>
       <div class="flex shrink-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <div v-if="rowDocumentJson !== undefined" data-row-detail-view-tabs class="flex shrink-0 items-center overflow-hidden rounded-md border" role="tablist">
+          <Button variant="ghost" size="sm" role="tab" class="h-7 rounded-none px-2 text-xs" :class="{ 'bg-accent text-foreground': rowView === 'fields' }" :aria-selected="rowView === 'fields'" @click="rowView = 'fields'"><ListTree class="mr-1.5 h-3 w-3" />{{ t("grid.rowDetailFieldsTab") }}</Button
+          ><Button variant="ghost" size="sm" role="tab" class="h-7 rounded-none border-l px-2 text-xs" :class="{ 'bg-accent text-foreground': rowView === 'json' }" :aria-selected="rowView === 'json'" @click="rowView = 'json'"><Braces class="mr-1.5 h-3 w-3" />JSON</Button>
+        </div>
         <span class="mr-auto whitespace-nowrap">{{ t("grid.columnsCount", { count: rowDetail.fields.length }) }}</span>
-        <div v-if="!showRowJsonPreview" class="relative w-56 max-w-full"><Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" /><Input v-model="rowSearch" :placeholder="t('grid.detailSearchPlaceholder')" class="h-7 pl-7 text-xs" /></div>
+        <div v-if="!showRowJsonPreview && !showRowDocumentJson" class="relative w-56 max-w-full">
+          <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" /><Input v-model="rowSearch" :placeholder="t('grid.detailSearchPlaceholder')" class="h-7 pl-7 text-xs" />
+        </div>
         <Button v-if="canPreviewRowJson" :variant="showRowJsonPreview ? 'secondary' : 'outline'" size="sm" class="h-7 text-xs" :aria-pressed="showRowJsonPreview" @click="rowJsonPreview = !rowJsonPreview"> <Code2 class="mr-1.5 h-3 w-3" />{{ t("grid.rowJsonPreview") }} </Button>
       </div>
-      <div v-if="showRowJsonPreview" class="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/20">
+      <div v-if="showRowDocumentJson" data-row-detail-document-json class="h-[60vh] min-h-48 shrink overflow-hidden rounded-md border bg-background">
+        <RedisJsonEditor :key="rowDetail.rowId" :model-value="rowDocumentJson ?? ''" read-only class="h-full" />
+      </div>
+      <div v-else-if="showRowJsonPreview" class="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/20">
         <DataGridRowJsonPreview :key="rowDetail.rowId" :fields="rowJsonFields" :preview-hint="(count) => t('grid.largeValuePreviewHint', { count })" />
       </div>
       <div v-else class="min-h-0 flex-1 overflow-auto rounded border">

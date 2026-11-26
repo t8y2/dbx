@@ -246,6 +246,42 @@ describe("search categories and connection scope", () => {
     await nextTick();
   }
 
+  it.each([
+    { label: "isComposing", isComposing: true },
+    { label: "IME key code", keyCode: 229 },
+    { label: "active composition", startComposition: true },
+    { label: "composition ending before keydown", startComposition: true, endBeforeKeydown: true },
+  ])("keeps the search open on an IME Enter marked by $label", async ({ isComposing, keyCode, startComposition, endBeforeKeydown }) => {
+    mocks.connections = [{ id: "conn1", name: "Production", db_type: "postgres" }];
+    mocks.treeNodes = [
+      { id: "table1", connectionId: "conn1", type: "table", database: "app", label: "projects" },
+      { id: "table2", connectionId: "conn1", type: "table", database: "app", label: "users" },
+    ];
+    const input = await mountObjects();
+    await search(input, "projects");
+    expect(host.querySelector('[data-selected="true"]')?.textContent).toContain("projects");
+
+    if (startComposition) input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    input.value = "users";
+    if (endBeforeKeydown) input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "users" }));
+    const commit = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, isComposing });
+    if (keyCode !== undefined) Object.defineProperty(commit, "keyCode", { value: keyCode });
+    input.dispatchEvent(commit);
+    expect(commit.defaultPrevented).toBe(false);
+    expect(mocks.select).not.toHaveBeenCalled();
+    expect(mocks.updateOpen).not.toHaveBeenCalled();
+
+    if (startComposition && !endBeforeKeydown) input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "users" }));
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+    await nextTick();
+    expect(host.querySelector('[data-selected="true"]')?.textContent).toContain("users");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(mocks.select).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: "table", label: "users" }));
+    expect(mocks.updateOpen).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
   it.each(["column", "database", "connection"])("keeps %s matches visible for the broad objects query category", async (type) => {
     mocks.connections = [{ id: "conn1", name: "needle", db_type: "postgres" }];
     mocks.treeNodes = [{ id: "target", connectionId: "conn1", type, database: "needle", tableName: "users", label: "needle" }];

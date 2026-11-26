@@ -3281,6 +3281,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "等しくない",
     filterBuilderContains: "含む",
     filterBuilderNotContains: "含まない",
+    filterBuilderContainsCaseInsensitive: "含む（大文字と小文字を区別しない）",
+    filterBuilderNotContainsCaseInsensitive: "含まない（大文字と小文字を区別しない）",
     filterBuilderBeginsWith: "で始まる",
     filterBuilderEndsWith: "で終わる",
     filterBuilderNotBeginsWith: "…で始まらない",

@@ -3246,6 +3246,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "Не равно",
     filterBuilderContains: "Содержит",
     filterBuilderNotContains: "Не содержит",
+    filterBuilderContainsCaseInsensitive: "Содержит (без учета регистра)",
+    filterBuilderNotContainsCaseInsensitive: "Не содержит (без учета регистра)",
     filterBuilderBeginsWith: "Начинается с",
     filterBuilderEndsWith: "Заканчивается на",
     filterBuilderNotBeginsWith: "Не начинается с",

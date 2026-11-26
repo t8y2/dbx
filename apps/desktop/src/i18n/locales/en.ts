@@ -3558,6 +3558,8 @@ export default {
     filterBuilderNotEquals: "Does not equal",
     filterBuilderContains: "Contains",
     filterBuilderNotContains: "Does not contain",
+    filterBuilderContainsCaseInsensitive: "Contains (case insensitive)",
+    filterBuilderNotContainsCaseInsensitive: "Does not contain (case insensitive)",
     filterBuilderBeginsWith: "Starts with",
     filterBuilderEndsWith: "Ends with",
     filterBuilderNotBeginsWith: "Does not start with",

@@ -3485,6 +3485,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "不等于",
     filterBuilderContains: "包含",
     filterBuilderNotContains: "不包含",
+    filterBuilderContainsCaseInsensitive: "包含（不区分大小写）",
+    filterBuilderNotContainsCaseInsensitive: "不包含（不区分大小写）",
     filterBuilderBeginsWith: "以…开始",
     filterBuilderEndsWith: "以…结束",
     filterBuilderNotBeginsWith: "不以…开始",

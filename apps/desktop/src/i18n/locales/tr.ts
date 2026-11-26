@@ -2263,6 +2263,8 @@ export default withEnglishFallback({
     filterBuilderNotEquals: "Eşit değildir",
     filterBuilderContains: "İçerir",
     filterBuilderNotContains: "İçermez",
+    filterBuilderContainsCaseInsensitive: "İçerir (büyük/küçük harfe duyarsız)",
+    filterBuilderNotContainsCaseInsensitive: "İçermez (büyük/küçük harfe duyarsız)",
     filterBuilderBeginsWith: "İle başlar",
     filterBuilderEndsWith: "İle biter",
     filterBuilderNotBeginsWith: "İle başlamaz",

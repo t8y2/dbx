@@ -3751,6 +3751,10 @@ export default withEnglishFallback({
     pasteCellTextFailed: "셀에 텍스트를 붙여넣을 수 없습니다: {message}",
     copyExtractorSingleColumnFormat: "스마트 복사 단일 열 형식",
     copyExtractorUseSmartDefaults: "스마트 복사 기본 형식 사용",
+    tableQueryDefaults: "이 테이블의 기본 필터 및 정렬",
+    tableQueryDefaultsSave: "현재 필터 및 정렬 저장",
+    tableQueryDefaultsClear: "저장된 기본 조건 지우기",
+    tableQueryDefaultsSaveFailed: "이 테이블의 기본 조건을 저장할 수 없습니다.",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

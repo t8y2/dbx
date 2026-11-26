@@ -3882,6 +3882,10 @@ export default withEnglishFallback({
     pasteCellTextFailed: "Не удалось вставить текст в ячейку: {message}",
     copyExtractorSingleColumnFormat: "Формат одного столбца для Smart Copy",
     copyExtractorUseSmartDefaults: "Использовать формат Smart Copy по умолчанию",
+    tableQueryDefaults: "Фильтры и сортировка по умолчанию для этой таблицы",
+    tableQueryDefaultsSave: "Сохранить текущие фильтры и сортировку",
+    tableQueryDefaultsClear: "Очистить сохраненные условия по умолчанию",
+    tableQueryDefaultsSaveFailed: "Не удалось сохранить условия по умолчанию для этой таблицы.",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

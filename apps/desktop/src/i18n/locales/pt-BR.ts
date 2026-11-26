@@ -3928,6 +3928,10 @@ export default withEnglishFallback({
     influxDeleteConfirmMessage: "Excluir permanentemente {count} ponto(s) selecionado(s) do InfluxDB 1.x? Cada predicado usa o horário exato e todas as tags disponíveis. As exclusões não podem ser desfeitas, e um erro pode ocorrer depois que pontos anteriores já tiverem sido excluídos.",
     influxDeleteTarget: "Measurement: {measurement}",
     influxDeleteConfirm: "Excluir pontos",
+    tableQueryDefaults: "Filtro e ordenação padrão desta tabela",
+    tableQueryDefaultsSave: "Salvar filtro e ordenação atuais",
+    tableQueryDefaultsClear: "Limpar condições padrão salvas",
+    tableQueryDefaultsSaveFailed: "Não foi possível salvar as condições padrão desta tabela.",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",

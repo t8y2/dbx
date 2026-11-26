@@ -383,6 +383,7 @@ import {
   editorSettingsDraftFromSettings,
   editorSettingsDraftPatchFromSettings,
   editorSettingsPatchFromDraft,
+  normalizeCompletionAutoActivationDelayDraft,
   normalizeQueryResultMaxRowsDraft,
   normalizeTableOpenPageSizeDraft,
   shouldConfirmEditorSettingsDialogClose,
@@ -817,7 +818,7 @@ const editSequenceCompletionEnabled = ref(settingsStore.editorSettings.sequenceC
 const showSqlServerSpaceConfirmsCompletion = computed(() => hasSqlServerConnection.value || settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion || editSqlServerSpaceConfirmsCompletion.value);
 const editSortCompletionColumnsAlphabetically = ref(settingsStore.editorSettings.sortCompletionColumnsAlphabetically);
 const editSelectFirstCompletionOnOpen = ref(settingsStore.editorSettings.selectFirstCompletionOnOpen);
-const editCompletionAutoActivationDelayMs = ref(settingsStore.editorSettings.completionAutoActivationDelayMs);
+const editCompletionAutoActivationDelayMs = ref<string | number>(settingsStore.editorSettings.completionAutoActivationDelayMs);
 const editCompletionTriggerMode = ref<SqlCompletionTriggerMode>(settingsStore.editorSettings.completionTriggerMode);
 const editCompletionMatchMode = ref<SqlCompletionMatchMode>(settingsStore.editorSettings.completionMatchMode);
 const editExcludedCompletionItems = ref(settingsStore.editorSettings.excludedCompletionItems.join("\n"));
@@ -938,9 +939,8 @@ function updateTableOpenPageSizeDraft(value: string | number) {
   editTableOpenPageSize.value = normalizeTableOpenPageSizeDraft(value);
 }
 
-function updateCompletionAutoActivationDelayDraft(value: string | number) {
-  const parsed = typeof value === "number" ? value : Number.parseInt(String(value).trim(), 10);
-  editCompletionAutoActivationDelayMs.value = Number.isFinite(parsed) ? Math.min(MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.max(MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS, parsed)) : DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs;
+function commitCompletionAutoActivationDelayInput() {
+  editCompletionAutoActivationDelayMs.value = normalizeCompletionAutoActivationDelayDraft(editCompletionAutoActivationDelayMs.value);
 }
 
 function updatePageSizeDraft(value: string | number) {
@@ -1380,7 +1380,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sequenceCompletionEnabled: editSequenceCompletionEnabled.value,
     sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically.value,
     selectFirstCompletionOnOpen: editSelectFirstCompletionOnOpen.value,
-    completionAutoActivationDelayMs: editCompletionAutoActivationDelayMs.value,
+    completionAutoActivationDelayMs: normalizeCompletionAutoActivationDelayDraft(editCompletionAutoActivationDelayMs.value),
     completionTriggerMode: editCompletionTriggerMode.value,
     completionMatchMode: editCompletionMatchMode.value,
     excludedCompletionItems: normalizeExcludedCompletionItems(editExcludedCompletionItems.value),
@@ -2943,6 +2943,7 @@ async function persistSettings() {
   await historyRetention.save();
   await mcpHistoryRetention.save();
   editSidebarHoverDelay.value = normalizeSidebarHoverDelay(editSidebarHoverDelay.value);
+  commitCompletionAutoActivationDelayInput();
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
@@ -8894,8 +8895,8 @@ onUnmounted(() => {
                     class="h-7 w-24 px-2 text-left text-xs tabular-nums"
                     :min="MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS"
                     :max="MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS"
-                    :model-value="editCompletionAutoActivationDelayMs"
-                    @update:model-value="updateCompletionAutoActivationDelayDraft"
+                    v-model="editCompletionAutoActivationDelayMs"
+                    @blur="commitCompletionAutoActivationDelayInput"
                   />
                 </div>
 

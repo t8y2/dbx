@@ -65,7 +65,9 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
     listElasticsearchCompletionFields: vi.fn(async () => []),
   };
   const connectionStore = store as unknown as Options["connectionStore"];
-  const settings = reactive({ editorSettings: { completionTriggerMode: "positional", snippets: [], sqlFormatter: { keywordCase: "upper", functionCase: "upper" }, autoAliasTables: false, tableCompletionSchemaQualification: "collision", generateSqlQuoteIdentifiers: false } });
+  const settings = reactive({
+    editorSettings: { completionTriggerMode: "positional", completionAutoActivationDelayMs: 0, snippets: [], sqlFormatter: { keywordCase: "upper", functionCase: "upper" }, autoAliasTables: false, tableCompletionSchemaQualification: "collision", generateSqlQuoteIdentifiers: false },
+  });
   const metadata = useQueryEditorCompletionMetadata({ props, view, connectionStore, sqlBehaviorDialect: () => props.dialect, remoteLatencyBudgetMs: 40, maxCompletionTables: 100, onDemandMinPrefix: 2, semanticCompletionEnabled });
   configureMetadata?.(metadata);
   const startCompletion = vi.fn(() => true);
@@ -524,8 +526,8 @@ describe("QueryEditor completion provider ownership", () => {
     runtime.imeCompositionActive = true;
     expect(await provide()).toBeNull();
     expect(completion.triggerSqlCompletion(currentView)).toBe(false);
-    completion.scheduleSqlCompletionStart(currentView);
-    await vi.advanceTimersByTimeAsync(1);
+    completion.scheduleDeferredCompletionTrigger(currentView, "GET", "");
+    await vi.advanceTimersByTimeAsync(25);
     expect(startCompletion).not.toHaveBeenCalled();
     expect(store.listRedisCompletionCommandDocs).not.toHaveBeenCalled();
   });
@@ -540,6 +542,25 @@ describe("QueryEditor completion provider ownership", () => {
     if (change === "cancel") completion.clearDeferredCompletionTrigger();
     await vi.advanceTimersByTimeAsync(50);
     expect(startCompletion).not.toHaveBeenCalled();
+  });
+
+  it("defers completion after IME input and leaves the shortcut immediately available", async () => {
+    const { currentView, settings, completion, provide, startCompletion } = createHarness();
+    settings.editorSettings.completionAutoActivationDelayMs = 2000;
+    completion.scheduleDeferredCompletionTrigger(currentView);
+    expect(await provide(false)).toBeNull();
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(startCompletion).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(startCompletion).toHaveBeenCalledOnce();
+
+    startCompletion.mockClear();
+    completion.scheduleDeferredCompletionTrigger(currentView);
+    expect(completion.triggerSqlCompletion(currentView)).toBe(true);
+    expect(completion.activeOrigin).toBe("explicit");
+    expect(startCompletion).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(startCompletion).toHaveBeenCalledOnce();
   });
 
   it("coalesces valid deferred input and reads late runtime initialization", async () => {

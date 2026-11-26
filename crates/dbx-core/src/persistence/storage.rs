@@ -7315,6 +7315,29 @@ pub fn sanitized_connection_config(config: &ConnectionConfig) -> ConnectionConfi
     sanitized
 }
 
+fn preserve_saved_mqtt_topics(tx: &Transaction<'_>, config: &mut ConnectionConfig) -> Result<(), String> {
+    if config.db_type != DatabaseType::Mqtt {
+        return Ok(());
+    }
+    let Some(external_config) = config.external_config.as_mut().and_then(serde_json::Value::as_object_mut) else {
+        return Ok(());
+    };
+    let persisted: Option<String> = tx
+        .query_row("SELECT config_json FROM connections WHERE id = ?1", [&config.id], |row| row.get(0))
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let saved_topics = persisted
+        .and_then(|json| serde_json::from_str::<ConnectionConfig>(&json).ok())
+        .filter(|previous| previous.db_type == DatabaseType::Mqtt)
+        .and_then(|previous| previous.external_config)
+        .and_then(|mut previous| previous.as_object_mut()?.remove("savedTopics"))
+        .filter(serde_json::Value::is_array);
+    if let Some(saved_topics) = saved_topics {
+        external_config.insert("savedTopics".to_string(), saved_topics);
+    }
+    Ok(())
+}
+
 fn persist_connection_in_tx(
     tx: &rusqlite::Transaction<'_>,
     codec: &SecretCodec,
@@ -7725,12 +7748,14 @@ impl Storage {
     /// client created in the meantime. Removing a connection therefore has to go
     /// through [`Storage::delete_connections`] with explicit ids.
     pub async fn save_connections(&self, configs: &[ConnectionConfig]) -> Result<(), String> {
-        let configs = configs.to_vec();
+        let mut configs = configs.to_vec();
         let needs_key = configs.iter().any(connection_config_has_inline_secrets);
         let codec = self.secret_codec_for_write(needs_key).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
-            for config in &configs {
+            for config in &mut configs {
+                // The frontend may submit a list from before its latest subscription edits.
+                preserve_saved_mqtt_topics(&tx, config)?;
                 // `persist_connection_in_tx` uses a plain INSERT, so an update of
                 // an already saved connection has to drop the old row first.
                 tx.execute("DELETE FROM connections WHERE id = ?1", [&config.id]).map_err(|e| e.to_string())?;
@@ -7947,7 +7972,8 @@ impl Storage {
     ) -> Result<(), String> {
         let connection_id = connection_id.to_string();
         self.with_conn(move |conn| {
-            let json = conn
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            let json = tx
                 .query_row("SELECT config_json FROM connections WHERE id = ?1", [&connection_id], |row| {
                     row.get::<_, String>(0)
                 })
@@ -7964,17 +7990,13 @@ impl Storage {
             external_object.insert("savedTopics".to_string(), saved_topics);
             config.external_config = Some(external_config);
             let updated_json = serde_json::to_string(&config).map_err(|error| error.to_string())?;
-            conn.execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![updated_json, connection_id])
-                .map(
-                    |updated| {
-                        if updated == 0 {
-                            Err(format!("Connection config not found: {connection_id}"))
-                        } else {
-                            Ok(())
-                        }
-                    },
-                )
-                .map_err(|error| error.to_string())?
+            let updated = tx
+                .execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![updated_json, connection_id])
+                .map_err(|error| error.to_string())?;
+            if updated == 0 {
+                return Err(format!("Connection config not found: {connection_id}"));
+            }
+            tx.commit().map_err(|error| error.to_string())
         })
         .await
     }

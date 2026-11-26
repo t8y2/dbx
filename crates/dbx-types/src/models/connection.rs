@@ -1469,6 +1469,7 @@ impl ConnectionConfig {
             DatabaseType::Sundb => format!("sundb://{host}:{port}{db_part}"),
             DatabaseType::Oscar => format!("oscar://{host}:{port}{db_part}"),
             DatabaseType::Tdengine => format!("tdengine://{host}:{port}{db_part}"),
+            DatabaseType::Cnosdb => format!("cnosdb://{host}:{port}{db_part}"),
             DatabaseType::Xugu => format!("xugu://{host}:{port}{db_part}"),
             DatabaseType::Iotdb => {
                 let base = format!("iotdb://{host}:{port}{db_part}");
@@ -1749,6 +1750,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Tdengine => {
                 format!("tdengine://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Cnosdb => {
+                format!("cnosdb://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Xugu => {
                 format!("xugu://{}:{}@{host}:{port}{db_part}", username, password)

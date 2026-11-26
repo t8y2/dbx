@@ -123,6 +123,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 "hive": "0.1.43",
                 "argo": "0.1.0",
                 "tdengine": "0.1.0",
+                "cnosdb": "0.1.0",
                 "etcd": "0.1.40",
                 "etcd2": "0.1.0",
                 "argo": "0.1.0",

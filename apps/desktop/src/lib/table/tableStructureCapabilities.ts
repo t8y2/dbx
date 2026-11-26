@@ -378,6 +378,11 @@ const questdbCapabilities = capabilities({
   foreignKey: false,
 });
 
+const cnosdbCapabilities = capabilities({
+  dialect: "postgres",
+  createTable: true,
+});
+
 const firebirdCapabilities = capabilities({
   ...postgresCapabilities,
   foreignKey: false,
@@ -397,6 +402,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   kwdb: postgresCapabilities,
   opengauss: postgresCapabilities,
   questdb: questdbCapabilities,
+  cnosdb: cnosdbCapabilities,
   redshift: redshiftCapabilities,
   vertica: redshiftCapabilities,
   highgo: postgresCapabilities,

@@ -36,6 +36,7 @@
   "sundb": "0.1.96",
   "teradata": "0.1.90",
   "tdengine": "0.1.57",
+  "cnosdb": "0.1.0",
   "trino": "0.1.95",
   "transwarp": "0.1.26",
   "vastbase": "0.1.57",

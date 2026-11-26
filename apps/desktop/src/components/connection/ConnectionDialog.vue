@@ -82,6 +82,7 @@ import {
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isWindows } from "@/lib/backend/platform";
+import { applyCnosdbTenantToExternalConfig, CNOSDB_DEFAULT_TENANT, cnosdbTenantFromExternalConfig } from "@/lib/connection/cnosdbTenant";
 import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, externalBasePath, normalizeBasePath, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { hasGbase8cConnectionDatabase } from "@/lib/connection/gbase8cDatabase";
 import { type GbaseProfile, gbaseProfileFromConfig, isGbaseProfile } from "@/lib/connection/gbaseProfiles";
@@ -860,6 +861,13 @@ function sqlServerPortExplicitFromConfig(config: Pick<ConnectionConfig, "db_type
   const external = externalConfigRecord(config.external_config);
   return external.portExplicit === true || external.port_explicit === true;
 }
+
+const cnosdbTenant = computed({
+  get: () => cnosdbTenantFromExternalConfig(form.value.external_config),
+  set: (value: string) => {
+    form.value.external_config = applyCnosdbTenantToExternalConfig(form.value.external_config, value);
+  },
+});
 
 function setSqlServerPortExplicit(config: Pick<ConnectionConfig, "db_type"> & { external_config?: unknown }, explicit: boolean) {
   if (config.db_type !== "sqlserver") return;
@@ -9862,6 +9870,14 @@ function openExternalUrl(url: string) {
                     <div v-if="form.db_type !== 'hbase' && form.db_type !== 'meilisearch' && form.db_type !== 'solr' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>
                       <Input v-model="form.database" class="col-span-3" :placeholder="databasePlaceholder" />
+                    </div>
+
+                    <div v-if="form.db_type === 'cnosdb'" class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.cnosdbTenant") }}</Label>
+                      <div class="col-span-3 space-y-1">
+                        <Input v-model="cnosdbTenant" :placeholder="CNOSDB_DEFAULT_TENANT" @input="resetTestState" />
+                        <p class="text-xs text-muted-foreground">{{ t("connection.cnosdbTenantHint") }}</p>
+                      </div>
                     </div>
 
                     <!-- Cloud Spanner: project/instance/database resource path instead of user/password/database -->

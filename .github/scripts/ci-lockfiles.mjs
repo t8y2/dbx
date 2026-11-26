@@ -6,7 +6,7 @@ export function lockfileManifests(plan) {
   return [
     ...(plan.rust ? ["Cargo.toml"] : []),
     ...plan.agent_rust.include.map(({ driver }) => {
-      if (!["duckdb", "tdengine"].includes(driver)) throw new Error(`Unknown native Rust driver: ${driver}`);
+      if (!["duckdb", "tdengine", "cnosdb"].includes(driver)) throw new Error(`Unknown native Rust driver: ${driver}`);
       return `agents/drivers/${driver}/Cargo.toml`;
     }),
   ];

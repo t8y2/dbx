@@ -233,6 +233,7 @@ pub(super) fn capabilities_for(
             alter_primary_key: false,
             foreign_key: false,
         },
+        Some(DatabaseType::Cnosdb) => TableStructureCapabilities { dialect: StructureDialect::Postgres, ..base },
         Some(DatabaseType::Redshift | DatabaseType::Vertica) => TableStructureCapabilities {
             dialect: StructureDialect::Postgres,
             add_column: true,

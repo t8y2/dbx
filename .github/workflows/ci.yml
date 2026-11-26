@@ -1594,6 +1594,9 @@ jobs:
       - name: TDengine native agent build
         if: matrix.driver == 'tdengine'
         run: mold -run cargo build --manifest-path drivers/tdengine/Cargo.toml --locked --release --bin dbx-tdengine-driver
+      - name: CnosDB native agent build
+        if: matrix.driver == 'cnosdb'
+        run: mold -run cargo build --manifest-path drivers/cnosdb/Cargo.toml --locked --release --bin dbx-cnosdb-driver
       - name: Upload Rust Cargo timings
         if: always() && !cancelled()
         uses: actions/upload-artifact@v6

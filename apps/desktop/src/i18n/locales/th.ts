@@ -1664,6 +1664,8 @@ export default withEnglishFallback({
     hiveTicketCacheFallback: "ตั้ง useSubjectCredsOnly=false",
     hiveJvmOptions: "ตัวเลือก JVM",
     hiveJvmOptionsPlaceholder: "-Dsun.security.krb5.debug=true",
+    cnosdbTenant: "เทแนนท์ CnosDB",
+    cnosdbTenantHint: "เนมสเปซแยกของมัลติเทแนนท์ ไม่ใช่ชื่อผู้ใช้ล็อกอิน เว้นว่างได้ การติดตั้งโอเพนซอร์สค่าเริ่มต้นคือ cnosdb",
     gbaseServer: "GBASEDBTSERVER",
     gbaseServerHint: "ต้องตรงกับ DBSERVERNAME หรือ DBSERVERALIASES ของ Server",
     gbaseServerMismatch: "การเชื่อมต่อ GBase 8s ล้มเหลวเนื่องจาก GBASEDBTSERVER ไม่ตรงกับ DBSERVERNAME หรือ DBSERVERALIASES ของ Server เติม GBASEDBTSERVER ด้วยชื่อ Server จริง",

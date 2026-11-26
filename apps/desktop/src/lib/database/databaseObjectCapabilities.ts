@@ -132,6 +132,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["ignite", TABLE_VIEW_OBJECTS],
   ["ignite3", TABLE_VIEW_OBJECTS],
   ["tdengine", TABLE_VIEW_OBJECTS],
+  ["cnosdb", TABLE_VIEW_OBJECTS],
   ["iotdb", TABLE_VIEW_OBJECTS],
   ["neo4j", TABLE_VIEW_OBJECTS],
   ["nebula", TABLE_VIEW_OBJECTS],

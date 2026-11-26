@@ -184,7 +184,22 @@ pub fn agent_connect_params_with_role(
             (config.effective_connect_timeout_secs() * 1000).max(ZOOKEEPER_MIN_CONNECTION_TIMEOUT_MS)
         );
     }
+    if config.db_type == DatabaseType::Cnosdb {
+        params["tenant"] = serde_json::json!(cnosdb_tenant(config));
+    }
     Ok(params)
+}
+
+fn cnosdb_tenant(config: &ConnectionConfig) -> String {
+    config
+        .external_config
+        .as_ref()
+        .and_then(|value| value.get("tenant"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("cnosdb")
+        .to_string()
 }
 
 fn oracle_uses_sysdba(config: &ConnectionConfig) -> bool {

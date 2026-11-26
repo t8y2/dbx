@@ -2,6 +2,7 @@
 import { createApp, defineComponent, h, reactive, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
+import { UpdatePreparationError } from "@/lib/app/updatePreparation";
 import { effectiveUpdateInfo, isNewerRemoteVersion, isPreparedUpdateObsolete, resolveReleaseTagUrl, resolveUpdateReleaseUrl, useAppUpdater } from "@/composables/useAppUpdater";
 import { displayAppVersion } from "@/lib/app/promotedBuild";
 const mocks = vi.hoisted(() => ({
@@ -332,6 +333,126 @@ describe("silent update lifecycle", () => {
     expect(updater.updateDownloaded.value).toBe(true);
     await updater.installDownloadedUpdate();
     expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+  });
+  it("offers a confirmation for running work and retries the install with force", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const prepare = vi
+      .fn()
+      .mockRejectedValueOnce(new UpdatePreparationError("2 tasks running", "tasks"))
+      .mockResolvedValueOnce(() => {});
+    const updater = mount({ prepareForUpdate: prepare });
+    await updater.checkUpdates({ silent: true });
+
+    await updater.installDownloadedUpdate();
+
+    // A settleable block is a question, not a failure: no error banner, no install.
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+    expect(updater.updateCheckFailed.value).toBe(false);
+    expect(updater.blockedPreparation.value?.message).toContain("2 tasks running");
+
+    await updater.confirmBlockedInstall();
+
+    expect(prepare).toHaveBeenLastCalledWith({ force: true });
+    expect(mocks.installDownloadedUpdate).toHaveBeenCalledWith("cached", "1.1.0");
+    expect(updater.blockedPreparation.value).toBeNull();
+  });
+  it("dismissing the confirmation installs nothing", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const updater = mount({
+      prepareForUpdate: async () => {
+        throw new UpdatePreparationError("1 transaction open", "tasks");
+      },
+    });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+
+    expect(updater.blockedPreparation.value?.code).toBe("tasks");
+    updater.dismissBlockedInstall();
+
+    expect(updater.blockedPreparation.value).toBeNull();
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+  });
+  it("keeps non-settleable blocks as errors instead of offering a confirmation", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const updater = mount({
+      prepareForUpdate: async () => {
+        throw new UpdatePreparationError("close the DDL dialog", "config");
+      },
+    });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+
+    expect(updater.blockedPreparation.value).toBeNull();
+    expect(updater.updateCheckFailed.value).toBe(true);
+    expect(updater.updateCheckMessage.value).toContain("close the DDL dialog");
+  });
+  it("a cleanup that fails keeps the install blocked and keeps the reason", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const prepare = vi.fn().mockRejectedValueOnce(new UpdatePreparationError("2 tasks running", "tasks")).mockRejectedValueOnce(new UpdatePreparationError("orders could not be stopped: backend offline", "settle_failed"));
+    const updater = mount({ prepareForUpdate: prepare });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+    expect(updater.blockedPreparation.value).not.toBeNull();
+
+    await updater.confirmBlockedInstall();
+
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+    expect(updater.blockedPreparation.value).toBeNull();
+    expect(updater.updateCheckFailed.value).toBe(true);
+    expect(updater.updateCheckMessage.value).toContain("orders could not be stopped: backend offline");
+  });
+  it("work that survives the confirmed cleanup re-blocks instead of installing", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const prepare = vi.fn().mockRejectedValueOnce(new UpdatePreparationError("1 task running", "tasks")).mockRejectedValueOnce(new UpdatePreparationError("a new query started", "tasks"));
+    const updater = mount({ prepareForUpdate: prepare });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+
+    await updater.confirmBlockedInstall();
+
+    // No second destructive prompt: the block is reported and nothing installs.
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+    expect(updater.blockedPreparation.value).toBeNull();
+    expect(updater.updateCheckFailed.value).toBe(true);
+    expect(updater.updateCheckMessage.value).toContain("a new query started");
+  });
+  it("reports the settling state while the confirmed cleanup runs", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    let settlingDuringCleanup: boolean | undefined;
+    const prepare = vi
+      .fn()
+      .mockRejectedValueOnce(new UpdatePreparationError("2 tasks running", "tasks"))
+      .mockImplementationOnce(async () => {
+        settlingDuringCleanup = updater.isSettlingWork.value;
+        return () => {};
+      });
+    const updater = mount({ prepareForUpdate: prepare });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+
+    await updater.confirmBlockedInstall();
+
+    expect(settlingDuringCleanup).toBe(true);
+    expect(updater.isSettlingWork.value).toBe(false);
+  });
+  it("a failed cleanup can be retried without restarting DBX", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const prepare = vi
+      .fn()
+      .mockRejectedValueOnce(new UpdatePreparationError("2 tasks running", "tasks"))
+      .mockRejectedValueOnce(new UpdatePreparationError("orders could not be stopped: backend offline", "settle_failed"))
+      .mockResolvedValueOnce(() => {});
+    const updater = mount({ prepareForUpdate: prepare });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+    await updater.confirmBlockedInstall();
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+
+    // The package is still there and the error is not terminal: retrying installs.
+    await updater.installDownloadedUpdate();
+
+    expect(mocks.installDownloadedUpdate).toHaveBeenCalledWith("cached", "1.1.0");
+    expect(updater.updateCheckFailed.value).toBe(false);
   });
   it("retries only restart after relaunch fails", async () => {
     mocks.relaunchApp.mockRejectedValueOnce(new Error("restart failed"));

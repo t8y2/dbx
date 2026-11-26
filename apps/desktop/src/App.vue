@@ -2,6 +2,7 @@
 import { blockingDesktopAiRunsForUpdate } from "@/lib/ai/desktopAiRunRegistry";
 import { setupUpdatePreparation, prepareUpdateWithDraftRecovery, isUpdatePreparationActive, UpdatePreparationError } from "@/lib/app/updatePreparation";
 import { describeConfigUpdateBlock, type UpdateBlockingConfigState, type UpdateConfigTranslator } from "@/lib/app/updatePreparationSurfaces";
+import { settleUpdateWork, type UpdateSettleFailure } from "@/lib/app/updateBlockerSettle";
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent, provide } from "vue";
 import { MCP_CALL_HISTORY_OPEN_EVENT, type McpCallHistoryRequest } from "@/lib/mcp/mcpCallHistory";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
@@ -387,12 +388,25 @@ const {
   cancelDownload,
   installDownloadedUpdate,
   restartApp,
+  blockedPreparation,
+  isSettlingWork,
+  confirmBlockedInstall,
+  dismissBlockedInstall,
 } = useAppUpdater({
   getActiveTaskCount: () => trackedUpdateTaskCount.value,
-  prepareForUpdate: async () => {
+  prepareForUpdate: async (prepareOptions: { force?: boolean } = {}) => {
     if (!updatePreparation) throw new Error(t("updates.preparationNotReady"));
+    // Only the confirmation raised by the preparation block sets `force`; every
+    // other path still reports the block and lets the user act on it.
+    if (prepareOptions.force) await settleUpdateBlockers();
     return prepareUpdateWithDraftRecovery(() => updatePreparation!.prepare());
   },
+});
+
+// Closing the update center abandons the question the confirmation asked;
+// reopening it must not show a stale destructive prompt.
+watch(showUpdateDialog, (open) => {
+  if (!open) dismissBlockedInstall();
 });
 const { setupFileDrop } = useFileDrop();
 const { openSqlFile } = useSqlFilePicker();
@@ -442,8 +456,14 @@ async function initializeUpdatePreparation() {
     translate: (key) => t(key),
     assertSafe() {
       if (!updateWindowReady) throw new UpdatePreparationError(t("updates.preparationNotReady"), "not_ready");
-      if (trackedUpdateTaskCount.value > 0 || blockingDesktopAiRunsForUpdate().length > 0 || queryStore.tabs.some((tab) => tab.isCancelling || tab.isExplaining || tab.txnSessionId)) {
+      if (trackedUpdateTaskCount.value > 0 || queryStore.tabs.some((tab) => tab.isCancelling || tab.isExplaining || tab.txnSessionId)) {
         throw new UpdatePreparationError(t("updates.preparationTasks"), "tasks");
+      }
+      // Confirming settles queries, tasks and transactions; an AI run is not
+      // stop-able that way, so it stays a plain block instead of a destructive
+      // prompt that could never succeed.
+      if (blockingDesktopAiRunsForUpdate().length > 0) {
+        throw new UpdatePreparationError(t("updates.preparationAiRuns"), "ai_runs");
       }
       if (queryStore.tabs.some((tab) => (tab.pendingDataChangeCount ?? 0) > 0 || tab.hasPendingDataEditorDraft)) {
         throw new UpdatePreparationError(t("updates.preparationDrafts"), "drafts");
@@ -1779,6 +1799,46 @@ async function consumePendingComponentUpdatesAfterRestart() {
   reportComponentUpdateResult(await runPendingComponentUpdatePlan(pending, componentUpdates));
 }
 
+/** How long the confirmation waits for cancelled work to actually stop. */
+const UPDATE_SETTLE_TIMEOUT_MS = 10_000;
+
+function describeSettleFailure(failure: UpdateSettleFailure): string {
+  if (failure.reason === "rejected") return t("updates.settleItemFailed", { target: failure.label, error: failure.error ?? "" });
+  if (failure.reason === "unconfirmed") return t("updates.settleItemUnconfirmed", { target: failure.label });
+  return t("updates.settleItemRunning", { target: failure.label });
+}
+
+async function settleUpdateBlockers() {
+  // Reaching here means the user confirmed the preparation block, which states
+  // that running queries are cancelled and open transactions are rolled back.
+  // The host waits for each cancellation to take effect and rolls back only the
+  // transactions still open afterwards; anything it cannot stop is reported, so
+  // the install stays blocked instead of killing work nobody agreed to lose.
+  const failures = await settleUpdateWork(
+    {
+      // Read live state on every step: work started after the prompt appeared
+      // must be settled too.
+      snapshot: () => ({
+        tasks: backgroundTasks.value
+          .filter((task) => task.status === "Queued" || task.status === "Unknown" || task.status === "PreparingSnapshot" || task.status === "Running" || task.status === "Writing" || task.status === "Cancelling")
+          .map((task) => ({ id: task.exportId, label: task.tableName || task.dataTransferLabel || task.currentObject || t("updates.backgroundTaskLabel") })),
+        // `stopInFlight` keeps the store from being asked for a stop it would
+        // refuse without a backend call (already cancelling, no execution
+        // dispatched yet); settling still waits for those tabs.
+        executions: queryStore.tabs.filter((tab) => tab.isExecuting || tab.isCancelling).map((tab) => ({ id: tab.id, label: tab.title, stopInFlight: tab.isCancelling || !tab.executionId })),
+        explains: queryStore.tabs.filter((tab) => tab.isExplaining || Boolean(tab.explainExecutionId)).map((tab) => ({ id: tab.id, label: tab.title, stopInFlight: !tab.isExplaining || !tab.explainExecutionId })),
+        transactions: queryStore.tabs.filter((tab) => Boolean(tab.txnSessionId)).map((tab) => ({ id: tab.id, label: tab.title })),
+      }),
+      cancelTask: (id) => cancelBackgroundTask(id),
+      cancelExecution: (id) => queryStore.cancelTabExecution(id),
+      cancelExplain: (id) => queryStore.cancelTabExplain(id),
+      rollbackTransaction: (id) => queryStore.rollbackTransaction(id),
+    },
+    { timeoutMs: UPDATE_SETTLE_TIMEOUT_MS },
+  );
+  if (failures.length) throw new UpdatePreparationError(failures.map(describeSettleFailure).join("; "), "settle_failed");
+}
+
 async function installDownloadedUpdateWithComponentUpdates() {
   await rememberComponentUpdatesForRestartedApp();
   await installDownloadedUpdate();
@@ -1787,6 +1847,11 @@ async function installDownloadedUpdateWithComponentUpdates() {
 async function restartAppWithComponentUpdates() {
   await rememberComponentUpdatesForRestartedApp();
   await restartApp();
+}
+
+async function confirmBlockedInstallWithComponentUpdates() {
+  await rememberComponentUpdatesForRestartedApp();
+  await confirmBlockedInstall();
 }
 
 function installComponentUpdates(category: ComponentUpdateCategory) {
@@ -6342,6 +6407,10 @@ onUnmounted(() => {
           @cancel-download="cancelDownload"
           @install-downloaded="installDownloadedUpdateWithComponentUpdates"
           @restart="restartAppWithComponentUpdates"
+          :blocked-update-message="blockedPreparation?.message ?? ''"
+          :is-settling-work="isSettlingWork"
+          @confirm-blocked-install="confirmBlockedInstallWithComponentUpdates"
+          @dismiss-blocked-install="dismissBlockedInstall"
           :ignored-release-version="ignoredReleaseVersion"
           @ignore-version="ignoreCurrentVersion"
           @restore-ignored-version="restoreIgnoredVersion"

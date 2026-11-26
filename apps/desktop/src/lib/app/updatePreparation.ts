@@ -7,7 +7,7 @@ let barrierDepth = 0;
 export const UPDATE_RESTORE_KEY = "dbx-update-restore-tabs";
 
 /** Why the installer was held back — a block never installs anything. */
-export type UpdatePreparationBlockCode = "not_ready" | "tasks" | "drafts" | "config" | "config_busy" | "window_operation" | "busy" | "cancelled" | "timeout" | "windows_changed";
+export type UpdatePreparationBlockCode = "not_ready" | "tasks" | "ai_runs" | "settle_failed" | "drafts" | "config" | "config_busy" | "window_operation" | "busy" | "cancelled" | "timeout" | "windows_changed";
 
 /**
  * Safety refusals are not installation failures: the caller must present them as

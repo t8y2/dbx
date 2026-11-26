@@ -555,9 +555,10 @@ function scheduleDdlEditorInit() {
  * quoted names are uppercased before their quotes are removed.
  */
 function applyDdlGenerationPreferences(sql: string, dialect: SqlFormatDialect): string {
-  const unqualified = applyDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
-  if (settingsStore.editorSettings.generateSqlQuoteIdentifiers) return unqualified;
-  return formatGeneratedDdlIdentifierQuotes(unqualified, dialect, false, { preserveCaseSensitiveIdentifiers: tableStoresCaseSensitiveIdentifiers.value });
+  // Kingbase can resolve an unqualified DDL target to a system table with the same name.
+  const targetSql = databaseType.value === "kingbase" ? sql : applyDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
+  if (settingsStore.editorSettings.generateSqlQuoteIdentifiers) return targetSql;
+  return formatGeneratedDdlIdentifierQuotes(targetSql, dialect, false, { preserveCaseSensitiveIdentifiers: tableStoresCaseSensitiveIdentifiers.value });
 }
 
 type StructureDdlRequest = {

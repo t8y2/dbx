@@ -8814,6 +8814,8 @@ pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionCo
     // A default browser filter does not change the established Redis session.
     a.redis_key_filter = None;
     b.redis_key_filter = None;
+    a.watermark = None;
+    b.watermark = None;
     if !a.save_password && !b.save_password {
         a.password.clear();
         b.password.clear();
@@ -8844,6 +8846,7 @@ pub fn connection_configs_session_credentials_compatible(a: &ConnectionConfig, b
         config.show_native_jobs = None;
         config.show_user_admin = None;
         config.color = None;
+        config.watermark = None;
         config.docs_notes_path = None;
         config.connect_timeout_secs = 0;
         config.query_timeout_secs = 0;
@@ -9707,6 +9710,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }
@@ -13720,6 +13724,7 @@ sleep 30
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,

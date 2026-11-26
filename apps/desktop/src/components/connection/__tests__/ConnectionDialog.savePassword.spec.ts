@@ -3,6 +3,7 @@
 import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
+import { resolveConnectionWatermark } from "@/lib/connection/connectionWatermark";
 import type { ConnectionConfig } from "@/types/database";
 
 const { store, settings, backend } = vi.hoisted(() => ({
@@ -108,23 +109,6 @@ vi.mock("@/components/ui/PasswordInput.vue", async () => {
     }),
   };
 });
-vi.mock("@/components/ui/tabs", async () => {
-  const { defineComponent, h } = await import("vue");
-  const pass = defineComponent({
-    setup:
-      (_props, { slots }) =>
-      () =>
-        h("div", slots.default?.()),
-  });
-  const TabsContent = defineComponent({
-    props: ["value"],
-    setup:
-      (props, { slots }) =>
-      () =>
-        props.value === "connection" ? h("div", slots.default?.()) : null,
-  });
-  return { Tabs: pass, TabsContent, TabsList: pass, TabsTrigger: pass };
-});
 vi.mock("@/components/ui/tooltip", async () => {
   const { defineComponent, h } = await import("vue");
   const pass = defineComponent({
@@ -160,7 +144,7 @@ async function settle() {
   for (let i = 0; i < 8; i++) await nextTick();
 }
 
-async function mountDialog(config: ConnectionConfig) {
+async function mountDialog(config: ConnectionConfig, initialTab?: "advanced") {
   const props = reactive({ open: true, editConfig: config });
   store.getConfig.mockReturnValue(config);
   const container = document.createElement("div");
@@ -170,6 +154,7 @@ async function mountDialog(config: ConnectionConfig) {
       setup: () => () =>
         h(ConnectionDialog, {
           ...props,
+          initialTab,
           "onUpdate:open": (value: boolean) => {
             props.open = value;
           },
@@ -287,6 +272,28 @@ function buttonNamed(name: string): HTMLButtonElement {
   expect(button, `Expected button ${name}`).toBeTruthy();
   return button!;
 }
+
+it("saves watermark edits from the advanced tab independently from production protection", async () => {
+  await mountDialog(redisConnection({ is_production: true, watermark: { mode: "custom" } }), "advanced");
+  const input = document.querySelector<HTMLInputElement>('input[maxlength="48"]')!;
+  input.value = "SIT";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle();
+  expect(document.querySelector("figure .connection-watermark__label")?.textContent?.trim()).toBe("SIT");
+  buttonNamed("Save").click();
+  await settle();
+  expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ is_production: true, watermark: { mode: "custom", text: "SIT" } }));
+});
+
+it("uses the saved connection name when custom watermark text is blank", async () => {
+  await mountDialog({ id: "mysql-1", name: "", db_type: "mysql", driver_profile: "mysql", host: "localhost", port: 3306, username: "root", password: "", watermark: { mode: "custom" } }, "advanced");
+  expect(document.querySelector("figure .connection-watermark__label")).toBeNull();
+  buttonNamed("Save").click();
+  await settle();
+  const saved = store.updateConnection.mock.calls[0]?.[0];
+  expect(saved).toMatchObject({ name: expect.stringMatching(/^MySQL_/), watermark: { mode: "custom" } });
+  expect(resolveConnectionWatermark(saved, false)?.text).toBe(saved.name);
+});
 
 describe("Elasticsearch API key authentication", () => {
   it("clears the previous credential on switch, hides username and submits the key in the secret slot", async () => {

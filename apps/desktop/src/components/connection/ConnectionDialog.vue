@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ConnectionWatermarkSettings from "./ConnectionWatermarkSettings.vue";
 import type { ObjectDirective } from "vue";
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
@@ -3407,6 +3408,7 @@ watch(
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
         production_badge_scope: sidebarProductionBadgeScope(config),
+        watermark: config.watermark,
         visible_databases: config.visible_databases,
         // 通配符筛选由侧栏弹窗维护；编辑连接时也要带上，否则保存会把它清掉，
         // “显示全部（含系统库）”的 `%` 也会在下次打开编辑器时丢失。
@@ -5131,6 +5133,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.name = form.value.name.trim() || config.name;
     config.note = form.value.note;
     config.color = form.value.color;
+    config.watermark = form.value.watermark;
     config.transport_layers = form.value.transport_layers || [];
     config.connect_timeout_secs = form.value.connect_timeout_secs;
     // buildPluginConnectionConfig rebuilds the config from scratch and drops
@@ -11046,6 +11049,7 @@ function openExternalUrl(url: string) {
                     <p class="col-span-3 col-start-2 text-xs leading-5 text-muted-foreground">{{ t("connection.etcdGrpcMaxInboundHint") }}</p>
                   </div>
                 </section>
+                <ConnectionWatermarkSettings v-model="form.watermark" :connection-name="form.name" />
                 <section class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4">
                   <h3 class="text-base font-bold">{{ t("connection.advancedOperationProtection") }}</h3>
                   <div class="grid grid-cols-4 items-center gap-4">

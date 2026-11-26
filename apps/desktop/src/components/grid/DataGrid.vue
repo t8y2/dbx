@@ -73,7 +73,8 @@ import { Input } from "@/components/ui/input";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import DataGridBusyOverlay from "@/components/grid/DataGridBusyOverlay.vue";
 import { DATA_GRID_CLIPBOARD_BATCH_CHARS, DataGridClipboardCapacityError, dataGridPendingRowLimit, dataGridPreparationBatchSize, type DataGridRowPreparationOptions, type DataGridRowPreparationProgress } from "@/lib/dataGrid/dataGridRowPreparation";
-import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
+import ConnectionWatermark from "@/components/common/ConnectionWatermark.vue";
+import { resolveConnectionWatermark } from "@/lib/connection/connectionWatermark";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdownMenu from "@/components/ui/LightDropdownMenu.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -961,7 +962,10 @@ const tableDependencyTarget = computed(() => {
 function viewRelationSql(context: ObjectDependencyTarget, sql: string) {
   queryStore.createTab(context.connectionId, context.database, t("objectDependencies.viewSql"), "query", context.schema, sql, context.catalog, { forceNew: true });
 }
-const productionContext = computed(() => productionContextForDatabase(resolvedConnectionConfig.value, props.database));
+const watermark = computed(() => {
+  const connection = resolvedConnectionConfig.value;
+  return resolveConnectionWatermark(connection, productionContextForDatabase(connection, props.database).active);
+});
 // The collection grid and Mongo query-result grids share the document-grid value
 // encoding (BSON null sentinel + JSON-prefixed containers), so every display,
 // editor and clipboard path must decode it whenever MongoDB values are on screen.
@@ -16536,7 +16540,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 </Button>
               </div>
               <div class="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-                <ProductionWatermark v-if="productionContext.active" />
+                <ConnectionWatermark v-if="watermark" v-bind="watermark" />
                 <div data-grid-transpose-header class="data-grid-transpose-header data-grid-header-shell relative z-20 h-7 w-full shrink-0 overflow-hidden border-b border-border font-semibold text-muted-foreground">
                   <div class="absolute left-0 top-0 z-30 h-full" :style="{ width: `${transposePinnedWidth}px` }">
                     <div class="data-grid-header-cell relative flex h-full w-full shrink-0 items-center border-r border-border px-3 py-1.5 truncate">
@@ -17376,7 +17380,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                    `top`/`inset` offsets are measured from the body instead of from the
                    grid's outer relative container (which starts at the header row). -->
               <div class="data-grid-scroll-body relative min-h-0 flex-1 flex flex-col overflow-hidden" :class="{ 'has-vertical-scrollbar': hasGridVerticalOverflow }">
-                <ProductionWatermark v-if="productionContext.active" />
+                <ConnectionWatermark v-if="watermark" v-bind="watermark" />
                 <div v-if="!hasVisibleRows" class="relative min-h-0 flex-1">
                   <div class="data-grid-scroller h-full overflow-x-auto overflow-y-hidden overscroll-none" :class="{ 'is-scrolling': isScrolling }" @scroll="onScrollerScroll" @wheel="onDomGridWheel">
                     <div class="h-full min-h-[220px]" :style="{ width: 'max(100%, var(--total-w))' }" />

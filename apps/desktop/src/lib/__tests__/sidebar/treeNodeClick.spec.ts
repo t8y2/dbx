@@ -8,6 +8,7 @@ import {
   objectSourceTargetForTreeNode,
   shouldActivateTreeNodeOnSingleClick,
   shouldBrowseObjectsOnDatabaseActivation,
+  shouldShowDatabaseServiceInfoOnActivation,
   shouldOpenQueryOnTreeNodeActivation,
   shouldRunTreeNodeRowAction,
   treeNodeRowAction,
@@ -183,6 +184,13 @@ describe("treeNodeClick", () => {
     expect(shouldBrowseObjectsOnDatabaseActivation("database", false)).toBe(false);
     expect(shouldBrowseObjectsOnDatabaseActivation("mongo-db", true)).toBe(true);
     expect(shouldBrowseObjectsOnDatabaseActivation("object-browser", true)).toBe(false);
+    expect(shouldShowDatabaseServiceInfoOnActivation({ type: "connection", connectionId: "c1" }, true)).toBe(true);
+    expect(shouldShowDatabaseServiceInfoOnActivation({ type: "connection", connectionId: "c1" }, false)).toBe(false);
+    expect(shouldShowDatabaseServiceInfoOnActivation({ type: "connection" }, true)).toBe(false);
+    expect(shouldShowDatabaseServiceInfoOnActivation({ type: "database", connectionId: "c1" }, true)).toBe(false);
+    expect(shouldShowDatabaseServiceInfoOnActivation({ type: "schema", connectionId: "c1" }, true)).toBe(false);
+    expect(shouldShowDatabaseServiceInfoOnActivation({ type: "mongo-db", connectionId: "c1" }, true)).toBe(false);
+    expect(shouldShowDatabaseServiceInfoOnActivation({ type: "connection", connectionId: "c1" }, true, false)).toBe(false);
     expect(treeNodeRowDoubleClickAction("object-browser", true, "double", false, "postgres", false, false)).toBe("open-object-browser");
   });
 

@@ -11093,6 +11093,8 @@ export default withEnglishFallback({
     tabWrapMaxRows: "탭 최대 타일 행 수",
     shortcutGoToLastEditLocation: "마지막 편집 위치로 이동",
     shortcutToggleLineCommentAndAdvance: "줄 주석 전환 및 다음 줄로 이동",
+    sidebarShowDatabaseServiceInfoOnActivation: "열 때 서버 대시보드로 이동",
+    sidebarShowDatabaseServiceInfoOnActivationDescription: "활성화하면 연결이 활성화되고 펼쳐질 때 오른쪽에 서버 대시보드가 열립니다. 해당 연결을 접으면 대시보드가 닫히고 기본 홈으로 돌아갑니다.",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

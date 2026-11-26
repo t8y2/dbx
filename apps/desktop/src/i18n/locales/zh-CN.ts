@@ -11009,6 +11009,8 @@ export default withEnglishFallback({
     sidebarCopyTableNameIncludeSchemaDescription: "开启后复制或拖拽表名时使用 schema.table 限定名，并按当前连接方言自动加引号。",
     sidebarTablePageSize: "侧边栏分页大小",
     sidebarTablePageSizeDescription: "侧边栏树每页最多加载的表/对象数量。表多时可以调大减少翻页次数。",
+    sidebarShowDatabaseServiceInfoOnActivation: "打开时进入服务器仪表盘",
+    sidebarShowDatabaseServiceInfoOnActivationDescription: "启用后，连接激活并展开时在右侧打开服务器仪表盘；折叠该连接时关闭仪表盘并回到默认首页。",
     sidebarTableSearchEnabled: "启用库下表搜索框",
     sidebarTableSearchEnabledDescription: "在已展开的数据库、schema 或表分组下显示局部表搜索框，用于为不同库分别过滤表。",
     sidebarSearchOpenedDatabasesOnly: "仅搜索已打开的数据库",

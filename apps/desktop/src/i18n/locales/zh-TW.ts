@@ -8700,6 +8700,8 @@ export default withEnglishFallback({
     sidebarCopyTableNameIncludeSchemaDescription: "開啟後複製或拖曳表名時使用 schema.table 限定名，並依目前連線方言自動加引號。",
     sidebarTablePageSize: "側邊欄分頁大小",
     sidebarTablePageSizeDescription: "側邊欄樹每頁最多載入的資料表/物件數量。資料表多時可調大減少翻頁次數。",
+    sidebarShowDatabaseServiceInfoOnActivation: "開啟時進入伺服器儀表板",
+    sidebarShowDatabaseServiceInfoOnActivationDescription: "啟用後，連線啟用並展開時在右側開啟伺服器儀表板；摺疊該連線時關閉儀表板並回到預設首頁。",
     sidebarTableSearchEnabled: "啟用庫下資料表搜尋框",
     sidebarTableSearchEnabledDescription: "在已展開的資料庫、schema 或資料表分組下顯示局部資料表搜尋框，用於為不同庫分別篩選資料表。",
     sidebarObjectInfoMode: "側邊欄附加資訊",

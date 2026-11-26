@@ -1038,6 +1038,7 @@ const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const dataTabReuseModeHelp = ref<DataTabReuseMode | null>(null);
 const editRoutineSourceOpenMode = ref(settingsStore.editorSettings.routineSourceOpenMode);
 const editSidebarTableSearchEnabled = ref(settingsStore.editorSettings.sidebarTableSearchEnabled);
+const editSidebarShowDatabaseServiceInfoOnActivation = ref(settingsStore.editorSettings.sidebarShowDatabaseServiceInfoOnActivation);
 const editSidebarSearchOpenedDatabasesOnly = ref(settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
 const editSidebarPinDefaultDatabase = ref(settingsStore.editorSettings.sidebarPinDefaultDatabase);
@@ -1063,6 +1064,23 @@ const editOpenDataTabsNextToActive = ref(settingsStore.editorSettings.openDataTa
 const editOpenTablesInDetachedWindow = ref(settingsStore.editorSettings.openTablesInDetachedWindow);
 const editPrefillNewQueryWithSelect = ref(settingsStore.editorSettings.prefillNewQueryWithSelect);
 const editOpenQueryOnConnectionOpen = ref(settingsStore.editorSettings.openQueryOnConnectionOpen);
+
+function onOpenQueryOnConnectionOpenChange(enabled: boolean) {
+  editOpenQueryOnConnectionOpen.value = enabled;
+  if (enabled) editSidebarShowDatabaseServiceInfoOnActivation.value = false;
+}
+
+function onDatabaseServiceInfoOnActivationChange(enabled: boolean) {
+  editSidebarShowDatabaseServiceInfoOnActivation.value = enabled;
+  if (enabled) editOpenQueryOnConnectionOpen.value = false;
+}
+
+function preferDatabaseServiceInfoOverQueryPage() {
+  if (editSidebarShowDatabaseServiceInfoOnActivation.value && editOpenQueryOnConnectionOpen.value) {
+    editOpenQueryOnConnectionOpen.value = false;
+  }
+}
+preferDatabaseServiceInfoOverQueryPage();
 const editGenerateSqlIncludeDatabaseName = ref(settingsStore.editorSettings.generateSqlIncludeDatabaseName);
 const editGenerateSqlQuoteIdentifiers = ref(settingsStore.editorSettings.generateSqlQuoteIdentifiers);
 const editFormatSqlOnSqlFileSave = ref(settingsStore.editorSettings.formatSqlOnSqlFileSave);
@@ -1468,6 +1486,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
     sidebarSimpleHideIndexes: editSidebarSimpleHideIndexes.value,
     routineSourceOpenMode: editRoutineSourceOpenMode.value,
+    sidebarShowDatabaseServiceInfoOnActivation: editSidebarShowDatabaseServiceInfoOnActivation.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
     sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
@@ -2326,6 +2345,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
   editSidebarSimpleHideIndexes.value = settingsStore.editorSettings.sidebarSimpleHideIndexes;
   editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
+  editSidebarShowDatabaseServiceInfoOnActivation.value = settingsStore.editorSettings.sidebarShowDatabaseServiceInfoOnActivation;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
   editSidebarSearchOpenedDatabasesOnly.value = settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly;
   editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
@@ -2345,6 +2365,7 @@ function syncEditorSettingsDraftFromStore() {
   editOpenTablesInDetachedWindow.value = settingsStore.editorSettings.openTablesInDetachedWindow;
   editPrefillNewQueryWithSelect.value = settingsStore.editorSettings.prefillNewQueryWithSelect;
   editOpenQueryOnConnectionOpen.value = settingsStore.editorSettings.openQueryOnConnectionOpen;
+  preferDatabaseServiceInfoOverQueryPage();
   editGenerateSqlIncludeDatabaseName.value = settingsStore.editorSettings.generateSqlIncludeDatabaseName;
   editGenerateSqlQuoteIdentifiers.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers;
   editFormatSqlOnSqlFileSave.value = settingsStore.editorSettings.formatSqlOnSqlFileSave;
@@ -2522,6 +2543,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarObjectDisplay: editSidebarObjectDisplay,
   sidebarSimpleHideIndexes: editSidebarSimpleHideIndexes,
   routineSourceOpenMode: editRoutineSourceOpenMode,
+  sidebarShowDatabaseServiceInfoOnActivation: editSidebarShowDatabaseServiceInfoOnActivation,
   sidebarTableSearchEnabled: editSidebarTableSearchEnabled,
   sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly,
   autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode,
@@ -3154,6 +3176,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
     editSidebarSimpleHideIndexes.value = DEFAULT_EDITOR_SETTINGS.sidebarSimpleHideIndexes;
     editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
+    editSidebarShowDatabaseServiceInfoOnActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarShowDatabaseServiceInfoOnActivation;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
     editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
@@ -3399,6 +3422,7 @@ function resetAllDefaults() {
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
   editSidebarSimpleHideIndexes.value = DEFAULT_EDITOR_SETTINGS.sidebarSimpleHideIndexes;
   editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
+  editSidebarShowDatabaseServiceInfoOnActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarShowDatabaseServiceInfoOnActivation;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
@@ -10270,8 +10294,17 @@ onUnmounted(() => {
                     <Label for="editor-open-query-on-connection">{{ t("settings.openQueryOnConnectionOpen") }}</Label>
                     <p class="text-xs text-muted-foreground">{{ t("settings.openQueryOnConnectionOpenDescription") }}</p>
                   </div>
-                  <Switch id="editor-open-query-on-connection" v-model="editOpenQueryOnConnectionOpen" class="mt-0.5" />
+                  <Switch id="editor-open-query-on-connection" :model-value="editOpenQueryOnConnectionOpen" class="mt-0.5" @update:model-value="onOpenQueryOnConnectionOpenChange($event === true)" />
                 </div>
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-show-database-service-info">{{ t("settings.sidebarShowDatabaseServiceInfoOnActivation") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarShowDatabaseServiceInfoOnActivation')">
+                    {{ t("settings.sidebarShowDatabaseServiceInfoOnActivationDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-show-database-service-info" :model-value="editSidebarShowDatabaseServiceInfoOnActivation" @update:model-value="onDatabaseServiceInfoOnActivationChange($event === true)" />
               </div>
               <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">

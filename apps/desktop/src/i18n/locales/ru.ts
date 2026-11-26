@@ -12586,6 +12586,8 @@ export default withEnglishFallback({
     tabWrapMaxRows: "Максимальное количество строк для вкладок",
     shortcutGoToLastEditLocation: "Перейти к последнему месту редактирования",
     shortcutToggleLineCommentAndAdvance: "Переключить комментарий строки и перейти к следующей строке",
+    sidebarShowDatabaseServiceInfoOnActivation: "При открытии переходить на панель управления сервером",
+    sidebarShowDatabaseServiceInfoOnActivationDescription: "Если включено, при активации и развёртывании подключения справа открывается панель управления сервером; при сворачивании этого подключения панель закрывается и происходит возврат на главную страницу по умолчанию.",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

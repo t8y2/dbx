@@ -12949,6 +12949,8 @@ export default withEnglishFallback({
     tabWrapMaxRows: "จำนวนแถวสูงสุดสำหรับการเรียงแท็บ",
     shortcutGoToLastEditLocation: "ไปยังตำแหน่งที่แก้ไขล่าสุด",
     shortcutToggleLineCommentAndAdvance: "สลับคอมเมนต์บรรทัดและย้ายไปยังบรรทัดถัดไป",
+    sidebarShowDatabaseServiceInfoOnActivation: "เมื่อเปิด ให้เข้าสู่แดชบอร์ดเซิร์ฟเวอร์",
+    sidebarShowDatabaseServiceInfoOnActivationDescription: "เมื่อเปิดใช้งานแล้ว เมื่อการเชื่อมต่อถูกเปิดใช้งานและขยาย จะเปิดแดชบอร์ดเซิร์ฟเวอร์ทางด้านขวา; เมื่อยุบการเชื่อมต่อนั้น จะปิดแดชบอร์ดและกลับไปยังหน้าหลักเริ่มต้น",
   },
   driverStore: {
     jreDirRemoveFailed: "ลบไดเรกทอรี JRE เก่าไม่สำเร็จ: {path} (ข้อผิดพลาดเดิม: {error})",

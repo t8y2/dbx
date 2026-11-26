@@ -10980,6 +10980,8 @@ export default withEnglishFallback({
     tabWrapMaxRows: "Número máximo de linhas lado a lado das abas",
     shortcutGoToLastEditLocation: "Ir para o último local de edição",
     shortcutToggleLineCommentAndAdvance: "Alternar comentário de linha e avançar para a próxima linha",
+    sidebarShowDatabaseServiceInfoOnActivation: "Ao abrir, acessar o painel do servidor",
+    sidebarShowDatabaseServiceInfoOnActivationDescription: "Depois de ativado, quando a conexão é ativada e expandida, abre o painel do servidor à direita; ao recolher essa conexão, fecha o painel e volta à página inicial padrão.",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

@@ -5312,33 +5312,106 @@ mod tests {
             rowids
         }
 
+        /// 一条导入规则：形态即前端解析器的导入产物（TEXT 列 unquoted 字符串、
+        /// 数字列保留原始拼写）。
+        struct ImportedRule {
+            mode: DataGridContextFilterMode,
+            column: &'static str,
+            value: Value,
+            values: Vec<Value>,
+        }
+
         #[test]
         fn imported_where_rules_reproduce_the_original_result_set() {
             let connection = seed_grid();
-            // (手输原句, 逐条规则 (mode, 列, value, values))——形态即前端解析器
-            // 的导入产物，AND 链与网格应用多规则时一致。
-            let cases: Vec<(&str, Vec<(DataGridContextFilterMode, &str, Value, Vec<Value>)>)> = vec![
-                ("task_id = 100234", vec![(DataGridContextFilterMode::Equals, "task_id", json!("100234"), vec![])]),
+            // (手输原句, 逐条规则)——AND 链与网格应用多规则时一致。
+            let cases: Vec<(&str, Vec<ImportedRule>)> = vec![
+                (
+                    "task_id = 100234",
+                    vec![ImportedRule {
+                        mode: DataGridContextFilterMode::Equals,
+                        column: "task_id",
+                        value: json!("100234"),
+                        values: vec![],
+                    }],
+                ),
                 (
                     "task_id = 1 AND name NOT LIKE 'abc%'",
                     vec![
-                        (DataGridContextFilterMode::Equals, "task_id", json!("1"), vec![]),
-                        (DataGridContextFilterMode::NotBeginsWith, "name", json!("abc"), vec![]),
+                        ImportedRule {
+                            mode: DataGridContextFilterMode::Equals,
+                            column: "task_id",
+                            value: json!("1"),
+                            values: vec![],
+                        },
+                        ImportedRule {
+                            mode: DataGridContextFilterMode::NotBeginsWith,
+                            column: "name",
+                            value: json!("abc"),
+                            values: vec![],
+                        },
                     ],
                 ),
-                ("name LIKE '%9'", vec![(DataGridContextFilterMode::EndsWith, "name", json!("9"), vec![])]),
-                ("name = 'xabcx'", vec![(DataGridContextFilterMode::Equals, "name", json!("xabcx"), vec![])]),
+                (
+                    "name LIKE '%9'",
+                    vec![ImportedRule {
+                        mode: DataGridContextFilterMode::EndsWith,
+                        column: "name",
+                        value: json!("9"),
+                        values: vec![],
+                    }],
+                ),
+                (
+                    "name = 'xabcx'",
+                    vec![ImportedRule {
+                        mode: DataGridContextFilterMode::Equals,
+                        column: "name",
+                        value: json!("xabcx"),
+                        values: vec![],
+                    }],
+                ),
                 (
                     "status IN ('done', 'open')",
-                    vec![(DataGridContextFilterMode::In, "status", Value::Null, vec![json!("done"), json!("open")])],
+                    vec![ImportedRule {
+                        mode: DataGridContextFilterMode::In,
+                        column: "status",
+                        value: Value::Null,
+                        values: vec![json!("done"), json!("open")],
+                    }],
                 ),
-                ("order_no IS NULL", vec![(DataGridContextFilterMode::IsNull, "order_no", Value::Null, vec![])]),
-                ("task_id >= 2", vec![(DataGridContextFilterMode::GreaterThanOrEqual, "task_id", json!("2"), vec![])]),
+                (
+                    "order_no IS NULL",
+                    vec![ImportedRule {
+                        mode: DataGridContextFilterMode::IsNull,
+                        column: "order_no",
+                        value: Value::Null,
+                        values: vec![],
+                    }],
+                ),
+                (
+                    "task_id >= 2",
+                    vec![ImportedRule {
+                        mode: DataGridContextFilterMode::GreaterThanOrEqual,
+                        column: "task_id",
+                        value: json!("2"),
+                        values: vec![],
+                    }],
+                ),
                 (
                     "name NOT LIKE 'abc%' AND status = 'open'",
                     vec![
-                        (DataGridContextFilterMode::NotBeginsWith, "name", json!("abc"), vec![]),
-                        (DataGridContextFilterMode::Equals, "status", json!("open"), vec![]),
+                        ImportedRule {
+                            mode: DataGridContextFilterMode::NotBeginsWith,
+                            column: "name",
+                            value: json!("abc"),
+                            values: vec![],
+                        },
+                        ImportedRule {
+                            mode: DataGridContextFilterMode::Equals,
+                            column: "status",
+                            value: json!("open"),
+                            values: vec![],
+                        },
                     ],
                 ),
             ];
@@ -5346,9 +5419,7 @@ mod tests {
             for (hand_written, rules) in &cases {
                 let rebuilt = rules
                     .iter()
-                    .map(|(mode, rule_column, value, values)| {
-                        rebuilt_condition(*mode, rule_column, value.clone(), values.clone())
-                    })
+                    .map(|rule| rebuilt_condition(rule.mode, rule.column, rule.value.clone(), rule.values.clone()))
                     .collect::<Vec<_>>()
                     .join(" AND ");
                 assert_eq!(

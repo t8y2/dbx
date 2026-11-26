@@ -26,6 +26,7 @@ pub(super) fn request(extractor: DataGridExtractorId) -> DataGridExtractRequest 
         rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Grace, Hopper")]],
         selection_kind: DataGridSelectionKind::Cells,
         options: DataGridExtractorOptions::default(),
+        transposed_markdown: None,
         spatial_columns: None,
         spatial_values: None,
     }
@@ -1697,6 +1698,7 @@ fn sqlserver_spatial_extract_selection_replays_cell_srid() {
         ],
         selection_kind: DataGridSelectionKind::Cells,
         options: DataGridExtractorOptions::default(),
+        transposed_markdown: None,
         spatial_columns: Some(vec![
             SpatialColumn { column_index: 0, srid: Some(0) },
             SpatialColumn { column_index: 1, srid: Some(4326) },
@@ -1765,6 +1767,7 @@ fn sqlserver_spatial_extract_updates_replay_cell_srid() {
         rows: vec![vec![json!(1), json!("POINT (1 2)")], vec![json!(2), json!("POINT (3 4)")]],
         selection_kind: DataGridSelectionKind::Cells,
         options: DataGridExtractorOptions::default(),
+        transposed_markdown: None,
         spatial_columns: Some(vec![SpatialColumn { column_index: 1, srid: Some(0) }]),
         spatial_values: Some(vec![vec![None, Some(3857)], vec![None, Some(2154)]]),
     };
@@ -2425,6 +2428,116 @@ fn rejects_requests_that_exceed_the_column_budget() {
     let error = extract_data_grid_selection(request).expect_err("oversized column list must fail");
 
     assert_eq!(error.code, DataGridExtractErrorCode::InputTooLarge);
+}
+
+fn transposed_markdown_request() -> DataGridExtractRequest {
+    let mut request = request(DataGridExtractorId::Markdown);
+    request.selection_kind = DataGridSelectionKind::Rows;
+    request.transposed_markdown = Some(DataGridTransposedMarkdownLabels { field: "Field".into(), data: "Data".into() });
+    request
+}
+
+#[test]
+fn transposed_markdown_preserves_selected_order_values_and_escaping() {
+    let mut request = transposed_markdown_request();
+    request.columns = vec![column("hidden", 0), column("a|\\\n", 2), column("编号", 1)];
+    request.selected_column_indexes = vec![2, 1];
+    request.rows = vec![vec![json!("excluded"), json!("9007199254740993"), json!("x|\\\ny")]];
+    let result = extract_data_grid_selection(request).unwrap();
+    assert_eq!(
+        result.text,
+        "| Field | Data |\n| --- | --- |\n| 编号 | 9007199254740993 |\n| a\\|\\\\<br> | x\\|\\\\<br>y |"
+    );
+    assert_eq!((result.row_count, result.column_count), (2, 2));
+
+    let mut request = transposed_markdown_request();
+    request.rows = vec![vec![Value::Null, json!(false)], vec![json!(0), json!({"key": "a|b"})]];
+    let result = extract_data_grid_selection(request).unwrap();
+    assert_eq!(
+        result.text,
+        "| Field | Data 1 | Data 2 |\n| --- | --- | --- |\n| id | NULL | 0 |\n| name | false | {\"key\":\"a\\|b\"} |"
+    );
+    assert_eq!((result.row_count, result.column_count), (2, 3));
+}
+
+#[test]
+fn transposed_markdown_normalizes_line_endings_and_escapes_backslashes_before_pipes() {
+    for (text, escaped) in [
+        ("a\rb", "a<br>b"),
+        ("a\nb", "a<br>b"),
+        ("a\r\nb", "a<br>b"),
+        ("a\\|b", r"a\\\|b"),
+        ("a\r\nb\rc\nd", "a<br>b<br>c<br>d"),
+    ] {
+        let mut request = transposed_markdown_request();
+        request.columns = vec![column(text, 0)];
+        request.selected_column_indexes = vec![0];
+        request.rows = vec![vec![json!(text)]];
+        request.transposed_markdown = Some(DataGridTransposedMarkdownLabels { field: text.into(), data: text.into() });
+        let result = extract_data_grid_selection(request).unwrap();
+        assert_eq!(result.text, format!("| {escaped} | {escaped} |\n| --- | --- |\n| {escaped} | {escaped} |"));
+    }
+}
+
+#[test]
+fn transposed_markdown_exports_ten_thousand_records_without_rotating_source_limits() {
+    let mut request = transposed_markdown_request();
+    request.rows = (0..10_000).map(|index| vec![json!(index), Value::Null]).collect();
+    let result = extract_data_grid_selection(request).unwrap();
+    assert_eq!((result.row_count, result.column_count), (2, 10_001));
+    assert_eq!(result.text.lines().count(), 4);
+    assert!(result.text.lines().next().unwrap().ends_with(" | Data 10000 |"));
+    assert!(result.text.lines().nth(2).unwrap().ends_with(" | 9999 |"));
+}
+
+#[test]
+fn transposed_markdown_flag_is_optional_and_does_not_change_other_extractions() {
+    let original = request(DataGridExtractorId::Markdown);
+    let wire = serde_json::to_value(&original).unwrap();
+    assert!(wire.get("transposedMarkdown").is_none());
+    let restored: DataGridExtractRequest = serde_json::from_value(wire).unwrap();
+    assert!(restored.transposed_markdown.is_none());
+    for (extractor, selection) in [
+        (DataGridExtractorId::Markdown, DataGridSelectionKind::Cells),
+        (DataGridExtractorId::Markdown, DataGridSelectionKind::Columns),
+        (DataGridExtractorId::Csv, DataGridSelectionKind::Rows),
+    ] {
+        let mut flagged = transposed_markdown_request();
+        flagged.extractor = extractor;
+        flagged.selection_kind = selection;
+        let mut plain = flagged.clone();
+        plain.transposed_markdown = None;
+        let result = extract_data_grid_selection(flagged).unwrap();
+        assert_eq!(result.text, extract_data_grid_selection(plain).unwrap().text);
+        assert_eq!((result.row_count, result.column_count), (2, 2));
+    }
+}
+
+#[test]
+fn transposed_markdown_still_checks_source_dimensions_cells_and_input_bytes() {
+    let mut oversized = transposed_markdown_request();
+    oversized.rows = vec![vec![]; DATA_GRID_EXTRACTOR_MAX_ROWS + 1];
+    assert_eq!(extract_data_grid_selection(oversized).unwrap_err().code, DataGridExtractErrorCode::InputTooLarge);
+    let mut oversized = transposed_markdown_request();
+    oversized.columns = vec![column("column", 0); DATA_GRID_EXTRACTOR_MAX_COLUMNS + 1];
+    assert_eq!(extract_data_grid_selection(oversized).unwrap_err().code, DataGridExtractErrorCode::InputTooLarge);
+    let mut oversized = transposed_markdown_request();
+    oversized.selected_column_indexes = vec![0; DATA_GRID_EXTRACTOR_MAX_COLUMNS + 1];
+    assert_eq!(extract_data_grid_selection(oversized).unwrap_err().code, DataGridExtractErrorCode::InputTooLarge);
+    let mut oversized = transposed_markdown_request();
+    oversized.rows = vec![vec![Value::Null; 2001]; 1000];
+    assert_eq!(extract_data_grid_selection(oversized).unwrap_err().code, DataGridExtractErrorCode::InputTooLarge);
+    let mut oversized = transposed_markdown_request();
+    oversized.transposed_markdown.as_mut().unwrap().data = "x".repeat(DATA_GRID_EXTRACTOR_MAX_INPUT_BYTES + 1);
+    assert_eq!(extract_data_grid_selection(oversized).unwrap_err().code, DataGridExtractErrorCode::InputTooLarge);
+}
+
+#[test]
+fn transposed_markdown_repeated_headers_obey_the_output_limit() {
+    let mut request = transposed_markdown_request();
+    request.rows = vec![vec![Value::Null, Value::Null]; 10_000];
+    request.transposed_markdown.as_mut().unwrap().data = "|".repeat(2048);
+    assert_eq!(extract_data_grid_selection(request).unwrap_err().code, DataGridExtractErrorCode::OutputTooLarge);
 }
 
 #[test]

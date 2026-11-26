@@ -14,6 +14,7 @@ import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridCopyExtractorId, type
 import { useToast } from "@/composables/useToast";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { clipboardCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
 import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
 import { materializeSnapshotResultRows, waitForLargeValueSnapshot } from "@/lib/dataGrid/largeValueSnapshot";
 import { snapshotExportSelection, assertSnapshotXlsxCellLengths } from "@/lib/dataGrid/snapshotExport";
@@ -86,6 +87,21 @@ export function normalizeExportTarget(target?: ExportTargetParam, columnIndexesP
     rowIds: target?.rowIds,
     columnIndexes: columnIndexesParam ?? target?.columnIndexes,
   };
+}
+
+interface DataFileExportOptions {
+  xlsx?: XlsxExportOptions;
+  includeSqlSheet?: boolean;
+  sql?: SqlExportOptions;
+  openAfterExport?: boolean;
+  transposedMarkdownLabels?: TransposedMarkdownLabels;
+}
+
+function writeMarkdown(path: string, columns: string[], rows: CellValue[][], labels?: TransposedMarkdownLabels) {
+  if (labels && rows.length > 0) {
+    return api.exportQueryResultMarkdown(path, columns, rows, labels);
+  }
+  return api.exportQueryResultMarkdown(path, columns, rows);
 }
 
 export interface DataGridExportSheet {
@@ -1205,14 +1221,19 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return { ...result, rows: await materializeExportSnapshot(result, isSourceCurrent) };
   }
 
-  async function exportWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = extractorOptionsOption?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, scope: "selection" | "result" = "selection"): Promise<boolean> {
+  function markdownRecordLabels(): TransposedMarkdownLabels {
+    return { field: t("common.column"), data: t("settings.dataTab") };
+  }
+
+  async function exportWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = extractorOptionsOption?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, scope: "selection" | "result" = "selection", fieldOrder?: readonly number[]): Promise<boolean> {
     if (!allowExport(extractor === "csv-with-headers" ? "csv" : extractor)) return false;
     let exported = false;
     await runExclusiveExport(async () => {
       if (!canCopyWithExtractor(extractor, extractorOptions)) return;
       try {
         const result = scope === "result" ? await readFullExtractorResult() : undefined;
-        const extraction = await extractWithExtractor(extractor, extractorOptions, undefined, result);
+        const transposedMarkdown = fieldOrder && scope === "selection" && extractor === "markdown" ? { labels: markdownRecordLabels(), fieldOrder } : undefined;
+        const extraction = await extractWithExtractor(extractor, extractorOptions, undefined, result, transposedMarkdown);
         if (!extraction) return;
         const extension = extraction.result.fileExtension.replace(/^\.+/, "") || "txt";
         const baseName = exportFileBaseName?.value || tableMeta.value?.tableName || "export";
@@ -1229,13 +1250,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return exported;
   }
 
-  async function exportLocalSnapshot(
-    format: "csv" | "json" | "xlsx" | "markdown" | "html" | "txt" | "sql",
-    rowIds: number[] | undefined,
-    columnIndexes: number[] | undefined,
-    full: boolean,
-    exportOptions: { xlsx?: XlsxExportOptions; includeSqlSheet?: boolean; sql?: SqlExportOptions; openAfterExport?: boolean } = {},
-  ): Promise<boolean> {
+  async function exportLocalSnapshot(format: "csv" | "json" | "xlsx" | "markdown" | "html" | "txt" | "sql", rowIds: number[] | undefined, columnIndexes: number[] | undefined, full: boolean, exportOptions: DataFileExportOptions = {}): Promise<boolean> {
     const original = options.snapshotResult?.value;
     const originalConnectionId = connectionId.value;
     const originalDatabase = database.value;
@@ -1415,7 +1430,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             const request = { ...selected, context: { ...selected.context, executionId }, format, quoteMode: editorSettings.csvQuoteMode, nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode) };
             writing = native ? api.exportSnapshotResult(request, outputPath, undefined, true) : api.exportSnapshotResult(request, outputPath, controller.signal);
           } else if (writeWorkbook) writing = writeWorkbook(outputPath, { columns: names, columnTypes: types, columnComments: xlsxComments, rows: selected.rows as CellValue[][] });
-          else if (format === "markdown") writing = api.exportQueryResultMarkdown(outputPath, names, selected.rows as CellValue[][]);
+          else if (format === "markdown") writing = writeMarkdown(outputPath, names, selected.rows as CellValue[][], exportOptions.transposedMarkdownLabels);
           else if (format === "html") writing = api.exportQueryResultHtml(outputPath, title, names, selected.rows as CellValue[][]);
           else {
             const { writeTextFile } = await import("@tauri-apps/plugin-fs");
@@ -1466,13 +1481,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return true;
   }
 
-  async function exportMemoryDataFile(
-    format: "csv" | "json" | "markdown" | "html" | "txt" | "xlsx" | "sql",
-    rowIds: number[] | undefined,
-    columnIndexes: number[] | undefined,
-    full: boolean,
-    exportOptions: { xlsx?: XlsxExportOptions; includeSqlSheet?: boolean; sql?: SqlExportOptions; openAfterExport?: boolean } = {},
-  ): Promise<boolean> {
+  async function exportMemoryDataFile(format: "csv" | "json" | "markdown" | "html" | "txt" | "xlsx" | "sql", rowIds: number[] | undefined, columnIndexes: number[] | undefined, full: boolean, exportOptions: DataFileExportOptions = {}): Promise<boolean> {
     const original = completeLocalResult?.value ?? options.snapshotResult?.value;
     if (!isTauriRuntime() || !original) return false;
     const needsFullRead = full && rowIds === undefined && !hasCompleteLocalResult?.value;
@@ -1562,7 +1571,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         if (writeWorkbook) await writeWorkbook(outputPath, result);
         else if (format === "csv") await api.exportQueryResultCsv(outputPath, result.columns, result.rows, settings.csvQuoteMode, csvNullLiteralForMode(settings.csvNullMode), settings.csvWithoutBom);
         else if (format === "json") await api.exportQueryResultJson(outputPath, result.columns, result.rows);
-        else if (format === "markdown") await api.exportQueryResultMarkdown(outputPath, result.columns, result.rows);
+        else if (format === "markdown") await writeMarkdown(outputPath, result.columns, result.rows, exportOptions.transposedMarkdownLabels);
         else if (format === "html") await api.exportQueryResultHtml(outputPath, title, result.columns, result.rows);
         else {
           const { writeTextFile } = await import("@tauri-apps/plugin-fs");
@@ -1735,14 +1744,15 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  async function exportMarkdown(target?: ExportTargetParam, columnIndexesParam?: number[]) {
+  async function exportMarkdown(target?: number[] | (DataGridExportTarget & { transposeRecords?: boolean }), columnIndexesParam?: number[]) {
     if (!allowExport("markdown")) return;
     const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
+    const transposedMarkdownLabels = !Array.isArray(target) && target?.transposeRecords && rowIds?.length ? markdownRecordLabels() : undefined;
     await runExclusiveExport(async () => {
       try {
         if (await exportFullTableDataViaBackend("markdown", rowIds, "name", true, undefined, false, columnIndexes)) return;
-        if (await exportLocalSnapshot("markdown", rowIds, columnIndexes, true)) return;
-        if (await exportMemoryDataFile("markdown", rowIds, columnIndexes, true)) return;
+        if (await exportLocalSnapshot("markdown", rowIds, columnIndexes, true, { transposedMarkdownLabels })) return;
+        if (await exportMemoryDataFile("markdown", rowIds, columnIndexes, true, { transposedMarkdownLabels })) return;
 
         let outputPath = exportFileName("export", "md");
         if (isTauriRuntime()) {
@@ -1755,7 +1765,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           outputPath = path;
         }
         const result = await resultToExport({ rowIds, columnIndexes });
-        await api.exportQueryResultMarkdown(outputPath, result.columns, result.rows);
+        await writeMarkdown(outputPath, result.columns, result.rows, transposedMarkdownLabels);
         notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);

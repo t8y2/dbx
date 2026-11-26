@@ -415,6 +415,98 @@ function parseMongoExistingFieldInputValue(raw: Exclude<MongoInputValue, null>, 
   return parseMongoDocumentInputValue(raw);
 }
 
+/**
+ * Parses text typed into the Tree view's inline editor, keeping the field's
+ * existing BSON type where the text allows it: a Date stays a Date, an
+ * ObjectId stays an ObjectId, Int32 stays Int32, a String stays a String.
+ * Returns `{ ok: false }` when the text cannot be the original type and would
+ * silently change it (e.g. "abc" over a Date).
+ */
+export function parseMongoTreeEditValue(text: string, originalValue: unknown): { ok: true; value: unknown } | { ok: false } {
+  const trimmed = text.trim();
+  const originalType = mongoExtendedJsonValueType(originalValue);
+  if (originalType === "date" || (typeof originalValue === "string" && MONGO_SHELL_DATE_PATTERN.test(originalValue.trim()))) {
+    const shell = mongoShellDateToExtendedJson(trimmed);
+    if (shell !== trimmed) return { ok: true, value: shell };
+    const normalized = normalizeMongoDateInput(trimmed);
+    return normalized ? { ok: true, value: { $date: normalized } } : { ok: false };
+  }
+  if (originalType === "objectId") {
+    const shell = mongoShellObjectIdToExtendedJson(trimmed);
+    if (shell !== trimmed) return { ok: true, value: shell };
+    return MONGO_OBJECT_ID_PATTERN.test(trimmed) ? { ok: true, value: { $oid: trimmed.toLowerCase() } } : { ok: false };
+  }
+  if (typeof originalValue === "boolean") {
+    if (/^true$/i.test(trimmed)) return { ok: true, value: true };
+    if (/^false$/i.test(trimmed)) return { ok: true, value: false };
+    return { ok: false };
+  }
+  if (typeof originalValue === "string") return { ok: true, value: text };
+  if (originalValue === null) return { ok: true, value: parseMongoDocumentInputValue(text) };
+  if (originalType === "int32" || originalType === "int64" || originalType === "double" || originalType === "decimal128") {
+    const value = strictMongoNumberEdit(trimmed, originalType);
+    return value === undefined ? { ok: false } : { ok: true, value };
+  }
+  // A plain JSON number (relaxed documents) does not say whether it is Int32, Int64 or
+  // Double, so no edit could promise to keep its type: refuse instead of guessing.
+  if (typeof originalValue === "number" || typeof originalValue === "bigint") return { ok: false };
+  return { ok: true, value: parseMongoExistingFieldInputValue(text, originalValue) };
+}
+
+const MONGO_SPECIAL_FLOAT_INPUTS: Record<string, string> = { nan: "NaN", infinity: "Infinity", "+infinity": "Infinity", "-infinity": "-Infinity" };
+const MONGO_SHELL_NUMBER_WRAPPERS: Record<string, string> = { NumberInt: "int32", NumberLong: "int64", NumberDouble: "double", NumberDecimal: "decimal128" };
+const DECIMAL128_MAX_DIGITS = 34;
+const DECIMAL128_MIN_EXPONENT = -6176;
+const DECIMAL128_MAX_EXPONENT = 6111;
+
+/**
+ * Strict numeric parse for the Tree view editor: the value must fit the field's
+ * existing BSON type, otherwise undefined (the edit is rejected, never converted).
+ * - Int32 / Int64: an integer within the type's range.
+ * - Double: a finite decimal; `NaN`, `Infinity`, `-Infinity` only when typed literally.
+ *   Text that overflows to ±Infinity (e.g. `1e999`) is rejected.
+ * - Decimal128: at most 34 significant digits and an exponent BSON can encode, or a
+ *   literal `NaN` / `Infinity` / `-Infinity`.
+ * A shell wrapper (`NumberLong("5")`) is accepted only when it names the same type.
+ */
+function strictMongoNumberEdit(text: string, type: "int32" | "int64" | "double" | "decimal128"): unknown {
+  let body = text;
+  const shell = /^(NumberInt|NumberLong|NumberDouble|NumberDecimal)\(\s*(?:"([^"]*)"|'([^']*)'|([^()]*?))\s*\)$/.exec(text);
+  if (shell) {
+    if (MONGO_SHELL_NUMBER_WRAPPERS[shell[1]!] !== type) return undefined;
+    body = (shell[2] ?? shell[3] ?? shell[4] ?? "").trim();
+  }
+  const special = MONGO_SPECIAL_FLOAT_INPUTS[body.toLowerCase()];
+  switch (type) {
+    case "int32":
+    case "int64": {
+      if (!MONGO_INTEGER_PATTERN.test(body)) return undefined;
+      const integer = BigInt(body);
+      if (type === "int32") return integer >= MIN_BSON_INT32 && integer <= MAX_BSON_INT32 ? { $numberInt: integer.toString() } : undefined;
+      return integer >= MIN_BSON_INT64 && integer <= MAX_BSON_INT64 ? { $numberLong: integer.toString() } : undefined;
+    }
+    case "double": {
+      if (special) return { $numberDouble: special };
+      if (!MONGO_DECIMAL_INPUT_PATTERN.test(body)) return undefined;
+      const double = Number(body);
+      return Number.isFinite(double) ? { $numberDouble: String(double) } : undefined;
+    }
+    case "decimal128": {
+      if (special) return { $numberDecimal: special };
+      if (!MONGO_DECIMAL_INPUT_PATTERN.test(body)) return undefined;
+      const match = /^-?(\d*)\.?(\d*)(?:[eE]([+-]?\d+))?$/.exec(body);
+      if (!match) return undefined;
+      const integerDigits = match[1] ?? "";
+      const fractionDigits = match[2] ?? "";
+      const significant = (integerDigits + fractionDigits).replace(/^0+/, "") || "0";
+      if (significant.length > DECIMAL128_MAX_DIGITS) return undefined;
+      const exponent = Number(match[3] ?? "0") - fractionDigits.length;
+      if (exponent < DECIMAL128_MIN_EXPONENT || exponent > DECIMAL128_MAX_EXPONENT) return undefined;
+      return { $numberDecimal: body };
+    }
+  }
+}
+
 const MONGO_DECIMAL_INPUT_PATTERN = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
 const MIN_BSON_INT32 = -2147483648n;
 const MAX_BSON_INT32 = 2147483647n;

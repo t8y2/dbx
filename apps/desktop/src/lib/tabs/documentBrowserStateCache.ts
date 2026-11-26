@@ -41,6 +41,8 @@ export interface DocumentBrowserStateSnapshot {
   localColumnFilters?: Record<string, string[]>;
   /** Column names corresponding to the local filter indexes. */
   localColumnFilterColumns?: string[];
+  /** MongoDB Table view: subdocument columns expanded into dot-path sub-columns. */
+  expandedNestedColumns?: string[];
   /**
    * Rows from the last completed load. Written only by the unmount capture; a
    * conditions-only save (the keystroke path) drops it, which is the whole

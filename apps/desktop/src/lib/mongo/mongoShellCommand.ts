@@ -1,4 +1,5 @@
 import type { QueryResult } from "@/types/database";
+import { getMongoPathValue } from "@/lib/mongo/mongoDocumentTree";
 import { isMongoExtendedJsonId, mongoDocumentGridColumnTypes, mongoDocumentGridValue, mongoDocumentIdForGrid } from "@/lib/mongo/mongoDocumentValues";
 import {
   chainedMethodCallPattern,
@@ -1261,6 +1262,35 @@ export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeM
     affected_rows: total,
     execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
     truncated: total > documents.length,
+  };
+}
+
+/** One grid row for a document, encoded exactly like mongoDocumentsToQueryResult. */
+export function mongoQueryResultRowFromDocument(document: unknown, columns: readonly string[]): QueryResult["rows"][number] {
+  if (isRecord(document)) return columns.map((column) => toCellValue(document[column], true));
+  return columns.map((column) => (column === "value" ? toCellValue(document, true) : null));
+}
+
+/**
+ * Re-projects a MongoDB query result onto dot-path columns (see
+ * buildMongoFlatColumns): nested fields become their own grid columns while the
+ * original documents stay attached for JSON preview, copy and the Tree view.
+ * Cells use the same encoding as mongoDocumentsToQueryResult.
+ */
+export function flattenMongoQueryResult(result: QueryResult, columns: readonly { name: string; path: readonly string[] }[]): QueryResult {
+  const documents = result.mongo_documents ?? [];
+  const canonical = result.mongo_copy_documents?.length === documents.length ? result.mongo_copy_documents : undefined;
+  const readPath = (document: unknown, path: readonly string[]): unknown => getMongoPathValue(document, path);
+  const project = (document: unknown) => Object.fromEntries(columns.map((column) => [column.name, readPath(document, column.path)]).filter(([, value]) => value !== undefined));
+  const names = columns.map((column) => column.name);
+  const rows = documents.map((document) => columns.map((column) => toCellValue(readPath(document, column.path), true)));
+  const dateColumnTypes = canonical ? mongoDocumentGridColumnTypes(canonical.map(project), names).map((type) => (type === "datetime" ? type : "")) : [];
+  const { appended_from_row_count: _appended, column_types: _types, local_column_filters: _filters, ...rest } = result;
+  return {
+    ...rest,
+    columns: names,
+    rows,
+    ...(dateColumnTypes.includes("datetime") ? { column_types: dateColumnTypes } : {}),
   };
 }
 

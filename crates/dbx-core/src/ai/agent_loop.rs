@@ -91,6 +91,10 @@ pub struct AgentLoopContext {
     pub connection_id: String,
     pub database: String,
     pub selected_databases: Vec<String>,
+    /// Plugin connections the user attached to this conversation. Plugin tools
+    /// are limited to these (plus the target connection when it is itself a
+    /// plugin connection); open-but-unattached connections contribute nothing.
+    pub plugin_connection_ids: Vec<String>,
     /// Selected schema that scopes Agent metadata and SQL execution.
     pub schema: Option<String>,
     pub db_type: DatabaseType,
@@ -204,6 +208,36 @@ fn run_tools(
         tools.extend(skill_tools::tool_definitions());
     }
     tools
+}
+
+/// Connection scope for plugin tools.
+///
+/// The target's saved config is the server's source of truth for its type: the
+/// request's own `db_type` comes from the client, so trusting it would let a
+/// request declare a database type while targeting a plugin connection and widen
+/// the scope to attachments by claiming a database target. An empty or unknown
+/// target fails closed (no plugin tools) for the same reason — a request can
+/// supply any attachment list, so nothing it names may become a scope on its
+/// own. A plugin-connection target is authoritative: only that connection may
+/// contribute tools, no matter what the attachment list says. The attachment
+/// list only widens a database-target run. Keeping this decision on the server
+/// means the boundary never depends on the client constructing the request
+/// correctly.
+async fn plugin_tool_connection_scope(
+    state: &AppState,
+    connection_id: &str,
+    attached_connection_ids: &[String],
+) -> Vec<String> {
+    if connection_id.is_empty() {
+        return Vec::new();
+    }
+    match state.configs.read().await.get(connection_id).map(|config| config.db_type) {
+        Some(DatabaseType::Plugin) => vec![connection_id.to_string()],
+        Some(_) => attached_connection_ids.to_vec(),
+        // Unknown target: the run cannot execute against a connection that does
+        // not exist, and its attachments must never stand in for one.
+        None => Vec::new(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -334,11 +368,17 @@ async fn run_agent_loop_inner(
     let mut sql_permissions = agent_ctx.sql_permissions.clone();
     let mut tools = run_tools(agent_ctx.db_type, &sql_permissions, is_agent_mode, agent_ctx.allow_skills);
     // Plugin tools join agent runs only; ask mode keeps its database-only
-    // read tools.
+    // read tools. The conversation target is authoritative: opening a plugin
+    // connection does not authorize the agent, so only explicitly attached
+    // connections are visible.
     let plugin_tool_set = if is_agent_mode {
-        let bound_plugin_connection =
-            (agent_ctx.db_type == DatabaseType::Plugin).then_some(agent_ctx.connection_id.as_str());
-        plugin_tools::discover_plugin_tools(&agent_ctx.state, agent_ctx.host_runtime.as_ref(), bound_plugin_connection)
+        let allowed_connections = plugin_tool_connection_scope(
+            agent_ctx.state.as_ref(),
+            &agent_ctx.connection_id,
+            &agent_ctx.plugin_connection_ids,
+        )
+        .await;
+        plugin_tools::discover_plugin_tools(&agent_ctx.state, agent_ctx.host_runtime.as_ref(), &allowed_connections)
             .await
     } else {
         PluginToolSet::default()
@@ -1756,6 +1796,79 @@ mod tests {
         }
     }
 
+    /// AppState whose saved configs are exactly `connections`, so a scope test
+    /// can tell "saved as a plugin connection" from "unknown id".
+    async fn state_with_connections(connections: &[(&str, &str)]) -> (tempfile::TempDir, Arc<AppState>) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let mut configs = state.configs.write().await;
+        for (id, db_type) in connections {
+            let config = serde_json::from_value(json!({
+                "id": id,
+                "name": id,
+                "db_type": db_type,
+                "host": "",
+                "port": 0,
+                "username": "",
+                "password": "",
+                "database": null,
+            }))
+            .unwrap();
+            configs.insert(id.to_string(), config);
+        }
+        drop(configs);
+        (temp_dir, state)
+    }
+
+    #[tokio::test]
+    async fn a_plugin_target_scopes_tools_to_its_own_connection() {
+        let attached = vec!["ssh-1".to_string(), "kafka-1".to_string()];
+        let (_dir, state) =
+            state_with_connections(&[("ssh-1", "plugin"), ("ssh-9", "plugin"), ("db-1", "postgres")]).await;
+        // A plugin target ignores every other attachment, even when a client
+        // sends extras: the boundary is decided here, not by the request shape.
+        assert_eq!(plugin_tool_connection_scope(&state, "ssh-1", &attached).await, ["ssh-1"]);
+        assert_eq!(plugin_tool_connection_scope(&state, "ssh-9", &attached).await, ["ssh-9"]);
+        // Database targets keep the explicit attachment list.
+        assert_eq!(plugin_tool_connection_scope(&state, "db-1", &attached).await, attached);
+        // No target means no plugin scope: an empty connection id must never be
+        // widened to attachments a client supplied directly.
+        assert!(plugin_tool_connection_scope(&state, "", &attached).await.is_empty());
+        // #13978 review P1: an id no saved config names fails closed. Otherwise a
+        // request could invent a target and still receive every attachment's tools.
+        assert!(plugin_tool_connection_scope(&state, "missing", &attached).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_declared_db_type_never_widens_a_plugin_target_scope() {
+        let attached = vec!["ssh-1".to_string(), "kafka-1".to_string()];
+        let (_dir, state) = state_with_connections(&[("ssh-1", "plugin"), ("db-1", "postgres")]).await;
+        // #13978 review P1: the run's declared type is client data. A request
+        // that names a plugin connection while declaring a database type used to
+        // get the whole attachment list; the saved config must win instead.
+        let ctx = AgentLoopContext {
+            state: state.clone(),
+            connection_id: "ssh-1".to_string(),
+            database: String::new(),
+            selected_databases: Vec::new(),
+            plugin_connection_ids: attached.clone(),
+            schema: None,
+            db_type: DatabaseType::Postgres,
+            cli_mcp_server_command: None,
+            sql_permissions: agent_tools::AgentSqlPermissions::default(),
+            max_agent_turns: DEFAULT_MAX_AGENT_TURNS,
+            prompt_cache_key: None,
+            session_id: None,
+            host_runtime: None,
+            allow_skills: false,
+        };
+        let scope =
+            plugin_tool_connection_scope(ctx.state.as_ref(), &ctx.connection_id, &ctx.plugin_connection_ids).await;
+        assert_eq!(scope, ["ssh-1"]);
+        assert_ne!(scope, ctx.plugin_connection_ids);
+    }
+
     async fn gate_context(session_id: Option<&str>) -> (tempfile::TempDir, AgentLoopContext) {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
@@ -1764,6 +1877,7 @@ mod tests {
             connection_id: "db".to_string(),
             database: String::new(),
             selected_databases: Vec::new(),
+            plugin_connection_ids: Vec::new(),
             schema: None,
             db_type: DatabaseType::Postgres,
             cli_mcp_server_command: None,

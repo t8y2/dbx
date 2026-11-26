@@ -1332,6 +1332,7 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         plugin_context_json TEXT,
         assistant_mode TEXT,
         assistant_action TEXT,
+        plugin_connection_ids TEXT,
         pinned INTEGER NOT NULL DEFAULT 0,
         pinned_at TEXT,
         created_at TEXT NOT NULL DEFAULT '',
@@ -3469,6 +3470,10 @@ fn ensure_ai_conversations_columns_sync(conn: &Connection) -> Result<(), String>
         // default.
         ("assistant_mode", "TEXT"),
         ("assistant_action", "TEXT"),
+        // Plugin connections attached to the conversation's AI runs. Legacy
+        // rows keep NULL, read as "nothing attached" — the safe default that
+        // never exposes tools the user did not opt into.
+        ("plugin_connection_ids", "TEXT"),
         // History pinning (#14226). A dedicated `pinned_at` rather than reusing
         // `updated_at` keeps "most recently used" intact: pinning an old
         // conversation must not make it the restore-last target.
@@ -6772,12 +6777,19 @@ impl Storage {
     pub async fn save_ai_conversation(&self, conv: &AiConversation) -> Result<(), String> {
         let conv = conv.clone();
         let messages_json = serde_json::to_string(&conv.messages).map_err(|e| e.to_string())?;
+        let plugin_connection_ids = serde_json::to_string(&conv.plugin_connection_ids).map_err(|e| e.to_string())?;
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
+            // `plugin_connection_ids` is written on INSERT only. Snapshot saves come
+            // from the panel (and from background runs that may hold a transcript
+            // built before the user's latest toggle), so letting an update rewrite
+            // the column would let an older snapshot silently revoke or add plugin
+            // access. Existing rows change attachments only through
+            // `update_ai_conversation_plugin_connection_ids`.
             tx.execute(
                 "INSERT INTO ai_conversations \
-                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action, pinned, pinned_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action, plugin_connection_ids, pinned, pinned_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                    title = excluded.title, \
                    connection_name = excluded.connection_name, \
@@ -6803,6 +6815,7 @@ impl Storage {
                     conv.plugin_context.map(|value| value.to_string()),
                     conv.assistant_mode,
                     conv.assistant_action,
+                    plugin_connection_ids,
                     conv.pinned,
                     conv.pinned_at
                 ],
@@ -6815,11 +6828,36 @@ impl Storage {
         .await
     }
 
+    /// Updates only the plugin attachment list of a conversation.
+    ///
+    /// A toggle can land after a transcript snapshot was built but before that
+    /// snapshot is saved. Repairing the record by re-saving the whole snapshot
+    /// would write its older messages and title over whatever has been persisted
+    /// since, so callers must patch this one column instead. A missing row is a
+    /// no-op: the first save of a new chat may still be in flight.
+    pub async fn update_ai_conversation_plugin_connection_ids(
+        &self,
+        id: &str,
+        plugin_connection_ids: &[String],
+    ) -> Result<(), String> {
+        let id = id.to_string();
+        let plugin_connection_ids = serde_json::to_string(plugin_connection_ids).map_err(|e| e.to_string())?;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE ai_conversations SET plugin_connection_ids = ? WHERE id = ?",
+                params![plugin_connection_ids, id],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn load_ai_conversations(&self) -> Result<Vec<AiConversation>, String> {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json, connection_id, schema_name, assistant_mode, assistant_action, pinned, pinned_at \
+                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json, connection_id, schema_name, assistant_mode, assistant_action, plugin_connection_ids, pinned, pinned_at \
                      FROM ai_conversations ORDER BY pinned DESC, updated_at DESC",
                 )
                 .map_err(|e| e.to_string())?;
@@ -6842,8 +6880,12 @@ impl Storage {
                         schema: row.get(10)?,
                         assistant_mode: row.get(11)?,
                         assistant_action: row.get(12)?,
-                        pinned: row.get::<_, i64>(13)? != 0,
-                        pinned_at: row.get(14)?,
+                        plugin_connection_ids: row
+                            .get::<_, Option<String>>(13)?
+                            .and_then(|json| serde_json::from_str(&json).ok())
+                            .unwrap_or_default(),
+                        pinned: row.get::<_, i64>(14)? != 0,
+                        pinned_at: row.get(15)?,
                     })
                 })
                 .map_err(|e| e.to_string())?;
@@ -6946,15 +6988,20 @@ impl Storage {
         let conv = conv.clone();
         let run = run.clone();
         let messages_json = serde_json::to_string(&conv.messages).map_err(|e| e.to_string())?;
+        let plugin_connection_ids = serde_json::to_string(&conv.plugin_connection_ids).map_err(|e| e.to_string())?;
         let session_ids_json = serde_json::to_string(&run.session_ids).map_err(|e| e.to_string())?;
         let pending_confirmation_json = run.pending_confirmation.map(|value| value.to_string());
         let fifo_category = run.fifo_category.map(|c| c.as_str().to_string());
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
+            // Same rule as `save_ai_conversation`: a background run's snapshot may
+            // predate the user's latest attachment toggle, so it initializes the
+            // list only when it creates the conversation row. Updates never touch
+            // the column; the dedicated patch API owns it after that.
             tx.execute(
                 "INSERT INTO ai_conversations
-                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action, pinned, pinned_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action, plugin_connection_ids, pinned, pinned_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                    title = excluded.title,
                    connection_name = excluded.connection_name,
@@ -6980,6 +7027,7 @@ impl Storage {
                     conv.plugin_context.map(|value| value.to_string()),
                     conv.assistant_mode,
                     conv.assistant_action,
+                    plugin_connection_ids,
                     conv.pinned,
                     conv.pinned_at
                 ],
@@ -11659,6 +11707,7 @@ mod tests {
             queued_input: None,
             assistant_mode: None,
             assistant_action: None,
+            plugin_connection_ids: Vec::new(),
             pinned: false,
             pinned_at: None,
             created_at: updated_at.to_string(),
@@ -12351,10 +12400,104 @@ mod tests {
         let legacy_json: AiConversation = serde_json::from_str(r#"{"id":"old","title":"Old","connectionName":"","connectionId":"","database":"","messages":[],"createdAt":"0000","updatedAt":"0000"}"#).unwrap();
         assert!(legacy_json.assistant_mode.is_none());
         assert!(legacy_json.assistant_action.is_none());
+        // #13978: nothing attached, so the agent gets no plugin tools.
+        assert!(legacy_json.plugin_connection_ids.is_empty());
         // `None` is skipped entirely, so an old reader sees the record it always saw.
         let serialized = serde_json::to_value(&legacy_json).unwrap();
         assert!(serialized.get("assistantMode").is_none());
         assert!(serialized.get("assistantAction").is_none());
+        assert!(serialized.get("pluginConnectionIds").is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    // #13978: the conversation's plugin attachment list has to survive a restart
+    // (and a web round-trip), and a pre-migration row must read as "nothing
+    // attached" rather than failing or exposing every open plugin connection.
+    #[tokio::test]
+    async fn ai_conversation_roundtrips_plugin_connection_attachments() {
+        let path = temp_db_path("ai-conversation-plugin-attachments");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_conversations (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', connection_name TEXT NOT NULL DEFAULT '',
+            database TEXT NOT NULL DEFAULT '', messages_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
+        ); INSERT INTO ai_conversations (id, title) VALUES ('legacy', 'SQL conversation');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        // The migrated legacy row has no attachments: the safe default, since an
+        // attachment is the user's explicit consent to expose plugin tools.
+        let legacy = storage.load_ai_conversations().await.unwrap();
+        assert!(legacy[0].plugin_connection_ids.is_empty());
+
+        // A first save of each kind initializes the list: the plain conversation
+        // write and the conversation+run write used by background runs.
+        let mut conversation = ai_conversation("attached-conv", "0001");
+        conversation.plugin_connection_ids = vec!["ssh-1".to_string(), "kafka-1".to_string()];
+        storage.save_ai_conversation(&conversation).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "attached-conv").unwrap();
+        assert_eq!(saved.plugin_connection_ids, ["ssh-1", "kafka-1"]);
+
+        let mut run_conversation = ai_conversation("run-attached", "0002");
+        run_conversation.plugin_connection_ids = vec!["openobserve-1".to_string()];
+        let run = ai_run("run-2", "run-attached", AiRunStatus::Running, "0002");
+        storage.save_ai_run_state(&run_conversation, &run).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "run-attached").unwrap();
+        assert_eq!(saved.plugin_connection_ids, ["openobserve-1"]);
+
+        // #13978 review P1: later snapshots of an existing conversation never
+        // rewrite the column. Both writers can hold a list older than the user's
+        // latest toggle (a background run keeps its pre-close snapshot), so only
+        // the dedicated patch may change what an existing row authorizes.
+        conversation.plugin_connection_ids = vec!["stale-1".to_string()];
+        storage.save_ai_conversation(&conversation).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "attached-conv").unwrap();
+        assert_eq!(saved.plugin_connection_ids, ["ssh-1", "kafka-1"]);
+
+        run_conversation.plugin_connection_ids = Vec::new();
+        storage.save_ai_run_state(&run_conversation, &run).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "run-attached").unwrap();
+        assert_eq!(saved.plugin_connection_ids, ["openobserve-1"]);
+
+        // Detaching everything goes through the patch API, which is the only
+        // writer for an existing row.
+        storage.update_ai_conversation_plugin_connection_ids("attached-conv", &[]).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "attached-conv").unwrap();
+        assert!(saved.plugin_connection_ids.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    // #13978 review: a toggle (and the stale-snapshot repair) must patch only the
+    // attachment column, never re-save a whole older snapshot over newer content.
+    #[tokio::test]
+    async fn plugin_attachment_update_touches_only_that_column() {
+        let path = temp_db_path("ai-conversation-plugin-attachment-update");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let mut conversation = ai_conversation("attach-update", "0001");
+        conversation.messages[0].content = "the persisted turn".to_string();
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        storage.update_ai_conversation_plugin_connection_ids("attach-update", &["ssh-1".to_string()]).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "attach-update").unwrap();
+        assert_eq!(saved.plugin_connection_ids, ["ssh-1"]);
+        // The transcript and title stay the ones the full save wrote.
+        assert_eq!(saved.title, conversation.title);
+        assert_eq!(saved.messages[0].content, "the persisted turn");
+
+        // A row that does not exist yet is a no-op, not an error: the first save
+        // of a new chat may still be in flight when the toggle lands.
+        storage.update_ai_conversation_plugin_connection_ids("missing", &["ssh-1".to_string()]).await.unwrap();
 
         let _ = std::fs::remove_file(path);
     }

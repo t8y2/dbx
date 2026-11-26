@@ -2496,6 +2496,7 @@ export async function aiAgentStream(
   signal?: AbortSignal,
   selectedDatabases?: string[],
   allowSkills = false,
+  pluginConnectionIds: string[] = [],
 ): Promise<string> {
   const res = await fetch(apiUrl("/api/ai/agent-stream"), {
     method: "POST",
@@ -2517,6 +2518,7 @@ export async function aiAgentStream(
       // The web server ignores this by design: local skill files are never
       // exposed to it (there is no request field on that route either).
       allowSkills,
+      pluginConnectionIds,
     }),
     signal,
   });
@@ -3145,6 +3147,11 @@ export async function savePinnedTreeNodeIds(_ids: string[]): Promise<void> {
 
 export async function saveAiConversation(conversation: AiConversation): Promise<void> {
   return post("/api/ai/conversation", { conversation });
+}
+
+/** Patches only the plugin attachment list; see the Tauri counterpart. */
+export async function updateAiConversationPluginConnections(conversationId: string, pluginConnectionIds: string[]): Promise<void> {
+  return post("/api/ai/conversation/plugin-connections", { conversationId, pluginConnectionIds });
 }
 
 /** Column-only pin write (#14226); see the Tauri counterpart for why, including

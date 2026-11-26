@@ -850,6 +850,7 @@ export async function aiAgentStream(
   _signal?: AbortSignal,
   selectedDatabases?: string[],
   allowSkills = false,
+  pluginConnectionIds: string[] = [],
 ): Promise<string> {
   const unlisten: UnlistenFn = await listen<TauriAgentEvent>("ai-agent-event", (event) => {
     const payload = event.payload;
@@ -875,6 +876,7 @@ export async function aiAgentStream(
       confirmedSchema,
       selectedDatabases,
       allowSkills,
+      pluginConnectionIds,
     });
   } catch (e) {
     unlisten();
@@ -1658,6 +1660,11 @@ export interface AiConversation {
    *  the record keeps the ENTRY the user chose, not the action a send routed
    *  to. Same semantics as `assistantMode`. */
   assistantAction?: string;
+  /** Plugin connections the user attached to this conversation's agent runs.
+   *  Plugin tools are scoped to these open connections (plus the target when it
+   *  is itself a plugin connection); absent/empty means nothing is attached,
+   *  which is the safe default for records written before this field existed. */
+  pluginConnectionIds?: string[];
   /** Pinned to the top of the history list (#14226). Absent means unpinned, so
    *  legacy records and records written before the field existed load fine. */
   pinned?: boolean;
@@ -1693,6 +1700,12 @@ export interface AiRun {
 
 export async function saveAiConversation(conversation: AiConversation): Promise<void> {
   return invoke("save_ai_conversation", { conversation });
+}
+
+/** Patches only the plugin attachment list, so an old transcript snapshot is
+ *  never re-written over newer messages (attachment toggles + repair path). */
+export async function updateAiConversationPluginConnections(conversationId: string, pluginConnectionIds: string[]): Promise<void> {
+  return invoke("update_ai_conversation_plugin_connections", { conversationId, pluginConnectionIds });
 }
 
 /** Writes only the pin columns (#14226). Pinning is a property toggle, so it must

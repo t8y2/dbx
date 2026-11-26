@@ -723,6 +723,17 @@ pub struct AiConversation {
     /// [`AiConversation::assistant_mode`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_action: Option<String>,
+    /// Whether the user pinned this conversation to the top of the history list
+    /// (#14226).
+    ///
+    /// `pinned_at` is deliberately separate from `updated_at`: pinning must not
+    /// change which conversation counts as "most recently used" (the
+    /// `restoreLastConversation` target), and it leaves room for a future
+    /// pin-order sort. Both fields default, so legacy rows load as unpinned.
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

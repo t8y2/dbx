@@ -43,6 +43,14 @@ pub struct SaveAiConversationRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SaveAiConversationPinRequest {
+    pub id: String,
+    pub pinned: bool,
+    pub pinned_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AiCompleteRequest {
     pub request: AiCompletionRequest,
 }
@@ -256,6 +264,21 @@ pub async fn save_ai_conversation(
 ) -> Result<Json<()>, AppError> {
     state.app.storage.save_ai_conversation(&body.conversation).await.map_err(AppError::from)?;
     Ok(Json(()))
+}
+
+/// Column-only pin write (#14226): the pin toggle must not rewrite the transcript.
+/// `false` means the conversation no longer exists; the client drops its row.
+pub async fn save_ai_conversation_pin(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveAiConversationPinRequest>,
+) -> Result<Json<bool>, AppError> {
+    let updated = state
+        .app
+        .storage
+        .save_ai_conversation_pin(&body.id, body.pinned, body.pinned_at)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(updated))
 }
 
 pub async fn load_ai_conversations(State(state): State<Arc<WebState>>) -> Result<Json<Vec<AiConversation>>, AppError> {

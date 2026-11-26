@@ -3113,6 +3113,11 @@ export default {
     xAxisAuto: "Auto",
     xAxisCategory: "Category",
     xAxisTime: "Time",
+    settings: "Settings",
+    yAxisType: "Y-Axis Type",
+    yAxisValue: "Linear",
+    yAxisLog: "Logarithmic",
+    smooth: "Smooth Line",
   },
   grid: {
     setTablePageSizeDefault: "Set default for this table",

@@ -2818,6 +2818,11 @@ export default withEnglishFallback({
     xAxisAuto: "Авто",
     xAxisCategory: "Категория",
     xAxisTime: "Время",
+    settings: "Настройки",
+    yAxisType: "Тип оси Y",
+    yAxisValue: "Линейная",
+    yAxisLog: "Логарифмическая",
+    smooth: "Сглаживание",
   },
   grid: {
     setTablePageSizeDefault: "Сохранить значение для этой таблицы",

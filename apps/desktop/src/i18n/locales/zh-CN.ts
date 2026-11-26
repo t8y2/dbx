@@ -3041,6 +3041,11 @@ export default withEnglishFallback({
     xAxisAuto: "自动",
     xAxisCategory: "类别",
     xAxisTime: "时间",
+    settings: "设置",
+    yAxisType: "Y轴类型",
+    yAxisValue: "数值",
+    yAxisLog: "对数",
+    smooth: "平滑曲线",
   },
   grid: {
     setTablePageSizeDefault: "设为此表的默认值",

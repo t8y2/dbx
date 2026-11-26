@@ -255,6 +255,49 @@ describe("chartData", () => {
       expect(option?.series[0].smooth).toBe(true);
     });
 
+    it("lets the user override smoothing on either axis type", () => {
+      const timed = result(
+        ["time", "value"],
+        [
+          ["2026-11-25T10:00:00Z", 10],
+          ["2026-11-25T10:30:00Z", 5],
+        ],
+      );
+      const forcedOn = buildQueryChartOption(timed, {
+        chartType: "line",
+        xColumnIndex: 0,
+        yColumnIndexes: [1],
+        smooth: true,
+      });
+      expect(forcedOn?.series[0].smooth).toBe(true);
+
+      const forcedOff = buildQueryChartOption(testResult, {
+        chartType: "line",
+        xColumnIndex: 0,
+        yColumnIndexes: [1],
+        smooth: false,
+      });
+      expect(forcedOff?.series[0].smooth).toBe(false);
+    });
+
+    it("uses a logarithmic Y axis when the user selects it", () => {
+      const logAxis = buildQueryChartOption(testResult, {
+        chartType: "bar",
+        xColumnIndex: 0,
+        yColumnIndexes: [1],
+        yAxisType: "log",
+      });
+      expect(logAxis?.yAxis).toMatchObject({ type: "log" });
+
+      const linearAxis = buildQueryChartOption(testResult, {
+        chartType: "bar",
+        xColumnIndex: 0,
+        yColumnIndexes: [1],
+        yAxisType: "value",
+      });
+      expect(linearAxis?.yAxis).toMatchObject({ type: "value" });
+    });
+
     it("uses time axis for numeric epoch X column", () => {
       const timed = result(
         ["ts", "value"],

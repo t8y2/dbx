@@ -63,14 +63,16 @@ describe("QueryChart", () => {
     localStorage.clear();
   });
 
-  it("renders showLabels toggle button and updates chart option on click", async () => {
+  it("toggles showLabels from the settings dialog and updates chart option", async () => {
     app = createApp(QueryChart, { result: createQueryResult() });
     app.mount(container!);
     await nextTick();
 
-    const btn = container!.querySelector('[data-testid="query-chart-show-labels-btn"]') as HTMLButtonElement;
+    (container!.querySelector('[data-testid="query-chart-settings-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+
+    const btn = document.querySelector('[data-testid="query-chart-show-labels"]') as HTMLInputElement;
     expect(btn).not.toBeNull();
-    expect(btn.textContent).toContain("chart.showLabels");
 
     const vchart = container!.querySelector("[data-chart-option]") as HTMLDivElement;
     let option = JSON.parse(vchart.getAttribute("data-chart-option") || "{}");
@@ -92,7 +94,7 @@ describe("QueryChart", () => {
     expect(option.series[0].label.show).toBe(false);
   });
 
-  it("renders the X-axis type selector and infers a time axis by default", async () => {
+  it("defaults to a category axis without auto-detecting a time axis", async () => {
     app = createApp(QueryChart, {
       result: {
         columns: ["time", "value"],
@@ -107,10 +109,53 @@ describe("QueryChart", () => {
     app.mount(container!);
     await nextTick();
 
-    expect(container!.querySelector('[data-testid="query-chart-x-axis-type"]')).not.toBeNull();
     const vchart = container!.querySelector("[data-chart-option]") as HTMLDivElement;
     const option = JSON.parse(vchart.getAttribute("data-chart-option") || "{}");
-    expect(option.xAxis.type).toBe("time");
+    expect(option.xAxis.type).toBe("category");
+  });
+
+  it("opens a settings dialog with chart configuration options", async () => {
+    app = createApp(QueryChart, { result: createQueryResult() });
+    app.mount(container!);
+    await nextTick();
+
+    const settingsBtn = container!.querySelector('[data-testid="query-chart-settings-btn"]') as HTMLButtonElement;
+    expect(settingsBtn).not.toBeNull();
+    // The settings controls live in a dialog, not in the toolbar.
+    expect(container!.querySelector('[data-testid="query-chart-x-axis-type"]')).toBeNull();
+    expect(container!.querySelector('[data-testid="query-chart-show-labels-btn"]')).toBeNull();
+
+    settingsBtn.click();
+    await nextTick();
+
+    expect(document.querySelector('[data-testid="query-chart-settings-dialog"]')).not.toBeNull();
+    for (const testId of ["query-chart-x-axis-type", "query-chart-y-axis-type", "query-chart-smooth", "query-chart-show-labels"]) {
+      expect(document.querySelector(`[data-testid="${testId}"]`)).not.toBeNull();
+    }
+  });
+
+  it("applies the smoothing switch to the chart option", async () => {
+    app = createApp(QueryChart, { result: createQueryResult() });
+    app.mount(container!);
+    await nextTick();
+
+    const lineButton = Array.from(container!.querySelectorAll("button")).find((btn) => btn.textContent?.includes("chart.line")) as HTMLButtonElement;
+    expect(lineButton).not.toBeNull();
+    lineButton.click();
+    await nextTick();
+    (container!.querySelector('[data-testid="query-chart-settings-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+
+    const vchart = container!.querySelector("[data-chart-option]") as HTMLDivElement;
+    let option = JSON.parse(vchart.getAttribute("data-chart-option") || "{}");
+    expect(option.series[0].smooth).toBe(true); // category axis default
+
+    const smoothSwitch = document.querySelector('[data-testid="query-chart-smooth"]') as HTMLElement;
+    smoothSwitch.click();
+    await nextTick();
+
+    option = JSON.parse(vchart.getAttribute("data-chart-option") || "{}");
+    expect(option.series[0].smooth).toBe(false);
   });
 
   it("initializes showLabels from localStorage if previously enabled", async () => {

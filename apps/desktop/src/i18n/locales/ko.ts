@@ -2728,6 +2728,11 @@ export default withEnglishFallback({
     xAxisAuto: "자동",
     xAxisCategory: "범주",
     xAxisTime: "시간",
+    settings: "설정",
+    yAxisType: "Y축 유형",
+    yAxisValue: "선형",
+    yAxisLog: "로그",
+    smooth: "부드러운 선",
   },
   grid: {
     setTablePageSizeDefault: "이 테이블의 기본값으로 설정",

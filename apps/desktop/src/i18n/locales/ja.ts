@@ -2748,6 +2748,11 @@ export default withEnglishFallback({
     xAxisAuto: "自動",
     xAxisCategory: "カテゴリ",
     xAxisTime: "時間",
+    settings: "設定",
+    yAxisType: "Y軸の種類",
+    yAxisValue: "線形",
+    yAxisLog: "対数",
+    smooth: "平滑な線",
   },
   grid: {
     setTablePageSizeDefault: "このテーブルの既定値に設定",

@@ -2968,6 +2968,11 @@ export default withEnglishFallback({
     xAxisAuto: "อัตโนมัติ",
     xAxisCategory: "หมวดหมู่",
     xAxisTime: "เวลา",
+    settings: "การตั้งค่า",
+    yAxisType: "ประเภทแกน Y",
+    yAxisValue: "เชิงเส้น",
+    yAxisLog: "ลอการิทึม",
+    smooth: "เส้นเรียบ",
   },
   grid: {
     setTablePageSizeDefault: "ตั้งค่าเริ่มต้นสำหรับตารางนี้",

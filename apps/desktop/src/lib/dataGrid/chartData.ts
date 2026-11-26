@@ -68,8 +68,9 @@ export function axisColumnLabel(columns: string[], index: number): string {
 
 export type ChartType = "line" | "bar" | "pie";
 
-/** How the horizontal axis is scaled: inferred from data, or forced by the user. */
+/** How an axis is scaled: "auto" is an explicit opt-in, never the component default. */
 export type XAxisType = "auto" | "category" | "time";
+export type YAxisType = "value" | "log";
 
 export interface QueryChartOptionConfig {
   chartType: ChartType;
@@ -78,10 +79,13 @@ export interface QueryChartOptionConfig {
   showLabels?: boolean;
   isDark?: boolean;
   xAxisType?: XAxisType;
+  yAxisType?: YAxisType;
+  /** Explicit user choice. When omitted, fall back to the safe axis-based default. */
+  smooth?: boolean;
 }
 
 export function buildQueryChartOption(result: QueryResult, config: QueryChartOptionConfig) {
-  const { chartType, xColumnIndex, yColumnIndexes, showLabels = false, isDark = false, xAxisType = "auto" } = config;
+  const { chartType, xColumnIndex, yColumnIndexes, showLabels = false, isDark = false, xAxisType = "auto", yAxisType = "value", smooth: smoothOverride } = config;
   if (xColumnIndex < 0 || yColumnIndexes.length === 0) return null;
 
   const xData = result.rows.map((row) => String(row[xColumnIndex] ?? ""));
@@ -135,7 +139,7 @@ export function buildQueryChartOption(result: QueryResult, config: QueryChartOpt
     grid: { left: 60, right: 20, top: showLabels ? 28 : 20, bottom: 40 },
     xAxis,
     yAxis: {
-      type: "value" as const,
+      type: yAxisType,
       axisLabel: { color: isDark ? "#aaa" : "#666" },
     },
     series: yIndices.map((yIdx) => ({
@@ -146,10 +150,9 @@ export function buildQueryChartOption(result: QueryResult, config: QueryChartOpt
         return timestamps ? [timestamps[rowIndex], value] : value;
       }),
       // Bezier smoothing overshoots when time-axis points are unevenly spaced
-      // (e.g. minutes apart then seconds apart) and the value drops sharply,
-      // making the line loop back on itself. Straight segments keep the series
-      // faithful to the actual samples. Category axes keep the original look.
-      smooth: chartType === "line" && !timestamps,
+      // and the value changes sharply, making the line loop back on itself.
+      // The user can explicitly override this from the settings dialog.
+      smooth: smoothOverride ?? (chartType === "line" && !timestamps),
       label: {
         show: showLabels,
         position: "top" as const,

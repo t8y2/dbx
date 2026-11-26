@@ -17,6 +17,7 @@ CLAUDE.md
 
 # Build output
 dist/
+dist-old-*/
 coverage/
 /target/
 vendor/wry/target/

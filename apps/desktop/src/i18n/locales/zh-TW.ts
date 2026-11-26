@@ -2710,6 +2710,11 @@ export default withEnglishFallback({
     xAxisAuto: "自動",
     xAxisCategory: "類別",
     xAxisTime: "時間",
+    settings: "設定",
+    yAxisType: "Y軸類型",
+    yAxisValue: "數值",
+    yAxisLog: "對數",
+    smooth: "平滑曲線",
   },
   grid: {
     setTablePageSizeDefault: "設為此資料表的預設值",

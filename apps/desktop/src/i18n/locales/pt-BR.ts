@@ -2728,6 +2728,11 @@ export default withEnglishFallback({
     xAxisAuto: "Automático",
     xAxisCategory: "Categoria",
     xAxisTime: "Tempo",
+    settings: "Configurações",
+    yAxisType: "Tipo do eixo Y",
+    yAxisValue: "Linear",
+    yAxisLog: "Logarítmico",
+    smooth: "Linha suave",
   },
   grid: {
     setTablePageSizeDefault: "Definir padrão para esta tabela",

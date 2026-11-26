@@ -2828,6 +2828,11 @@ export default withEnglishFallback({
     xAxisAuto: "Automático",
     xAxisCategory: "Categoría",
     xAxisTime: "Tiempo",
+    settings: "Configuración",
+    yAxisType: "Tipo de eje Y",
+    yAxisValue: "Lineal",
+    yAxisLog: "Logarítmico",
+    smooth: "Línea suave",
   },
   grid: {
     setTablePageSizeDefault: "Fijar valor predeterminado para esta tabla",

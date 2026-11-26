@@ -311,7 +311,11 @@ const IGNITE_CONNECTION_PROFILES: ReadonlyArray<{ value: IgniteConnectionProfile
 // The picker merges the Ignite 2.x/3.x cards into a single "Apache Ignite"
 // entry; the version is picked inside the connection form instead.
 const MERGED_PICKER_OPTION_FOR_TYPE: Record<string, string> = { ignite3: "ignite" };
-const PICKER_SEARCH_ALIASES: Record<string, string[]> = { ignite: ["ignite3", "ignite 3"] };
+const PICKER_SEARCH_ALIASES: Record<string, string[]> = {
+  ignite: ["ignite3", "ignite 3"],
+  polardb: ["polar db"],
+  postgres: ["polardb for postgresql", "polardb postgresql", "polardb pg", "polar db"],
+};
 
 type LegacyTransportFields = {
   ssh_enabled?: boolean;
@@ -4021,6 +4025,12 @@ function isPickerOptionSelected(optionValue: string): boolean {
 }
 
 const selectedDbOptionIsVisible = computed(() => visibleDbCategories.value.some((category) => category.options.some((option) => isPickerOptionSelected(option.value))));
+const selectedDatabaseTypeLabel = computed(() => (selectedType.value === "polardb" ? (dbOptions.find((option) => option.value === "polardb")?.label ?? selectedProfile().label) : selectedProfile().label));
+const showPolarDbPickerHint = computed(() => {
+  if (selectedType.value === "polardb" && selectedDbOptionIsVisible.value) return true;
+  if (!/\bpolar/i.test(dbSearchQuery.value)) return false;
+  return visibleDbCategories.value.some((category) => category.options.some((option) => option.value === "polardb" || option.value === "postgres"));
+});
 
 function selectDbCategory(category: DbCategoryKey) {
   selectedDbCategory.value = category;
@@ -7759,6 +7769,8 @@ function openExternalUrl(url: string) {
             </Button>
           </div>
 
+          <p v-if="showPolarDbPickerHint" class="shrink-0 text-sm text-muted-foreground">{{ t("connection.polarDbPostgresPickerHint") }}</p>
+
           <div class="connection-db-picker-body min-h-0 flex flex-1 flex-col gap-3 overflow-hidden sm:flex-row sm:gap-4">
             <nav data-connection-category-nav class="flex shrink-0 gap-1 overflow-x-auto border-b px-0.5 pt-0.5 pb-2.5 sm:w-40 sm:flex-col sm:overflow-y-auto sm:border-b-0 sm:border-r sm:py-0.5 sm:pr-3.5" :aria-label="t('connection.databaseCategories')">
               <button
@@ -7832,7 +7844,7 @@ function openExternalUrl(url: string) {
           <div class="mr-auto flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
             <PluginIcon v-if="isPluginConnection" :plugin-id="selectedPluginProvider?.plugin.manifest.id || ''" :icon="selectedPluginIcon" class="h-4 w-4" />
             <DatabaseIcon v-else :db-type="selectedDbIcon" class="h-4 w-4 shrink-0" />
-            <span class="truncate">{{ t("connection.selectedDatabase") }}: {{ selectedProfile().label }}</span>
+            <span class="truncate">{{ t("connection.selectedDatabase") }}: {{ selectedDatabaseTypeLabel }}</span>
           </div>
           <Button :disabled="!hasDbPickerResults || !selectedDbOptionIsVisible" @click="goToConnectionStep()">
             {{ t("connection.next") }}
@@ -7884,7 +7896,7 @@ function openExternalUrl(url: string) {
                   <button type="button" class="col-span-3 flex items-center gap-2 rounded-md border bg-muted/20 px-3 py-2 hover:bg-muted/40 cursor-pointer transition" @click="backToDatabasePicker()">
                     <PluginIcon v-if="isPluginConnection && selectedPluginProvider" :plugin-id="selectedPluginProvider.plugin.manifest.id" :icon="selectedPluginIcon" class="h-4 w-4 shrink-0" />
                     <DatabaseIcon v-else :db-type="selectedDbIcon" class="h-4 w-4 shrink-0" />
-                    <span class="min-w-0 flex-1 truncate text-sm text-left">{{ selectedProfile().label }}</span>
+                    <span class="min-w-0 flex-1 truncate text-sm text-left">{{ selectedDatabaseTypeLabel }}</span>
                     <Pencil class="h-3 w-3 text-muted-foreground" />
                   </button>
                 </div>

@@ -2243,6 +2243,7 @@ export default {
     mqttSubscriptionDelete: "Delete configuration",
     mqttSubscriptionOperationFailed: "Subscription operation failed: {error}. The configuration was kept.",
     searchDatabasePlaceholder: "Search database types",
+    polarDbPostgresPickerHint: "If you use PolarDB for PostgreSQL, select PostgreSQL.",
     searchResults: "Search results",
     databaseCategories: "Categories",
     databaseCategorySql: "Relational",

@@ -2244,6 +2244,7 @@ export default withEnglishFallback({
       revealRaw: "원본 텍스트 표시",
       apply: "적용",
     },
+    polarDbPostgresPickerHint: "PolarDB PostgreSQL 버전을 사용하는 경우 PostgreSQL을 선택하세요.",
   },
   editor: {
     duckdbDraining: "이전 DuckDB 쿼리가 아직 중지 중입니다. 잠시 후 다시 시도해 주세요.",

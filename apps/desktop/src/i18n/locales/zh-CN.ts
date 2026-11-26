@@ -2175,6 +2175,7 @@ export default withEnglishFallback({
     mqttSubscriptionDelete: "删除配置",
     mqttSubscriptionOperationFailed: "订阅操作失败：{error}。配置已保留。",
     searchDatabasePlaceholder: "搜索数据库类型",
+    polarDbPostgresPickerHint: "如果使用 PolarDB PostgreSQL 版，请选择 PostgreSQL。",
     searchResults: "搜索结果",
     databaseCategories: "分类",
     databaseCategorySql: "关系型数据库",

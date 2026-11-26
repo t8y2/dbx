@@ -2316,6 +2316,7 @@ export default withEnglishFallback({
       revealRaw: "Mostra testo non elaborato",
       apply: "Applica",
     },
+    polarDbPostgresPickerHint: "Se utilizzi PolarDB PostgreSQL, seleziona PostgreSQL.",
   },
   editor: {
     duckdbDraining: "La query DuckDB precedente è ancora in fase di arresto. Riprova a breve.",

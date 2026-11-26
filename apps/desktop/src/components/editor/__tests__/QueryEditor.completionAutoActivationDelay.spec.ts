@@ -105,6 +105,26 @@ describe("completion auto-activation delay (#15340)", () => {
     expect(completionStatus(view.state)).toBe("active");
   });
 
+  it.each([false, true])("handles Alt+/ with IME composing=%s", async (isComposing) => {
+    const view = await mountEditor(2000);
+    view.focus();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    if (isComposing) view.contentDOM.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    const event = new KeyboardEvent("keydown", { key: "/", code: "Slash", altKey: true, isComposing, bubbles: true, cancelable: true });
+    view.contentDOM.dispatchEvent(event);
+
+    if (isComposing) {
+      expect(event.defaultPrevented).toBe(false);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(completionStatus(view.state)).toBeNull();
+    } else {
+      expect(event.defaultPrevented).toBe(true);
+      expect(completionStatus(view.state)).toBe("pending");
+      await vi.advanceTimersByTimeAsync(100);
+      expect(completionStatus(view.state)).toBe("active");
+    }
+  });
+
   it("normalizes persisted values into the 0–5000 ms range", () => {
     expect(normalizeEditorSettings({}).completionAutoActivationDelayMs).toBe(500);
     expect(normalizeEditorSettings({ completionAutoActivationDelayMs: 1234 }).completionAutoActivationDelayMs).toBe(1234);

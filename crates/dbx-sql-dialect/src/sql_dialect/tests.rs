@@ -782,6 +782,26 @@ fn builds_table_data_where_and_schema_queries() {
         }),
         "SELECT `id`, `name` FROM `dbx_demo`.`connection_test` ORDER BY 1 LIMIT 2 OFFSET 1;"
     );
+    // Impala only needs ORDER BY when OFFSET is present; the first page must not
+    // pay for a positional `ORDER BY 1` global sort on every table open.
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Impala),
+            schema: Some("dbx_demo".to_string()),
+            table_name: "connection_test".to_string(),
+            table_type: Some("TABLE".to_string()),
+            primary_keys: Vec::new(),
+            columns: vec!["id".to_string(), "name".to_string()],
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(100),
+            offset: None,
+            where_input: None,
+            include_row_id: false,
+            ..Default::default()
+        }),
+        "SELECT `id`, `name` FROM `dbx_demo`.`connection_test` LIMIT 100;"
+    );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Kingbase),

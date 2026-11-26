@@ -358,10 +358,12 @@ pub fn build_table_data_select_sql_with_database(
         // InfluxQL only allows sorting of the timestamp column; SQL-mode
         // InfluxDB 3 tables also key naturally on `time`.
         Some("time DESC".to_string())
-    } else if database_type == Some(DatabaseType::Impala) {
-        // Impala requires ORDER BY when OFFSET is present. Keeping the same
-        // fallback on the first page also prevents page boundaries from using
-        // different row orders when the table has no explicit key.
+    } else if database_type == Some(DatabaseType::Impala) && options.offset.is_some_and(|offset| offset > 0) {
+        // Impala rejects OFFSET without ORDER BY ("ORDER BY clause is required
+        // when OFFSET is used"). The first page carries no OFFSET, so it keeps
+        // the natural scan order instead of forcing a positional ORDER BY 1
+        // global sort on every table open. Later pages keep the fallback so
+        // their boundaries stay stable.
         Some("1".to_string())
     } else {
         None

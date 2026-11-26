@@ -37,7 +37,7 @@ import {
   mongoCompletionNeedsIndexes,
   shouldAutoOpenMongoCompletion,
 } from "@/lib/mongo/mongoCompletion";
-import { buildMongoSqlCompletionItems, getMongoSqlCompletionContext, getMongoSqlCompletionResultValidFor, mongoSqlCompletionCollections, shouldAutoOpenMongoSqlCompletion } from "@/lib/mongo/mongoSqlCompletion";
+import { buildMongoSqlCompletionItems, getMongoSqlCompletionContext, getMongoSqlCompletionResultValidFor, mongoSqlCollectionKey, mongoSqlCompletionCollections, shouldAutoOpenMongoSqlCompletion } from "@/lib/mongo/mongoSqlCompletion";
 import { buildSoqlCompletionItems, getSoqlCompletionContext, getSoqlCompletionResultValidFor, resolveSoqlFieldCandidates, resolveSoqlValueField, shouldAutoOpenSoqlCompletion, soqlCompletionNeedsObjects, type SoqlCompletionField, type SoqlCompletionObject } from "@/lib/soql/soqlCompletion";
 import {
   buildSqlServerUseDatabaseCompletionItems,
@@ -783,9 +783,10 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     const fields = new Map<string, Awaited<ReturnType<typeof connectionStore.listMongoCompletionFields>>>();
     if (database) {
       try {
-        if (completionContext.mode === "collection") collections = await connectionStore.listMongoCompletionCollections(connectionId, database);
-        for (const collection of mongoSqlCompletionCollections(completionContext)) {
-          fields.set(collection, await connectionStore.listMongoCompletionFields(connectionId, database, collection));
+        // `FROM archive.users` / `FROM archive.|` read the named database, not the tab's.
+        if (completionContext.mode === "collection") collections = await connectionStore.listMongoCompletionCollections(connectionId, completionContext.collectionDatabase ?? database);
+        for (const ref of mongoSqlCompletionCollections(completionContext)) {
+          fields.set(mongoSqlCollectionKey(ref), await connectionStore.listMongoCompletionFields(connectionId, ref.database ?? database, ref.collection));
         }
       } catch {
         // Keywords stay available when the collection cannot be sampled.

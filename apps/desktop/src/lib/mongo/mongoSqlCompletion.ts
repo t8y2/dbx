@@ -1,62 +1,74 @@
 // Completion for the MongoDB SQL mode (see lib/mongo/mongoSql.ts).
 //
-// A pure library like lib/soql/soqlCompletion.ts: a context scanner reads the
-// statement around the cursor, and a builder turns the collections and sampled
-// field paths the shell mode already loads into completion items. Only syntax
-// the SQL → shell compiler accepts is offered.
+// A pure library like lib/soql/soqlCompletion.ts: a small tokenizer reads the
+// statement around the cursor the way the SQL → shell compiler does, and a
+// builder turns the collections and sampled field paths the shell mode already
+// loads into completion items. Only what the compiler accepts at the cursor's
+// position is offered.
+//
+// Grammar mirrored from mongoSql.ts:
+//   SELECT [DISTINCT] items FROM t [ [INNER|LEFT] JOIN t ON a = b ]* [WHERE e]
+//          [GROUP BY f, …] [HAVING e] [ORDER BY f [ASC|DESC], …] [LIMIT n] [OFFSET n]
+//   INSERT INTO t (cols) VALUES (…), …
+//   UPDATE t SET f = v, … [WHERE e]
+//   DELETE FROM t [WHERE e]
+// where t is `collection`, `database.collection`, or a quoted name (`a.b` in
+// backticks / double quotes is one collection name containing a dot).
 
 import type { MongoCompletionField, MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 
 export type MongoSqlCompletionMode = "none" | "statement" | "collection" | "field" | "keyword";
 
+export type MongoSqlStatementKind = "select" | "insert" | "update" | "delete";
+
 export type MongoSqlClause = "select" | "from" | "join" | "on" | "where" | "groupby" | "having" | "orderby" | "limit" | "set" | "into" | "values" | null;
 
 export interface MongoSqlCollectionRef {
   collection: string;
+  /** Database qualifier (`archive.users`); undefined = the tab's database. */
+  database?: string;
   alias?: string;
 }
 
 export interface MongoSqlCompletionContext {
   mode: MongoSqlCompletionMode;
-  /** Identifier text being completed (after any `alias.`). */
+  /** Identifier text being completed (after any `alias.` / `database.`). */
   prefix: string;
   /** Document position where the replacement starts. */
   from: number;
   /** Document position where the replacement ends (rest of the word under the cursor). */
   to: number;
+  statement: MongoSqlStatementKind | null;
   clause: MongoSqlClause;
-  /** Collection the unqualified fields belong to (FROM / UPDATE / INSERT INTO / DELETE FROM). */
-  baseCollection?: string;
+  /** FROM / UPDATE / INSERT INTO / DELETE FROM target. */
+  base?: MongoSqlCollectionRef;
   /** Joined collections, for `alias.field` items. */
   joins: MongoSqlCollectionRef[];
   /** Set when the user typed `alias.`: fields of that collection only. */
   qualifier?: MongoSqlCollectionRef;
-  /** The previous word is a complete FROM/JOIN target, so clause keywords come next. */
-  afterCollection?: boolean;
+  /** Collection mode: list collections of this database (from a typed `database.`). */
+  collectionDatabase?: string;
+  /** Keyword mode: exactly the keywords the compiler accepts here. */
+  keywords?: string[];
+  /** SELECT … AS names, usable in HAVING and ORDER BY. */
+  selectAliases: string[];
+  /** Field mode right after SELECT / SELECT DISTINCT: `*` is allowed here. */
+  selectListStart?: boolean;
 }
 
 export interface MongoSqlCompletionInput {
   collections?: string[];
-  /** Sampled field paths per collection name. */
+  /** Sampled field paths per collection, keyed by mongoSqlCollectionKey(). */
   fields?: Map<string, MongoCompletionField[]>;
+}
+
+/** Map key for one collection's fields (database-qualified collections are distinct). */
+export function mongoSqlCollectionKey(ref: Pick<MongoSqlCollectionRef, "collection" | "database">): string {
+  return `${ref.database ?? ""}\u0000${ref.collection}`;
 }
 
 const WORD = /[A-Za-z0-9_$]/;
 const IDENT_SEGMENT = /^[A-Za-z_][A-Za-z0-9_$]*$/;
-
-const CLAUSE_WORDS: Record<string, MongoSqlClause> = {
-  select: "select",
-  from: "from",
-  join: "join",
-  on: "on",
-  where: "where",
-  having: "having",
-  limit: "limit",
-  offset: "limit",
-  set: "set",
-  into: "into",
-  values: "values",
-};
 
 const STATEMENT_KEYWORDS: Array<{ label: string; detail: string; boost: number }> = [
   { label: "SELECT", detail: "find / aggregate", boost: 100 },
@@ -65,10 +77,6 @@ const STATEMENT_KEYWORDS: Array<{ label: string; detail: string; boost: number }
   { label: "UPDATE", detail: "updateMany", boost: 78 },
   { label: "DELETE FROM", detail: "deleteMany", boost: 76 },
 ];
-
-const FIELD_LIST_STARTERS = new Set(["select", "where", "and", "or", "not", "by", "on", "set", "having", "distinct"]);
-
-const AFTER_COLLECTION_KEYWORDS = ["WHERE", "INNER JOIN", "LEFT JOIN", "GROUP BY", "ORDER BY", "LIMIT", "OFFSET", "SET", "VALUES"];
 
 const CONDITION_KEYWORDS = ["AND", "OR", "NOT", "IN", "NOT IN", "LIKE", "NOT LIKE", "ILIKE", "BETWEEN", "IS NULL", "IS NOT NULL", "TRUE", "FALSE", "NULL"];
 
@@ -80,19 +88,53 @@ const AGGREGATES: Array<{ label: string; apply: string; detail: string }> = [
   { label: "MIN", apply: "MIN()", detail: "$min" },
   { label: "MAX", apply: "MAX()", detail: "$max" },
 ];
+const AGGREGATE_NAMES = new Set(["count", "sum", "avg", "min", "max"]);
 
 const VALUE_CONSTRUCTORS: Array<{ label: string; apply: string; detail: string }> = [
   { label: "ObjectId('')", apply: "ObjectId('')", detail: "ObjectId value" },
   { label: "ISODate('')", apply: "ISODate('')", detail: "Date value" },
 ];
 
-/** Strings and comments blanked out, so keyword scans never look inside them. Same length as the input. */
-function maskSql(text: string): string {
+/** Words that end a table reference instead of being its alias (as in mongoSql.ts). */
+const NOT_AN_ALIAS = new Set(["where", "join", "inner", "left", "right", "full", "cross", "on", "group", "order", "limit", "offset", "set", "values", "having", "as"]);
+
+// SELECT clauses in order; after a clause only the later ones may follow.
+const SELECT_TAIL_ORDER = ["WHERE", "GROUP BY", "HAVING", "ORDER BY", "LIMIT", "OFFSET"];
+
+interface Token {
+  kind: "word" | "quoted" | "number" | "op";
+  text: string;
+  /** Identifier value (quotes removed) for word / quoted tokens. */
+  value: string;
+  start: number;
+  end: number;
+}
+
+/** Comments blanked out (same length), so scans never look inside them. */
+function maskComments(text: string): string {
   let out = "";
   let index = 0;
+  let quote: string | null = null;
   while (index < text.length) {
     const char = text[index]!;
     const next = text[index + 1];
+    if (quote) {
+      out += char;
+      if (char === "\\" && quote === "'" && next !== undefined) {
+        out += next;
+        index += 2;
+        continue;
+      }
+      if (char === quote) quote = null;
+      index++;
+      continue;
+    }
+    if (char === "'" || char === "`" || char === '"') {
+      quote = char;
+      out += char;
+      index++;
+      continue;
+    }
     if (char === "-" && next === "-") {
       while (index < text.length && text[index] !== "\n") {
         out += " ";
@@ -107,89 +149,217 @@ function maskSql(text: string): string {
       index = stop;
       continue;
     }
-    if (char === "'" || char === '"' || char === "`") {
-      // Quoted identifiers keep a marker so `FROM "my coll"` still reads as a word.
-      const quote = char;
-      let stop = index + 1;
-      while (stop < text.length && text[stop] !== quote) stop += text[stop] === "\\" ? 2 : 1;
-      stop = Math.min(text.length, stop + 1);
-      const filler = quote === "'" ? " " : "x";
-      out += quote === "'" ? "'" + filler.repeat(Math.max(0, stop - index - 2)) + (stop - index > 1 ? "'" : "") : filler.repeat(stop - index);
-      index = stop;
-      continue;
-    }
     out += char;
     index++;
   }
   return out;
 }
 
-/** True when the cursor sits inside an unclosed single-quoted string (a value). */
-function insideString(text: string, cursor: number): boolean {
-  let open = false;
-  for (let index = 0; index < cursor; index++) {
-    const char = text[index];
-    if (char === "\\" && open) {
+/** Tokens of `text` (comments already masked); single-quoted strings become one opaque token. */
+function tokenize(text: string, offset = 0): Token[] {
+  const tokens: Token[] = [];
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index]!;
+    if (/\s/.test(char)) {
       index++;
       continue;
     }
-    if (char === "'") open = !open;
+    const start = index;
+    if (char === "'") {
+      index++;
+      while (index < text.length && text[index] !== "'") index += text[index] === "\\" ? 2 : 1;
+      index = Math.min(index + 1, text.length);
+      tokens.push({ kind: "op", text: "'", value: "", start: start + offset, end: index + offset });
+      continue;
+    }
+    if (char === "`" || char === '"') {
+      index++;
+      while (index < text.length && text[index] !== char) index++;
+      const value = text.slice(start + 1, index);
+      index = Math.min(index + 1, text.length);
+      tokens.push({ kind: "quoted", text: text.slice(start, index), value, start: start + offset, end: index + offset });
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(char)) {
+      while (index < text.length && WORD.test(text[index]!)) index++;
+      const word = text.slice(start, index);
+      tokens.push({ kind: "word", text: word, value: word, start: start + offset, end: index + offset });
+      continue;
+    }
+    if (/\d/.test(char)) {
+      while (index < text.length && /[\d.]/.test(text[index]!)) index++;
+      tokens.push({ kind: "number", text: text.slice(start, index), value: "", start: start + offset, end: index + offset });
+      continue;
+    }
+    const two = text.slice(index, index + 2);
+    const op = ["<=", ">=", "<>", "!="].includes(two) ? two : char;
+    index += op.length;
+    tokens.push({ kind: "op", text: op, value: "", start: start + offset, end: index + offset });
   }
-  return open;
+  return tokens;
+}
+
+const isIdent = (token: Token | undefined): token is Token => !!token && (token.kind === "word" || token.kind === "quoted");
+const keywordOf = (token: Token | undefined) => (token?.kind === "word" ? token.text.toLowerCase() : undefined);
+
+interface TableRefSpan {
+  ref: MongoSqlCollectionRef;
+  /** Index of the token that introduced it (FROM / JOIN / UPDATE / INTO). */
+  introducer: number;
+  /** Index of its last token (collection or alias). */
+  last: number;
+  isJoin: boolean;
+}
+
+/** A table reference starting at tokens[index], read like Parser.parseTableRef. */
+function readTableRef(tokens: Token[], index: number, introducer: number, isJoin: boolean): TableRefSpan | undefined {
+  const first = tokens[index];
+  if (!isIdent(first)) return undefined;
+  let ref: MongoSqlCollectionRef = { collection: first.value };
+  let last = index;
+  if (tokens[index + 1]?.text === "." && isIdent(tokens[index + 2])) {
+    ref = { database: first.value, collection: tokens[index + 2]!.value };
+    last = index + 2;
+  }
+  let aliasIndex = last + 1;
+  if (keywordOf(tokens[aliasIndex]) === "as") aliasIndex++;
+  const alias = tokens[aliasIndex];
+  if (isIdent(alias) && !(alias.kind === "word" && NOT_AN_ALIAS.has(alias.text.toLowerCase()))) {
+    ref.alias = alias.value;
+    last = aliasIndex;
+  }
+  return { ref, introducer, last, isJoin };
+}
+
+function statementTableRefs(tokens: Token[]): TableRefSpan[] {
+  const refs: TableRefSpan[] = [];
+  tokens.forEach((token, index) => {
+    const keyword = keywordOf(token);
+    const previous = keywordOf(tokens[index - 1]);
+    let span: TableRefSpan | undefined;
+    if (keyword === "from" || keyword === "update" || (keyword === "into" && previous === "insert")) span = readTableRef(tokens, index + 1, index, false);
+    else if (keyword === "join") span = readTableRef(tokens, index + 1, index, true);
+    if (span) refs.push(span);
+  });
+  return refs;
+}
+
+const joinRefs = (refs: TableRefSpan[]) => refs.filter((span) => span.isJoin).map((span) => ({ ...span.ref, alias: span.ref.alias ?? span.ref.collection }));
+
+/** FROM / JOIN / UPDATE / INSERT INTO / DELETE FROM targets of one statement. */
+export function mongoSqlStatementCollections(statement: string): { base?: MongoSqlCollectionRef; joins: MongoSqlCollectionRef[] } {
+  const refs = statementTableRefs(tokenize(maskComments(statement)));
+  return { base: refs.find((span) => !span.isJoin)?.ref, joins: joinRefs(refs) };
+}
+
+/** True when the cursor sits inside an unclosed string, quoted identifier or line comment. */
+function insideQuote(text: string, cursor: number): boolean {
+  let quote: string | null = null;
+  for (let index = 0; index < cursor; index++) {
+    const char = text[index]!;
+    if (quote) {
+      if (char === "\\" && quote === "'") index++;
+      else if (char === quote) quote = null;
+    } else if (char === "'" || char === "`" || char === '"') quote = char;
+    else if (char === "-" && text[index + 1] === "-") {
+      const end = text.indexOf("\n", index);
+      if (end < 0 || end >= cursor) return true;
+      index = end;
+    } else if (char === "/" && text[index + 1] === "*") {
+      const end = text.indexOf("*/", index + 2);
+      if (end < 0 || end + 2 > cursor) return true;
+      index = end + 1;
+    }
+  }
+  return quote !== null;
 }
 
 function statementBounds(masked: string, cursor: number): { start: number; end: number } {
-  const start = masked.lastIndexOf(";", cursor - 1) + 1;
-  const endIndex = masked.indexOf(";", cursor);
-  return { start, end: endIndex < 0 ? masked.length : endIndex };
-}
-
-function unquote(word: string): string {
-  return word.replace(/^[`"](.*)[`"]$/, "$1");
-}
-
-/** FROM / JOIN / UPDATE / INSERT INTO / DELETE FROM targets of one statement. */
-export function mongoSqlStatementCollections(statement: string): { base?: string; baseAlias?: string; joins: MongoSqlCollectionRef[] } {
-  const masked = maskSql(statement);
-  const original = statement;
-  const words: Array<{ text: string; start: number }> = [];
-  const pattern = /[`"][^`"]*[`"]|[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)*/g;
-  for (const match of masked.matchAll(pattern)) {
-    const start = match.index ?? 0;
-    words.push({ text: original.slice(start, start + match[0].length), start });
-  }
-  let base: string | undefined;
-  let baseAlias: string | undefined;
-  const joins: MongoSqlCollectionRef[] = [];
-  const aliasAfter = (index: number) => {
-    let next = words[index + 1];
-    if (next?.text.toLowerCase() === "as") next = words[index + 2];
-    if (!next) return undefined;
-    return /^(where|join|inner|left|right|full|cross|on|group|order|limit|offset|set|values|having)$/i.test(next.text) ? undefined : unquote(next.text);
-  };
-  words.forEach((word, index) => {
-    const lower = word.text.toLowerCase();
-    const target = words[index + 1];
-    if (!target) return;
-    const prev = words[index - 1]?.text.toLowerCase();
-    const name = unquote(target.text).split(".").pop()!;
-    if ((lower === "from" && prev !== "delete") || lower === "update" || (lower === "into" && prev === "insert") || (lower === "from" && prev === "delete")) {
-      if (!base) {
-        base = name;
-        baseAlias = lower === "from" ? aliasAfter(index + 1) : undefined;
+  // A `;` inside a string does not end the statement.
+  let start = 0;
+  let end = masked.length;
+  let quote: string | null = null;
+  for (let index = 0; index < masked.length; index++) {
+    const char = masked[index]!;
+    if (quote) {
+      if (char === "\\" && quote === "'") index++;
+      else if (char === quote) quote = null;
+    } else if (char === "'" || char === "`" || char === '"') quote = char;
+    else if (char === ";") {
+      if (index < cursor) start = index + 1;
+      else {
+        end = index;
+        break;
       }
-    } else if (lower === "join") {
-      joins.push({ collection: name, alias: aliasAfter(index + 1) ?? name });
     }
+  }
+  return { start, end };
+}
+
+/** The clause the cursor is in: the last clause keyword before it. */
+function clauseAt(tokens: Token[]): MongoSqlClause {
+  for (let index = tokens.length - 1; index >= 0; index--) {
+    const keyword = keywordOf(tokens[index]);
+    const before = keywordOf(tokens[index - 1]);
+    if (keyword === "by" && (before === "group" || before === "order")) return before === "group" ? "groupby" : "orderby";
+    switch (keyword) {
+      case "select":
+        return "select";
+      case "from":
+      case "update":
+        return "from";
+      case "join":
+        return "join";
+      case "on":
+        return "on";
+      case "where":
+        return "where";
+      case "having":
+        return "having";
+      case "limit":
+      case "offset":
+        return "limit";
+      case "set":
+        return "set";
+      case "into":
+        return "into";
+      case "values":
+        return "values";
+    }
+  }
+  return null;
+}
+
+/** SELECT clauses that may still follow the last one present before the cursor. */
+function selectTail(before: Token[], all: Token[]): string[] {
+  let reached = -1;
+  before.forEach((token, index) => {
+    const keyword = keywordOf(token);
+    const label = keyword === "by" ? `${keywordOf(before[index - 1])?.toUpperCase()} BY` : keyword?.toUpperCase();
+    const position = label ? SELECT_TAIL_ORDER.indexOf(label) : -1;
+    if (position > reached) reached = position;
   });
-  return { base, baseAlias, joins };
+  // HAVING needs GROUP BY, DISTINCT or an aggregate in the SELECT list (Parser.finishSelect).
+  const grouped = all.some((token, index) => keywordOf(token) === "by" && keywordOf(all[index - 1]) === "group") || keywordOf(all[1]) === "distinct" || all.some((token, index) => AGGREGATE_NAMES.has(keywordOf(token) ?? "") && all[index + 1]?.text === "(");
+  return SELECT_TAIL_ORDER.slice(reached + 1).filter((label) => label !== "HAVING" || grouped);
+}
+
+function selectAliases(tokens: Token[]): string[] {
+  const fromIndex = tokens.findIndex((token) => keywordOf(token) === "from");
+  const selectList = fromIndex < 0 ? tokens : tokens.slice(0, fromIndex);
+  const aliases: string[] = [];
+  selectList.forEach((token, index) => {
+    if (keywordOf(token) === "as" && isIdent(selectList[index + 1])) aliases.push(selectList[index + 1]!.value);
+  });
+  return aliases;
 }
 
 export function getMongoSqlCompletionContext(text: string, cursor: number): MongoSqlCompletionContext {
   const safeCursor = Math.max(0, Math.min(cursor, text.length));
-  const none: MongoSqlCompletionContext = { mode: "none", prefix: "", from: safeCursor, to: safeCursor, clause: null, joins: [] };
-  if (insideString(text, safeCursor)) return none;
-  const masked = maskSql(text);
+  const none: MongoSqlCompletionContext = { mode: "none", prefix: "", from: safeCursor, to: safeCursor, statement: null, clause: null, joins: [], selectAliases: [] };
+  if (insideQuote(text, safeCursor)) return none;
+  const masked = maskComments(text);
   const { start, end } = statementBounds(masked, safeCursor);
 
   // Word (possibly dotted) under the cursor.
@@ -200,69 +370,95 @@ export function getMongoSqlCompletionContext(text: string, cursor: number): Mong
   const typed = text.slice(wordStart, safeCursor);
   if (/^\d/.test(typed)) return none;
 
-  const statementText = text.slice(start, end);
-  const { base, baseAlias, joins } = mongoSqlStatementCollections(statementText);
-
-  // Words before the one being typed, for clause detection.
-  const before = masked.slice(start, wordStart);
-  const previousWords = [...before.matchAll(/[A-Za-z_][A-Za-z0-9_$]*|[(),=<>*]/g)].map((match) => match[0].toLowerCase());
-  const previous = previousWords[previousWords.length - 1];
-  const previous2 = previousWords[previousWords.length - 2];
-
-  let clause: MongoSqlClause = null;
-  for (let index = previousWords.length - 1; index >= 0; index--) {
-    const word = previousWords[index]!;
-    if (word === "by" && (previousWords[index - 1] === "group" || previousWords[index - 1] === "order")) {
-      clause = previousWords[index - 1] === "group" ? "groupby" : "orderby";
-      break;
-    }
-    if (word === "update") {
-      clause = "from";
-      break;
-    }
-    if (CLAUSE_WORDS[word]) {
-      clause = CLAUSE_WORDS[word]!;
-      break;
-    }
-  }
-
-  const prefixAll = typed;
+  const allTokens = tokenize(masked.slice(start, end), start);
+  const tokens = allTokens.filter((token) => token.end <= wordStart);
+  const statement = (["select", "insert", "update", "delete"] as const).find((kind) => kind === keywordOf(allTokens[0])) ?? null;
+  // Targets as written in the whole statement, except a word still being typed right after one.
+  const statementTokens = allTokens.filter((token) => token.end <= wordStart || token.start >= wordEnd);
+  const refs = statementTableRefs(statementTokens);
+  const baseRef = refs.find((span) => !span.isJoin)?.ref;
+  const joins = joinRefs(refs);
+  const clause = clauseAt(tokens);
+  const aliases = statement === "select" ? selectAliases(allTokens) : [];
   const context = (mode: MongoSqlCompletionMode, extra: Partial<MongoSqlCompletionContext> = {}): MongoSqlCompletionContext => ({
     mode,
-    prefix: prefixAll,
+    prefix: typed,
     from: wordStart,
     to: wordEnd,
+    statement,
     clause,
-    baseCollection: base,
+    base: baseRef,
     joins,
+    selectAliases: aliases,
     ...extra,
   });
 
-  if (previousWords.length === 0) return context("statement");
+  if (tokens.length === 0) return context("statement");
+  const previous = tokens[tokens.length - 1]!;
+  const previousKeyword = keywordOf(previous);
 
-  // Collection right after FROM / JOIN / UPDATE / INTO.
-  if (previous === "from" || previous === "join" || previous === "update" || (previous === "into" && previous2 === "insert")) {
+  // Collection right after FROM / JOIN / UPDATE / INSERT INTO; `database.` lists that database.
+  const introducesTable = previousKeyword === "from" || previousKeyword === "join" || previousKeyword === "update" || (previousKeyword === "into" && keywordOf(tokens[tokens.length - 2]) === "insert");
+  if (introducesTable) {
+    const dot = typed.indexOf(".");
+    if (dot > 0) return context("collection", { collectionDatabase: typed.slice(0, dot), prefix: typed.slice(dot + 1), from: wordStart + dot + 1 });
     return context("collection");
   }
-
-  // `FROM users |` or `FROM users u |`: the next clause keyword.
-  if (clause === "from" || clause === "join") {
-    if (!prefixAll || !/\./.test(prefixAll)) return context("keyword", { afterCollection: true });
+  // `FROM \`archive\`.|` — a quoted database name followed by a dot.
+  if (previous.text === "." && isIdent(tokens[tokens.length - 2]) && keywordOf(tokens[tokens.length - 3]) && ["from", "join", "update", "into"].includes(keywordOf(tokens[tokens.length - 3])!)) {
+    return context("collection", { collectionDatabase: tokens[tokens.length - 2]!.value });
   }
 
-  if (clause === "limit" || clause === "values" || clause === "into") return clause === "into" ? context("field") : none;
+  // Just after a complete table reference: the keywords that may follow it.
+  const beforeRefs = statementTableRefs(tokens);
+  const finishedRef = beforeRefs.find((span) => tokens.length - 1 === span.last);
+  if (finishedRef && !typed.includes(".")) {
+    if (finishedRef.isJoin) return context("keyword", { keywords: ["ON"] });
+    if (statement === "select") return context("keyword", { keywords: ["INNER JOIN", "LEFT JOIN", ...selectTail(tokens, allTokens)] });
+    if (statement === "update") return context("keyword", { keywords: ["SET"] });
+    if (statement === "delete") return context("keyword", { keywords: ["WHERE"] });
+    return none; // INSERT INTO t needs a column list next
+  }
+  if (clause === "from" || clause === "join" || clause === "limit" || clause === "values") return none;
 
-  // `alias.` / `collection.` qualifies the field.
-  const dot = prefixAll.lastIndexOf(".");
-  if (dot > 0) {
-    const head = prefixAll.slice(0, prefixAll.indexOf("."));
-    const qualifier =
-      joins.find((join) => join.alias?.toLowerCase() === head.toLowerCase() || join.collection.toLowerCase() === head.toLowerCase()) ?? (base && (head.toLowerCase() === base.toLowerCase() || head.toLowerCase() === baseAlias?.toLowerCase()) ? { collection: base, alias: head } : undefined);
-    if (qualifier) {
-      return context("field", { qualifier, prefix: prefixAll.slice(prefixAll.indexOf(".") + 1), from: wordStart + prefixAll.indexOf(".") + 1 });
+  // INSERT INTO t (a, b, |) VALUES … : columns inside the first parentheses, then VALUES.
+  if (statement === "insert") {
+    const open = tokens.findIndex((token) => token.text === "(");
+    const close = tokens.findIndex((token) => token.text === ")");
+    if (open >= 0 && close < 0 && (previous.text === "(" || previous.text === ",")) return context("field", { clause: "into" });
+    if (close >= 0 && previous.text === ")" && clause === "into") return context("keyword", { keywords: ["VALUES"] });
+    return none;
+  }
+
+  // ON a.x = b.y — once the equality is complete, more JOINs or the SELECT tail follow.
+  if (clause === "on") {
+    const onIndex = tokens.map((token) => keywordOf(token)).lastIndexOf("on");
+    const onTokens = tokens.slice(onIndex + 1);
+    const equals = onTokens.findIndex((token) => token.text === "=");
+    if (equals >= 0 && equals < onTokens.length - 1 && isIdent(previous)) {
+      return context("keyword", { keywords: ["INNER JOIN", "LEFT JOIN", ...selectTail(tokens, allTokens)] });
     }
   }
-  return context("field");
+
+  // ORDER BY f |  → ASC / DESC and later clauses; after ASC / DESC only `,` or later clauses.
+  if (clause === "orderby" && !typed.includes(".")) {
+    if (previousKeyword === "asc" || previousKeyword === "desc") return context("keyword", { keywords: ["LIMIT", "OFFSET"] });
+    if (isIdent(previous) && previousKeyword !== "by") return context("keyword", { keywords: ["ASC", "DESC", "LIMIT", "OFFSET"] });
+  }
+
+  // GROUP BY f |  → later clauses.
+  if (clause === "groupby" && isIdent(previous) && previousKeyword !== "by" && !typed.includes(".")) {
+    return context("keyword", { keywords: selectTail(tokens, allTokens) });
+  }
+
+  // `alias.` / `collection.` qualifies the field.
+  const dot = typed.indexOf(".");
+  if (dot > 0) {
+    const head = typed.slice(0, dot).toLowerCase();
+    const qualifier = joins.find((join) => join.alias?.toLowerCase() === head || join.collection.toLowerCase() === head) ?? (baseRef && (head === baseRef.collection.toLowerCase() || head === baseRef.alias?.toLowerCase()) ? baseRef : undefined);
+    if (qualifier) return context("field", { qualifier, prefix: typed.slice(dot + 1), from: wordStart + dot + 1 });
+  }
+  return context("field", { selectListStart: clause === "select" && previousKeyword === "select" });
 }
 
 function quoteFieldPath(path: string): string {
@@ -270,6 +466,11 @@ function quoteFieldPath(path: string): string {
     .split(".")
     .map((segment) => (IDENT_SEGMENT.test(segment) ? segment : `\`${segment.replace(/`/g, "")}\``))
     .join(".");
+}
+
+/** A collection name as the compiler reads it: dotted or odd names must be quoted to stay one name. */
+export function quoteMongoSqlCollection(name: string): string {
+  return IDENT_SEGMENT.test(name) ? name : `\`${name.replace(/`/g, "")}\``;
 }
 
 function keywordItem(label: string, detail: string, boost: number): MongoCompletionItem {
@@ -287,77 +488,105 @@ export function buildMongoSqlCompletionItems(context: MongoSqlCompletionContext,
 
   if (context.mode === "collection") {
     for (const collection of input.collections ?? []) {
-      items.push({ label: collection, type: "table", detail: "collection", boost: 90, apply: IDENT_SEGMENT.test(collection) ? collection : `\`${collection}\`` });
+      items.push({ label: collection, type: "table", detail: context.collectionDatabase ? `collection · ${context.collectionDatabase}` : "collection", boost: 90, apply: quoteMongoSqlCollection(collection) });
     }
     return items;
   }
 
   if (context.mode === "keyword") {
-    AFTER_COLLECTION_KEYWORDS.forEach((label, index) => items.push(keywordItem(label, "clause", 90 - index)));
+    (context.keywords ?? []).forEach((label, index) => items.push(keywordItem(label, "clause", 90 - index)));
     return items;
   }
 
   // Field mode.
-  const fieldsOf = (collection: string) => input.fields?.get(collection) ?? [];
+  const fieldsOf = (ref: MongoSqlCollectionRef) => input.fields?.get(mongoSqlCollectionKey(ref)) ?? [];
+  const describe = (ref: MongoSqlCollectionRef) => (ref.database ? `${ref.database}.${ref.collection}` : ref.collection);
   if (context.qualifier) {
-    for (const field of fieldsOf(context.qualifier.collection)) {
-      items.push({ label: field.name, type: "column", detail: field.type, boost: 95, apply: quoteFieldPath(field.name) });
-    }
+    for (const field of fieldsOf(context.qualifier)) items.push({ label: field.name, type: "column", detail: field.type, boost: 95, apply: quoteFieldPath(field.name) });
     return items;
   }
-  if (context.baseCollection) {
-    for (const field of fieldsOf(context.baseCollection)) {
-      items.push({ label: field.name, type: "column", detail: field.type ? `${field.type} · ${context.baseCollection}` : context.baseCollection, boost: 95, apply: quoteFieldPath(field.name) });
+  const clause = context.clause;
+  const singleCollection = clause === "set" || clause === "into" || context.statement !== "select";
+  if (context.base) {
+    for (const field of fieldsOf(context.base)) {
+      items.push({ label: field.name, type: "column", detail: field.type ? `${field.type} · ${describe(context.base)}` : describe(context.base), boost: 95, apply: quoteFieldPath(field.name) });
     }
   }
-  for (const join of context.joins) {
-    const alias = join.alias ?? join.collection;
-    for (const field of fieldsOf(join.collection)) {
-      const label = `${alias}.${field.name}`;
-      items.push({ label, type: "column", detail: field.type ? `${field.type} · ${join.collection}` : join.collection, boost: 85, apply: `${quoteFieldPath(alias)}.${quoteFieldPath(field.name)}` });
+  if (!singleCollection) {
+    for (const join of context.joins) {
+      const alias = join.alias ?? join.collection;
+      for (const field of fieldsOf(join)) {
+        items.push({ label: `${alias}.${field.name}`, type: "column", detail: field.type ? `${field.type} · ${describe(join)}` : describe(join), boost: 85, apply: `${quoteFieldPath(alias)}.${quoteFieldPath(field.name)}` });
+      }
     }
   }
 
-  const clause = context.clause;
-  if (clause === "select" || clause === "having" || clause === "orderby") {
-    for (const fn of AGGREGATES) items.push({ label: fn.label, type: "function", detail: fn.detail, boost: 60, apply: fn.apply });
+  const tail = (labels: string[]) => labels.forEach((label) => items.push(keywordItem(label, "clause", 40)));
+  const aggregates = () => AGGREGATES.forEach((fn) => items.push({ label: fn.label, type: "function", detail: fn.detail, boost: 60, apply: fn.apply }));
+  const aliases = () => context.selectAliases.forEach((alias) => items.push({ label: alias, type: "column", detail: "alias", boost: 97, apply: alias }));
+  const conditions = () => CONDITION_KEYWORDS.forEach((label, index) => items.push(keywordItem(label, "condition", 50 - index)));
+  const constructors = () => VALUE_CONSTRUCTORS.forEach((ctor) => items.push({ label: ctor.label, type: "function", detail: ctor.detail, boost: 45, apply: ctor.apply }));
+
+  switch (clause) {
+    case "select":
+      aggregates();
+      items.push(keywordItem("FROM", "collection", 70), keywordItem("AS", "alias", 55));
+      if (context.selectListStart) items.push({ label: "*", type: "keyword", detail: "all fields", boost: 50, apply: "* " });
+      break;
+    case "where":
+      conditions();
+      constructors();
+      if (context.statement === "select") tail(["GROUP BY", "ORDER BY", "LIMIT", "OFFSET"]);
+      break;
+    case "having":
+      aliases();
+      aggregates();
+      conditions();
+      tail(["ORDER BY", "LIMIT", "OFFSET"]);
+      break;
+    case "orderby":
+      // ORDER BY takes a column or SELECT alias — aggregates are rejected by the compiler.
+      aliases();
+      break;
+    case "set":
+      constructors();
+      items.push(keywordItem("WHERE", "clause", 40));
+      break;
+    default:
+      // ON / GROUP BY / INSERT column list: fields only.
+      break;
   }
-  if (clause === "select") {
-    items.push(keywordItem("FROM", "collection", 70), keywordItem("AS", "alias", 55));
-    if (!context.baseCollection) items.push({ label: "*", type: "keyword", detail: "all fields", boost: 50, apply: "* " });
-  }
-  if (clause === "where" || clause === "having" || clause === "on") {
-    CONDITION_KEYWORDS.forEach((label, index) => items.push(keywordItem(label, "condition", 50 - index)));
-    for (const ctor of VALUE_CONSTRUCTORS) items.push({ label: ctor.label, type: "function", detail: ctor.detail, boost: 45, apply: ctor.apply });
-    for (const label of ["GROUP BY", "ORDER BY", "LIMIT"]) items.push(keywordItem(label, "clause", 40));
-  }
-  if (clause === "groupby") for (const label of ["HAVING", "ORDER BY", "LIMIT"]) items.push(keywordItem(label, "clause", 40));
-  if (clause === "orderby") {
-    items.push(keywordItem("ASC", "ascending", 58), keywordItem("DESC", "descending", 58), keywordItem("LIMIT", "clause", 40), keywordItem("OFFSET", "clause", 38));
-  }
-  if (clause === "set") for (const ctor of VALUE_CONSTRUCTORS) items.push({ label: ctor.label, type: "function", detail: ctor.detail, boost: 45, apply: ctor.apply });
   return items;
 }
 
 /** Collections whose fields a field-mode context needs. */
-export function mongoSqlCompletionCollections(context: MongoSqlCompletionContext): string[] {
+export function mongoSqlCompletionCollections(context: MongoSqlCompletionContext): MongoSqlCollectionRef[] {
   if (context.mode !== "field") return [];
-  if (context.qualifier) return [context.qualifier.collection];
-  return [...new Set([context.baseCollection, ...context.joins.map((join) => join.collection)].filter((name): name is string => !!name))];
+  if (context.qualifier) return [context.qualifier];
+  const singleCollection = context.clause === "set" || context.clause === "into" || context.statement !== "select";
+  const refs = [context.base, ...(singleCollection ? [] : context.joins)].filter((ref): ref is MongoSqlCollectionRef => !!ref);
+  const seen = new Set<string>();
+  return refs.filter((ref) => {
+    const key = mongoSqlCollectionKey(ref);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
-/** Open automatically while typing a word, after `.`, and after FROM / JOIN / UPDATE / INTO + space. */
+const FIELD_LIST_STARTERS = new Set(["select", "where", "and", "or", "not", "by", "on", "set", "having", "distinct"]);
+
+/** Open automatically while typing a word, after `.`, and after FROM / JOIN / UPDATE / INTO / WHERE / AND / BY + space. */
 export function shouldAutoOpenMongoSqlCompletion(text: string, cursor: number): boolean {
   const safeCursor = Math.max(0, Math.min(cursor, text.length));
   const previous = text[safeCursor - 1];
   if (!previous) return false;
-  if (insideString(text, safeCursor)) return false;
+  if (insideQuote(text, safeCursor)) return false;
   if (previous === ".") return true;
   if (WORD.test(previous)) return !/^\d+$/.test(text.slice(0, safeCursor).match(/[A-Za-z0-9_$]+$/)?.[0] ?? "");
   if (/\s/.test(previous)) {
     const context = getMongoSqlCompletionContext(text, safeCursor);
     if (context.mode === "collection") return true;
-    // Field lists right after the words that start one: `WHERE |`, `AND |`, `ORDER BY |`, `SELECT |`.
     const lastWord = text
       .slice(0, safeCursor)
       .match(/([A-Za-z]+)\s+$/)?.[1]
@@ -368,5 +597,5 @@ export function shouldAutoOpenMongoSqlCompletion(text: string, cursor: number): 
 }
 
 export function getMongoSqlCompletionResultValidFor(): RegExp {
-  return /^[A-Za-z0-9_$.]*$/;
+  return /^[A-Za-z0-9_$]*$/;
 }

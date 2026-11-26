@@ -665,6 +665,23 @@ describe("QueryEditor completion provider ownership", () => {
     expect(result?.from).toBe(doc.length - "mob".length);
   });
 
+  it("samples fields from the qualified database in MongoDB SQL mode", async () => {
+    const { store, provide } = createHarness({ databaseType: "mongodb", mongoQueryLanguage: "sql", modelValue: "SELECT * FROM archive.users WHERE arch" });
+    store.listMongoCompletionFields.mockResolvedValue([{ name: "archived_at", type: "date" }]);
+    const result = await provide();
+    expect(store.listMongoCompletionFields).toHaveBeenCalledWith("connection", "archive", "users");
+    expect(store.listMongoCompletionFields).not.toHaveBeenCalledWith("connection", "demo", "users");
+    expect(result?.options.map((option) => option.label)).toContain("archived_at");
+  });
+
+  it("lists the qualified database's collections after `database.` in MongoDB SQL mode", async () => {
+    const { store, provide } = createHarness({ databaseType: "mongodb", mongoQueryLanguage: "sql", modelValue: "SELECT * FROM archive.us" });
+    store.listMongoCompletionCollections.mockResolvedValue(["users", "audit.logs"]);
+    const result = await provide();
+    expect(store.listMongoCompletionCollections).toHaveBeenCalledWith("connection", "archive");
+    expect(result?.options.map((option) => option.label)).toContain("users");
+  });
+
   it("keeps SQL keywords in MongoDB SQL mode when the collection cannot be sampled", async () => {
     const { store, provide } = createHarness({ databaseType: "mongodb", mongoQueryLanguage: "sql", modelValue: "SELECT * FROM users WHERE st" });
     store.listMongoCompletionFields.mockRejectedValue(new Error("offline"));

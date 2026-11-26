@@ -174,12 +174,22 @@ describe("Oracle routine source save", () => {
       .mockResolvedValueOnce({ operation: record({ readback: null }), lifecycle: "terminal", error: null })
       .mockResolvedValueOnce({ operation: record(), lifecycle: "terminal", error: null });
 
-    const settled = await save();
-    expect(settled.lifecycle).toBe("terminal");
-    expect(settled.readback?.state).toBe("verified");
-    // Status reads only: the DDL is dispatched once and readback is never re-run here.
-    expect(api.executeOracleRoutineOperation).toHaveBeenCalledTimes(1);
-    expect(api.observeOracleRoutineOperation).toHaveBeenCalledWith("original-operation", false);
+    // Drive the poll with fake timers: its real interval is seconds long, and waiting it
+    // out here would hold the event loop long enough to time out unrelated suites that
+    // happen to share this worker.
+    vi.useFakeTimers();
+    try {
+      const settling = save();
+      await vi.runAllTimersAsync();
+      const settled = await settling;
+      expect(settled.lifecycle).toBe("terminal");
+      expect(settled.readback?.state).toBe("verified");
+      // Status reads only: the DDL is dispatched once and readback is never re-run here.
+      expect(api.executeOracleRoutineOperation).toHaveBeenCalledTimes(1);
+      expect(api.observeOracleRoutineOperation).toHaveBeenCalledWith("original-operation", false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports a failed write at once instead of waiting for a readback", async () => {

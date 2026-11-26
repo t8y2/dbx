@@ -134,6 +134,35 @@ END`;
     expect(foldedTextAtLine(state, 10)).toBe("\n  SELECT 2;\n");
   });
 
+  it("regression: a labeled END WHILE closer must not pop the enclosing BEGIN (MySQL `LEAVE lbl` idiom)", () => {
+    // `endsStatement` used to require `;`/end-of-document directly after the continuation word, so
+    // the label identifier in `END WHILE lbl;` made it return false and that `END` popped the
+    // enclosing `BEGIN...END` pair, desyncing every later pair (same mechanism as dbx#15561).
+    const sql = `BEGIN
+  WHILE done = 0 DO
+    SET done = 1;
+  END WHILE outer_loop;
+  SELECT 2;
+END`;
+    const state = stateFor(sql);
+
+    expect(foldedTextAtLine(state, 1)).toContain("END WHILE outer_loop;");
+  });
+
+  it("regression: a labeled END LOOP closer still skips the whole statement", () => {
+    const sql = `BEGIN
+  LOOP
+    LEAVE main_loop;
+  END LOOP main_loop;
+  SELECT 2;
+END`;
+    const state = stateFor(sql);
+
+    const folded = foldedTextAtLine(state, 1);
+    expect(folded).not.toBeNull();
+    expect(folded).toContain("END LOOP main_loop;");
+  });
+
   it("regression: a same-line IF statement after a bare END still closes the block (dbx#15561)", () => {
     // A one-line T-SQL script puts the next statement's `IF` in the slot right after the block's
     // `END` ("END IF @b = 2 BEGIN"), which reads like `END IF` unless the `;` requirement is

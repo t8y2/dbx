@@ -91,9 +91,12 @@ function isEndContinuation(state: EditorState, end: SyntaxNode, next: SyntaxNode
 // that same slot (`... END IF @b = 2 BEGIN ...`), which the same-line check alone still reads as a
 // continuation of a construct this service never pushed. Treat end-of-document as a terminator so
 // an unfinished `END IF` keeps the previous, harmless behaviour while the user is still typing.
+// MySQL's `END WHILE lbl;` and Oracle's `END LOOP label;` carry one trailing label identifier
+// (the `LEAVE lbl` idiom) before the terminator, so a single optional identifier is tolerated too.
 function endsStatement(state: EditorState, node: SyntaxNode): boolean {
   const doc = state.doc;
   let pos = node.to;
+  let labelAllowed = true;
   while (pos < doc.length) {
     const char = state.sliceDoc(pos, pos + 1);
     if (/\s/.test(char)) {
@@ -108,6 +111,12 @@ function endsStatement(state: EditorState, node: SyntaxNode): boolean {
       const commentEnd = state.sliceDoc(pos, Math.min(doc.length, pos + 4096)).indexOf("*/");
       if (commentEnd < 0) return true;
       pos += commentEnd + 2;
+      continue;
+    }
+    if (labelAllowed && /[A-Za-z_$]/.test(char)) {
+      labelAllowed = false;
+      pos++;
+      while (pos < doc.length && /[A-Za-z0-9_$]/.test(state.sliceDoc(pos, pos + 1))) pos++;
       continue;
     }
     return char === ";";

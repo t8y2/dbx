@@ -41,6 +41,32 @@ const DAMENG_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW
 export function supportsSchemaIndexManagement(dbType?: DatabaseType): boolean {
   return dbType === "oracle" || dbType === "oceanbase-oracle" || dbType === "dameng";
 }
+
+// MySQL-family servers keep leading/trailing spaces inside quoted identifiers
+// (`\` orders \`` is a different table from `\`orders\``). Table-like rows from
+// these databases must carry the driver-reported name byte-for-byte, otherwise
+// the sidebar, object browser and later ALTER statements address the wrong
+// table (#14905). Other dialects keep the historical normalized name.
+const EXACT_TABLE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb"]);
+
+export function isTableLikeObjectKind(objectKind?: string | null): boolean {
+  if (!objectKind) return false;
+  const normalized = objectKind
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+  return normalized === "TABLE" || normalized === "VIEW" || normalized === "MATERIALIZED_VIEW";
+}
+
+/**
+ * Whether a table-like object's driver-reported name and schema must be kept
+ * exactly as returned (only emptiness-trimmed) instead of normalized.
+ * `objectKind` must already be a normalized sidebar kind (TABLE/VIEW/
+ * MATERIALIZED_VIEW); callers pass the result of `normalizeSidebarObjectKind`.
+ */
+export function preservesExactTableIdentifier(dbType?: DatabaseType, objectKind?: string | null): boolean {
+  return !!dbType && EXACT_TABLE_IDENTIFIER_DATABASES.has(dbType) && isTableLikeObjectKind(objectKind);
+}
 const XUGU_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
 const FIREBIRD_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION_INTERNAL", "FUNCTION_UDF", "TRIGGER", "SEQUENCE", "INDEX", "PACKAGE"];
 const PACKAGE_MEMBER_EXPANSION_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "xugu"]);

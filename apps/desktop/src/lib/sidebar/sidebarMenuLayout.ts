@@ -21,7 +21,18 @@ export function sidebarMenuScope(type: SidebarMenuTargetType): SidebarMenuScope 
 }
 
 const primaryActions: Record<SidebarMenuScope, readonly string[]> = {
-  connection: ["connection.cancelConnecting", "contextMenu.openConnection", "contextMenu.disconnectConnection", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.openDatabaseBrowser", "contextMenu.createDatabase", "contextMenu.editConnection", "contextMenu.refreshChildren"],
+  connection: [
+    "connection.cancelConnecting",
+    "contextMenu.openConnection",
+    "contextMenu.disconnectConnection",
+    "contextMenu.newQuery",
+    "savedSql.openDefaultQuery",
+    "contextMenu.openDatabaseBrowser",
+    "connection.batchTestConnections",
+    "contextMenu.createDatabase",
+    "contextMenu.editConnection",
+    "contextMenu.refreshChildren",
+  ],
   // Closing a database hides itself once the database is already closed, so it leads the database menu
   // and "browse objects" stays first for databases that cannot be closed.
   database: ["contextMenu.closeDatabaseConnection", "contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.createDatabase", "contextMenu.refreshChildren"],
@@ -91,7 +102,7 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "diff.title",
     "dataDictionary.title",
   ],
-  copy: ["contextMenu.copyName", "contextMenu.copyConnectionInfo", "contextMenu.copyStructureAs", "contextMenu.copyFinalProxyPort", "contextMenu.copyTable", "contextMenu.pasteTable"],
+  copy: ["contextMenu.copyName", "contextMenu.copyConnectionInfo", "contextMenu.copyStructureAs", "contextMenu.copyFinalProxyPort", "contextMenu.copyTable", "contextMenu.pasteTable", "contextMenu.copyView", "contextMenu.pasteView"],
   organize: [
     "contextMenu.setDefaultDatabase",
     "contextMenu.clearDefaultDatabase",
@@ -99,6 +110,7 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "contextMenu.clearDefaultSchema",
     "contextMenu.editDatabaseProperties",
     "contextMenu.renameDatabase",
+    "contextMenu.renameSchema",
     "contextMenu.createSchema",
     "contextMenu.editSchemaComment",
     "contextMenu.configureVisibleObjects",

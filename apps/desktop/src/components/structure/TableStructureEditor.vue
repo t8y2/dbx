@@ -113,6 +113,7 @@ import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { applyDdlDatabaseQualifier, formatDdlForDisplay, formatGeneratedDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard, eventTargetUsesNativeClipboard, isPlainClipboardShortcut } from "@/lib/common/clipboard";
+import { structureRowClickTargetOwnsFocus, structureRowClosestControl } from "@/lib/table/structureRowClickFocus";
 import { formatTsv } from "@/lib/export/exportFormats";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
@@ -4732,6 +4733,12 @@ function onColumnRowMouseDown(event: MouseEvent) {
   if (event.button === 0) {
     columnContextMenuButton = null;
     columnContextMenuCtrlKey = false;
+    // On macOS WebKit, <button> is not mouse-focusable, so mousedown on a popup
+    // trigger inside a focusable scroller moves focus to the scroller instead
+    // and triggers Reka DismissableLayer focusOutside on popovers/menus (#15596).
+    if (!event.ctrlKey && structureRowClosestControl(event.target, "[aria-haspopup]")) {
+      event.preventDefault();
+    }
   } else {
     columnContextMenuButton = event.button;
     columnContextMenuCtrlKey = event.ctrlKey;
@@ -4753,7 +4760,11 @@ function onColumnRowClick(column: EditableStructureColumn, event: MouseEvent) {
   columnContextMenuCtrlKey = false;
   columnPointerSelectionActive = false;
   if (!columnIsSelectable(column)) return;
-  if (!eventTargetUsesNativeClipboard(event)) structureScrollerElement(columnsScrollerRef.value)?.focus({ preventScroll: true });
+  // Focus the scroller only for inert cell content, so the row clipboard shortcuts keep
+  // acting on the table. A control under the pointer must keep focus: moving it to the
+  // scroller dismissed the dropdown/popover that the same click had just opened, because
+  // reka's popover and dropdown layers close on focus-outside (#15585, #15596).
+  if (!eventTargetUsesNativeClipboard(event) && !structureRowClickTargetOwnsFocus(event.target)) structureScrollerElement(columnsScrollerRef.value)?.focus({ preventScroll: true });
   if (event.shiftKey) {
     selectColumnRangeFromAnchor(column);
     return;
@@ -8809,7 +8820,7 @@ watch(
             <CustomContextMenu :items="activeColumnContextMenuItems" @close="clearColumnContextMenuTarget" v-slot="columnContextMenuSlot">
               <RecycleScroller
                 ref="columnsScrollerRef"
-                class="structure-column-virtual-scroller structure-table-scroller h-full overflow-auto"
+                class="structure-column-virtual-scroller structure-table-scroller h-full overflow-auto outline-none"
                 :style="{
                   '--structure-column-table-width': columnTableWidth + 'px',
                   '--structure-column-row-height': structureColumnRowHeight + 'px',
@@ -8826,7 +8837,7 @@ watch(
                 key-field="id"
                 item-class="structure-column-virtual-row"
                 list-class="structure-column-virtual-list"
-                tabindex="0"
+                tabindex="-1"
                 @keydown="onColumnGridKeydown"
                 @paste="onColumnGridPaste"
                 @scroll.passive="onStructureContentScroll('columns', $event)"
@@ -10569,15 +10580,16 @@ watch(
 .structure-card-scroller::-webkit-scrollbar-thumb {
   background: rgba(82, 82, 82, 0.3);
   background: color-mix(in oklab, var(--foreground) 30%, transparent);
-  border: 3px solid transparent;
+  border: var(--dbx-workspace-scrollbar-inset) solid transparent;
   background-clip: padding-box;
   border-radius: 999px;
 }
 
+/* Full-track thickness on hover, like the workspace and data grid scrollbars (#15585). */
 .structure-card-scroller::-webkit-scrollbar-thumb:hover {
   background: rgba(82, 82, 82, 0.48);
   background: color-mix(in oklab, var(--foreground) 48%, transparent);
-  border-width: 2px;
+  border-width: 0;
   background-clip: padding-box;
 }
 
@@ -10665,38 +10677,41 @@ watch(
   vertical-align: middle;
 }
 
+/* Mirrors `.data-grid-vertical-scrollbar` so both axes thicken the same way (#15585). */
 .structure-vertical-scrollbar {
   position: relative;
-  width: 10px;
+  width: var(--dbx-workspace-scrollbar-size);
   cursor: default;
   touch-action: none;
 }
 
 .structure-vertical-scrollbar__thumb {
   position: absolute;
-  left: 3px;
-  width: 4px;
+  inset-inline: 0;
   min-height: 24px;
+  border-inline: var(--dbx-workspace-scrollbar-inset) solid transparent;
   border-radius: 999px;
   background: rgba(82, 82, 82, 0.3);
   background: color-mix(in oklab, var(--foreground) 30%, transparent);
+  background-clip: padding-box;
   transition:
-    left 120ms ease,
-    width 120ms ease,
+    border-width 120ms ease,
     background-color 120ms ease;
 }
 
 .structure-vertical-scrollbar:hover .structure-vertical-scrollbar__thumb,
 .structure-vertical-scrollbar--dragging .structure-vertical-scrollbar__thumb {
-  left: 2px;
-  width: 6px;
+  border-width: 0;
   background: rgba(82, 82, 82, 0.48);
   background: color-mix(in oklab, var(--foreground) 48%, transparent);
 }
 
+/* Same thumb model as the data grid (`.data-grid-horizontal-scrollbar`): a 10px
+   track whose thumb grows from the inset look to the full track on hover/drag, so
+   the hover feedback in the structure editor matches 表右键 → 查看数据 (#15585). */
 .structure-horizontal-scrollbar {
   position: relative;
-  height: 10px;
+  height: var(--dbx-workspace-scrollbar-size);
   flex-shrink: 0;
   cursor: pointer;
   touch-action: none;
@@ -10705,22 +10720,21 @@ watch(
 
 .structure-horizontal-scrollbar__thumb {
   position: absolute;
-  top: 3px;
-  height: 4px;
+  inset-block: 0;
   min-width: 24px;
+  border-block: var(--dbx-workspace-scrollbar-inset) solid transparent;
   border-radius: 999px;
   background: rgba(82, 82, 82, 0.3);
   background: color-mix(in oklab, var(--foreground) 30%, transparent);
+  background-clip: padding-box;
   transition:
-    top 120ms ease,
-    height 120ms ease,
+    border-width 120ms ease,
     background-color 120ms ease;
 }
 
 .structure-horizontal-scrollbar:hover .structure-horizontal-scrollbar__thumb,
 .structure-horizontal-scrollbar--dragging .structure-horizontal-scrollbar__thumb {
-  top: 2px;
-  height: 6px;
+  border-width: 0;
   background: rgba(82, 82, 82, 0.48);
   background: color-mix(in oklab, var(--foreground) 48%, transparent);
 }

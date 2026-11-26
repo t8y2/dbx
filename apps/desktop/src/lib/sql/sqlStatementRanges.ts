@@ -1,5 +1,7 @@
 import type { SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDelimiter";
+import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
+import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import { splitMongoCommandRanges } from "@/lib/mongo/mongoShellCommand";
 import { isRedisCommentLine } from "@/lib/redis/redisCommandTokenizer";
 import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
@@ -3048,13 +3050,82 @@ export function currentExecutableStatementRange(sql: string, cursorPos: number, 
   return statementRangeAtCursor(sql, cursorPos, databaseType, parameterOptions);
 }
 
+/**
+ * Bracket groups whose first keyword starts a standalone-executable query
+ * (SELECT / WITH / TABLE / VALUES) can run on their own once the wrapping
+ * parentheses are stripped — these are the nested candidates the execution
+ * target picker offers at the cursor position (#15213). Anything else is never
+ * offered: peeling an INSERT/UPDATE body, a function argument list, or a
+ * PL/SQL block would produce a fragment that no longer means what the author
+ * wrote.
+ */
+const NESTED_QUERY_STARTERS = new Set(["select", "with", "table", "values"]);
+const PL_SQL_BLOCK_STARTERS = new Set(["declare", "begin"]);
+
+export function nestedQueryCandidateRanges(sql: string, cursorPos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlTextRange[] {
+  // Redis/Mongo commands are not SQL; their bracket groups mean nothing as
+  // standalone queries, so the nested layer never applies to them.
+  if (databaseType === "redis" || databaseType === "mongodb") return [];
+  const statement = currentExecutableStatementRange(sql, cursorPos, databaseType, parameterOptions);
+  if (!statement) return [];
+  // Oracle-style anonymous blocks mix procedural control flow with embedded
+  // queries; a bracket peel there easily changes what actually runs, so the
+  // whole class stays out of the picker.
+  const dialect = sqlSemanticDialectFor({ databaseType });
+  const tokens = tokenizeSqlSemantic(statement.sql, dialect.id, { mysqlBackslashEscape: dialect.id === "mysql", mysqlDashCommentRequiresWhitespace: dialect.id === "mysql" }).filter((token) => token.kind !== "comment");
+  const firstWord = tokens.find((token) => token.kind === "word");
+  if (!firstWord || PL_SQL_BLOCK_STARTERS.has(firstWord.normalized)) return [];
+
+  const groups: SqlTextRange[] = [];
+  const stack: Array<{ openEnd: number; firstWordStart?: number; firstWordNormalized?: string }> = [];
+  const cursor = cursorPos;
+  for (const token of tokens) {
+    if (token.kind === "punctuation" && token.text === "(") {
+      stack.push({ openEnd: statement.from + token.span.end });
+      continue;
+    }
+    if (token.kind === "punctuation" && token.text === ")") {
+      const open = stack.pop();
+      if (!open || open.firstWordStart === undefined) continue;
+      const closeStart = statement.from + token.span.start;
+      // The cursor sits inside the group when it is at or after the first
+      // character following the open paren (a cursor parked on the subquery's
+      // own SELECT counts) and before or on the closing paren.
+      if (cursor >= open.openEnd && cursor <= closeStart && NESTED_QUERY_STARTERS.has(open.firstWordNormalized ?? "")) {
+        const from = open.firstWordStart;
+        groups.push({ from, to: closeStart, sql: sql.slice(from, closeStart) });
+      }
+      continue;
+    }
+    if (token.kind === "word" && stack.length > 0) {
+      const top = stack[stack.length - 1]!;
+      if (top.firstWordStart === undefined) {
+        top.firstWordStart = statement.from + token.span.start;
+        top.firstWordNormalized = token.normalized;
+      }
+    }
+  }
+  // Unterminated groups (cursor inside a half-typed subquery) never reach the
+  // closing branch, so they are naturally excluded — nothing to clean up here.
+  return groups;
+}
+
 export function buildExecutionCandidates(sql: string, cursorPos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlExecutionCandidate[] {
   const full = fullSqlRange(sql);
   const cursorStatement = currentExecutableStatementRange(sql, cursorPos, databaseType, parameterOptions);
 
   if (!full && !cursorStatement) return [];
+  // Nested queries sort innermost-first so the picker reads like DataGrip's
+  // "statement at cursor" list: peel the innermost query, then its parent,
+  // then the statement itself, then the whole document.
+  const nestedCandidates = cursorStatement
+    ? nestedQueryCandidateRanges(sql, cursorPos, databaseType, parameterOptions)
+        .filter((range) => normalizeSql(range.sql) !== normalizeSql(cursorStatement.sql))
+        .sort((a, b) => a.to - a.from - (b.to - b.from))
+        .map((range, index) => ({ ...candidateFromRange(range, "nested", databaseType), level: index + 1 }))
+    : [];
   if (!full) {
-    return cursorStatement ? [candidateFromRange(cursorStatement, "cursor", databaseType)] : [];
+    return cursorStatement ? [...nestedCandidates, candidateFromRange(cursorStatement, "cursor", databaseType)] : [];
   }
   if (!cursorStatement) {
     return [candidateFromRange(full, "all", databaseType)];
@@ -3062,18 +3133,19 @@ export function buildExecutionCandidates(sql: string, cursorPos: number, databas
 
   const sameContent = normalizeSql(cursorStatement.sql) === normalizeSql(full.sql);
   if (sameContent) {
-    return [candidateFromRange(full, "all", databaseType, ["cursor", "all"])];
+    return [...nestedCandidates, candidateFromRange(full, "all", databaseType, ["cursor", "all"])];
   }
 
-  return [candidateFromRange(cursorStatement, "cursor", databaseType), candidateFromRange(full, "all", databaseType)];
+  return [...nestedCandidates, candidateFromRange(cursorStatement, "cursor", databaseType), candidateFromRange(full, "all", databaseType)];
 }
 
 function candidateFromRange(range: SqlTextRange, kind: SqlExecutionCandidate["kind"], databaseType?: DatabaseType, supportedKinds: SqlExecutionCandidate["supportedKinds"] = [kind]): SqlExecutionCandidate {
   const isRedis = databaseType === "redis";
+  const label = kind === "nested" ? "nestedStatement" : kind === "cursor" ? (isRedis ? "currentCommand" : "currentStatement") : isRedis ? "allCommands" : "allStatements";
   return {
     kind,
     supportedKinds,
-    label: kind === "cursor" ? (isRedis ? "currentCommand" : "currentStatement") : isRedis ? "allCommands" : "allStatements",
+    label,
     sql: range.sql,
     from: range.from,
     to: range.to,

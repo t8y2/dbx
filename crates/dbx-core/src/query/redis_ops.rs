@@ -322,6 +322,7 @@ pub async fn redis_stream_entries_in_db_core(
     db: u32,
     key_raw: &str,
     cursor: Option<&str>,
+    newest_first: bool,
 ) -> Result<RedisStreamPage, String> {
     ensure_redis_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Connection not found")?;
@@ -332,12 +333,12 @@ pub async fn redis_stream_entries_in_db_core(
                 RedisConnection::Direct(con) => {
                     let mut con = con.lock().await;
                     redis_driver::select_db(&mut *con, db).await?;
-                    redis_driver::get_stream_entries_page(&mut *con, &key, cursor).await
+                    redis_driver::get_stream_entries_page_with_order(&mut *con, &key, cursor, newest_first).await
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_database(cluster, db).await?;
                     let mut con = redis_driver::cluster_key_connection_in_db(cluster, &key, db).await?;
-                    redis_driver::get_stream_entries_page(&mut con, &key, cursor).await
+                    redis_driver::get_stream_entries_page_with_order(&mut con, &key, cursor, newest_first).await
                 }
             }
         }

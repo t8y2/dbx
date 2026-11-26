@@ -104,17 +104,6 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-zh" target="_blank">
-        <img src="docs/public/sponsors/hiapi-card.png" alt="HiAPI" width="175" />
-      </a>
-    </td>
-    <td>
-      HiAPI 是面向开发者的图片、视频、音频及文本模型 API 平台——GPT Image 2.5（Flare 与 Sunburst）、OpenAI 兼容文本接口，并可通过 Remote MCP/Agent Skills 接入 Claude Code、Cursor 等编程工具。按量付费、无最低消费；新用户注册赠送 200 Credits，充值送 10% 积分。
-      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-zh" target="_blank">访问 HiAPI</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
         <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
       </a>

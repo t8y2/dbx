@@ -6,6 +6,7 @@ import {
   extractorUnavailableForDatabase,
   normalizeDataGridCopyPreference,
   normalizeDataGridExtractorOptions,
+  normalizeDataGridSmartSingleColumnFormat,
   normalizeVisibleDataGridCopyExtractors,
   resolveDataGridCopyPreference,
   validateDataGridExtractorOptions,
@@ -60,6 +61,13 @@ describe("data-grid extractor options", () => {
     expect(resolveDataGridCopyPreference("smart", 2)).toBe("tsv");
     expect(resolveDataGridCopyPreference("csv", 1)).toBe("csv");
     expect(resolveDataGridCopyPreference("raw", 3)).toBe("raw");
+  });
+
+  it("normalizes the Smart Copy single-column format setting", () => {
+    expect(normalizeDataGridSmartSingleColumnFormat(undefined)).toBe("default");
+    expect(normalizeDataGridSmartSingleColumnFormat("json")).toBe("json");
+    expect(normalizeDataGridSmartSingleColumnFormat("sql-inserts")).toBe("default");
+    expect(normalizeDataGridSmartSingleColumnFormat("invalid")).toBe("default");
   });
 
   it("normalizes persisted values without sharing the default object", () => {

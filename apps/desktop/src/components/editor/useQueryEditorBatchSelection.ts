@@ -71,6 +71,7 @@ export function useQueryEditorBatchSelection(options: QueryEditorBatchSelectionO
     replaceSelectWildcard?: true;
     candidates: BatchColumnSelectionCandidate[];
     selectedKeys: Set<string>;
+    lastPressedCandidateKey?: string;
     completionOptions: Map<string, QueryCompletionOption>;
   }
 
@@ -500,23 +501,28 @@ export function useQueryEditorBatchSelection(options: QueryEditorBatchSelectionO
     return checkbox;
   }
 
-  // The checkbox above only guards its own hitbox. A mousedown/click anywhere
-  // else in the row (the label, detail text, icon — most of the row's area)
-  // falls through to CodeMirror's own list-item handler, which accepts that
-  // row as a single completion and discards every other checked field. Guard
-  // the whole row the same way, at the document level, since the completion
-  // tooltip renders outside the editor's own DOM (see tooltipParent above).
+  // Capture row presses because the completion tooltip renders outside the editor.
+  // Single presses toggle the checkbox. A second press on the same row in a
+  // double-click reaches CodeMirror's own single-completion handler.
   function onBatchColumnSelectionRowGuard(event: MouseEvent) {
-    if (event.button !== 0 || !batchColumnSelectionSession) return;
+    const session = batchColumnSelectionSession;
+    if (event.button !== 0 || !session) return;
+    const previousCandidateKey = session.lastPressedCandidateKey;
+    const pressed = event.type === "mousedown";
+    if (pressed) session.lastPressedCandidateKey = undefined;
     const target = event.target;
     if (!(target instanceof Element) || target.closest("input.cm-batch-column-selection-checkbox")) return;
     const hit = batchColumnSelectionMarkerAtPoint(event.clientX, event.clientY);
-    if (!hit || hit.marker.sessionKey !== batchColumnSelectionSession.key) return;
+    if (!hit || hit.marker.sessionKey !== session.key || target.closest("[role='option']") !== hit.checkbox.closest("[role='option']")) return;
+    const currentView = view.value;
+    if (pressed && event.detail === 2 && previousCandidateKey === hit.marker.candidateKey && currentView && !currentView.state.readOnly && currentView.state.doc.toString() === session.document) return;
+
     event.preventDefault();
     event.stopPropagation();
-    if (event.type !== "mousedown") return;
-    const currentView = view.value;
-    if (currentView) toggleBatchColumnSelection(currentView, hit.marker.sessionKey, hit.marker.candidateKey);
+    if (pressed && currentView) {
+      session.lastPressedCandidateKey = hit.marker.candidateKey;
+      toggleBatchColumnSelection(currentView, hit.marker.sessionKey, hit.marker.candidateKey);
+    }
   }
 
   function renderBatchColumnSelectionActionMarker(completion: Completion): Node | null {

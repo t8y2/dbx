@@ -60,21 +60,29 @@ function loadExternalSqlFileTargets(): StoredExternalSqlFileTarget[] {
   }
 }
 
-function saveExternalSqlFileTargets(targets: StoredExternalSqlFileTarget[]) {
+function saveExternalSqlFileTargets(targets: StoredExternalSqlFileTarget[]): boolean {
   try {
     localStorage.setItem(EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY, JSON.stringify(targets));
-  } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function rememberExternalSqlFileTarget(path: string, target: ExternalSqlFileTarget) {
-  const normalizedPath = normalizeExternalSqlPath(path);
-  if (!normalizedPath) return;
-  const remaining = loadExternalSqlFileTargets().filter((item) => item.path !== normalizedPath);
-  if (!target.connectionId) {
-    saveExternalSqlFileTargets(remaining);
-    return;
-  }
-  saveExternalSqlFileTargets([{ path: normalizedPath, ...target, updatedAt: Date.now() }, ...remaining].slice(0, MAX_EXTERNAL_SQL_FILE_TARGETS));
+  rememberExternalSqlFileTargets([path], target, { allowEviction: true });
+}
+
+export function rememberExternalSqlFileTargets(paths: readonly string[], target: ExternalSqlFileTarget, options: { allowEviction?: boolean } = {}): "saved" | "capacity" | "storage-error" {
+  const normalizedPaths = new Set(paths.map(normalizeExternalSqlPath).filter(Boolean));
+  if (normalizedPaths.size === 0) return "saved";
+  const remaining = loadExternalSqlFileTargets().filter((item) => !normalizedPaths.has(item.path));
+  if (!target.connectionId) return saveExternalSqlFileTargets(remaining) ? "saved" : "storage-error";
+  if (!options.allowEviction && normalizedPaths.size + remaining.length > MAX_EXTERNAL_SQL_FILE_TARGETS) return "capacity";
+  const updatedAt = Date.now();
+  const updated = [...normalizedPaths].map((path) => ({ path, ...target, updatedAt }));
+  const targets = [...updated, ...remaining].slice(0, MAX_EXTERNAL_SQL_FILE_TARGETS);
+  return saveExternalSqlFileTargets(targets) ? "saved" : "storage-error";
 }
 
 export function moveExternalSqlFileTarget(previousPath: string, nextPath: string) {

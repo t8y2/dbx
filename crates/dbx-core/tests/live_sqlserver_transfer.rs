@@ -37,6 +37,8 @@ fn live_sqlserver_config(id: &str, database: &str) -> ConnectionConfig {
         transport_layers: Vec::new(),
         connect_timeout_secs: 15,
         query_timeout_secs: 30,
+
+        write_timeout_secs: 0,
         idle_timeout_secs: 60,
         manual_transaction_timeout_secs: 300,
         idle_disconnect_secs: 0,

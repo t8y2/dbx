@@ -106,6 +106,7 @@ import DataGridTableInfoPanels from "@/components/grid/DataGridTableInfoPanels.v
 import DataGridColumnFilterPopover from "@/components/grid/DataGridColumnFilterPopover.vue";
 import DataGridCellDetailHeader from "@/components/grid/DataGridCellDetailHeader.vue";
 import DataGridCellDetailHexViewer from "@/components/grid/DataGridCellDetailHexViewer.vue";
+import DataGridCellDetailTextPreview from "@/components/grid/DataGridCellDetailTextPreview.vue";
 import DataGridCellDetailForeignKey, { type ForeignKeyRowPreviewState } from "@/components/grid/DataGridCellDetailForeignKey.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
@@ -387,7 +388,16 @@ import { canReadClipboardText, eventTargetAllowsNativeClipboard, isPlainClipboar
 import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, parseDataGridClipboardInBatches, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import { parseInsertStatementPaste, parseInsertStatementPasteInBatches } from "@/lib/dataGrid/dataGridInsertPaste";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
-import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, DATA_GRID_COPY_EXTRACTOR_IDS, DATA_GRID_DEFAULT_COPY_PREFERENCES, extractorUnavailableForDatabase, type DataGridCopyExtractorId, type DataGridCopyPreference, type DataGridPrimaryKeyMode } from "@/lib/dataGrid/dataGridCopyExtractor";
+import {
+  DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS,
+  DATA_GRID_COPY_EXTRACTOR_IDS,
+  DATA_GRID_DEFAULT_COPY_PREFERENCES,
+  extractorUnavailableForDatabase,
+  type DataGridCopyExtractorId,
+  type DataGridCopyPreference,
+  type DataGridPrimaryKeyMode,
+  type DataGridSmartSingleColumnFormat,
+} from "@/lib/dataGrid/dataGridCopyExtractor";
 import { columnNamesForCopy, formatColumnNamesForCopy, type ColumnNameCopyQuoteStyle, type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resolveDataGridMaxRowNumber, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { createDataGridColumnStructureSignature } from "@/lib/dataGrid/dataGridColumnWidthState";
@@ -1265,6 +1275,7 @@ const showMongoJsonPreview = ref(false);
 const mongoJsonPreviewScope = ref<"selected" | "page">("selected");
 const activeCellDetailTab = ref<CellDetailTab>(defaultCellDetailTab());
 const cellDetailDialogOpen = ref(false);
+const binaryTextPreviewDetail = shallowRef<DataGridCellDetail | null>(null);
 const cellDetailDialogTarget = ref<{ rowIndex: number; col: number } | null>(null);
 const cellDetailPanelRef = ref<{ openSearch: () => boolean } | null>(null);
 const rowDetailDialogOpen = ref(false);
@@ -3753,6 +3764,16 @@ function refreshGridScrollerMetrics() {
   }
   observeGridHorizontalScrollbarScroller();
   scheduleVisibleLargeValuePreviewHydration();
+}
+
+let scrollerMetricsRefreshFrame: number | null = null;
+
+function scheduleScrollerMetricsRefresh() {
+  if (!gridScrollbarsRuntime.active || scrollerMetricsRefreshFrame !== null) return;
+  scrollerMetricsRefreshFrame = requestAnimationFrame(() => {
+    scrollerMetricsRefreshFrame = null;
+    if (gridScrollbarsRuntime.active) refreshGridScrollerMetrics();
+  });
 }
 
 let columnLayoutRefreshFrame = 0;
@@ -6719,13 +6740,7 @@ const hasVisibleRows = computed(() => displayRowCount.value > 0);
 const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !replaceOpen.value && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value || hasServerColumnFilters.value);
 const emptyTitle = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRows") : t("grid.noRows")));
 const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription")));
-watch(
-  () => [hasVisibleRows.value, props.result.columns.length] as const,
-  () => {
-    nextTick(refreshGridScrollerMetrics);
-  },
-  { immediate: true },
-);
+watch([hasVisibleRows, () => props.result.columns.length], scheduleScrollerMetricsRefresh, { flush: "post", immediate: true });
 const isErrorResult = computed(() => isQueryExecutionErrorResult(props.result) && props.result.rows.length > 0);
 const errorMessage = computed(() => (isErrorResult.value ? String(props.result.rows[0]?.[0] ?? "") : ""));
 // An execution error is not a result set (its error-action slot covers that
@@ -8964,16 +8979,9 @@ const { elapsedMs: resultViewUpdateMs, canvasDrawCompleted: completeResultCanvas
   () => (useCanvasGridRows.value ? "canvas" : "dom"),
 );
 
-watch(
-  () => [totalWidth.value, displayRowCount.value, useCanvasGridRows.value, props.result.columns.join("\u0000")],
-  () => {
-    nextTick(() => {
-      refreshGridScrollerMetrics();
-      observeGridHorizontalScrollbarScroller();
-    });
-  },
-  { flush: "post" },
-);
+// Width reads can force a full WebKit layout. Coalesce result changes outside
+// Vue's flush so the refresh cannot keep re-entering the same render cycle.
+watch([totalWidth, displayRowCount, useCanvasGridRows, () => props.result.columns.join("\u0000")], scheduleScrollerMetricsRefresh, { flush: "post" });
 
 function canvasScrollerElement(): HTMLElement | null {
   const scroller = scrollerRef.value;
@@ -9831,6 +9839,8 @@ function pauseCanvasGridWork() {
   lastPresentedCanvasBackingKey = null;
   stopCanvasResizeTracking();
   gridScrollbarsRuntime.pause();
+  if (scrollerMetricsRefreshFrame !== null) cancelAnimationFrame(scrollerMetricsRefreshFrame);
+  scrollerMetricsRefreshFrame = null;
   disconnectCellEditResizeObserver();
   dataGridTopbarResizeObserver?.disconnect();
   dataGridTopbarResizeObserver = null;
@@ -9854,8 +9864,7 @@ function resumeCanvasGridWork() {
     attachCanvasResizeObserver();
     observeDataGridTopbarWidth();
     observeTransposeViewport();
-    refreshGridScrollerMetrics();
-    observeGridHorizontalScrollbarScroller();
+    scheduleScrollerMetricsRefresh();
   });
 }
 
@@ -10143,6 +10152,7 @@ const {
   allSourceColumns: computed(() => props.sourceColumns),
   visibleColumnIndexes,
   extractorOptions: computed(() => settingsStore.editorSettings.dataGridExtractorOptions),
+  smartSingleColumnFormat: computed(() => settingsStore.editorSettings.dataGridSmartSingleColumnFormat),
   sql: computed(() => props.sql),
   exportSql: computed(() => props.exportSql),
   pageSql: computed(() => props.pageSql),
@@ -10407,9 +10417,10 @@ function sqlInsertExtractorOptions(primaryKeyMode: DataGridPrimaryKeyMode) {
   };
 }
 
-function saveExtractorConfiguration(value: { preference: DataGridCopyPreference; options: typeof settingsStore.editorSettings.dataGridExtractorOptions; visibleCopyExtractors: typeof settingsStore.editorSettings.dataGridVisibleCopyExtractors }) {
+function saveExtractorConfiguration(value: { preference: DataGridCopyPreference; singleColumnFormat: DataGridSmartSingleColumnFormat; options: typeof settingsStore.editorSettings.dataGridExtractorOptions; visibleCopyExtractors: typeof settingsStore.editorSettings.dataGridVisibleCopyExtractors }) {
   settingsStore.updateEditorSettings({
     dataGridCopyExtractor: value.preference,
+    dataGridSmartSingleColumnFormat: value.singleColumnFormat,
     dataGridExtractorOptions: value.options,
     dataGridVisibleCopyExtractors: value.visibleCopyExtractors,
   });
@@ -12739,6 +12750,18 @@ async function downloadDetailBinaryValue(detail: DataGridCellDetail | null, mode
   } catch (e: any) {
     toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
   }
+}
+
+function binaryTextPreviewItem(detail: DataGridCellDetail | null): ContextMenuItem | null {
+  if (!detail || (detail.isNull ?? detail.value === null) || !isBinaryCellColumnType(detail.type)) return null;
+  const sourceResult = props.result;
+  return {
+    label: t("grid.binaryTextPreview"),
+    icon: Code2,
+    action: () => {
+      if (props.result === sourceResult) binaryTextPreviewDetail.value = detail;
+    },
+  };
 }
 
 function binaryDownloadSubmenu(detail: DataGridCellDetail | null): ContextMenuItem | null {
@@ -15072,6 +15095,7 @@ onActivated(() => {
 });
 onDeactivated(() => {
   gridClipboardActive = false;
+  binaryTextPreviewDetail.value = null;
   pendingColumnOrder.value = null;
   pendingPasteAsNewRows.value = null;
   gridClipboardLifecycle++;
@@ -15909,6 +15933,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         bulkEdit: openBulkEditDialog,
         transpose: openContextTranspose,
       },
+      binaryTextPreviewItem: binaryTextPreviewItem(contextCellDetail.value),
       pluginDecodeItem: pluginDecodeItem(contextCellDetail.value),
       importItem: binaryImportItem(contextCellDetail.value),
       downloadItem: binaryDownloadSubmenu(contextCellDetail.value),
@@ -18329,6 +18354,18 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       @edit="openDialogCellInSidePanel"
     />
 
+    <DataGridCellDetailTextPreview
+      v-if="binaryTextPreviewDetail"
+      :open="true"
+      hide-trigger
+      :identity="`${binaryTextPreviewDetail.rowId}:${binaryTextPreviewDetail.colIndex}`"
+      :value="binaryTextPreviewDetail.value"
+      :column-type="binaryTextPreviewDetail.type"
+      :database-type="resolvedDatabaseType"
+      :incomplete="binaryTextPreviewDetail.isSourceTruncated"
+      @update:open="!$event && (binaryTextPreviewDetail = null)"
+    />
+
     <DataGridValueDiffDialog v-if="detailValueDiffSnapshot" v-model:open="detailValueDiffOpen" :snapshot="detailValueDiffSnapshot" />
 
     <DataGridDetailDialogs
@@ -18423,6 +18460,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       v-model:open="extractorConfigOpen"
       mode="configure"
       :preference="selectedCopyPreference"
+      :single-column-format="settingsStore.editorSettings.dataGridSmartSingleColumnFormat"
       :source-table-name="props.tableMeta?.tableName"
       :visible-copy-extractors="settingsStore.editorSettings.dataGridVisibleCopyExtractors"
       :options="settingsStore.editorSettings.dataGridExtractorOptions"

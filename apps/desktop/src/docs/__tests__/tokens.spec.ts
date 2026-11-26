@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { DEFAULT_UI_FONT_FAMILY } from "../../lib/app/appFonts";
 
 const stylesDir = path.resolve(__dirname, "../../styles");
 
@@ -26,6 +27,12 @@ describe("design tokens", () => {
   it("keeps globals.css importing the extracted tokens", () => {
     const globals = readFileSync(path.join(stylesDir, "globals.css"), "utf8");
     expect(globals.includes('@import "./tokens.css"')).toBe(true);
+  });
+
+  it("keeps the baseline sans font token in sync with the application default", () => {
+    const source = readFileSync(path.join(stylesDir, "tokens.css"), "utf8");
+    const token = source.match(/^\s*--font-sans:\s*([^;]+);/m);
+    expect(token?.[1]).toBe(DEFAULT_UI_FONT_FAMILY);
   });
 
   it("declares the dark overrides after the light ones", () => {

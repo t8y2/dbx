@@ -3,7 +3,13 @@ export const FONT_MONO_CSS_VAR = "--font-mono";
 export const EDITOR_FONT_FAMILY_CSS_VAR = "--dbx-editor-font-family";
 export const DATA_GRID_FONT_FAMILY_CSS_VAR = "--dbx-data-grid-font-family";
 
-export const DEFAULT_UI_FONT_FAMILY = `"Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif`;
+// Geist ships only Latin subsets. Keep broad system text faces ahead of the
+// CJK fallbacks so Cyrillic and other non-CJK glyphs do not use full-width
+// CJK variants (notably Hiragino Sans GB on macOS).
+const NON_CJK_SYSTEM_FALLBACK_FONTS = `"Segoe UI", "Helvetica Neue", Arial, "Noto Sans", Roboto, "Liberation Sans", "DejaVu Sans"`;
+
+export const DEFAULT_UI_FONT_FAMILY = `"Geist Variable", ${NON_CJK_SYSTEM_FALLBACK_FONTS}, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif`;
+
 // Keep the generic monospace family before CJK fallbacks. CSS chooses a font
 // per glyph, so placing PingFang/Microsoft YaHei first also makes ASCII SQL
 // render proportionally when the named coding fonts are unavailable. CJK
@@ -14,7 +20,7 @@ export const DEFAULT_MONO_FALLBACK_FONTS = `ui-monospace, SFMono-Regular, "SF Mo
 // Keep in sync with the editor font default in settingsStore; also the baseline
 // `--font-mono` value in tokens.css, which plugin sandboxes consume via the bridge.
 export const DEFAULT_MONO_FONT_FAMILY = `'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', ${DEFAULT_MONO_FALLBACK_FONTS}`;
-export const DEFAULT_DATA_GRID_FONT_FAMILY = `"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
+export const DEFAULT_DATA_GRID_FONT_FAMILY = `"Geist Variable Tabular", "Geist Variable", ${NON_CJK_SYSTEM_FALLBACK_FONTS}, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
 
 // Native-feeling UI option without DBX's bundled/brand font at the front of the stack.
 export const SYSTEM_UI_FONT_FAMILY = `system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;

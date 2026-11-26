@@ -3896,6 +3896,7 @@ export default withEnglishFallback({
     tableQueryDefaultsSave: "Сохранить текущие фильтры и сортировку",
     tableQueryDefaultsClear: "Очистить сохраненные условия по умолчанию",
     tableQueryDefaultsSaveFailed: "Не удалось сохранить условия по умолчанию для этой таблицы.",
+    copyExtractorReplaceInto: "Использовать REPLACE INTO (заменять исходную запись при конфликте ключа)",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

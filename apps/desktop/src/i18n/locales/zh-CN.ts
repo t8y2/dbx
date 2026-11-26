@@ -3235,6 +3235,7 @@ export default withEnglishFallback({
     copyExtractorSkipGenerated: "跳过生成列",
     copyExtractorExcludePrimaryKeys: "主键处理方式",
     copyExtractorIncludeDatabaseName: "包含数据库名称",
+    copyExtractorReplaceInto: "使用 REPLACE INTO（键冲突时替换原记录）",
     copyExtractorQuoteIdentifiers: "表名和字段名加引号",
     copyExtractorTemporalFormat: "日期和时间值",
     copyExtractorTemporalNative: "数据库原生格式",

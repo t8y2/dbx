@@ -3943,6 +3943,7 @@ export default withEnglishFallback({
     tableQueryDefaultsSave: "Guardar el filtro y el orden actuales",
     tableQueryDefaultsClear: "Borrar las condiciones predeterminadas guardadas",
     tableQueryDefaultsSaveFailed: "No se pueden guardar las condiciones predeterminadas de esta tabla.",
+    copyExtractorReplaceInto: "Usar REPLACE INTO (reemplazar el registro original cuando haya conflicto de clave)",
   },
   exportProgress: {
     recoveryTitle: "¿Eliminar la exportación cuyo final no se ha confirmado?",

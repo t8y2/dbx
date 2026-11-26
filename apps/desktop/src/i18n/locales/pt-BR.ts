@@ -3942,6 +3942,7 @@ export default withEnglishFallback({
     tableQueryDefaultsSave: "Salvar filtro e ordenação atuais",
     tableQueryDefaultsClear: "Limpar condições padrão salvas",
     tableQueryDefaultsSaveFailed: "Não foi possível salvar as condições padrão desta tabela.",
+    copyExtractorReplaceInto: "Usar REPLACE INTO (substitui o registro original em caso de conflito de chave)",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",

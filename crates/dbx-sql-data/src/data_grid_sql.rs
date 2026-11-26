@@ -636,6 +636,7 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
 
 pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatementOptions) -> Option<String> {
     build_data_grid_copy_insert_statement_with_formatters(
+        "INSERT",
         options,
         |reference| reference,
         format_grid_copy_insert_sql_literal_with_spatial,
@@ -643,15 +644,17 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
 }
 
 pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
+    insert_keyword: &str,
     options: DataGridCopyInsertStatementOptions,
     format_reference: impl Fn(String) -> String,
     format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>, Option<u32>) -> String,
 ) -> Option<String> {
-    build_data_grid_copy_insert_statements_with_formatters(options, format_reference, format_literal)
+    build_data_grid_copy_insert_statements_with_formatters(insert_keyword, options, format_reference, format_literal)
         .map(|statements| statements.join("\n"))
 }
 
 pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
+    insert_keyword: &str,
     options: DataGridCopyInsertStatementOptions,
     format_reference: impl Fn(String) -> String,
     format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>, Option<u32>) -> String,
@@ -833,7 +836,7 @@ pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
         value_rows
             .iter()
             .map(|values| {
-                let sql = format!("INSERT INTO {table} ({columns}) VALUES {values}");
+                let sql = format!("{insert_keyword} INTO {table} ({columns}) VALUES {values}");
                 if options.database_type == Some(DatabaseType::OceanbaseOracle) {
                     data_grid_statement(options.database_type, sql)
                 } else {
@@ -843,7 +846,7 @@ pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
             .collect::<Vec<_>>()
     } else {
         vec![format!(
-            "INSERT INTO {table} ({columns}) VALUES{}{};",
+            "{insert_keyword} INTO {table} ({columns}) VALUES{}{};",
             if value_rows.len() == 1 { " " } else { "\n" },
             value_rows.join(",\n")
         )]

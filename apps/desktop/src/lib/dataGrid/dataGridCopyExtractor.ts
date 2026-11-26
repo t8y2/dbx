@@ -147,6 +147,7 @@ export interface DataGridExtractorOptions {
     skipComputedColumns: boolean;
     skipGeneratedColumns: boolean;
     insertMode: DataGridCopyInsertMode;
+    replaceInto?: boolean;
     primaryKeyMode: DataGridPrimaryKeyMode;
     includeDatabaseName: boolean;
     quoteIdentifiers: boolean;
@@ -276,6 +277,7 @@ export function normalizeDataGridExtractorOptions(value: unknown): DataGridExtra
       skipComputedColumns: sql.skipComputedColumns !== false,
       skipGeneratedColumns: sql.skipGeneratedColumns !== false,
       insertMode: sql.insertMode === "row-by-row" ? "row-by-row" : "merged",
+      ...(sql.replaceInto === true ? { replaceInto: true } : {}),
       primaryKeyMode: sql.primaryKeyMode === "exclude-generated" || sql.primaryKeyMode === "exclude-all" || sql.primaryKeyMode === "include" ? sql.primaryKeyMode : sql.excludePrimaryKeysFromInsert === true ? "exclude-generated" : "include",
       includeDatabaseName: sql.includeDatabaseName !== false,
       quoteIdentifiers: sql.quoteIdentifiers !== false,

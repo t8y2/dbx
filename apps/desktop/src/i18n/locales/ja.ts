@@ -4116,6 +4116,7 @@ export default withEnglishFallback({
     tableQueryDefaultsSave: "現在のフィルターと並べ替えを保存",
     tableQueryDefaultsClear: "保存済みの既定条件をクリア",
     tableQueryDefaultsSaveFailed: "このテーブルの既定条件を保存できません。",
+    copyExtractorReplaceInto: "REPLACE INTO を使用（キー衝突時に元のレコードを置換）",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

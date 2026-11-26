@@ -2825,3 +2825,45 @@ fn deletes_inserts_requires_table_meta_and_primary_key() {
         DataGridExtractErrorCode::UnsupportedDatabase
     );
 }
+
+#[test]
+fn sql_insert_replace_into_mysql_and_dialect_gate() {
+    // (a) MySQL + replace_into emits REPLACE INTO in both insert modes.
+    for insert_mode in
+        [crate::data_grid_sql::DataGridCopyInsertMode::Merged, crate::data_grid_sql::DataGridCopyInsertMode::RowByRow]
+    {
+        let mut request = temporal_insert_request();
+        request.database_type = Some(DatabaseType::Mysql);
+        request.options.sql.insert_mode = insert_mode;
+        request.options.sql.replace_into = true;
+        let result = extract_data_grid_selection(request).unwrap();
+        assert!(
+            result.text.contains("REPLACE INTO"),
+            "mysql replace_into must emit REPLACE INTO ({insert_mode:?}): {}",
+            result.text
+        );
+        assert!(
+            !result.text.contains("INSERT INTO"),
+            "mysql replace_into must not also emit INSERT INTO: {}",
+            result.text
+        );
+    }
+
+    // (b) Non-MySQL with a persisted replace_into preference still emits INSERT.
+    let mut request = temporal_insert_request();
+    request.database_type = Some(DatabaseType::Postgres);
+    request.options.sql.replace_into = true;
+    let result = extract_data_grid_selection(request).unwrap();
+    assert!(result.text.contains("INSERT INTO"), "postgres must ignore replace_into: {}", result.text);
+    assert!(!result.text.contains("REPLACE INTO"), "postgres must never emit REPLACE: {}", result.text);
+
+    // (c) sql-deletes-inserts stays INSERT even on MySQL with replace_into on.
+    let mut request = temporal_insert_request();
+    request.extractor = DataGridExtractorId::SqlDeletesInserts;
+    request.database_type = Some(DatabaseType::Mysql);
+    request.options.sql.replace_into = true;
+    request.table_meta.as_mut().unwrap().primary_keys = vec!["AMOUNT".into()];
+    let result = extract_data_grid_selection(request).unwrap();
+    assert!(result.text.contains("INSERT INTO"), "deletes-inserts must stay INSERT: {}", result.text);
+    assert!(!result.text.contains("REPLACE INTO"), "deletes-inserts must never emit REPLACE: {}", result.text);
+}

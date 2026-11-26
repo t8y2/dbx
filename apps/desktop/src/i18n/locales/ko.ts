@@ -3765,6 +3765,7 @@ export default withEnglishFallback({
     tableQueryDefaultsSave: "현재 필터 및 정렬 저장",
     tableQueryDefaultsClear: "저장된 기본 조건 지우기",
     tableQueryDefaultsSaveFailed: "이 테이블의 기본 조건을 저장할 수 없습니다.",
+    copyExtractorReplaceInto: "REPLACE INTO 사용(키 충돌 시 기존 레코드 대체)",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

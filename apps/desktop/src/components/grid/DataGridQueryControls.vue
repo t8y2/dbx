@@ -304,6 +304,7 @@ onUnmounted(onResizeEnd);
               :apply-only-busy="applyOnlyBusy"
               :columns="[...(quickBuilderColumns ?? columns)]"
               :filtered-columns="quickFilteredColumns"
+              :comment-by-column="commentByColumn"
               :mode-options="modeOptions"
               :column-search="columnSearch"
               :disabled="!canUseWhereSearch"

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import DataGridColumnOptionLabel from "@/components/grid/DataGridColumnOptionLabel.vue";
 import DataGridDistinctValuePopover from "@/components/grid/DataGridDistinctValuePopover.vue";
 import { filterModeNeedsValue, filterModeUsesList, filterModeUsesRange } from "@/lib/dataGrid/dataGridColumnFilter";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
@@ -33,6 +34,7 @@ const props = withDefaults(
     rules: DataGridStructuredFilterRule[];
     columns: string[];
     filteredColumns: string[];
+    commentByColumn?: ReadonlyMap<string, string>;
     modeOptions: Array<{ value: DataGridContextFilterMode; labelKey: string }>;
     columnSearch: string;
     disabled?: boolean;
@@ -617,12 +619,13 @@ function blurValueRule(id: string) {
                 v-for="(column, columnIndex) in props.filteredColumns"
                 :key="column"
                 :value="column"
+                :text-value="column"
                 class="rounded-none"
                 :class="activeColumnIndex(rule.id) === columnIndex ? 'bg-accent text-accent-foreground' : ''"
                 :data-filter-active="activeColumnIndex(rule.id) === columnIndex ? '' : undefined"
                 @pointermove="setActiveColumnIndex(rule.id, columnIndex)"
               >
-                {{ column }}
+                <DataGridColumnOptionLabel :name="column" :comment="props.commentByColumn?.get(column) ?? props.commentByColumn?.get(column.toLowerCase())" />
               </SelectItem>
               <div v-if="!props.filteredColumns.length" class="px-2 py-2 text-xs text-muted-foreground">{{ t("grid.filterBuilderNoMatchingColumns") }}</div>
               <template #header>

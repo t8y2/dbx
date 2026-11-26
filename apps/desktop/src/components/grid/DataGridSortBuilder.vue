@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
 import { ArrowDown, ArrowUp, Check, Eye, EyeOff, Focus, GripVertical, Plus, Search, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
+import DataGridColumnOptionLabel from "@/components/grid/DataGridColumnOptionLabel.vue";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -68,8 +69,11 @@ function filteredColumns(rule: DataGridStructuredSortRule): string[] {
   const query = columnSearches.value[rule.id]?.trim() ?? "";
   if (!query) return [...props.columns];
   // Match column comments too, mirroring the filter builder's comment search (#10759).
-  const comments = props.commentByColumn;
-  return props.columns.filter((column) => matchesIdentifierSearch(column, query) || matchesIdentifierSearch(comments?.get(column) ?? comments?.get(column.toLowerCase()) ?? "", query));
+  return props.columns.filter((column) => matchesIdentifierSearch(column, query) || matchesIdentifierSearch(columnComment(column) ?? "", query));
+}
+
+function columnComment(column: string): string | undefined {
+  return props.commentByColumn?.get(column) ?? props.commentByColumn?.get(column.toLowerCase());
 }
 
 function setRuleElement(id: string, element: unknown) {
@@ -378,8 +382,8 @@ onBeforeUnmount(clearDragState);
             <SelectValue v-else :placeholder="t('grid.sortBuilderSelectColumn')" />
           </SelectTrigger>
           <SelectContent position="popper" class="max-h-72" :hide-scroll-buttons="true">
-            <SelectItem v-for="(column, columnIndex) in filteredColumns(rule)" :key="column" :value="column" class="rounded-none" :class="activeColumnIndex(rule.id) === columnIndex ? 'bg-accent text-accent-foreground' : ''" @pointermove="setActiveColumnIndex(rule, columnIndex)">
-              {{ column }}
+            <SelectItem v-for="(column, columnIndex) in filteredColumns(rule)" :key="column" :value="column" :text-value="column" class="rounded-none" :class="activeColumnIndex(rule.id) === columnIndex ? 'bg-accent text-accent-foreground' : ''" @pointermove="setActiveColumnIndex(rule, columnIndex)">
+              <DataGridColumnOptionLabel :name="column" :comment="columnComment(column)" />
             </SelectItem>
             <div v-if="!filteredColumns(rule).length" class="px-2 py-2 text-xs text-muted-foreground">{{ t("grid.filterBuilderNoMatchingColumns") }}</div>
             <template #header>

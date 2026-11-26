@@ -16,6 +16,7 @@ const props = defineProps<{
   rules: DataGridStructuredFilterRule[];
   columns: string[];
   filteredColumns: string[];
+  commentByColumn?: ReadonlyMap<string, string>;
   modeOptions: Array<{ value: DataGridContextFilterMode; labelKey: string }>;
   columnSearch: string;
   applyOnlyBusy?: boolean;
@@ -88,6 +89,7 @@ watch(
         :apply-only-busy="applyOnlyBusy"
         :columns="columns"
         :filtered-columns="filteredColumns"
+        :comment-by-column="commentByColumn"
         :mode-options="modeOptions"
         :column-search="columnSearch"
         :disabled="disabled"

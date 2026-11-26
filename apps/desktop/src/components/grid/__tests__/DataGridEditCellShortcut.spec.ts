@@ -160,8 +160,8 @@ function gridRoot(host: HTMLElement): HTMLElement {
   return root;
 }
 
-function dispatchKey(target: HTMLElement, key: string, modifiers: { ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean; shiftKey?: boolean } = {}): KeyboardEvent {
-  const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key, ...modifiers });
+function dispatchKey(target: HTMLElement, key: string, options: KeyboardEventInit = {}): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...options, key });
   target.dispatchEvent(event);
   return event;
 }
@@ -382,6 +382,46 @@ describe("DataGrid editCell shortcut", () => {
     expect(root.hasAttribute("data-cell-edit-selection-style")).toBe(false);
     expect(dataCell(host, 0, 1).textContent?.trim()).toBe("Alice");
     expect(dataCell(host, 1, 1).textContent?.trim()).toBe("Bob");
+  });
+
+  it.each([{ metaKey: true }, { ctrlKey: true }, { altKey: true }, { shiftKey: true }, { isComposing: true }, { keyCode: 229 }])("leaves the selected range unchanged on Enter with %j", async (options) => {
+    const { host } = mountGrid({ renderMode: "dom" });
+    await settle();
+    await selectDataCell(host, 0, 1);
+    await selectDataCell(host, 1, 1, true);
+
+    const event = dispatchKey(gridRoot(host), "Enter", options);
+    await settle();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(host.querySelector(".cell-edit-input")).toBeNull();
+    expect(dataCell(host, 0, 1).textContent?.trim()).toBe("Alice");
+    expect(dataCell(host, 1, 1).textContent?.trim()).toBe("Bob");
+  });
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])("leaves a single cell unchanged on composition Enter with %j", async (options) => {
+    const { host } = mountGrid({ renderMode: "dom" });
+    await settle();
+    await selectDataCell(host, 0, 1);
+
+    const event = dispatchKey(gridRoot(host), "Enter", options);
+    await settle();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(host.querySelector(".cell-edit-input")).toBeNull();
+  });
+
+  it("starts an empty bulk editor on plain Enter", async () => {
+    const { host } = mountGrid({ renderMode: "dom" });
+    await settle();
+    await selectDataCell(host, 0, 1);
+    await selectDataCell(host, 1, 1, true);
+
+    const event = dispatchKey(gridRoot(host), "Enter");
+    await settle();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(host.querySelector<HTMLInputElement>(".cell-edit-input")?.value).toBe("");
   });
 
   it("commits the previewed value to every selected cell on Enter", async () => {

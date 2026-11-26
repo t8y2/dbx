@@ -3,6 +3,7 @@ export interface DataGridInlineBulkEditKeyEvent {
   ctrlKey?: boolean;
   metaKey?: boolean;
   altKey?: boolean;
+  shiftKey?: boolean;
   isComposing?: boolean;
   keyCode?: number;
 }
@@ -14,9 +15,13 @@ export function dataGridDirectCellEditValue(event: DataGridInlineBulkEditKeyEven
   return event.key;
 }
 
+export function isDataGridPlainEditEnter(event: DataGridInlineBulkEditKeyEvent): boolean {
+  return event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && !event.isComposing && event.keyCode !== 229;
+}
+
 export function dataGridInlineBulkEditValue(event: DataGridInlineBulkEditKeyEvent, selectedCellCount: number): string | undefined {
   if (selectedCellCount <= 1) return undefined;
-  if (event.key === "Enter") return "";
+  if (isDataGridPlainEditEnter(event)) return "";
   return dataGridDirectCellEditValue(event);
 }
 

@@ -408,7 +408,7 @@ import { uiTuning } from "@/lib/app/uiTuning";
 import { useDataGridScrollbars, type DataGridScrollbarsRuntime } from "@/composables/useDataGridScrollbars";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
 import { dataGridNavigationOrigin, dataGridPageScrollTop, dataGridRowScrollTop, moveDataGridCell, navigateDataGridCell, type DataGridNavigationDirection, type DataGridScrollAlignment } from "@/lib/dataGrid/dataGridNavigation";
-import { bulkEditInputToSqlValue, dataGridDirectCellEditValue, dataGridInlineBulkEditValue } from "@/lib/dataGrid/dataGridInlineBulkEdit";
+import { bulkEditInputToSqlValue, dataGridDirectCellEditValue, dataGridInlineBulkEditValue, isDataGridPlainEditEnter } from "@/lib/dataGrid/dataGridInlineBulkEdit";
 import type { CellPosition } from "@/lib/dataGrid/gridSelection";
 import type { GridSnapshotSource } from "@/lib/gridSnapshot/gridSnapshot";
 import { createDataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
@@ -12584,7 +12584,8 @@ async function onGridKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
-  if ((isEditCellShortcut(event, settingsStore.editorSettings.shortcuts) || (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "Enter")) && editSelectedCell()) {
+  const editCellShortcut = event.keyCode !== 229 && isEditCellShortcut(event, settingsStore.editorSettings.shortcuts);
+  if ((editCellShortcut || isDataGridPlainEditEnter(event)) && editSelectedCell()) {
     event.preventDefault();
     return;
   }

@@ -2196,6 +2196,16 @@ function unfoldAll(): boolean {
   return queryEditorRef.value?.unfoldAll?.() ?? false;
 }
 
+function undo(): boolean {
+  if (!sourceSectionActive.value) return false;
+  return queryEditorRef.value?.undo?.() ?? false;
+}
+
+function redo(): boolean {
+  if (!sourceSectionActive.value) return false;
+  return queryEditorRef.value?.redo?.() ?? false;
+}
+
 async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" | "txt"; columnComments?: (string | null)[] }) {
   const tab = props.activeTab;
   if (!tab || tab.mode !== "query") return;
@@ -2353,6 +2363,8 @@ defineExpose({
   foldAll,
   toggleLineComment,
   unfoldAll,
+  undo,
+  redo,
 });
 </script>
 

@@ -812,6 +812,69 @@ describe("EditorToolbar mount contract", () => {
     host.remove();
   });
 
+  it("emits undo and redo when clicking the undo/redo toolbar buttons", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "conn-1",
+        name: "conn",
+        db_type: "mysql",
+        color: "",
+      } as never,
+    ];
+
+    const host = createHost();
+    const onUndo = vi.fn();
+    const onRedo = vi.fn();
+    const app = createApp(EditorToolbar, {
+      activeTab: {
+        id: "tab-1",
+        title: "SQL",
+        connectionId: "conn-1",
+        database: "db",
+        sql: "SELECT 1;",
+        mode: "query",
+        isExecuting: false,
+        isCancelling: false,
+        isExplaining: false,
+      },
+      activeConnection: connectionStore.getConfig("conn-1"),
+      hasExecutableSql: true,
+      executableSqlMayContainDml: false,
+      explainMode: "explain",
+      blockDangerousRedisCommands: false,
+      sqlKeywordCase: "preserve",
+      databaseRequiredSignal: 0,
+      autoCommit: true,
+      txnSessionId: undefined,
+      txnAutoRolledBack: false,
+      txnPossiblyDirty: false,
+      stickyProvenReadOnlyState: false,
+      onUndo,
+      onRedo,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    const undoButton = host.querySelector<HTMLButtonElement>('button[aria-label="settings.shortcutUndo"]');
+    expect(undoButton).not.toBeNull();
+    undoButton?.dispatchEvent(new MouseEvent("click", { detail: 1, bubbles: true }));
+    await nextTick();
+    expect(onUndo).toHaveBeenCalledTimes(1);
+    expect(onRedo).not.toHaveBeenCalled();
+
+    const redoButton = host.querySelector<HTMLButtonElement>('button[aria-label="settings.shortcutRedo"]');
+    expect(redoButton).not.toBeNull();
+    redoButton?.dispatchEvent(new MouseEvent("click", { detail: 1, bubbles: true }));
+    await nextTick();
+    expect(onRedo).toHaveBeenCalledTimes(1);
+
+    app.unmount();
+    host.remove();
+  });
+
   it("renders shortcut hints on button hover tooltips", async () => {
     const connectionStore = useConnectionStore();
     connectionStore.connections = [

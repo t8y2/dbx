@@ -223,6 +223,7 @@ import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { COLUMN_NAME_COPY_SEPARATOR_VALUES } from "@/lib/dataGrid/dataGridColumnNameCopy";
+import { buildTableStructureCopyText, type TableStructureCopyFormat } from "@/lib/table/tableStructureCopy";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { orderObjectBrowserDropRows, runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { foreignKeyChecksPreview, foreignKeyChecksTargetResults, isForeignKeyChecksOverride, runForeignKeyChecksBatch, supportsForeignKeyChecksOption, type ForeignKeyChecksMode } from "@/lib/table/foreignKeyChecks";
@@ -6486,6 +6487,35 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
   };
 }
 
+function structureCopyTargetName(item: ObjectBrowserRow): string {
+  return item.schema ? `${item.schema}.${item.name}` : item.name;
+}
+
+function copyStructureAsSubmenu(item: ObjectBrowserRow): ContextMenuItem {
+  return {
+    sidebarActionId: "contextMenu.copyStructureAs",
+    label: t("contextMenu.copyStructureAs"),
+    icon: Clipboard,
+    children: [
+      { sidebarActionId: "contextMenu.copyStructureAsTsv", label: t("contextMenu.copyStructureAsTsv"), action: () => void copyTableStructureAs(item, "tsv") },
+      { sidebarActionId: "contextMenu.copyStructureAsMarkdown", label: t("contextMenu.copyStructureAsMarkdown"), action: () => void copyTableStructureAs(item, "markdown") },
+    ],
+  };
+}
+
+async function copyTableStructureAs(item: ObjectBrowserRow, format: TableStructureCopyFormat) {
+  try {
+    await connectionStore.ensureConnected(props.connection.id);
+    const schema = item.schema || selectedSchema.value || props.database;
+    const columns = await api.getColumns(props.connection.id, props.database, schema, item.name, props.catalog);
+    const text = buildTableStructureCopyText(format, [{ name: structureCopyTargetName(item), columns, columnType: (column) => gaussdbMColumnType(column.data_type) }], t);
+    await copyToClipboard(text);
+    toast(t("contextMenu.structureDocCopied"), 2000);
+  } catch (error) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
 function objectBrowserTableClipboardMenuState(item: ObjectBrowserRow) {
   return tableClipboardMenuState(
     normalizedObjectBrowserTableClipboardEntries(),
@@ -6602,6 +6632,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     exportDataSubmenu(item),
     { sidebarActionId: "contextMenu.exportDatabase", label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
     { sidebarActionId: "contextMenu.exportStructure", label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
+    copyStructureAsSubmenu(item),
     ...(canOpenDataDictionary.value ? [{ sidebarActionId: "dataDictionary.title", label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
     { label: "", separator: true },
     { sidebarActionId: "contextMenu.duplicateStructure", label: t("contextMenu.duplicateStructure"), action: () => requestCopyAsNewTable(item), icon: CopyPlus },
@@ -6643,6 +6674,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     exportDataSubmenu(item),
     { sidebarActionId: "contextMenu.exportDatabase", label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
     { sidebarActionId: "contextMenu.exportStructure", label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
+    copyStructureAsSubmenu(item),
     ...(canOpenDataDictionary.value ? [{ sidebarActionId: "dataDictionary.title", label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
     { label: "", separator: true },
     {

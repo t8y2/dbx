@@ -46,6 +46,7 @@ vi.mock("@/stores/settingsStore", () => ({
       objectBrowserShowCheckbox: false,
       sidebarCopyTableNameSeparator: "newline",
       sidebarCopyTableNameIncludeSchema: false,
+      sidebarMenuLayout: "grouped",
     },
   }),
 }));
@@ -227,6 +228,44 @@ describe("ObjectBrowser table copy", () => {
     });
     secondAction.click();
     await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenLastCalledWith("#\tgrid.columnName\tgrid.columnType\tgrid.tableInfoNullable\tstructureEditor.defaultValue\tgrid.columnComment\n3\tstatus\tTEXT\tYES\tnew\t"));
+  });
+
+  it.each([
+    {
+      action: "contextMenu.copyStructureAsMarkdown",
+      expected:
+        "### users\n\n| contextMenu.structureDocColumn | contextMenu.structureDocType | contextMenu.structureDocPrimaryKey | contextMenu.structureDocNullable | contextMenu.structureDocDefault | contextMenu.structureDocComment |\n| --- | --- | --- | --- | --- | --- |\n| id | INT | contextMenu.structureDocYes | contextMenu.structureDocNo |  |  |\n| note | TEXT | contextMenu.structureDocNo | contextMenu.structureDocYes | x\\|y | line1<br>line2 |\n",
+    },
+    {
+      action: "contextMenu.copyStructureAsTsv",
+      expected:
+        "contextMenu.structureDocColumn\tcontextMenu.structureDocType\tcontextMenu.structureDocPrimaryKey\tcontextMenu.structureDocNullable\tcontextMenu.structureDocDefault\tcontextMenu.structureDocComment\nid\tINT\tcontextMenu.structureDocYes\tcontextMenu.structureDocNo\t\t\nnote\tTEXT\tcontextMenu.structureDocNo\tcontextMenu.structureDocYes\tx|y\tline1 line2\n",
+    },
+  ])("copies the table structure as $action from the row context menu", async ({ action, expected }) => {
+    connection.id = `mysql-copy-structure-${action}`;
+    mocks.getColumns.mockResolvedValue([
+      { name: "id", data_type: "INT", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null },
+      { name: "note", data_type: "TEXT", is_nullable: true, column_default: "x|y", is_primary_key: false, extra: null, comment: "line1\nline2" },
+    ]);
+    const host = await mountBrowser();
+    rowFor(host, "users").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 14 }));
+
+    const copyGroup = await vi.waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>('[data-menu-action="group.copy"]');
+      expect(button).not.toBeNull();
+      return button!;
+    });
+    copyGroup.click();
+    const copyAction = await vi.waitFor(() => {
+      const button = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((item) => item.textContent?.includes(action));
+      expect(button).toBeDefined();
+      return button!;
+    });
+    copyAction.click();
+
+    await vi.waitFor(() => expect(mocks.getColumns).toHaveBeenCalledWith(connection.id, "app", "app", "users", undefined));
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith(expected));
+    expect(mocks.toast).toHaveBeenCalledWith("contextMenu.structureDocCopied", 2000);
   });
 
   it("clears the column selection when switching tables or closing the table-info panel", async () => {

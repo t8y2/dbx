@@ -109,6 +109,22 @@ describe("useSidebarTreeExportRuntime", () => {
       scope.stop();
     }
   });
+
+  it("copies multiple selected structures as one Markdown document", async () => {
+    const { scope, activeNode, secondNode, runtime, connectionStore } = structureRuntimeFixture();
+    connectionStore.selectedTreeNodeIds = [activeNode.value.id, secondNode.id];
+    apiMock.getColumns.mockResolvedValueOnce([column("id", true)]).mockResolvedValueOnce([column("name")]);
+    try {
+      await runtime.copyStructureAs("markdown");
+    } finally {
+      scope.stop();
+    }
+    expect(copyToClipboardMock).toHaveBeenCalledWith(
+      "### app.A\n\n| contextMenu.structureDocColumn | contextMenu.structureDocType | contextMenu.structureDocPrimaryKey | contextMenu.structureDocNullable | contextMenu.structureDocDefault | contextMenu.structureDocComment |\n| --- | --- | --- | --- | --- | --- |\n| id | text | contextMenu.structureDocYes | contextMenu.structureDocNo |  |  |\n\n### app.B\n\n| contextMenu.structureDocColumn | contextMenu.structureDocType | contextMenu.structureDocPrimaryKey | contextMenu.structureDocNullable | contextMenu.structureDocDefault | contextMenu.structureDocComment |\n| --- | --- | --- | --- | --- | --- |\n| name | text | contextMenu.structureDocNo | contextMenu.structureDocYes |  |  |\n",
+    );
+    expect(toastMock).toHaveBeenCalledWith("contextMenu.structureDocCopied", 2000);
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     apiMock.getTableDdl.mockReset();

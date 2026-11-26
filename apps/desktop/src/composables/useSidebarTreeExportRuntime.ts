@@ -43,8 +43,7 @@ import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabase
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
-
-type StructureCopyFormat = "tsv" | "markdown";
+import { buildTableStructureCopyText, type TableStructureCopyFormat, type TableStructureCopyTarget } from "@/lib/table/tableStructureCopy";
 
 interface SidebarTreeExportRuntimeOptions {
   activeNode: ShallowRef<TreeNode>;
@@ -252,63 +251,27 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     return target.schema ? `${target.schema}.${target.label}` : target.label;
   }
 
-  function columnDocValue(value: unknown): string {
-    return value === null || value === undefined ? "" : String(value);
-  }
-
-  function tsvCell(value: unknown): string {
-    return columnDocValue(value).replace(/\t/g, " ").replace(/\r?\n/g, " ").trim();
-  }
-
-  function markdownCell(value: unknown): string {
-    return columnDocValue(value).replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>").trim();
-  }
-
-  function columnDocHeaders(includeTable: boolean): string[] {
-    const headers = [t("contextMenu.structureDocColumn"), t("contextMenu.structureDocType"), t("contextMenu.structureDocPrimaryKey"), t("contextMenu.structureDocNullable"), t("contextMenu.structureDocDefault"), t("contextMenu.structureDocComment")];
-    return includeTable ? [t("contextMenu.structureDocTable"), ...headers] : headers;
-  }
-
-  function columnDocCells(target: TreeNode & { connectionId: string }, column: ColumnInfo, includeTable: boolean): unknown[] {
-    const config = connectionStore.getConfig(target.connectionId);
-    const isGaussdbM = effectiveDatabaseTypeForConnection(config) === "gaussdb" && config?.driver_profile?.toLowerCase() === "gaussdb-m";
-    const sourceDataType = column.data_type;
-    const dataType = isGaussdbM && sourceDataType ? gaussdbMTypeDisplayName(sourceDataType) : sourceDataType;
-    const cells = [column.name, dataType, column.is_primary_key ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.is_nullable ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.column_default, column.comment];
-    return includeTable ? [structureTargetName(target), ...cells] : cells;
-  }
-
   async function tableColumnsForStructureCopy(target: TreeNode & { connectionId: string; database: string }): Promise<ColumnInfo[]> {
     await connectionStore.ensureConnected(target.connectionId);
     return api.getColumns(target.connectionId, target.database, target.schema || target.database, target.label);
   }
 
-  async function buildStructureCopyText(format: StructureCopyFormat): Promise<string> {
+  async function buildStructureCopyText(format: TableStructureCopyFormat): Promise<string> {
     const targets = structureExportTargets();
-    if (!targets.length) return "";
-    const includeTable = targets.length > 1;
-    const headers = columnDocHeaders(includeTable);
-
-    if (format === "tsv") {
-      const lines = [headers.map(tsvCell).join("\t")];
-      for (const target of targets) {
-        const columns = await tableColumnsForStructureCopy(target);
-        for (const column of columns) lines.push(columnDocCells(target, column, includeTable).map(tsvCell).join("\t"));
-      }
-      return `${lines.join("\n")}\n`;
-    }
-
-    const tables: string[] = [];
-    const markdownHeaders = columnDocHeaders(false);
+    const copyTargets: TableStructureCopyTarget[] = [];
     for (const target of targets) {
-      const columns = await tableColumnsForStructureCopy(target);
-      const tableLines = [`### ${markdownCell(structureTargetName(target))}`, "", `| ${markdownHeaders.map(markdownCell).join(" | ")} |`, `| ${markdownHeaders.map(() => "---").join(" | ")} |`, ...columns.map((column) => `| ${columnDocCells(target, column, false).map(markdownCell).join(" | ")} |`)];
-      tables.push(tableLines.join("\n"));
+      const config = connectionStore.getConfig(target.connectionId);
+      const isGaussdbM = effectiveDatabaseTypeForConnection(config) === "gaussdb" && config?.driver_profile?.toLowerCase() === "gaussdb-m";
+      copyTargets.push({
+        name: structureTargetName(target),
+        columns: await tableColumnsForStructureCopy(target),
+        columnType: isGaussdbM ? (column) => gaussdbMTypeDisplayName(column.data_type) : undefined,
+      });
     }
-    return `${tables.join("\n\n")}\n`;
+    return buildTableStructureCopyText(format, copyTargets, t);
   }
 
-  async function copyStructureAs(format: StructureCopyFormat) {
+  async function copyStructureAs(format: TableStructureCopyFormat) {
     let text = "";
     try {
       text = await buildStructureCopyText(format);

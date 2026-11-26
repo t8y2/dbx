@@ -1306,7 +1306,11 @@ const dataGridSearch = useDataGridSearch({
   columns: () => props.result.columns,
   suggestionColumns: () => props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns,
   rows: () => displayItems.value,
-  getCellSearchText: (row, columnIndex) => (row.data[columnIndex] === null ? "" : rowLowerTextCache.get(row.data, columnIndex)),
+  getCellSearchText: (row, columnIndex) => {
+    if (row.data[columnIndex] === null) return "";
+    const preview = props.context === "table-data" && !replaceOpen.value && !row.isDirtyCol[columnIndex] ? largeValueRuntime?.visibleLargeValuePreviewSearchText(row.sourceIndex, columnIndex) : undefined;
+    return preview ?? rowLowerTextCache.get(row.data, columnIndex);
+  },
   getCellRawSearchText: (row, columnIndex) => (typeof row.data[columnIndex] === "string" ? (row.data[columnIndex] as string) : replaceOpen.value ? "" : String(row.data[columnIndex] ?? "")),
   caseSensitive: () => replaceOpen.value && replaceCaseSensitive.value,
   literalQuery: replaceOpen,
@@ -6193,7 +6197,8 @@ const sortedRows = computed(() => {
       const data = rows[sourceIndex];
       return data.some((cell, columnIndex) => {
         if (cell === null) return false;
-        const text = rowLowerTextCache.get(data, columnIndex);
+        const preview = props.context === "table-data" ? largeValueRuntime?.visibleLargeValuePreviewSearchText(sourceIndex, columnIndex) : undefined;
+        const text = preview ?? rowLowerTextCache.get(data, columnIndex);
         if (text.includes(q)) return true;
         // The display cache is truncated at the cell display cap, so a match
         // past the cut would wrongly hide a row that a WHERE clause finds;

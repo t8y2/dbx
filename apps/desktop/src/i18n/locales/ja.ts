@@ -4102,6 +4102,10 @@ export default withEnglishFallback({
     pasteCellTextFailed: "セルにテキストを貼り付けできません: {message}",
     copyExtractorSingleColumnFormat: "スマートコピーの単一列形式",
     copyExtractorUseSmartDefaults: "スマートコピーのデフォルト形式を使用",
+    tableQueryDefaults: "このテーブルの既定のフィルターと並べ替え",
+    tableQueryDefaultsSave: "現在のフィルターと並べ替えを保存",
+    tableQueryDefaultsClear: "保存済みの既定条件をクリア",
+    tableQueryDefaultsSaveFailed: "このテーブルの既定条件を保存できません。",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

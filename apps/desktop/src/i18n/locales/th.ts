@@ -4059,6 +4059,10 @@ export default withEnglishFallback({
     pasteCellTextFailed: "ไม่สามารถวางข้อความลงในเซลล์: {message}",
     copyExtractorSingleColumnFormat: "รูปแบบคอลัมน์เดียวของการคัดลอกอัจฉริยะ",
     copyExtractorUseSmartDefaults: "ใช้รูปแบบเริ่มต้นของการคัดลอกอัจฉริยะ",
+    tableQueryDefaults: "ตัวกรองและเรียงลำดับเริ่มต้นของตารางนี้",
+    tableQueryDefaultsSave: "บันทึกตัวกรองและเรียงลำดับปัจจุบัน",
+    tableQueryDefaultsClear: "ล้างเงื่อนไขเริ่มต้นที่บันทึกไว้",
+    tableQueryDefaultsSaveFailed: "ไม่สามารถบันทึกเงื่อนไขเริ่มต้นของตารางนี้ได้",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",

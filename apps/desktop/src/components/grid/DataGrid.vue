@@ -58,6 +58,7 @@ import {
   Columns3,
   PencilRuler,
   Pin,
+  Bookmark,
   Settings2,
   WandSparkles,
   Camera,
@@ -478,6 +479,7 @@ import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
 import { buildColumnIndexMap, columnIndexCacheAction, columnIndexColorClass, columnIndexNameKey, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { isSchemaAware, supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
+import { loadTableDataQueryDefaults, removeTableDataQueryDefaults, saveTableDataQueryDefaults, type TableDataQueryDefaultsScope } from "@/lib/table/tableDataQueryDefaults";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 import { buildDataGridLocalFilterOptions, restoreDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint } from "@/lib/database/jdbcDialect";
@@ -4286,6 +4288,39 @@ watch(
 );
 function currentWhereInput(): string | undefined {
   return combineWhereInputs(whereFilterInput.value, appliedStructuredWhereInput.value);
+}
+
+const tableQueryDefaultsScope = computed<TableDataQueryDefaultsScope | undefined>(() => {
+  const meta = props.tableMeta;
+  const database = meta?.database ?? props.database;
+  if (props.context !== "table-data" || !props.connectionId || database === undefined || !meta?.tableName) return undefined;
+  return { connectionId: props.connectionId, database, schema: meta.schema ?? props.schema, catalog: meta.catalog, tableName: meta.tableName };
+});
+const hasSavedTableQueryDefaults = ref(false);
+const canSaveTableQueryDefaults = computed(() => !gridSurfaceBusy.value && !props.result.execution_error && !hasPendingConditionInputs() && !!(currentWhereInput() || (dataGridOrderByVisible.value && effectiveOrderBy())));
+
+function refreshTableQueryDefaults() {
+  const scope = tableQueryDefaultsScope.value;
+  hasSavedTableQueryDefaults.value = !!scope && !!loadTableDataQueryDefaults(scope);
+}
+
+watch(tableQueryDefaultsScope, refreshTableQueryDefaults, { immediate: true });
+
+function saveCurrentTableQueryDefaults() {
+  const scope = tableQueryDefaultsScope.value;
+  if (!scope || !canSaveTableQueryDefaults.value) return;
+  if (!saveTableDataQueryDefaults(scope, { whereInput: currentWhereInput(), orderBy: dataGridOrderByVisible.value ? effectiveOrderBy() : undefined })) {
+    toast(t("grid.tableQueryDefaultsSaveFailed"));
+    return;
+  }
+  refreshTableQueryDefaults();
+}
+
+function clearSavedTableQueryDefaults() {
+  const scope = tableQueryDefaultsScope.value;
+  if (!scope) return;
+  removeTableDataQueryDefaults(scope);
+  refreshTableQueryDefaults();
 }
 
 function effectiveOrderBy(): string | undefined {
@@ -16290,6 +16325,17 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     </TooltipTrigger>
                     <TooltipContent side="bottom">{{ t("grid.copyQuerySql") }}</TooltipContent>
                   </Tooltip>
+                  <DropdownMenu v-if="tableQueryDefaultsScope && canUseWhereSearch" @update:open="(open) => open && refreshTableQueryDefaults()">
+                    <DropdownMenuTrigger as-child>
+                      <Button type="button" variant="ghost" size="icon" class="h-5 w-5" :class="{ 'text-primary': hasSavedTableQueryDefaults }" :title="t('grid.tableQueryDefaults')" :aria-label="t('grid.tableQueryDefaults')">
+                        <Bookmark class="h-3 w-3" :class="{ 'fill-current': hasSavedTableQueryDefaults }" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" class="min-w-52">
+                      <DropdownMenuItem :disabled="!canSaveTableQueryDefaults" @select="saveCurrentTableQueryDefaults">{{ t("grid.tableQueryDefaultsSave") }}</DropdownMenuItem>
+                      <DropdownMenuItem :disabled="!hasSavedTableQueryDefaults" @select="clearSavedTableQueryDefaults">{{ t("grid.tableQueryDefaultsClear") }}</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </div>
               </template>
 

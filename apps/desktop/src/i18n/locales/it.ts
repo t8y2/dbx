@@ -3791,6 +3791,10 @@ export default withEnglishFallback({
     pasteCellTextFailed: "Impossibile incollare il testo nella cella: {message}",
     copyExtractorSingleColumnFormat: "Formato a colonna singola di Copia intelligente",
     copyExtractorUseSmartDefaults: "Usa il formato predefinito di Copia intelligente",
+    tableQueryDefaults: "Filtri e ordinamento predefiniti per questa tabella",
+    tableQueryDefaultsSave: "Salva i filtri e l'ordinamento correnti",
+    tableQueryDefaultsClear: "Cancella le condizioni predefinite salvate",
+    tableQueryDefaultsSaveFailed: "Impossibile salvare le condizioni predefinite per questa tabella.",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

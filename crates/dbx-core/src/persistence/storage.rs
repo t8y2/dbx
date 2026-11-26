@@ -6746,6 +6746,12 @@ impl Storage {
         let plugin_connection_ids = serde_json::to_string(&conv.plugin_connection_ids).map_err(|e| e.to_string())?;
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
+            // `plugin_connection_ids` is written on INSERT only. Snapshot saves come
+            // from the panel (and from background runs that may hold a transcript
+            // built before the user's latest toggle), so letting an update rewrite
+            // the column would let an older snapshot silently revoke or add plugin
+            // access. Existing rows change attachments only through
+            // `update_ai_conversation_plugin_connection_ids`.
             tx.execute(
                 "INSERT INTO ai_conversations \
                  (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action, plugin_connection_ids) \
@@ -6760,8 +6766,7 @@ impl Storage {
                    queued_input = excluded.queued_input, \
                    created_at = excluded.created_at, \
                    updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json, \
-                   assistant_mode = excluded.assistant_mode, assistant_action = excluded.assistant_action, \
-                   plugin_connection_ids = excluded.plugin_connection_ids",
+                   assistant_mode = excluded.assistant_mode, assistant_action = excluded.assistant_action",
                 params![
                     conv.id,
                     conv.title,
@@ -6908,6 +6913,10 @@ impl Storage {
         let fifo_category = run.fifo_category.map(|c| c.as_str().to_string());
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
+            // Same rule as `save_ai_conversation`: a background run's snapshot may
+            // predate the user's latest attachment toggle, so it initializes the
+            // list only when it creates the conversation row. Updates never touch
+            // the column; the dedicated patch API owns it after that.
             tx.execute(
                 "INSERT INTO ai_conversations
                  (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action, plugin_connection_ids)
@@ -6922,8 +6931,7 @@ impl Storage {
                    queued_input = excluded.queued_input,
                    created_at = excluded.created_at,
                    updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json,
-                   assistant_mode = excluded.assistant_mode, assistant_action = excluded.assistant_action,
-                   plugin_connection_ids = excluded.plugin_connection_ids",
+                   assistant_mode = excluded.assistant_mode, assistant_action = excluded.assistant_action",
                 params![
                     conv.id,
                     conv.title,
@@ -12039,8 +12047,8 @@ mod tests {
         let legacy = storage.load_ai_conversations().await.unwrap();
         assert!(legacy[0].plugin_connection_ids.is_empty());
 
-        // Both upserts carry the list: the plain conversation write and the
-        // conversation+run write used by background runs.
+        // A first save of each kind initializes the list: the plain conversation
+        // write and the conversation+run write used by background runs.
         let mut conversation = ai_conversation("attached-conv", "0001");
         conversation.plugin_connection_ids = vec!["ssh-1".to_string(), "kafka-1".to_string()];
         storage.save_ai_conversation(&conversation).await.unwrap();
@@ -12056,9 +12064,25 @@ mod tests {
         let saved = loaded.iter().find(|item| item.id == "run-attached").unwrap();
         assert_eq!(saved.plugin_connection_ids, ["openobserve-1"]);
 
-        // Detaching everything writes an empty list, not a stale one.
-        conversation.plugin_connection_ids = Vec::new();
+        // #13978 review P1: later snapshots of an existing conversation never
+        // rewrite the column. Both writers can hold a list older than the user's
+        // latest toggle (a background run keeps its pre-close snapshot), so only
+        // the dedicated patch may change what an existing row authorizes.
+        conversation.plugin_connection_ids = vec!["stale-1".to_string()];
         storage.save_ai_conversation(&conversation).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "attached-conv").unwrap();
+        assert_eq!(saved.plugin_connection_ids, ["ssh-1", "kafka-1"]);
+
+        run_conversation.plugin_connection_ids = Vec::new();
+        storage.save_ai_run_state(&run_conversation, &run).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "run-attached").unwrap();
+        assert_eq!(saved.plugin_connection_ids, ["openobserve-1"]);
+
+        // Detaching everything goes through the patch API, which is the only
+        // writer for an existing row.
+        storage.update_ai_conversation_plugin_connection_ids("attached-conv", &[]).await.unwrap();
         let loaded = storage.load_ai_conversations().await.unwrap();
         let saved = loaded.iter().find(|item| item.id == "attached-conv").unwrap();
         assert!(saved.plugin_connection_ids.is_empty());

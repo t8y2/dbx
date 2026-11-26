@@ -22,6 +22,7 @@ import { clipboardLineEndings, copyRichTextToClipboard, copyToClipboard } from "
 import { clearDataGridClipboardCopy, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
 import { buildDataGridCopyInsertStatement, type DataGridColumnInfo, type DataGridCopyInsertMode, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { formatSqlInsert, formatTsv } from "@/lib/export/exportFormats";
+import { formatMarkdownWideTable } from "@/lib/export/markdownWideTable";
 import { showSqlInsertModeDialog, type SqlExportColumnSelection, type SqlExportOptions, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { resolveSqlExportColumnIndexes, sqlExportColumnChoices } from "@/lib/export/sqlExportColumns";
 import { summarizeExportRows } from "@/lib/export/exportDiagnostics";
@@ -1763,6 +1764,25 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
+  async function exportMarkdownWide(target?: ExportTargetParam, columnIndexesParam?: number[]) {
+    if (!allowExport("markdown")) return;
+    const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
+    if (!rowIds || rowIds.length === 0) return;
+    await runExclusiveExport(async () => {
+      try {
+        const result = await resultToExport({ rowIds, columnIndexes });
+        const wide = formatMarkdownWideTable(result.columns, commentsForExportColumns(result.columns, false), result.rows);
+        const baseName = exportFileBaseName?.value || tableMeta.value?.tableName || "export";
+        const saved = await saveTextFile(wide.markdown, exportFileName(baseName, "md", { preferFallback: true }), "Markdown", "md");
+        if (!saved) return;
+        if (wide.truncated) toast(t("grid.exportMarkdownWideTruncated", { count: wide.rowCount }), 5000);
+        notifyExportSuccess(typeof saved === "string" ? saved : undefined);
+      } catch (e: any) {
+        toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
+      }
+    });
+  }
+
   async function exportCurrentPageMarkdown(columnIndexes?: number[]) {
     if (!allowExport("markdown")) return;
     await runExclusiveExport(async () => {
@@ -3107,6 +3127,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     exportJson,
     exportCurrentPageJson,
     exportMarkdown,
+    exportMarkdownWide,
     exportCurrentPageMarkdown,
     exportHtml,
     exportCurrentPageHtml,

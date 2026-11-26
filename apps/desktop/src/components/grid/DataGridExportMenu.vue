@@ -14,7 +14,7 @@ const props = defineProps<{
 }>();
 const { t } = useI18n();
 const open = ref(false);
-const formats = ["csv", "xlsx", "xlsx-with-sql", "json", "markdown", "html", "sql", "sql-updates", "txt"];
+const formats = ["csv", "xlsx", "xlsx-with-sql", "json", "markdown", "markdown-wide", "html", "sql", "sql-updates", "txt"];
 
 // Every exportable scope is its own column. Each scope produces `<scope>-<format>`
 // items, so all of them belong in the same grid row as the format. Handling only
@@ -36,7 +36,7 @@ const rows = computed(() =>
     const result = props.items.find((item) => item.value === format);
     const scoped: Record<string, LightDropdownItem | undefined> = Object.fromEntries(scopes.map((scope) => [scope.key, props.items.find((item) => item.value === scopeValue(scope.key, format))]));
     if (!result && !Object.values(scoped).some(Boolean)) return [];
-    const formatLabels: Record<string, string> = { "xlsx-with-sql": t("grid.exportFormatXlsxWithSql"), sql: "SQL INSERT", "sql-updates": "SQL UPDATE", markdown: "Markdown" };
+    const formatLabels: Record<string, string> = { "xlsx-with-sql": t("grid.exportFormatXlsxWithSql"), "markdown-wide": t("grid.exportFormatMarkdownWide"), sql: "SQL INSERT", "sql-updates": "SQL UPDATE", markdown: "Markdown" };
     return [{ format, label: formatLabels[format] ?? format.toUpperCase(), scoped, result }];
   }),
 );

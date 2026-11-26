@@ -7638,6 +7638,13 @@ function exportSelectedRowsMarkdown() {
   return exportMarkdown({ rowIds, columnIndexes });
 }
 
+function exportSelectedRowsMarkdownWide() {
+  const rowIds = affectedRowIds();
+  if (rowIds.length === 0) return;
+  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  return exportMarkdownWide({ rowIds, columnIndexes });
+}
+
 function exportSelectedRowsHtml() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
@@ -10110,6 +10117,7 @@ const {
   exportJson,
   exportCurrentPageJson,
   exportMarkdown,
+  exportMarkdownWide,
   exportCurrentPageMarkdown,
   exportHtml,
   exportCurrentPageHtml,
@@ -10478,6 +10486,10 @@ const unrestrictedExportMenuItems = computed(() => {
           label: t("grid.exportSelectedRowsMarkdown"),
         },
         {
+          value: "selected-markdown-wide",
+          label: t("grid.exportSelectedRowsMarkdownWide"),
+        },
+        {
           value: "selected-html",
           label: t("grid.exportSelectedRowsHtml"),
         },
@@ -10652,6 +10664,7 @@ function selectExportMenuItem(value: string) {
     "selected-xlsx-with-sql": exportSelectedRowsXlsxWithSql,
     "selected-json": exportSelectedRowsJson,
     "selected-markdown": exportSelectedRowsMarkdown,
+    "selected-markdown-wide": exportSelectedRowsMarkdownWide,
     "selected-html": exportSelectedRowsHtml,
     "selected-sql": exportSelectedRowsSql,
     "selected-txt": exportSelectedRowsTxt,
@@ -15657,6 +15670,10 @@ function exportSubmenu(): ContextMenuItem {
       {
         label: t("grid.exportSelectedRowsMarkdown"),
         action: exportSelectedRowsMarkdown,
+      },
+      {
+        label: t("grid.exportSelectedRowsMarkdownWide"),
+        action: exportSelectedRowsMarkdownWide,
       },
       {
         label: t("grid.exportSelectedRowsHtml"),

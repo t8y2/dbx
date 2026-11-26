@@ -3777,6 +3777,7 @@ export default withEnglishFallback({
     tableQueryDefaultsSave: "儲存目前篩選與排序",
     tableQueryDefaultsClear: "清除已儲存的預設條件",
     tableQueryDefaultsSaveFailed: "無法儲存此表預設條件。",
+    copyExtractorReplaceInto: "使用 REPLACE INTO（鍵衝突時取代原記錄）",
   },
   exportProgress: {
     recoveryTitle: "刪除尚未確認結束的匯出？",

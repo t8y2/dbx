@@ -3795,6 +3795,7 @@ export default withEnglishFallback({
     tableQueryDefaultsSave: "Salva i filtri e l'ordinamento correnti",
     tableQueryDefaultsClear: "Cancella le condizioni predefinite salvate",
     tableQueryDefaultsSaveFailed: "Impossibile salvare le condizioni predefinite per questa tabella.",
+    copyExtractorReplaceInto: "Utilizza REPLACE INTO (sostituisce il record originale in caso di conflitto di chiave)",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

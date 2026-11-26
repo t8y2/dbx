@@ -12955,6 +12955,8 @@ export default withEnglishFallback({
     committedOffset: "コミット済みオフセット",
     logEndOffset: "ログ末尾オフセット",
     lag: "ラグ",
+    deleteGroup: "コンシューマーグループを削除",
+    confirmDelete: "コンシューマーグループ「{name}」を削除してもよろしいですか？このグループのすべてのトピックでコミット済みのオフセットが削除されます。",
   },
   mqClients: {
     unloadTopicUnsupportedKafka: "Kafka はトピックのアンロードに対応していません",

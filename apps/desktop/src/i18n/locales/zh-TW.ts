@@ -12490,6 +12490,8 @@ export default withEnglishFallback({
     committedOffset: "已提交 Offset",
     logEndOffset: "Log End Offset",
     lag: "積壓",
+    deleteGroup: "刪除消費者群組",
+    confirmDelete: "確定要刪除消費者群組「{name}」嗎？該群組在所有主題中已提交的位移都會被刪除。",
   },
   mqClients: {
     unloadTopicUnsupportedKafka: "Kafka 不支援卸載主題",

@@ -13739,6 +13739,8 @@ export default withEnglishFallback({
     committedOffset: "Зафиксированное смещение",
     logEndOffset: "Конечное смещение журнала",
     lag: "Отставание",
+    deleteGroup: "Удалить группу потребителей",
+    confirmDelete: "Вы уверены, что хотите удалить группу потребителей «{name}»? Все зафиксированные смещения этой группы во всех темах будут удалены.",
   },
   mqClients: {
     unloadTopicUnsupportedKafka: "Kafka не поддерживает выгрузку тем",

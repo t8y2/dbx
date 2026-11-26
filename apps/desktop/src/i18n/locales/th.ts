@@ -14102,6 +14102,8 @@ export default withEnglishFallback({
     committedOffset: "Offset ที่ Commit แล้ว",
     logEndOffset: "Offset สิ้นสุด Log",
     lag: "ความล่าช้า",
+    deleteGroup: "ลบกลุ่มผู้บริโภค",
+    confirmDelete: "คุณแน่ใจหรือไม่ว่าต้องการลบกลุ่มผู้บริโภค「{name}」? ออฟเซ็ตที่คอมมิตแล้วของกลุ่มนี้ในทุกท็อปิกจะถูกลบ",
   },
   mqClients: {
     unloadTopicUnsupportedKafka: "Kafka ไม่รองรับการ Unload Topic",

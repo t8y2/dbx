@@ -2255,14 +2255,12 @@ function focusWhere(): boolean {
 }
 
 function focusSearch(target: Element | null = null): boolean {
-  const tableInfoDrawer = target?.closest<HTMLElement>("[data-table-info-drawer]");
-  if (tableInfoDrawer) {
-    const input = tableInfoDrawer.querySelector<HTMLInputElement>("[data-table-info-search]");
-    if (input) {
-      input.focus();
-      input.select();
-      return true;
-    }
+  const panel = target?.closest("[data-column-lookup-panel], [data-table-info-drawer]");
+  const input = panel?.querySelector<HTMLInputElement>("[data-column-lookup-search], [data-table-info-search]");
+  if (input) {
+    input.focus();
+    input.select();
+    return true;
   }
   searchOverlayVisible.value = true;
   nextTick(() => {
@@ -2274,6 +2272,16 @@ function focusSearch(target: Element | null = null): boolean {
 function closeSearch() {
   replaceOpen.value = false;
   dataGridSearch.close();
+}
+
+function handleGridFindShortcut(event: KeyboardEvent): boolean {
+  const shortcuts = settingsStore.editorSettings.shortcuts;
+  if (event.defaultPrevented || !isFocusSearchShortcut(event, shortcuts)) return false;
+  const target = event.target instanceof Element ? event.target : document.activeElement;
+  if (isGoToColumnShortcut(event, shortcuts) && !target?.closest("[data-column-lookup-panel]")) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  return focusSearch(target);
 }
 
 const PAIRS: Record<string, string> = { "'": "'", '"': '"', "(": ")" };
@@ -2844,7 +2852,35 @@ function moveGoToColumnSelection(delta: number) {
   scrollGoToColumnSelectionIntoView();
 }
 
+let goToColumnComposition: "composing" | "saw-enter" | undefined;
+let goToColumnCommit: { timeStamp: number; acceptEqualTimeStamp: boolean } | undefined;
+
+function finishGoToColumnComposition(event?: CompositionEvent) {
+  goToColumnCommit = undefined;
+  if (goToColumnComposition === "composing" && event && event.data !== "") {
+    // WebKit can deliver an earlier physical keydown after compositionend.
+    const commit = { timeStamp: event.timeStamp, acceptEqualTimeStamp: true };
+    goToColumnCommit = commit;
+    // Rounded timestamps can tie. Expire only the tie so a later press at the same precision can select a column.
+    window.setTimeout(() => {
+      commit.acceptEqualTimeStamp = false;
+    }, 0);
+  }
+  goToColumnComposition = undefined;
+}
+
+function onGoToColumnInputKeydown(event: KeyboardEvent) {
+  const commit = goToColumnCommit;
+  goToColumnCommit = undefined;
+  const plainEnter = event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+  const trailingImeEnter = plainEnter && commit && (event.timeStamp < commit.timeStamp || (event.timeStamp === commit.timeStamp && commit.acceptEqualTimeStamp));
+  if (!trailingImeEnter && !isAiPromptImeCompositionEvent(event, goToColumnComposition !== undefined)) return;
+  if (goToColumnComposition && (event.key === "Enter" || event.code === "Enter" || event.code === "NumpadEnter")) goToColumnComposition = "saw-enter";
+  event.stopPropagation();
+}
+
 function onGoToColumnKeydown(event: KeyboardEvent) {
+  if (handleGridFindShortcut(event)) return;
   if (event.key === "ArrowDown") {
     event.preventDefault();
     event.stopPropagation();
@@ -2853,7 +2889,7 @@ function onGoToColumnKeydown(event: KeyboardEvent) {
     event.preventDefault();
     event.stopPropagation();
     moveGoToColumnSelection(-1);
-  } else if (event.key === "Enter") {
+  } else if (matchesShortcut(event, "Enter")) {
     const selected = filteredGoToColumns.value[goToColumnSelectedIndex.value];
     if (!selected) return;
     event.preventDefault();
@@ -2869,6 +2905,7 @@ function onGoToColumnKeydown(event: KeyboardEvent) {
 
 watch(goToColumnOpen, (open) => {
   if (!open) {
+    finishGoToColumnComposition();
     goToColumnSearch.value = "";
     return;
   }
@@ -12357,7 +12394,14 @@ function cancelPendingRowOrRestoreCell(): boolean {
   return restoreCellValue(item.id, actualColumnIndex(position.colIndex));
 }
 
-async function onGridKeydown(event: KeyboardEvent) {
+function onGridKeydown(event: KeyboardEvent) {
+  // Grid actions claim their key synchronously, including those that continue asynchronously.
+  const action = handleGridActionKeydown(event);
+  handleGridFindShortcut(event);
+  return action;
+}
+
+async function handleGridActionKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
 
   if (pendingPasteAsNewRows.value) {
@@ -12393,11 +12437,6 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (!targetAllowsNativeClipboard && handleGridPaginationShortcut(event)) return;
-  if (isFocusSearchShortcut(event) && !isGoToColumnShortcut(event, settingsStore.editorSettings.shortcuts)) {
-    event.preventDefault();
-    focusSearch(event.target instanceof Element ? event.target : document.activeElement instanceof Element ? document.activeElement : null);
-    return;
-  }
   if (isModRShortcut(event)) {
     event.preventDefault();
     event.stopPropagation();
@@ -17843,6 +17882,12 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               <input
                 ref="goToColumnSearchInput"
                 v-model="goToColumnSearch"
+                data-column-lookup-search
+                @compositionstart="goToColumnComposition = 'composing'"
+                @compositionend="finishGoToColumnComposition"
+                @blur="finishGoToColumnComposition()"
+                @keydown="onGoToColumnInputKeydown"
+                @keyup="goToColumnCommit = undefined"
                 :placeholder="t('grid.searchColumn')"
                 :aria-label="t('grid.searchColumn')"
                 class="h-8 w-full rounded-md border bg-transparent pl-7 pr-28 text-xs outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
@@ -17854,6 +17899,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     class="absolute right-7 top-1/2 inline-flex -translate-y-1/2 items-center gap-0.5 rounded px-1 text-[10px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
                     :title="goToColumnMatchMode === 'exact' ? t('grid.useFuzzyColumnSearch') : t('grid.useExactColumnSearch')"
                     :aria-label="goToColumnMatchMode === 'exact' ? t('grid.useFuzzyColumnSearch') : t('grid.useExactColumnSearch')"
+                    @keydown.capture="handleGridFindShortcut"
                     @keydown.stop
                   >
                     {{ goToColumnMatchMode === "exact" ? t("grid.exactColumnSearch") : t("grid.fuzzyColumnSearch") }}

@@ -109,6 +109,84 @@ END`;
     expect(foldedTextAtLine(state, 2)).toBeNull();
   });
 
+  it("regression: a bare END followed by a next-line IF statement is not read as END IF (dbx#15561)", () => {
+    // T-SQL writes the next `IF` on the line(s) right after a block's `END`. The continuation
+    // lookahead only skipped whitespace/comments and a line break is whitespace, so
+    // "END\n\nIF @b = 2" was taken for MySQL's `END IF`: that END never popped, the first block's
+    // `BEGIN` stayed on the stack, and its fold marker and BEGIN/END match highlight vanished as
+    // soon as the second block was added below it.
+    const sql = `IF @a = 1
+BEGIN
+  IF EXISTS (SELECT 1)
+  BEGIN
+    SELECT 1;
+  END
+END
+
+IF @b = 2
+BEGIN
+  SELECT 2;
+END`;
+    const state = stateFor(sql, "sqlserver");
+
+    expect(foldedTextAtLine(state, 4)).toBe("\n    SELECT 1;\n  ");
+    expect(foldedTextAtLine(state, 2)).toBe("\n  IF EXISTS (SELECT 1)\n  BEGIN\n    SELECT 1;\n  END\n");
+    expect(foldedTextAtLine(state, 10)).toBe("\n  SELECT 2;\n");
+  });
+
+  it("regression: a labeled END WHILE closer must not pop the enclosing BEGIN (MySQL `LEAVE lbl` idiom)", () => {
+    // `endsStatement` used to require `;`/end-of-document directly after the continuation word, so
+    // the label identifier in `END WHILE lbl;` made it return false and that `END` popped the
+    // enclosing `BEGIN...END` pair, desyncing every later pair (same mechanism as dbx#15561).
+    const sql = `BEGIN
+  WHILE done = 0 DO
+    SET done = 1;
+  END WHILE outer_loop;
+  SELECT 2;
+END`;
+    const state = stateFor(sql);
+
+    expect(foldedTextAtLine(state, 1)).toContain("END WHILE outer_loop;");
+  });
+
+  it("regression: a labeled END LOOP closer still skips the whole statement", () => {
+    const sql = `BEGIN
+  LOOP
+    LEAVE main_loop;
+  END LOOP main_loop;
+  SELECT 2;
+END`;
+    const state = stateFor(sql);
+
+    const folded = foldedTextAtLine(state, 1);
+    expect(folded).not.toBeNull();
+    expect(folded).toContain("END LOOP main_loop;");
+  });
+
+  it("regression: a same-line IF statement after a bare END still closes the block (dbx#15561)", () => {
+    // A one-line T-SQL script puts the next statement's `IF` in the slot right after the block's
+    // `END` ("END IF @b = 2 BEGIN"), which reads like `END IF` unless the `;` requirement is
+    // applied on top of the same-line check.
+    const sql = `IF @a = 1
+BEGIN
+  SELECT 1;
+END IF @b = 2
+BEGIN
+  SELECT 2;
+END`;
+    const state = stateFor(sql, "sqlserver");
+
+    expect(foldedTextAtLine(state, 2)).toBe("\n  SELECT 1;\n");
+    expect(foldedTextAtLine(state, 5)).toBe("\n  SELECT 2;\n");
+  });
+
+  it("regression: END IF with a trailing line comment before its terminator is still a closer", () => {
+    const sql = "BEGIN\n  IF 1 = 1 THEN\n    SELECT 1;\n  END IF -- done\n  ;\nEND";
+    const state = stateFor(sql);
+
+    expect(foldedTextAtLine(state, 1)).toContain("END IF -- done");
+  });
+
   it("regression: END IF inside a BEGIN block must not be mistaken for BEGIN's own closer", () => {
     // Before the fix, the first `END` (of "END IF") popped the BEGIN entry off the stack early,
     // so the BEGIN fold ended at "END IF" instead of the real outer END, and the final bare
@@ -340,12 +418,17 @@ SELECT * FROM (SELECT 1 AS value) one_line;`;
     expect(performance.now() - start).toBeLessThan(500);
   });
 
-  it("keeps END CASE paired across long separator comments", () => {
-    const sql = `BEGIN\n  CASE v\n    WHEN 1 THEN SELECT 1;\n  END\n${"-".repeat(1000)}\n  CASE;\nEND`;
+  it("keeps END CASE paired across long same-line separator comments", () => {
+    // `END` and its continuation must share a line (dbx#15561), so the comment that separates them
+    // has to be a block comment here; the gap scan still has to stay linear on a 1000-dash body.
+    const dashes = "-".repeat(1000);
+    const sql = `BEGIN\n  CASE v\n    WHEN 1 THEN SELECT 1;\n  END /* ${dashes} */ CASE;\nEND`;
     const state = stateFor(sql, "mysql", createSqlBlockFoldService("mysql"));
+    const start = performance.now();
 
     expect(foldedTextAtLine(state, 2)).toBe("\n    WHEN 1 THEN SELECT 1;\n  ");
-    expect(foldedTextAtLine(state, 1)).toContain(`${"-".repeat(1000)}\n  CASE;`);
+    expect(foldedTextAtLine(state, 1)).toContain(`/* ${dashes} */ CASE;`);
+    expect(performance.now() - start).toBeLessThan(500);
   });
 
   it("still folds correctly after a dialect reconfigure with the document unchanged", () => {

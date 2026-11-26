@@ -3299,6 +3299,7 @@ export default {
     copyExtractorSkipGenerated: "Skip generated columns",
     copyExtractorExcludePrimaryKeys: "Primary key handling",
     copyExtractorIncludeDatabaseName: "Include database name",
+    copyExtractorReplaceInto: "Use REPLACE INTO (replace rows on key conflicts)",
     copyExtractorQuoteIdentifiers: "Quote table and column names",
     copyExtractorTemporalFormat: "Date and time values",
     copyExtractorTemporalNative: "Native database format",

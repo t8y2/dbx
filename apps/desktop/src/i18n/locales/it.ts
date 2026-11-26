@@ -3789,6 +3789,7 @@ export default withEnglishFallback({
     pasteCellTextFailed: "Impossibile incollare il testo nella cella: {message}",
     copyExtractorSingleColumnFormat: "Formato a colonna singola di Copia intelligente",
     copyExtractorUseSmartDefaults: "Usa il formato predefinito di Copia intelligente",
+    layerPreviewExportGeoJson: "Esporta GeoJSON",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

@@ -3880,6 +3880,7 @@ export default withEnglishFallback({
     pasteCellTextFailed: "Не удалось вставить текст в ячейку: {message}",
     copyExtractorSingleColumnFormat: "Формат одного столбца для Smart Copy",
     copyExtractorUseSmartDefaults: "Использовать формат Smart Copy по умолчанию",
+    layerPreviewExportGeoJson: "Экспорт GeoJSON",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

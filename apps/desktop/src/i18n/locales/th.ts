@@ -4057,6 +4057,7 @@ export default withEnglishFallback({
     pasteCellTextFailed: "ไม่สามารถวางข้อความลงในเซลล์: {message}",
     copyExtractorSingleColumnFormat: "รูปแบบคอลัมน์เดียวของการคัดลอกอัจฉริยะ",
     copyExtractorUseSmartDefaults: "ใช้รูปแบบเริ่มต้นของการคัดลอกอัจฉริยะ",
+    layerPreviewExportGeoJson: "ส่งออก GeoJSON",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",

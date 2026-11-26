@@ -4100,6 +4100,7 @@ export default withEnglishFallback({
     pasteCellTextFailed: "セルにテキストを貼り付けできません: {message}",
     copyExtractorSingleColumnFormat: "スマートコピーの単一列形式",
     copyExtractorUseSmartDefaults: "スマートコピーのデフォルト形式を使用",
+    layerPreviewExportGeoJson: "GeoJSON をエクスポート",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

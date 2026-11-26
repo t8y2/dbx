@@ -3204,6 +3204,8 @@ defineExpose({
                 v-else-if="activeTab.result && hasTabularResult && (!activeTab.isExecuting || !isQueryExecutionErrorResult(activeTab.result))"
                 ref="dataGridRef"
                 @open-dependency-object="(context, target) => emit('openDependencyObject', context, target)"
+                @send-result-to-ai="emit('sendResultToAi', activeTab.id)"
+                send-result-to-ai-enabled
                 :key="activeResultGridInstanceKey"
                 :cache-key="activeResultGridCacheKey"
                 :column-width-cache-key="activeResultGridColumnWidthCacheKey"

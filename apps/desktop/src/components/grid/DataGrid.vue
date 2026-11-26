@@ -65,6 +65,7 @@ import {
   FileSpreadsheet,
   Globe2,
   Highlighter,
+  Sparkles,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -356,6 +357,7 @@ import {
   createDataGridFilterSubmenu,
   createDataGridHighlightSubmenu,
   createDataGridRowContextMenuItems,
+  createDataGridSendResultToAiItems,
   createDataGridSortMenuItems,
   dataGridSelectedSortMenuValue,
   type DataGridColumnSortState,
@@ -628,6 +630,12 @@ interface DataGridProps {
   schema?: string;
   columnLayoutScopeKey?: string;
   context?: "results" | "table-data";
+  /**
+   * Whether the host listens to `sendResultToAi`. The grid itself cannot know
+   * that, and the entry must not be a silent no-op in hosts that only view rows
+   * (document, vector, HBase browsers), so the entry is opt-in.
+   */
+  sendResultToAiEnabled?: boolean;
   pageSizePreference?: DataGridPageSizePreference;
   autoTransposeSingleRow?: boolean;
   resultTransposeEnabled?: boolean;
@@ -781,6 +789,9 @@ const props = withDefaults(defineProps<DataGridProps>(), {
   // Omitted row-action limits must keep normal table-data editing.
   allowInsertRows: undefined,
   allowDeleteRows: undefined,
+  // Explicit entry point only: hosts that render the grid without a
+  // `sendResultToAi` listener must not offer a menu item that does nothing.
+  sendResultToAiEnabled: false,
 });
 
 const tableColumnsByResultIndex = computed(() =>
@@ -821,6 +832,7 @@ const emit = defineEmits<{
   changeQueryTimeout: [connectionId: string];
   cancel: [];
   openDependencyObject: [context: ObjectDependencyTarget, target: SqlObjectNavigationTarget];
+  sendResultToAi: [];
 }>();
 
 const autoRefresh = useDataGridAutoRefresh({
@@ -6731,6 +6743,9 @@ const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilte
 watch([hasVisibleRows, () => props.result.columns.length], scheduleScrollerMetricsRefresh, { flush: "post", immediate: true });
 const isErrorResult = computed(() => isQueryExecutionErrorResult(props.result) && props.result.rows.length > 0);
 const errorMessage = computed(() => (isErrorResult.value ? String(props.result.rows[0]?.[0] ?? "") : ""));
+// An execution error is not a result set (its error-action slot covers that
+// flow), and an empty or evicted result has nothing to explain.
+const canSendResultToAi = computed(() => !isQueryExecutionErrorResult(props.result) && props.result.columns.length > 0 && props.result.rows.length > 0);
 // --- Selection composable ---
 const selection = useDataGridSelection({
   columns: visibleColumns,
@@ -16020,6 +16035,16 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         : []),
     ],
     previewItems,
+    // 显式把当前结果交回 AI（#15023）：只有真正带行的结果集才出现，错误/空结果
+    // 不提供入口。行数据是否离开本机由这一次点击决定，不改变全局隐私开关。
+    // 还要宿主真的监听 `sendResultToAi`（`sendResultToAiEnabled`），否则在只读
+    // 浏览型网格上是点了没反应的死入口。
+    createDataGridSendResultToAiItems({
+      label: t("ai.sendResultToAi"),
+      icon: Sparkles,
+      visible: props.sendResultToAiEnabled && canSendResultToAi.value,
+      send: () => emit("sendResultToAi"),
+    }),
     // 右键刷新：与工具栏刷新按钮/Mod+R 走同一个 onToolbarRefresh，方便
     // 习惯 Navicat 等工具在数据页右键刷新的用户（#7273）。
     [

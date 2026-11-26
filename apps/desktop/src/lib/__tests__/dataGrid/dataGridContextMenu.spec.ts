@@ -6,6 +6,7 @@ import {
   createDataGridFilterSubmenu,
   createDataGridHighlightSubmenu,
   createDataGridRowContextMenuItems,
+  createDataGridSendResultToAiItems,
   createDataGridSortMenuItems,
   dataGridSelectedSortMenuValue,
 } from "@/lib/dataGrid/dataGridContextMenu";
@@ -516,5 +517,15 @@ describe("dataGridContextMenu", () => {
     const clearItem = withUserSized.find((item) => item.label === "Clear remembered column widths");
     clearItem?.action?.();
     expect(clearAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers the send-result-to-AI entry only when there is a result to send", () => {
+    const send = vi.fn();
+    const visible = createDataGridSendResultToAiItems({ label: "Send result to AI", icon, send, visible: true });
+    expect(visible).toEqual([{ label: "Send result to AI", action: send, icon }]);
+    visible[0]!.action?.();
+    expect(send).toHaveBeenCalledTimes(1);
+
+    expect(createDataGridSendResultToAiItems({ label: "Send result to AI", icon, send, visible: false })).toEqual([]);
   });
 });

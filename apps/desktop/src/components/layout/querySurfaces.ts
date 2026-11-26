@@ -93,6 +93,8 @@ export interface ContentAreaSurfaceEmits {
   "update:activeOutputView": [tabId: string, value: TabOutputView];
   fixWithAi: [tabId: string, errorMessage: string];
   sendSelectionToAi: [tabId: string, sql: string];
+  /** Explicit "explain this result" hand-off from the query result surface (#15023). */
+  sendResultToAi: [tabId: string];
   previewChangesAvailable: [tabId: string, value: boolean];
   execute: [tabId: string, sqlOverride?: SqlExecutionOverride];
   executeInNewResultTab: [tabId: string, sqlOverride?: SqlExecutionOverride];

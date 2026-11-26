@@ -236,7 +236,7 @@ import { dismissOpenModalSurface } from "@/lib/ui/modalSurface";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { objectBrowserTablesToAiTreeNodes } from "@/lib/ai/objectBrowserToAiTargets";
 import { aiTargetFromTab, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
-import { queryErrorSelection, type AiExternalContextRequest } from "@/lib/ai/aiExternalContext";
+import { queryErrorSelection, queryResultSelection, type AiExternalContextRequest } from "@/lib/ai/aiExternalContext";
 import { isSchemaAware, isSingleDatabase, supportsConnectionQueryActions, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { canFormatSqlForDatabaseType, formatSqlForEditing, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
@@ -2308,6 +2308,41 @@ function sendSelectionToAi(tabId: string, sql: string) {
       unresolvedKey: "ai.externalTargetUnavailable",
     });
   });
+}
+
+/**
+ * "Send result to AI" from the query result surface (#15023).
+ *
+ * Unlike `includeQueryResult` — a global, default-off preview that rides along
+ * with every request — this is an explicit per-click hand-off: the executed SQL
+ * and a bounded row preview become a removable context chip, and the assistant
+ * is asked to explain them. Row data leaves the machine only because the user
+ * clicked here.
+ */
+function sendResultToAi(tabId: string) {
+  const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+  const selection = queryResultSelection(tab);
+  // The result surface hides the entry for error/empty results; guard the
+  // handler too so a programmatic trigger cannot open an empty AI request.
+  if (!selection) return;
+  // The preview is bounded by a row cap and a char budget, and neither is
+  // visible in the composer chip, so say when loaded rows were left out.
+  if (selection.sentRows < selection.loadedRows) {
+    toast(t("ai.queryResultPreviewTruncated", { sent: selection.sentRows, loaded: selection.loadedRows }), 4000);
+  }
+  // Same target rule as Fix with AI: the result's own execution namespace, not
+  // whichever tab happens to be active once the async panel mount completes.
+  const target = aiTargetFromTab(queryStore.activeResultExecutionTarget(tabId) ?? tab, (connectionId) => !!connectionStore.getConfig(connectionId));
+  openRightSidebarPanel("ai");
+  invokeWhenAiReady((handle) =>
+    handle.openExternalContext({
+      target,
+      selections: [selection],
+      action: "explain",
+      instruction: t("ai.explainQueryResultInstruction"),
+      unresolvedKey: "ai.externalTargetUnavailable",
+    }),
+  );
 }
 
 let addToAiRequestId = 0;
@@ -5998,6 +6033,7 @@ onUnmounted(() => {
                       }
                     "
                     @fix-with-ai="(tabId: string, message: string) => fixWithAi(tabId, message)"
+                    @send-result-to-ai="(tabId: string) => sendResultToAi(tabId)"
                     @send-selection-to-ai="
                       (tabId: string, sql: string) => {
                         if (tabId === queryStore.activeTabId) sendSelectionToAi(tabId, sql);

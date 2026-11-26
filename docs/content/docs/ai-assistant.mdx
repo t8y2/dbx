@@ -114,6 +114,12 @@ The conversation target comes from the editor tab the selection was taken in:
 
 A single selection is capped at 12,000 characters; anything beyond that is truncated and the chip is marked as truncated. **Fix with AI** under a query error follows the same rules.
 
+### Send a Result to AI
+
+Right-click a query result grid and choose **Send result to AI**. The assistant opens with the executed SQL, typed columns, and a bounded row preview attached, and asks the model to explain the result. The payload travels as **data**, not as an instruction; the chip reports how many rows were sent, and rows, cell values, or total characters beyond the caps are truncated with an explicit note in the content. When the preview caps leave out loaded rows, a toast also tells you how many of the loaded rows were sent.
+
+This is an explicit per-click hand-off and does not change the default-off **Send query results to AI** setting, which attaches a five-row preview to every request. Execution errors and results without rows do not show the entry.
+
 Large schemas are truncated. Explicit mentions are more reliable than asking the model to guess among every object, and they reduce tokens and metadata requests.
 
 ## Global Instructions and Prompt Templates

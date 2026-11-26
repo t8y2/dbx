@@ -11744,6 +11744,8 @@ export default withEnglishFallback({
     registerInstance: "Registra istanza",
     deregister: "Rimuovi",
     nacosContextPathHint: "Se lasciato vuoto, viene utilizzato il valore predefinito della modalità di connessione corrente; se si utilizza esplicitamente il percorso radice del servizio, inserire /; in scenari di proxy inverso, è possibile inserire prefissi come /nacos.",
+    defaultConfigGroup: "Gruppo di configurazione predefinito",
+    defaultConfigGroupHint: "Quando si apre un nuovo namespace, mostra solo le configurazioni di questo gruppo. Lasciare vuoto per mostrare tutti i gruppi.",
   },
   databaseBrowser: {
     search: "Cerca database...",

@@ -14678,6 +14678,8 @@ export default withEnglishFallback({
     restore: "Восстановить",
     registerInstance: "Зарегистрировать экземпляр",
     deregister: "Дерегистрировать",
+    defaultConfigGroup: "Группа конфигурации по умолчанию",
+    defaultConfigGroupHint: "При открытии пространства имён отображаются только конфигурации этой группы. Оставьте поле пустым, чтобы отображать все группы.",
   },
   doltVersionControl: {
     title: "Управление версиями Dolt",

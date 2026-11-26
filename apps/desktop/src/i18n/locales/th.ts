@@ -15041,6 +15041,8 @@ export default withEnglishFallback({
     restore: "คืนค่า",
     registerInstance: "ลงทะเบียน Instance",
     deregister: "ยกเลิกการลงทะเบียน",
+    defaultConfigGroup: "กลุ่มการกำหนดค่าเริ่มต้น",
+    defaultConfigGroupHint: "เมื่อเปิดเนมสเปซใหม่ จะแสดงเฉพาะการกำหนดค่าของกลุ่มนี้เท่านั้น หากเว้นว่างไว้จะแสดงทุกกลุ่ม",
   },
   doltVersionControl: {
     title: "Dolt Version Control",

@@ -12992,6 +12992,8 @@ export default withEnglishFallback({
     restore: "복원",
     registerInstance: "인스턴스 등록",
     deregister: "등록 해제",
+    defaultConfigGroup: "기본 구성 그룹",
+    defaultConfigGroupHint: "새 네임스페이스를 열 때 이 그룹의 구성만 표시합니다. 비워 두면 모든 그룹을 표시합니다.",
   },
   doltVersionControl: {
     title: "Dolt 버전 관리",

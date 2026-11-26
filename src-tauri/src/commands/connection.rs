@@ -584,12 +584,8 @@ mod tests {
                 request.extend_from_slice(&byte);
             }
             let request = String::from_utf8(request).unwrap();
-            let target = if proxy_type == ProxyType::Socks5 {
-                "/?query=SELECT%201"
-            } else {
-                "http://clickhouse.desktop.invalid:8123/?query=SELECT%201"
-            };
-            assert!(request.starts_with(&format!("GET {target} HTTP/1.1\r\n")));
+            let target = if proxy_type == ProxyType::Socks5 { "/" } else { "http://clickhouse.desktop.invalid:8123/" };
+            assert!(request.starts_with(&format!("POST {target} HTTP/1.1\r\n")));
             assert!(request.lines().any(|line| line.eq_ignore_ascii_case("host: clickhouse.desktop.invalid:8123")));
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n1\n").await.unwrap();
         });

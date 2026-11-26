@@ -13,6 +13,7 @@ import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataT
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/lib/table/tableSelectSql";
+import { loadTableDataQueryDefaults } from "@/lib/table/tableDataQueryDefaults";
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { physicalTablePrimaryKeys, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
@@ -425,7 +426,9 @@ export function useSidebarDataOpenRuntime() {
       const columns = loadedTableMeta?.columns ?? [];
       const primaryKeys = loadedTableMeta?.primaryKeys ?? [];
       const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, loadedTableMeta?.physicalPrimaryKeys ?? physicalTablePrimaryKeys(columns, undefined, effectiveDbType), connectionStore.connectionIdentifierQuote?.(node.connectionId));
-      const defaultOrderBy = defaultSort.orderBy;
+      const savedQuery = loadTableDataQueryDefaults(dataTabTarget);
+      const savedOrderBy = settingsStore.editorSettings.dataGridOrderByVisible === false ? undefined : savedQuery?.orderBy;
+      const initialOrderBy = savedOrderBy ?? defaultSort.orderBy;
       // #12647：首开路径同样尊重"该连接的行定位器已被引擎拒绝"的记忆，否则
       // 被降级过的连接每次重新单击表都会再发一次注定失败的定位器查询。
       const includeRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableType) && !rowIdLocatorUnsupported(node.connectionId) && !postgresTupleLocatorUnsupportedEngine(connectionStore.getConfig(node.connectionId));
@@ -447,7 +450,8 @@ export function useSidebarDataOpenRuntime() {
           limit,
           includeRowId: withRowId,
           injectDefaultTimeSeriesWhere: true,
-          orderBy: defaultOrderBy,
+          whereInput: savedQuery?.whereInput,
+          orderBy: initialOrderBy,
         });
       const sql = await buildOpenSql(includeRowId);
       let finalExecutedSql = sql;
@@ -467,7 +471,10 @@ export function useSidebarDataOpenRuntime() {
       logPhase("sql-built", { tabId, columnCount: columns.length, primaryKeyCount: primaryKeys.length });
       queryStore.updateSql(tabId, sql);
       const openedTab = queryStore.tabs.find((item) => item.id === tabId);
-      if (openedTab && defaultOrderBy) openedTab.orderByInput = defaultOrderBy;
+      if (openedTab) {
+        if (savedQuery?.whereInput) openedTab.whereInput = savedQuery.whereInput;
+        if (initialOrderBy) openedTab.orderByInput = initialOrderBy;
+      }
       logPhase("sql-updated", { tabId });
 
       openDataLog("info", "execute:start", { traceId, tabId, elapsed: elapsed() });
@@ -523,7 +530,7 @@ export function useSidebarDataOpenRuntime() {
       }
       openDataLog("info", "execute:done", { traceId, tabId, elapsed: elapsed() });
       const sortedTab = queryStore.tabs.find((item) => item.id === tabId);
-      if ((request?.isCurrent() ?? true) && sortedTab && sortedTab === openedTab && sortedTab.sql === finalExecutedSql) {
+      if (!savedOrderBy && (request?.isCurrent() ?? true) && sortedTab && sortedTab === openedTab && sortedTab.sql === finalExecutedSql) {
         applyTableDefaultSortResult(sortedTab, defaultSort, queryStore.sortTabResultLocally);
       }
       logPhase("execute-tab-sql", { tabId });

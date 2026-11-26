@@ -2195,7 +2195,7 @@ const completion = useQueryEditorCompletion({
     },
   },
 });
-const { triggerSqlCompletion, shouldTriggerSqlCompletionForPosition, scheduleSqlCompletionStart, consumeSqlCompletionAutoStartSuppression, scheduleDeferredCompletionTrigger, clearDeferredCompletionTrigger } = completion;
+const { triggerSqlCompletion, shouldTriggerSqlCompletionForPosition, consumeSqlCompletionAutoStartSuppression, scheduleDeferredCompletionTrigger, clearDeferredCompletionTrigger } = completion;
 
 const { editorIndentUnit, handleTab, handleEnter, acceptCompletionOrNextSnippetField, handleSpace, clearPendingCompletionEnter, clearPendingCompletionTab } = useQueryEditorCompletionKeys({
   props,
@@ -2218,7 +2218,7 @@ function isEditorComposing(currentView: EditorViewType): boolean {
   return currentView.compositionStarted || currentView.composing;
 }
 
-async function flushImeComposition() {
+function flushImeComposition() {
   const currentView = view.value;
   if (!currentView || !pendingImeModelEmit) return;
   pendingImeModelEmit = false;
@@ -2230,12 +2230,7 @@ async function flushImeComposition() {
   emit("selectionChange", selectedSqlFromView(currentView));
   emit("cursorChange", currentView.state.selection.main.head);
   documentState.recordSelection(currentView);
-  const fullDoc = currentView.state.doc.toString();
-  const position = currentView.state.selection.main.head;
-  if (await shouldTriggerSqlCompletionForPosition(fullDoc, position)) {
-    if (view.value !== currentView || currentView.state.selection.main.head !== position || isEditorComposing(currentView)) return;
-    scheduleSqlCompletionStart(currentView);
-  }
+  scheduleDeferredCompletionTrigger(currentView);
 }
 
 function defaultKeymapExtension() {
@@ -2482,6 +2477,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
               run: createQueryEditorEscapeHandler({
                 clearBatchSelection: clearBatchColumnSelectionSession,
                 cancelPendingAcceptance: () => {
+                  clearDeferredCompletionTrigger();
                   clearPendingCompletionEnter();
                   clearPendingCompletionTab();
                 },
@@ -2592,6 +2588,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
             return insertDroppedTableReference(currentView, event);
           },
           blur(_event, currentView) {
+            clearDeferredCompletionTrigger();
             imeCompositionActive = false;
             imeCompositionRecovered = false;
             // Focus moving to the sidebar or toolbar is when the tab's selection is read (locate at cursor).

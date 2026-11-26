@@ -3154,6 +3154,12 @@ export async function updateAiConversationPluginConnections(conversationId: stri
   return post("/api/ai/conversation/plugin-connections", { conversationId, pluginConnectionIds });
 }
 
+/** Column-only pin write (#14226); see the Tauri counterpart for why, including
+ *  the `false` = conversation-missing result. */
+export async function saveAiConversationPin(id: string, pinned: boolean, pinnedAt?: string): Promise<boolean> {
+  return post<boolean>("/api/ai/conversation/pin", { id, pinned, pinnedAt: pinnedAt ?? null });
+}
+
 export async function loadAiConversations(): Promise<AiConversation[]> {
   return get("/api/ai/conversations");
 }

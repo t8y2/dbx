@@ -1665,6 +1665,12 @@ export interface AiConversation {
    *  is itself a plugin connection); absent/empty means nothing is attached,
    *  which is the safe default for records written before this field existed. */
   pluginConnectionIds?: string[];
+  /** Pinned to the top of the history list (#14226). Absent means unpinned, so
+   *  legacy records and records written before the field existed load fine. */
+  pinned?: boolean;
+  /** When the user pinned it. Deliberately separate from `updatedAt` so pinning
+   *  an old conversation does not make it the restore-last target. */
+  pinnedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -1700,6 +1706,15 @@ export async function saveAiConversation(conversation: AiConversation): Promise<
  *  never re-written over newer messages (attachment toggles + repair path). */
 export async function updateAiConversationPluginConnections(conversationId: string, pluginConnectionIds: string[]): Promise<void> {
   return invoke("update_ai_conversation_plugin_connections", { conversationId, pluginConnectionIds });
+}
+
+/** Writes only the pin columns (#14226). Pinning is a property toggle, so it must
+ *  not rewrite the transcript: a whole-record write races every streaming
+ *  snapshot and would make a failed pin stick on disk via the snapshot path.
+ *  Resolves `false` when the conversation no longer exists, so the caller drops
+ *  its stale row instead of confirming a pin nothing on disk carries. */
+export async function saveAiConversationPin(id: string, pinned: boolean, pinnedAt?: string): Promise<boolean> {
+  return invoke<boolean>("save_ai_conversation_pin", { id, pinned, pinnedAt: pinnedAt ?? null });
 }
 
 export async function loadAiConversations(): Promise<AiConversation[]> {

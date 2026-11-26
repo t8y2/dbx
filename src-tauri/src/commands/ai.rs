@@ -541,6 +541,20 @@ pub async fn update_ai_conversation_plugin_connections(
     state.storage.update_ai_conversation_plugin_connection_ids(&conversation_id, &plugin_connection_ids).await
 }
 
+/// Column-only pin write (#14226). Deliberately separate from
+/// `save_ai_conversation`: a pin toggle must never rewrite the transcript.
+/// Returns `false` when the conversation no longer exists, so the UI can drop
+/// its stale row instead of confirming a pin that never reached disk.
+#[tauri::command]
+pub async fn save_ai_conversation_pin(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    pinned: bool,
+    pinned_at: Option<String>,
+) -> Result<bool, String> {
+    state.storage.save_ai_conversation_pin(&id, pinned, pinned_at).await
+}
+
 #[tauri::command]
 pub async fn load_ai_conversations(state: State<'_, Arc<AppState>>) -> Result<Vec<AiConversation>, String> {
     state.storage.load_ai_conversations().await

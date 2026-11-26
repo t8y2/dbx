@@ -1440,6 +1440,7 @@ async fn serve() -> Result<(), String> {
         .route("/ai/config/{config_id}", delete(routes::ai::delete_ai_config))
         .route("/ai/conversation", post(routes::ai::save_ai_conversation))
         .route("/ai/conversation/plugin-connections", post(routes::ai::update_ai_conversation_plugin_connections))
+        .route("/ai/conversation/pin", post(routes::ai::save_ai_conversation_pin))
         .route("/ai/conversations", get(routes::ai::load_ai_conversations))
         .route("/ai/conversation/{id}", delete(routes::ai::delete_ai_conversation))
         .route("/ai/complete", post(routes::ai::ai_complete))

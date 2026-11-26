@@ -137,3 +137,22 @@ describe("EditorSettingsDialog footer layout", () => {
     expect(preview.classList.contains("min-h-0")).toBe(true);
   });
 });
+
+describe("EditorSettingsDialog completion delay input", () => {
+  it("keeps intermediate edits and normalizes the value on blur", async () => {
+    const { store } = await mountSettings("page");
+    const input = host.querySelector<HTMLInputElement>("#editor-completion-auto-activation-delay")!;
+    expect(input.value).toBe("500");
+    input.focus();
+    for (const value of ["50", "5", "", "2000", "20000"]) {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await settle();
+      expect(input.value).toBe(value);
+    }
+    input.blur();
+    await settle();
+    expect(input.value).toBe("5000");
+    expect(store.editorSettings.completionAutoActivationDelayMs).toBe(500);
+  });
+});

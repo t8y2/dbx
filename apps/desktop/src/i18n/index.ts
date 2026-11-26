@@ -11,7 +11,7 @@ type I18nGlobal = {
 };
 
 function syncDocumentLanguage(locale: Locale) {
-  if (typeof document !== "undefined") {
+  if (typeof document !== "undefined" && document.documentElement) {
     document.documentElement.lang = locale;
   }
 }

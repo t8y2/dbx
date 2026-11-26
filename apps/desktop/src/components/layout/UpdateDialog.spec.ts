@@ -502,6 +502,26 @@ describe("UpdateDialog close protection", () => {
   });
 });
 
+describe("UpdateDialog footer layout", () => {
+  it("keeps the source selector and update actions in non-shrinking wrapping groups", async () => {
+    await mountDialog(0);
+
+    const footer = document.body.querySelector<HTMLElement>("[data-update-footer]");
+    const sourceControls = footer?.querySelector<HTMLElement>("[data-update-source-controls]");
+    const appActions = footer?.querySelector<HTMLElement>("[data-update-app-actions]");
+
+    // #15706: the old absolutely positioned source selector could be overlapped
+    // by the action buttons when the footer ran out of horizontal space.
+    expect(sourceControls?.className).toContain("flex-none");
+    expect(sourceControls?.className).toContain("whitespace-nowrap");
+    expect(sourceControls?.className).not.toContain("absolute");
+    expect(appActions?.className).toContain("max-w-full");
+    expect(appActions?.className).toContain("flex-wrap");
+    expect(appActions?.contains(buttonWithText("Open Release") ?? null)).toBe(true);
+    expect(appActions?.contains(downloadButton() ?? null)).toBe(true);
+  });
+});
+
 describe("UpdateDialog ignore version", () => {
   it("emits ignore-version when the ignore button is clicked", async () => {
     const { ignoreVersion } = await mountDialog(0);

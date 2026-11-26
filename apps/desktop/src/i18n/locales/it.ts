@@ -10980,6 +10980,8 @@ export default withEnglishFallback({
     tabWrapMaxRows: "Numero massimo di righe per l'affiancamento delle schede",
     shortcutGoToLastEditLocation: "Vai all'ultima posizione di modifica",
     shortcutToggleLineCommentAndAdvance: "Attiva/disattiva commento riga e passa alla riga successiva",
+    sidebarShowDatabaseServiceInfoOnActivation: "All'apertura, accedi alla dashboard del server",
+    sidebarShowDatabaseServiceInfoOnActivationDescription: "Se abilitato, all'attivazione e all'espansione di una connessione apre la dashboard del server a destra; quando la connessione viene compressa, chiude la dashboard e torna alla pagina iniziale predefinita.",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

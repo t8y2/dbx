@@ -11410,6 +11410,8 @@ export default withEnglishFallback({
     tabWrapMaxRows: "タブの最大折り返し行数",
     shortcutGoToLastEditLocation: "前回の編集位置に移動",
     shortcutToggleLineCommentAndAdvance: "行コメントを切り替えて次の行へ移動",
+    sidebarShowDatabaseServiceInfoOnActivation: "開いたときにサーバーダッシュボードを表示",
+    sidebarShowDatabaseServiceInfoOnActivationDescription: "有効にすると、接続がアクティブ化されて展開されたときに右側にサーバーダッシュボードを開きます。その接続を折りたたむと、ダッシュボードを閉じてデフォルトのホームページに戻ります。",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

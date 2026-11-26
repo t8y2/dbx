@@ -37,7 +37,8 @@ describe("translateMongoSqlScript", () => {
     const { command } = shell("SELECT status, COUNT(*) AS n FROM users WHERE active = true GROUP BY status ORDER BY n DESC");
     expect(command.kind).toBe("aggregate");
     if (command.kind !== "aggregate") return;
-    expect(JSON.parse(command.pipeline)).toEqual([{ $match: { active: true } }, { $group: { _id: "$status", n: { $sum: 1 } } }, { $project: { status: "$_id", n: 1, _id: 0 } }, { $sort: { n: -1 } }]);
+    // ORDER BY runs on the $group output, before $project (so it can also use unselected GROUP BY columns).
+    expect(JSON.parse(command.pipeline)).toEqual([{ $match: { active: true } }, { $group: { _id: "$status", n: { $sum: 1 } } }, { $sort: { n: -1 } }, { $project: { status: "$_id", n: 1, _id: 0 } }]);
   });
 
   it("compiles an equality join into $lookup", () => {

@@ -464,7 +464,8 @@ class Parser {
     if (fn === "count" && this.eatOp("*")) star = true;
     else field = this.parseFieldRef();
     this.expectOp(")");
-    const key = (item: SelectItem) => `${item.fn}|${item.star ? "*" : (item.field?.parts.map((part) => part.name).join(".") ?? "")}`;
+    // Identity includes array positions: SUM(items[0].price) and SUM(items[1].price) are different accumulators.
+    const key = (item: SelectItem) => `${item.fn}|${item.star ? "*" : (item.field?.parts.map((part) => `${part.name}${part.indexes.map((index) => `[${index}]`).join("")}`).join(".") ?? "")}`;
     const wanted = key({ type: "agg", fn, star, field });
     const names = aggregateOutputNames(items);
     const existing = items.find((item) => item.type === "agg" && key(item) === wanted);
@@ -736,7 +737,8 @@ function compileSelect(items: SelectItem[], from: TableRef, joins: Join[], where
   }
   if (items.some((item) => item.type === "agg") && !groupBy) {
     const onlyCount = items.length === 1 && items[0]?.fn === "count" && items[0].star && !items[0].alias;
-    if (onlyCount && !orderBy.length && limit === undefined && offset === undefined && joins.length === 0) {
+    // HAVING filters the single grouped row, so it must stay on the aggregate path.
+    if (onlyCount && !having && !orderBy.length && limit === undefined && offset === undefined && joins.length === 0) {
       const filter = where ? exprToFilter(where, aliases) : {};
       return mongoCall(from, "countDocuments", printShell(filter));
     }
@@ -765,15 +767,16 @@ function compileSelect(items: SelectItem[], from: TableRef, joins: Join[], where
   if (groupBy) {
     assertGroupedColumns(items, groupBy, aliases, from);
     pipeline.push({ $group: groupStage(items, groupBy, aliases, from) });
+    // HAVING and ORDER BY read the $group output (group keys under `_id`, aggregates by
+    // name) before $project, so they can use GROUP BY columns that are not selected.
+    if (having) pipeline.push({ $match: exprToFilter(rewriteGroupedFields(having, items, groupBy, aliases, from, "HAVING"), HAVING_ALIASES) });
+    if (orderBy.length) pipeline.push({ $sort: groupedSortDocument(orderBy, items, groupBy, aliases, from) });
     const project = groupProject(items, groupBy, aliases, from);
     if (project) pipeline.push({ $project: project });
-    if (having) {
-      // HAVING filters the grouped rows: aggregate outputs and the projected group columns.
-      pipeline.push({ $match: exprToFilter(rewriteHavingFields(having, items, groupBy, aliases, from, project !== undefined), HAVING_ALIASES) });
+    else {
       const hidden = items.filter((item) => item.hidden && item.alias).map((item) => item.alias!);
       if (hidden.length) pipeline.push({ $unset: hidden });
     }
-    if (orderBy.length) pipeline.push({ $sort: orderDocument(orderBy, items, true, aliases, from, groupBy) });
   } else {
     if (orderBy.length) pipeline.push({ $sort: orderDocument(orderBy, items, false, aliases, from) });
     if (joins.length && items.some((item) => item.type === "star")) {
@@ -823,7 +826,8 @@ function groupStage(items: SelectItem[], groupBy: FieldRef[], aliases: AliasMap,
     if (item.type !== "agg" || !item.fn) continue;
     const name = aggregateName(item, used);
     if (item.field) rejectNegativeIndex(item.field, "an aggregate");
-    const path = item.star || !item.field ? undefined : `$${qualifiedPath(fieldPath(item.field, aliases, from))}`;
+    // `$items.0.price` does not index arrays inside an aggregation expression; use $arrayElemAt like SELECT does.
+    const path: ShellValue | undefined = item.star || !item.field ? undefined : fieldHasIndex(item.field) ? arrayValueExpr(item.field, fieldPath(item.field, aliases, from)) : `$${qualifiedPath(fieldPath(item.field, aliases, from))}`;
     if (item.fn === "count") {
       group[name] = item.star || !path ? { $sum: 1 } : { $sum: { $cond: [{ $ne: [path, null] }, 1, 0] } };
     } else {
@@ -889,9 +893,10 @@ function groupProject(items: SelectItem[], groupBy: FieldRef[], aliases: AliasMa
   for (const item of items) {
     if (item.type !== "agg") continue;
     const name = aggregateName(item, used);
-    project[name] = 1;
+    if (!item.hidden) project[name] = 1;
   }
-  project._id = 0;
+  // A selected `_id` (e.g. SELECT DISTINCT _id) is an output column, not the group key to drop.
+  if (!("_id" in project)) project._id = 0;
   return project;
 }
 
@@ -925,33 +930,38 @@ function multiGroupProject(items: SelectItem[], aliases: AliasMap, from: TableRe
   if (columns.length === 0) return undefined;
   const project: Record<string, ShellValue> = {};
   for (const column of columns) project[column.name] = `$_id.${column.qualified}`;
-  for (const name of aggregateOutputNames(items).values()) project[name] = 1;
-  project._id = 0;
+  for (const [item, name] of aggregateOutputNames(items)) if (!item.hidden) project[name] = 1;
+  if (!("_id" in project)) project._id = 0;
   return project;
 }
 
 /**
- * Points HAVING field references at the grouped row: aggregate outputs and
- * aliases stay as they are; a GROUP BY column becomes its projected name
- * (or `_id` / `_id.path` when the stage has no $project).
+ * Path of a column in the $group output: an aggregate by its accumulator name, a
+ * GROUP BY column (directly or through its SELECT alias) as `_id` / `_id.<path>`.
+ * Anything else is not part of a grouped row, so it is rejected.
  */
-function rewriteHavingFields(expr: Expr, items: SelectItem[], groupBy: FieldRef[], aliases: AliasMap, from: TableRef, projected: boolean): Expr {
-  const outputs = new Set([...aggregateOutputNames(items).values(), ...items.filter((item) => item.alias).map((item) => item.alias!)]);
-  const groupPaths = groupBy.map((field) => qualifiedPath(fieldPath(field, aliases, from)));
-  const selectedNames = new Map<string, string>();
-  for (const item of items) {
-    if (item.type !== "field" || !item.field) continue;
-    selectedNames.set(qualifiedPath(fieldPath(item.field, aliases, from)), item.alias ?? lastPartName(item.field) ?? "");
+function groupedRowPath(field: FieldRef, items: SelectItem[], groupBy: FieldRef[], aliases: AliasMap, from: TableRef, clause: string): string {
+  const dotted = expandedNames(field).join(".");
+  let source = field;
+  if (field.parts.length === 1 && field.parts[0]!.indexes.length === 0) {
+    const name = field.parts[0]!.name;
+    for (const [, output] of aggregateOutputNames(items)) if (output === name) return output;
+    const aliased = items.find((item) => item.type === "field" && item.alias === name && item.field);
+    if (aliased?.field) source = aliased.field;
   }
-  const mapField = (field: FieldRef): FieldRef => {
-    const dotted = field.parts.map((part) => part.name).join(".");
-    if (field.parts.length === 1 && outputs.has(dotted)) return field;
-    const path = qualifiedPath(fieldPath(field, aliases, from));
-    if (!groupPaths.includes(path)) throw new MongoSqlError(`HAVING can only use GROUP BY columns or aggregates; ${dotted} is neither.`);
-    const projectedName = groupPaths.length > 1 ? multiGroupColumnName(field, items, aliases, from) : selectedNames.get(path);
-    const name = projected && projectedName ? projectedName : groupPaths.length === 1 ? "_id" : `_id.${path}`;
-    return { parts: name.split(".").map((part) => ({ name: part, indexes: [] })) };
-  };
+  const groupPaths = groupBy.map((group) => qualifiedPath(fieldPath(group, aliases, from)));
+  const path = qualifiedPath(fieldPath(source, aliases, from));
+  if (!groupPaths.includes(path)) throw new MongoSqlError(`${clause} can only use GROUP BY columns or aggregates; ${dotted} is neither.`);
+  return groupPaths.length === 1 ? "_id" : `_id.${path}`;
+}
+
+function groupedFieldRef(path: string): FieldRef {
+  return { parts: path.split(".").map((part) => ({ name: part, indexes: [] })) };
+}
+
+/** Points HAVING field references at the $group output (see groupedRowPath). */
+function rewriteGroupedFields(expr: Expr, items: SelectItem[], groupBy: FieldRef[], aliases: AliasMap, from: TableRef, clause: string): Expr {
+  const mapField = (field: FieldRef): FieldRef => groupedFieldRef(groupedRowPath(field, items, groupBy, aliases, from, clause));
   const visit = (node: Expr): Expr => {
     switch (node.type) {
       case "and":
@@ -966,6 +976,15 @@ function rewriteHavingFields(expr: Expr, items: SelectItem[], groupBy: FieldRef[
     }
   };
   return visit(expr);
+}
+
+function groupedSortDocument(orderBy: OrderKey[], items: SelectItem[], groupBy: FieldRef[], aliases: AliasMap, from: TableRef): ShellValue {
+  const sort: Record<string, ShellValue> = {};
+  for (const key of orderBy) {
+    rejectNegativeIndex(key.field, "ORDER BY");
+    sort[groupedRowPath(key.field, items, groupBy, aliases, from, "ORDER BY")] = key.direction;
+  }
+  return sort;
 }
 
 function projectStage(items: SelectItem[], aliases: AliasMap, from: TableRef): ShellValue {

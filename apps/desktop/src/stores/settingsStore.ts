@@ -614,6 +614,31 @@ export const AI_PROVIDER_PARTNER_PRESETS: readonly AiPartnerProviderPreset[] = [
   },
 ];
 
+/**
+ * Extra picker entries that reuse a built-in provider with a different endpoint,
+ * so the backend keeps treating them as that provider. `internationalEndpoint`
+ * is the endpoint used when the UI locale is not zh-CN.
+ */
+export interface AiVariantProviderPreset extends AiBuiltinProviderPreset {
+  internationalEndpoint: string;
+}
+
+export const AI_PROVIDER_VARIANT_PRESETS: readonly AiVariantProviderPreset[] = [
+  {
+    id: "zhipu-coding-plan",
+    label: "Zhipu Coding Plan",
+    iconSlug: "zhipu",
+    group: "builtin",
+    provider: "zhipu",
+    endpoint: "https://open.bigmodel.cn/api/coding/paas/v4",
+    internationalEndpoint: "https://api.z.ai/api/coding/paas/v4",
+    model: "glm-5.3",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: true,
+  },
+];
+
 function normalizeAiProviderEndpoint(endpoint: string): string {
   return endpoint.trim().replace(/\/+$/, "").toLowerCase();
 }
@@ -621,16 +646,20 @@ function normalizeAiProviderEndpoint(endpoint: string): string {
 export function getAiProviderPreset(provider: AiProvider, endpoint = ""): AiProviderPreset | AiPartnerProviderPreset {
   const normalizedEndpoint = normalizeAiProviderEndpoint(endpoint);
   const partnerPreset = AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.provider === provider && normalizeAiProviderEndpoint(preset.endpoint) === normalizedEndpoint);
-  return partnerPreset ?? AI_PROVIDER_PRESETS[provider];
+  const variantPreset = AI_PROVIDER_VARIANT_PRESETS.find((preset) => preset.provider === provider && [preset.endpoint, preset.internationalEndpoint].some((candidate) => normalizeAiProviderEndpoint(candidate) === normalizedEndpoint));
+  return partnerPreset ?? variantPreset ?? AI_PROVIDER_PRESETS[provider];
 }
 
 export function getAiProviderPresetOption(id: string): AiProviderPreset | AiBuiltinProviderPreset | AiPartnerProviderPreset {
-  return id === CC_SWITCH_PROVIDER_ID ? CC_SWITCH_PROVIDER_PRESET : (AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === id) ?? AI_PROVIDER_PRESETS[id as AiProvider] ?? AI_PROVIDER_PRESETS.custom);
+  return id === CC_SWITCH_PROVIDER_ID ? CC_SWITCH_PROVIDER_PRESET : (AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === id) ?? AI_PROVIDER_VARIANT_PRESETS.find((preset) => preset.id === id) ?? AI_PROVIDER_PRESETS[id as AiProvider] ?? AI_PROVIDER_PRESETS.custom);
 }
 
-export function getAiProviderPresetDefaultEndpoint(preset: AiProviderPreset | AiBuiltinProviderPreset | AiPartnerProviderPreset, locale: string): string {
+export function getAiProviderPresetDefaultEndpoint(preset: AiProviderPreset | AiBuiltinProviderPreset | AiPartnerProviderPreset | AiVariantProviderPreset, locale: string): string {
   if (preset.provider === "minimax" && locale === "zh-CN") {
     return "https://api.minimaxi.com/v1";
+  }
+  if ("internationalEndpoint" in preset && locale !== "zh-CN") {
+    return preset.internationalEndpoint;
   }
   if (preset.provider === "zhipu" && locale !== "zh-CN") {
     return "https://api.z.ai/api/paas/v4";

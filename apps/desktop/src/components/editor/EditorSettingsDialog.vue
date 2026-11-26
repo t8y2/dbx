@@ -70,6 +70,7 @@ import {
   useSettingsStore,
   AI_PROVIDER_PRESETS,
   AI_PROVIDER_PARTNER_PRESETS,
+  AI_PROVIDER_VARIANT_PRESETS,
   CC_SWITCH_PROVIDER_ID,
   AI_OUTPUT_TOKENS_MAX,
   AI_OUTPUT_TOKENS_MIN,
@@ -7170,7 +7171,13 @@ const aiCcSwitchPluginStatusText = computed(() => {
 const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli", "qoder-cli"]);
 const OPENCODE_CONTROL_ENV = new Set(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_PERMISSION", "OPENCODE_DISABLE_PROJECT_CONFIG"]);
 const CURSOR_CONTROL_ENV = new Set(["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"]);
-const builtinAiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
+// Variant presets (same provider, different endpoint) sit right after their provider.
+const builtinAiProviderOptions = computed(() =>
+  Object.values(AI_PROVIDER_PRESETS)
+    .filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider))
+    .flatMap((provider) => [provider, ...AI_PROVIDER_VARIANT_PRESETS.filter((variant) => variant.provider === provider.provider)])
+    .map((provider) => ({ ...provider, presetId: "id" in provider && typeof provider.id === "string" ? provider.id : provider.provider })),
+);
 const partnerAiProviderOptions = computed(() => AI_PROVIDER_PARTNER_PRESETS.filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
 
 async function refreshCcSwitchPluginAvailability() {
@@ -13111,7 +13118,7 @@ LIMIT 100;</pre>
                         <div class="grid grid-cols-1 gap-1 sm:grid-cols-2">
                           <SelectGroup class="min-w-0">
                             <SelectLabel>{{ t("ai.builtinProviders") }}</SelectLabel>
-                            <SelectItem v-for="provider in builtinAiProviderOptions" :key="provider.provider" :value="provider.provider">
+                            <SelectItem v-for="provider in builtinAiProviderOptions" :key="provider.presetId" :value="provider.presetId">
                               <span class="flex w-full min-w-0 items-center gap-2">
                                 <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" :icon-path="provider.iconPath" />
                                 <span class="truncate">{{ provider.label }}</span>

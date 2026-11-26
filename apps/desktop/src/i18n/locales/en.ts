@@ -5402,6 +5402,8 @@ export default {
     unsplit: "Unsplit",
     compactTabTitle: "Shorten Tab Titles",
     fullTabTitle: "Show Full Tab Titles",
+    hideProcedureTabSignatures: "Hide Procedure Parameters in Tab Titles",
+    showProcedureTabSignatures: "Show Procedure Parameters in Tab Titles",
     closeTab: "Close Tab",
     reopenClosedTab: "Reopen Closed Tab",
     editTabGroup: "Edit Tab Group",

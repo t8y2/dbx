@@ -328,6 +328,11 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   }
   if (tab.mode === "query") {
     const title = queryTitle(tab);
+    const source = tab.objectSource ?? tab.sourceLoad?.request;
+    if (settingsStore.editorSettings.hideProcedureTabSignatures && source?.objectType === "PROCEDURE" && source.signature) {
+      const sourceTitle = `Source - ${source.name}`;
+      if (title === `${sourceTitle}(${source.signature})`) return sourceTitle;
+    }
     if (title) return title;
     if (compact) return connectionDisplayName(tab.connectionId);
     const hasDatabase = Boolean(tab.database?.trim());

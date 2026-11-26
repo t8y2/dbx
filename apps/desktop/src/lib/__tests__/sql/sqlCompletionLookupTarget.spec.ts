@@ -340,10 +340,10 @@ describe("sqlCompletionLookupTarget", () => {
   });
 
   it("reports which dialects treat USE as a database switch", () => {
-    for (const databaseType of ["mysql", "doris", "starrocks", "goldendb", "gbase"] as const) {
+    for (const databaseType of ["mysql", "doris", "starrocks", "goldendb", "gbase", "clickhouse"] as const) {
       expect(switchesDatabaseWithUseStatement(databaseType)).toBe(true);
     }
-    for (const databaseType of ["postgres", "oracle", "clickhouse", "hive"] as const) {
+    for (const databaseType of ["postgres", "oracle", "hive"] as const) {
       expect(switchesDatabaseWithUseStatement(databaseType)).toBe(false);
     }
     expect(switchesDatabaseWithUseStatement(undefined)).toBe(false);

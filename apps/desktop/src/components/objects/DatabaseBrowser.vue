@@ -2,19 +2,22 @@
 import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
-import { ArrowDown, ArrowUp, Check, Copy, Database, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, TerminalSquare, X } from "@lucide/vue";
+import { ArrowDown, ArrowUp, Check, ChevronDown, Copy, Database, FilePlus2, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
-import { DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
+import { canClearDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionUsesConnectionRootSchemaMode } from "@/lib/database/jdbcDialect";
 import { objectBrowserTargetForNamespaceRow } from "@/lib/database/objectBrowserTarget";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "@/components/sidebar/SidebarTreeItemDialogs.vue";
+import TableStructurePeekDialog from "@/components/editor/TableStructurePeekDialog.vue";
+import { useTableStructurePeek } from "@/composables/useTableStructurePeek";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -29,7 +32,13 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSidebarMenuPresentation } from "@/composables/useSidebarMenuPresentation";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { formatRowsAsSpreadsheetTsv } from "@/lib/common/tableClipboard";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import { createDatabaseCollationOptionsForCharset, parseCreateDatabaseCharsetMetadata, type CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import { editableDatabasePropertyGroups } from "@/lib/database/databasePropertyEditing";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { MYSQL_CHARACTER_SETS_SQL, MYSQL_COLLATIONS_SQL, mysqlTableCharsetFromCollation, mysqlTableCollationBelongsToCharset } from "@/lib/table/mysqlTableCollation";
 
 type DatabaseRow = {
   name: string;
@@ -75,6 +84,7 @@ const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
 const { presentMenu, SidebarMenuPreferencesDialog, sidebarMenuPreferencesOpen, sidebarMenuPreferences } = useSidebarMenuPresentation();
+const { target: tableStructureTarget, columns: tableStructureColumns, loading: tableStructureLoading, error: tableStructureError, open: openTableStructurePeek, close: closeTableStructurePeek } = useTableStructurePeek();
 const searchInput = ref<InstanceType<typeof Input>>();
 const search = ref(restoredUiState.search ?? "");
 const rows = ref<DatabaseRow[]>([]);
@@ -133,7 +143,9 @@ function setCompactCardWidth(width: ObjectBrowserCompactWidth) {
 // controls into the overflow menu, tier 2 drops the connection chip (the tab
 // title already carries it). See useToolbarOverflow for the tier contract.
 const toolbarRef = ref<HTMLElement | null>(null);
-const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.connection.id, () => settingsStore.editorSettings.objectBrowserViewMode]);
+// The connection chip renders `connection.name`, so a rename changes the row's
+// content extent without changing its width — track the name, not just the id.
+const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.connection.id, () => props.connection.name, () => settingsStore.editorSettings.objectBrowserViewMode]);
 const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
 const showConnectionChip = computed(() => toolbarTier.value < 2);
 const showInlineSortAndView = computed(() => toolbarTier.value < 1);
@@ -232,12 +244,19 @@ function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
         },
         icon: Copy,
       },
-      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.newQuery")}`, "query", target.schema, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
+      {
+        sidebarActionId: "contextMenu.newQuery",
+        label: t("contextMenu.newQuery"),
+        action: () => queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.newQuery")}`, "query", target.schema, undefined, undefined, { forceNew: true }),
+        icon: FilePlus2,
+        shortcut: settingsStore.editorSettings.shortcuts.newQuery,
+      },
       { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyToClipboard(row.name), icon: Copy },
       { label: "", separator: true },
       {
         label: isDefault ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"),
         action: () => (isDefault ? connectionStore.clearDefaultDatabase(props.connection.id) : connectionStore.setDefaultDatabase(props.connection.id, row.name)),
+        disabled: isDefault && !canClearDefaultDatabase(props.connection.db_type),
         icon: Database,
       },
       { label: "", separator: true },
@@ -265,6 +284,11 @@ function openDatabaseFromSidebar(node: TreeNode) {
   if (node.database) openDatabase(node.database);
 }
 
+function openSidebarTableStructure(node: TreeNode) {
+  if (!node.connectionId) return;
+  void openTableStructurePeek(node);
+}
+
 function columnLabel(key: DatabaseBrowserColumnKey): string {
   if (key === "name") return t("objects.name");
   if (key === "sizeBytes") return t("objects.size");
@@ -283,6 +307,162 @@ function displayValue(row: DatabaseRow, key: DatabaseBrowserColumnKey): string {
   if (key === "defaultCharset") return row.defaultCharset || "";
   if (key === "defaultCollation") return row.defaultCollation || "";
   return row.comment || "";
+}
+
+// ---- MySQL 数据库默认字符集 / 排序规则：下拉选择后执行 ALTER DATABASE ----
+const mysqlCharsetMetadata = ref<CreateDatabaseCharsetMetadata | undefined>();
+const mysqlCharsetMetadataLoading = ref(false);
+const mysqlCharsetMetadataError = ref("");
+let mysqlCharsetMetadataRequestId = 0;
+/** 同一时刻只允许打开一个下拉，避免虚拟滚动复用行时残留多个浮层。 */
+const mysqlCharsetMenuTarget = ref<{ database: string; kind: "charset" | "collation" } | null>(null);
+const mysqlCharsetOptions = computed<string[]>(() => mysqlCharsetMetadata.value?.charsets ?? []);
+const mysqlCharsetChangeTarget = ref<{ row: DatabaseRow; charset: string; collation: string } | null>(null);
+const mysqlCharsetChangeSql = ref("");
+const showMysqlCharsetChangeConfirm = ref(false);
+const mysqlCharsetChangeExecuting = ref(false);
+const mysqlCharsetChangeLabel = computed(() => (mysqlCharsetChangeTarget.value ? `\`${mysqlCharsetChangeTarget.value.row.name}\`` : ""));
+
+function canChangeDatabaseCharset(row: DatabaseRow): boolean {
+  return editableDatabasePropertyGroups(props.connection, { type: "database", database: row.name }).includes("charsetCollation");
+}
+
+function mysqlCollationOptionsForCharset(charset: string): string[] {
+  const metadata = mysqlCharsetMetadata.value;
+  if (!metadata) return [];
+  // 统计信息里没有数据库排序规则时，退回全量列表，选中后由排序规则反推字符集。
+  if (!charset.trim()) return Array.from(new Set(Object.values(metadata.collationsByCharset).flat()));
+  return createDatabaseCollationOptionsForCharset(charset, metadata.collationsByCharset);
+}
+
+async function loadMysqlCharsetMetadata(force = false) {
+  if (!force && (mysqlCharsetMetadataLoading.value || mysqlCharsetMetadata.value)) return;
+  const requestId = ++mysqlCharsetMetadataRequestId;
+  mysqlCharsetMetadataLoading.value = true;
+  mysqlCharsetMetadataError.value = "";
+  try {
+    await connectionStore.ensureConnected(props.connection.id);
+    const [charsetResult, collationResult] = await Promise.all([api.executeQuery(props.connection.id, "", MYSQL_CHARACTER_SETS_SQL, undefined, undefined, { maxRows: 1000 }), api.executeQuery(props.connection.id, "", MYSQL_COLLATIONS_SQL, undefined, undefined, { maxRows: 10000 })]);
+    if (requestId !== mysqlCharsetMetadataRequestId) return;
+    mysqlCharsetMetadata.value = parseCreateDatabaseCharsetMetadata(charsetResult, collationResult);
+  } catch (e: any) {
+    if (requestId !== mysqlCharsetMetadataRequestId) return;
+    mysqlCharsetMetadataError.value = translateBackendError(t, e);
+  } finally {
+    if (requestId === mysqlCharsetMetadataRequestId) mysqlCharsetMetadataLoading.value = false;
+  }
+}
+
+function setMysqlCharsetMenuOpen(row: DatabaseRow, kind: "charset" | "collation", open: boolean) {
+  const current = mysqlCharsetMenuTarget.value;
+  mysqlCharsetMenuTarget.value = open ? { database: row.name, kind } : current?.database === row.name && current?.kind === kind ? null : current;
+  if (open) void loadMysqlCharsetMetadata();
+}
+
+async function openMysqlCharsetChangeConfirm(row: DatabaseRow, charset: string, collation: string) {
+  const sql = await api
+    .buildUpdateDatabasePropertiesSql({
+      databaseType: props.connection.db_type,
+      driverProfile: props.connection.driver_profile,
+      target: "database",
+      name: row.name,
+      charset,
+      collation,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+    })
+    .catch(() => "");
+  if (!sql) {
+    toast(t("databaseBrowser.charsetChangeInvalid"), 5000);
+    return;
+  }
+  mysqlCharsetChangeSql.value = sql;
+  mysqlCharsetChangeTarget.value = { row, charset, collation };
+  showMysqlCharsetChangeConfirm.value = true;
+}
+
+/** 换字符集时保留仍然合法的排序规则，否则退回该字符集的默认排序规则（服务端返回的首项）。 */
+function mysqlCollationForCharset(row: DatabaseRow, charset: string): string {
+  const current = (row.defaultCollation ?? "").trim();
+  if (current && mysqlTableCollationBelongsToCharset(current, charset)) return current;
+  return mysqlCollationOptionsForCharset(charset)[0] ?? "";
+}
+
+function selectMysqlDatabaseCharset(row: DatabaseRow, charset: string) {
+  mysqlCharsetMenuTarget.value = null;
+  const next = charset.trim();
+  if (!next) return;
+  const collation = mysqlCollationForCharset(row, next);
+  if (next.toLowerCase() === (row.defaultCharset ?? "").trim().toLowerCase() && collation.toLowerCase() === (row.defaultCollation ?? "").trim().toLowerCase()) return;
+  void openMysqlCharsetChangeConfirm(row, next, collation);
+}
+
+function selectMysqlDatabaseCollation(row: DatabaseRow, collation: string) {
+  mysqlCharsetMenuTarget.value = null;
+  const next = collation.trim();
+  if (!next || next.toLowerCase() === (row.defaultCollation ?? "").trim().toLowerCase()) return;
+  const charset = (row.defaultCharset ?? "").trim() || mysqlTableCharsetFromCollation(next);
+  if (!charset) return;
+  void openMysqlCharsetChangeConfirm(row, charset, next);
+}
+
+async function confirmMysqlDatabaseCharsetChange() {
+  const target = mysqlCharsetChangeTarget.value;
+  if (!target || mysqlCharsetChangeExecuting.value || !mysqlCharsetChangeSql.value) return;
+  mysqlCharsetChangeExecuting.value = true;
+  try {
+    // Library-level charset/collation edits are DDL. Route them through the same
+    // production gate the sidebar database-properties editor uses, so a
+    // production target cannot be altered from a one-click dropdown.
+    const executed = await executeWithProductionSqlGuard({
+      connection: props.connection,
+      database: target.row.name,
+      sql: mysqlCharsetChangeSql.value,
+      source: t("production.sourceObjectBrowser"),
+      execute: async () => {
+        await api.executeQuery(props.connection.id, target.row.name, mysqlCharsetChangeSql.value);
+        return true;
+      },
+    });
+    // The guard declined (production confirmation cancelled, or the connection
+    // is read-only): the DDL was never sent, so report nothing as a success.
+    if (executed !== true) return;
+    toast(t("databaseBrowser.charsetChangeSuccess", { name: target.row.name, charset: target.charset, collation: target.collation }), 3000);
+    showMysqlCharsetChangeConfirm.value = false;
+    mysqlCharsetChangeTarget.value = null;
+    await refresh();
+    await connectionStore.loadDatabases?.(props.connection.id, { force: true }).catch(() => {});
+  } catch (e: any) {
+    toast(t("databaseBrowser.charsetChangeFailed", { message: translateBackendError(t, e) }), 5000);
+  } finally {
+    mysqlCharsetChangeExecuting.value = false;
+  }
+}
+
+function databaseBrowserCopyColumns() {
+  return visibleColumns.value.map((key) => ({
+    label: columnLabel(key),
+    value: (row: DatabaseRow) => displayValue(row, key),
+  }));
+}
+
+async function copyDatabaseNames() {
+  if (visibleRows.value.length === 0) return;
+  try {
+    await copyToClipboard(visibleRows.value.map((row) => row.name).join("\n"));
+    toast(t("objects.copyNamesSuccess", { count: visibleRows.value.length }), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function copyDatabasesAsTable() {
+  if (visibleRows.value.length === 0) return;
+  try {
+    await copyToClipboard(formatRowsAsSpreadsheetTsv(visibleRows.value, databaseBrowserCopyColumns()));
+    toast(t("objects.copyTableDataSuccess", { count: visibleRows.value.length }), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 function compareRows(left: DatabaseRow, right: DatabaseRow, key: DatabaseBrowserSortKey, direction: SortDirection): number {
@@ -598,7 +778,7 @@ defineExpose({ focusSearch, refresh });
 
 <template>
   <section class="flex h-full min-h-0 min-w-0 flex-col bg-background">
-    <div ref="toolbarRef" class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
+    <div ref="toolbarRef" data-toolbar-row class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
       <span v-if="showConnectionChip" class="inline-flex max-w-[14rem] min-w-12 items-center truncate rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium" :title="connection.name">
         {{ connection.name }}
       </span>
@@ -644,6 +824,25 @@ defineExpose({ focusSearch, refresh });
         >
           <option v-for="width in OBJECT_BROWSER_COMPACT_WIDTHS" :key="width" :value="width" class="bg-background text-foreground">{{ width }}px</option>
         </select>
+      </div>
+      <div class="flex h-7 shrink-0 items-center">
+        <Button variant="ghost" size="sm" class="h-7 rounded-r-none px-2 text-xs" :disabled="visibleRows.length === 0" @click="copyDatabaseNames">
+          <Copy class="mr-1.5 h-3.5 w-3.5" />
+          {{ t("objects.copyNames") }}
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-7 w-6 rounded-l-none border-l border-border/60" :aria-label="t('objects.copyOptions')" :title="t('objects.copyOptions')" data-database-copy-menu>
+              <ChevronDown class="h-3.5 w-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" class="w-56">
+            <DropdownMenuItem :disabled="visibleRows.length === 0" @select="copyDatabasesAsTable">
+              <Copy class="h-3.5 w-3.5" />
+              {{ t("objects.copyCurrentPageAsTable") }}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('contextMenu.refreshTab')" :disabled="loading" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />
@@ -746,8 +945,56 @@ defineExpose({ focusSearch, refresh });
                   :class="{ 'flex items-center gap-2 text-[13px] font-medium text-foreground': key === 'name', 'tabular-nums': key === 'sizeBytes' || key === 'createdAt' || key === 'updatedAt' }"
                   :title="displayValue(row, key)"
                 >
-                  <Database v-if="key === 'name'" class="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                  {{ displayValue(row, key) || "-" }}
+                  <Popover
+                    v-if="(key === 'defaultCharset' || key === 'defaultCollation') && canChangeDatabaseCharset(row)"
+                    :open="mysqlCharsetMenuTarget?.database === row.name && mysqlCharsetMenuTarget?.kind === (key === 'defaultCharset' ? 'charset' : 'collation')"
+                    @update:open="setMysqlCharsetMenuOpen(row, key === 'defaultCharset' ? 'charset' : 'collation', $event)"
+                  >
+                    <PopoverTrigger as-child>
+                      <button type="button" class="flex h-6 w-full min-w-0 items-center gap-1 truncate rounded px-1 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground" :title="columnLabel(key)" data-database-charset-trigger @click.stop @dblclick.stop>
+                        <span class="truncate">{{ displayValue(row, key) || "—" }}</span>
+                        <ChevronDown class="h-3 w-3 shrink-0 opacity-60" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent align="start" class="w-64 p-1" @click.stop @dblclick.stop>
+                      <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ columnLabel(key) }}</div>
+                      <div v-if="mysqlCharsetMetadataLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+                        <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                        {{ t("common.loading") }}
+                      </div>
+                      <div v-else-if="mysqlCharsetMetadataError" class="space-y-2 px-2 py-2 text-xs text-destructive">
+                        <p class="whitespace-normal leading-4">{{ mysqlCharsetMetadataError }}</p>
+                        <Button variant="outline" size="sm" class="h-7 w-full text-xs" @click="loadMysqlCharsetMetadata(true)">{{ t("objects.engineLoadRetry") }}</Button>
+                      </div>
+                      <div v-else class="max-h-64 overflow-auto">
+                        <template v-if="key === 'defaultCharset'">
+                          <button v-for="charset in mysqlCharsetOptions" :key="charset" type="button" class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :data-database-charset-option="charset" @click="selectMysqlDatabaseCharset(row, charset)">
+                            <Check v-if="(row.defaultCharset || '').toLowerCase() === charset.toLowerCase()" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                            <span v-else class="h-3.5 w-3.5 shrink-0" />
+                            <span class="truncate">{{ charset }}</span>
+                          </button>
+                        </template>
+                        <template v-else>
+                          <button
+                            v-for="collation in mysqlCollationOptionsForCharset(row.defaultCharset || '')"
+                            :key="collation"
+                            type="button"
+                            class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent"
+                            :data-database-collation-option="collation"
+                            @click="selectMysqlDatabaseCollation(row, collation)"
+                          >
+                            <Check v-if="(row.defaultCollation || '').toLowerCase() === collation.toLowerCase()" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                            <span v-else class="h-3.5 w-3.5 shrink-0" />
+                            <span class="truncate">{{ collation }}</span>
+                          </button>
+                        </template>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                  <template v-else>
+                    <Database v-if="key === 'name'" class="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                    {{ displayValue(row, key) || "-" }}
+                  </template>
                 </div>
               </div>
             </CustomContextMenu>
@@ -794,8 +1041,36 @@ defineExpose({ focusSearch, refresh });
         </div>
       </div>
     </div>
+    <DangerConfirmDialog
+      v-model:open="showMysqlCharsetChangeConfirm"
+      :title="t('databaseBrowser.charsetChangeTitle')"
+      :message="t('databaseBrowser.charsetChangeMessage', { name: mysqlCharsetChangeLabel, charset: mysqlCharsetChangeTarget?.charset ?? '', collation: mysqlCharsetChangeTarget?.collation || '—' })"
+      :sql="mysqlCharsetChangeSql"
+      :loading="mysqlCharsetChangeExecuting"
+      :confirm-label="t('databaseBrowser.charsetChangeConfirm')"
+      @confirm="confirmMysqlDatabaseCharsetChange"
+    />
     <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
-    <SidebarTreeRuntimeHost ref="sidebarRuntimeHost" :node="sidebarRuntimeNode" :depth="0" @open-danger-dialog="openSidebarDangerDialog" @open-data="openDatabaseFromSidebar" @open-ddl="openDatabaseFromSidebar" @open-dialog-controller="sidebarDialogController = $event" />
+    <SidebarTreeRuntimeHost
+      ref="sidebarRuntimeHost"
+      :node="sidebarRuntimeNode"
+      :depth="0"
+      @open-danger-dialog="openSidebarDangerDialog"
+      @open-data="openDatabaseFromSidebar"
+      @open-ddl="openDatabaseFromSidebar"
+      @peek-structure="openSidebarTableStructure"
+      @open-dialog-controller="sidebarDialogController = $event"
+    />
     <SidebarTreeItemDialogs v-if="sidebarDialogController" :controller="sidebarDialogController" @closed="sidebarDialogController = null" />
+    <TableStructurePeekDialog
+      v-if="tableStructureTarget"
+      :table-name="tableStructureTarget.objectName || tableStructureTarget.label"
+      :schema="tableStructureTarget.schema"
+      :columns="tableStructureColumns"
+      :loading="tableStructureLoading"
+      :error="tableStructureError"
+      :insert-enabled="false"
+      @close="closeTableStructurePeek"
+    />
   </section>
 </template>

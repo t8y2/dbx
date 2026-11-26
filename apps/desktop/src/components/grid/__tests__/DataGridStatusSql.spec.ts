@@ -109,6 +109,32 @@ async function settle() {
   }
 }
 
+async function hover(element: HTMLElement) {
+  element.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, cancelable: true, pointerType: "mouse" }));
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await settle();
+}
+
+function hasStatusSqlTooltip(): boolean {
+  return [...document.querySelectorAll<HTMLElement>('[data-slot="tooltip-content"]')].some((element) => element.textContent?.includes("SELECT TOP (200)"));
+}
+
+async function enableHorizontalOverflow(host: HTMLElement) {
+  const scroller = host.querySelector<HTMLElement>(".data-grid-scroller");
+  if (!scroller) throw new Error("Data grid scroller not found");
+  Object.defineProperties(scroller, {
+    clientWidth: { configurable: true, value: 200 },
+    scrollWidth: { configurable: true, value: 1000 },
+  });
+  scroller.dispatchEvent(new Event("scroll"));
+  await settle();
+  const track = host.querySelector<HTMLElement>(".data-grid-horizontal-scrollbar");
+  if (!track) throw new Error("Horizontal scrollbar not found");
+  vi.spyOn(track, "getBoundingClientRect").mockReturnValue({ left: 0, width: 200 } as DOMRect);
+  return track;
+}
+
 afterEach(() => {
   for (const { app, host } of mountedApps.splice(0)) {
     app.unmount();
@@ -176,5 +202,30 @@ describe("DataGrid status bar SQL and total row count layout", () => {
     // Row count in Col 1 is intact
     const statusCol1 = host.querySelector(".grid.grid-cols-\\[max-content_minmax\\(0\\,1fr\\)_minmax\\(0\\,max-content\\)\\] > div:first-child");
     expect(statusCol1?.textContent).toContain("100");
+  });
+
+  it("closes and suppresses the status SQL tooltip while dragging the horizontal scrollbar", async () => {
+    const { host } = mountGrid({ showStatusSql: true });
+    await settle();
+
+    const sqlButton = host.querySelector<HTMLButtonElement>("button[data-result-sql]");
+    expect(sqlButton).not.toBeNull();
+    await hover(sqlButton!);
+    expect(hasStatusSqlTooltip()).toBe(true);
+
+    const track = await enableHorizontalOverflow(host);
+    track.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, clientX: 20, pointerType: "mouse" }));
+    await settle();
+    expect(hasStatusSqlTooltip()).toBe(false);
+
+    await hover(sqlButton!);
+    expect(hasStatusSqlTooltip()).toBe(false);
+
+    window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: 20, pointerType: "mouse" }));
+    await settle();
+    sqlButton!.dispatchEvent(new PointerEvent("pointerleave", { bubbles: true, pointerType: "mouse" }));
+    await settle();
+    await hover(sqlButton!);
+    expect(hasStatusSqlTooltip()).toBe(true);
   });
 });

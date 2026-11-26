@@ -33,6 +33,18 @@ fn reports_qualifiers_that_name_no_table_or_alias() {
 }
 
 #[test]
+fn reports_a_qualifier_that_names_no_cte_alias() {
+    let sql = "WITH demo AS (SELECT id FROM t) SELECT zz.id FROM demo d";
+    let analysis = analyze_sql_references(sql, Some("mysql")).unwrap();
+
+    let qualifiers: Vec<_> = analysis.unknown_qualifiers.iter().map(|unknown| unknown.qualifier.as_str()).collect();
+    assert_eq!(qualifiers, vec!["zz"]);
+    // The span covers the qualifier itself, not the whole `zz.id` reference.
+    let span = analysis.unknown_qualifiers[0].span;
+    assert_eq!(&sql[span.start_column - 1..span.end_column], "zz");
+}
+
+#[test]
 fn extracts_nested_query_scopes_for_correlated_subqueries() {
     let sql = "select aa.house_id from mds_base_house aa where exists (select 1 from mds_base_owner where HOUSE_ID = aa.HOUSE_ID)";
     let analysis = analyze_sql_references(sql, Some("mysql")).unwrap();

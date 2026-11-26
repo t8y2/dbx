@@ -1,4 +1,4 @@
-import type { DatabaseType, ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
+import type { DatabaseType, ObjectBrowserFilter, ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { supportsConnectionQueryActions } from "@/lib/database/databaseFeatureSupport";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
@@ -47,11 +47,12 @@ const toggleLeafNodeTypes = new Set<TreeNodeType>([
   "dameng-roles",
   "dameng-job-admin",
   "database-job-admin",
+  "postgres-aggregate-functions",
 ]);
 // These are application entry points rather than database objects. They should
 // always navigate on a single click, even when the user prefers double-click
 // activation for ordinary tree objects.
-const directNavigationTreeNodeTypes = new Set<TreeNodeType>(["consul-root", "consul-overview", "etcd-root", "etcd-dashboard", "etcd-access-control", "nacos-namespace", "nacos-access-control", "meilisearch-system", "dameng-job-admin", "database-job-admin"]);
+const directNavigationTreeNodeTypes = new Set<TreeNodeType>(["consul-root", "consul-overview", "etcd-root", "etcd-dashboard", "etcd-access-control", "nacos-namespace", "nacos-access-control", "meilisearch-system", "dameng-job-admin", "database-job-admin", "postgres-aggregate-functions"]);
 const repeatableNavigationTreeNodeTypes = new Set<TreeNodeType>(["etcd-root", "etcd-dashboard", "etcd-access-control", "nacos-namespace", "nacos-access-control"]);
 
 export function isDirectNavigationTreeNode(type: TreeNodeType): boolean {
@@ -106,6 +107,24 @@ const databaseChildGroupNodeTypes = new Set<TreeNodeType>([
   "group-types",
 ]);
 const displayPathObjectNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "package", "package-body", "type", "type-body"]);
+
+const groupNodeObjectBrowserFilters: Partial<Record<TreeNodeType, ObjectBrowserFilter>> = {
+  "group-tables": "tables",
+  "group-views": "views",
+  "group-materialized-views": "materializedViews",
+  "group-procedures": "procedures",
+  "group-functions": "functions",
+  "group-triggers": "triggers",
+  "group-events": "events",
+};
+
+/** 分组节点对应的对象浏览器分类：双击分组行时对象浏览器直接选中该分类。
+ *  `group-triggers` 同时用于数据库级与表级分组；表级分组属于具体表节点，
+ *  双击时应保持展开行为，而不是跳转到数据库范围的对象浏览器。 */
+export function objectBrowserFilterForGroupNode(type: TreeNodeType, tableName?: string | null): ObjectBrowserFilter | undefined {
+  if (type === "group-triggers" && tableName) return undefined;
+  return groupNodeObjectBrowserFilters[type];
+}
 
 export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKind | null {
   if (type === "view") return "VIEW";
@@ -165,10 +184,10 @@ function canOpenTreeNodeSource(type: TreeNodeType, dbType?: DatabaseType): boole
   return true;
 }
 
-export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single", dbType?: DatabaseType, browseObjectsOnDatabaseActivation = false, canOpenObjectBrowser = false): TreeNodeRowAction {
+export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single", dbType?: DatabaseType, browseObjectsOnDatabaseActivation = false, canOpenObjectBrowser = false, autoExpandOnDatabaseActivation = true): TreeNodeRowAction {
   if (!shouldActivateTreeNodeOnSingleClick(type, activation)) return "none";
   if (canOpenObjectBrowser && shouldBrowseObjectsOnDatabaseActivation(type, browseObjectsOnDatabaseActivation)) {
-    return canExpand ? "open-object-browser-and-expand" : "open-object-browser";
+    return canExpand && autoExpandOnDatabaseActivation ? "open-object-browser-and-expand" : "open-object-browser";
   }
   if (type === "extension") return "open-extension-details";
   if (type === "event-trigger") return "open-event-trigger-details";
@@ -192,7 +211,16 @@ export function shouldRunTreeNodeRowAction(action: TreeNodeRowAction, clickDetai
   return action !== "none" && clickDetail <= 1;
 }
 
-export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBrowser: boolean, activation: SidebarActivation = "single", canExpand = false, dbType?: DatabaseType, canOpenDatabaseBrowser = false, browseObjectsOnDatabaseActivation = false): TreeNodeRowDoubleClickAction {
+export function treeNodeRowDoubleClickAction(
+  type: TreeNodeType,
+  canOpenObjectBrowser: boolean,
+  activation: SidebarActivation = "single",
+  canExpand = false,
+  dbType?: DatabaseType,
+  canOpenDatabaseBrowser = false,
+  browseObjectsOnDatabaseActivation = false,
+  autoExpandOnDatabaseActivation = true,
+): TreeNodeRowDoubleClickAction {
   // Single-click activation already handles the first click in a dblclick
   // sequence. Most rows have no trailing action, while field/index rows have
   // an explicit structure-editor action in either activation mode.
@@ -206,7 +234,7 @@ export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBr
   if (type === "column" || type === "index") return "open-structure-editor";
   if (activation === "double") {
     if (canOpenObjectBrowser && shouldBrowseObjectsOnDatabaseActivation(type, browseObjectsOnDatabaseActivation)) {
-      return canExpand ? "open-object-browser-and-expand" : "open-object-browser";
+      return canExpand && autoExpandOnDatabaseActivation ? "open-object-browser-and-expand" : "open-object-browser";
     }
     if (canOpenObjectBrowser && type === "object-browser") return "open-object-browser";
     if (type === "extension") return "open-extension-details";

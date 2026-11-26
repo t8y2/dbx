@@ -418,6 +418,12 @@ function clickLoadMore(host: HTMLElement) {
   loadMore!.click();
 }
 
+function clickToolbarRefresh(host: HTMLElement) {
+  const refresh = host.querySelector<HTMLButtonElement>('button[aria-label="common.refresh"]:not([data-redis-refresh-group])');
+  expect(refresh, "toolbar refresh button").toBeDefined();
+  refresh!.click();
+}
+
 function leafVisible(host: HTMLElement, keyRaw: string): boolean {
   return host.querySelector(`[data-redis-leaf='${keyRaw}']`) !== null;
 }
@@ -790,6 +796,60 @@ describe("RedisKeyBrowser bounded group subtree fill (issue #7918)", () => {
     expect(leafVisible(host, "grp:s1")).toBe(true);
   });
 
+  it("refills an already expanded group after a toolbar refresh without scanning collapsed groups", async () => {
+    stubOverflowingViewport();
+    let refreshed = false;
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, _cursor: number, pattern: string) => {
+      if (pattern === "grp:*") {
+        return Promise.resolve({ cursor: 0, keys: [keyInfo("grp:a"), keyInfo(refreshed ? "grp:new" : "grp:old")], total_keys: 0 });
+      }
+      return Promise.resolve({ cursor: 9, keys: [keyInfo("grp:a"), keyInfo("sibling:a")], total_keys: 10_000 });
+    });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await vi.waitFor(() => expect(leafVisible(host, "grp:old")).toBe(true));
+
+    refreshed = true;
+    clickToolbarRefresh(host);
+    await vi.waitFor(() => expect(leafVisible(host, "grp:new")).toBe(true));
+    expect(leafVisible(host, "grp:a")).toBe(true);
+    expect(leafVisible(host, "grp:old")).toBe(false);
+    expect(mocks.redisScanKeysBatch.mock.calls.map((call) => call[3])).toEqual(["*", "grp:*", "*", "grp:*"]);
+  });
+
+  it("shares one automatic refill budget across expanded groups and leaves work for Load more", async () => {
+    stubOverflowingViewport();
+    let refreshed = false;
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, _cursor: number, pattern: string) => {
+      if (pattern === "grp:*") return Promise.resolve({ cursor: refreshed ? 57 : 0, keys: [], total_keys: 0 });
+      if (pattern === "sibling:*") return Promise.resolve({ cursor: 0, keys: [keyInfo("sibling:extra")], total_keys: 0 });
+      return Promise.resolve({ cursor: 9, keys: [keyInfo("grp:a"), keyInfo("sibling:a")], total_keys: 10_000 });
+    });
+    const groupCalls = () => mocks.redisScanKeysBatch.mock.calls.filter((call) => call[3] !== "*");
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    groupCheckbox(host, ["sibling"]).parentElement!.parentElement!.click();
+    await vi.waitFor(() => expect(leafVisible(host, "sibling:extra")).toBe(true));
+
+    mocks.redisScanKeysBatch.mockClear();
+    refreshed = true;
+    clickToolbarRefresh(host);
+    await vi.waitFor(() => expect(groupCalls()).toHaveLength(SUBTREE_FILL_MAX_CALLS_BY_ITERATIONS));
+    await settleThoroughly();
+    expect(groupCalls().every((call) => call[3] === "grp:*")).toBe(true);
+    expect(groupCalls().reduce((iterations, call) => iterations + Number(call[5]), 0)).toBe(50);
+    expect(leafVisible(host, "sibling:extra")).toBe(false);
+
+    clickLoadMore(host);
+    await vi.waitFor(() => expect(leafVisible(host, "sibling:extra")).toBe(true));
+    const calls = groupCalls();
+    expect(calls[calls.length - 1]?.slice(2, 4)).toEqual([0, "sibling:*"]);
+  });
+
   it("stops a huge group's fill at the per-pass key cap, saves the cursor, and scans no further", async () => {
     stubOverflowingViewport();
     let subtreeCall = 0;
@@ -1099,14 +1159,9 @@ describe("RedisKeyBrowser bounded group subtree fill (issue #7918)", () => {
     expandFirstGroupRow(host);
     await vi.waitFor(() => expect(subtreeCalls()).toHaveLength(1));
 
-    const refresh = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.className.includes("h-6 w-6") && !button.hasAttribute("title"));
-    expect(refresh, "refresh button").toBeDefined();
-    refresh!.click();
-    await vi.waitFor(() => expect(mainCalls).toBeGreaterThanOrEqual(2));
-    await settleThoroughly();
-    expandFirstGroupRow(host);
-    expandFirstGroupRow(host);
+    clickToolbarRefresh(host);
     await vi.waitFor(() => expect(subtreeCalls()).toHaveLength(2));
+    expect(mainCalls).toBeGreaterThanOrEqual(2);
 
     if (outcome === "resolves") oldFill.resolve({ cursor: 88, keys: [keyInfo("grp:stale")], total_keys: 0 });
     else oldFill.reject(new Error("stale subtree failure"));
@@ -1120,7 +1175,7 @@ describe("RedisKeyBrowser bounded group subtree fill (issue #7918)", () => {
     expect(subtreeCalls()).toHaveLength(2);
 
     currentFill.resolve({ cursor: 0, keys: [keyInfo("grp:current")], total_keys: 0 });
-    await settleThoroughly();
+    await vi.waitFor(() => expect(leafVisible(host, "grp:current")).toBe(true));
     expect(mocks.toast).not.toHaveBeenCalled();
   });
 });

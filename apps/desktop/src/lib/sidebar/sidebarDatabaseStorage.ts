@@ -1,6 +1,7 @@
 import type { ConnectionConfig, DatabaseStorageInfo, ObjectStatistics, TreeNode } from "@/types/database";
+import { databaseVGroupMembers } from "@/lib/table/tableVGroup";
 
-const sidebarTableStorageTypes = new Set<ConnectionConfig["db_type"]>(["mysql", "postgres", "sqlserver", "oracle", "clickhouse", "dameng", "gaussdb", "kingbase", "gbase"]);
+const sidebarTableStorageTypes = new Set<ConnectionConfig["db_type"]>(["mysql", "postgres", "sqlserver", "oracle", "clickhouse", "dameng", "gaussdb", "kingbase", "gbase", "doris", "starrocks"]);
 
 export function supportsSidebarDatabaseStorage(connection: ConnectionConfig | undefined): boolean {
   return connection?.db_type === "postgres" && connection.driver_profile !== "cockroachdb";
@@ -13,14 +14,14 @@ export function supportsSidebarTableStorage(connection: ConnectionConfig | undef
 
 export function sidebarDatabaseNames(nodes: readonly TreeNode[] | undefined): string[] {
   if (!nodes) return [];
-  return nodes.flatMap((node) => (node.type === "database" && !node.catalog && node.database ? [node.database] : []));
+  return databaseVGroupMembers(nodes).flatMap((node) => (node.type === "database" && !node.catalog && node.database ? [node.database] : []));
 }
 
 export function applySidebarDatabaseStorage(nodes: readonly TreeNode[] | undefined, storage: readonly DatabaseStorageInfo[]): boolean {
   if (!nodes?.length || !storage.length) return false;
   const byName = new Map(storage.map((item) => [item.name, item.size_bytes] as const));
   let changed = false;
-  for (const node of nodes) {
+  for (const node of databaseVGroupMembers(nodes)) {
     if (node.type !== "database" || node.catalog || !node.database || !byName.has(node.database)) continue;
     const sizeBytes = byName.get(node.database) ?? null;
     if (node.sizeBytes === sizeBytes) continue;
@@ -39,7 +40,11 @@ export interface SidebarTableStorageScope {
 export function sidebarTableStorageScopes(nodes: readonly TreeNode[]): SidebarTableStorageScope[] {
   const scopes = new Map<string, SidebarTableStorageScope>();
   for (const node of nodes) {
-    if ((node.type !== "table" && node.type !== "materialized_view") || !node.connectionId || !node.database) continue;
+    // Doris / StarRocks multi-catalog: the statistics RPC carries no catalog, so
+    // a request can only address the connection's default (internal) catalog.
+    // External-catalog tables are skipped instead of being filled from a
+    // same-named database in another catalog (#14758).
+    if ((node.type !== "table" && node.type !== "materialized_view") || node.catalog || !node.connectionId || !node.database) continue;
     const scope = { connectionId: node.connectionId, database: node.database, schema: node.schema || "" };
     scopes.set(`${scope.connectionId}\0${scope.database}\0${scope.schema}`, scope);
   }
@@ -52,7 +57,7 @@ export function applySidebarTableStorage(nodes: readonly TreeNode[] | undefined,
   let changed = false;
   const visit = (items: readonly TreeNode[]) => {
     for (const node of items) {
-      if ((node.type === "table" || node.type === "materialized_view") && node.connectionId === scope.connectionId && node.database === scope.database && (node.schema || "") === scope.schema && sizeByName.has(node.label)) {
+      if ((node.type === "table" || node.type === "materialized_view") && !node.catalog && node.connectionId === scope.connectionId && node.database === scope.database && (node.schema || "") === scope.schema && sizeByName.has(node.label)) {
         const sizeBytes = sizeByName.get(node.label) ?? null;
         if (node.sizeBytes !== sizeBytes) {
           node.sizeBytes = sizeBytes;

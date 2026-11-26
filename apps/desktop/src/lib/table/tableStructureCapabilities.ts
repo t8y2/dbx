@@ -89,6 +89,18 @@ const mysqlCapabilities = capabilities({
   foreignKey: true,
 });
 
+// Doris reuses the MySQL dialect for column/index SQL, but its index DDL is
+// narrower than MySQL's: an existing index cannot be rebuilt (no drop+create
+// flow), `CREATE INDEX` takes a single column and no index type/comment, and
+// there is no unique secondary index. Keep the flags in sync with the backend
+// `TableStructureCapabilities` for `DatabaseType::Doris`.
+const dorisCapabilities: TableStructureCapabilities = {
+  ...mysqlCapabilities,
+  rebuildIndex: false,
+  indexType: false,
+  indexComment: false,
+};
+
 const starrocksCapabilities = capabilities({
   dialect: "mysql",
   createTable: true,
@@ -373,7 +385,7 @@ const firebirdCapabilities = capabilities({
 
 const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>> = {
   mysql: mysqlCapabilities,
-  doris: mysqlCapabilities,
+  doris: dorisCapabilities,
   starrocks: starrocksCapabilities,
   goldendb: mysqlCapabilities,
   sundb: mysqlCapabilities,
@@ -455,11 +467,17 @@ export function isPhysicalTableColumnOrderChange(dbType: DatabaseType | undefine
   return reorderColumn && originalPosition !== currentPosition;
 }
 
-export function hasLocalTableColumnOrderChange(columns: readonly { originalPosition?: number; original?: unknown; markedForDrop?: boolean }[]): boolean {
+/** Active columns in the order the database holds them once the draft is saved. */
+export function localTableColumnDatabaseOrder<T extends { originalPosition?: number; original?: unknown; markedForDrop?: boolean }>(columns: readonly T[]): T[] {
   const activeColumns = columns.filter((column) => !column.markedForDrop);
   // Databases without physical reorder support keep existing columns in ordinal order
   // and append newly added columns, so compare against that post-save layout.
-  const databaseOrder = [...activeColumns.filter((column) => column.original).sort((left, right) => (left.originalPosition ?? Number.MAX_SAFE_INTEGER) - (right.originalPosition ?? Number.MAX_SAFE_INTEGER)), ...activeColumns.filter((column) => !column.original)];
+  return [...activeColumns.filter((column) => column.original).sort((left, right) => (left.originalPosition ?? Number.MAX_SAFE_INTEGER) - (right.originalPosition ?? Number.MAX_SAFE_INTEGER)), ...activeColumns.filter((column) => !column.original)];
+}
+
+export function hasLocalTableColumnOrderChange(columns: readonly { originalPosition?: number; original?: unknown; markedForDrop?: boolean }[]): boolean {
+  const activeColumns = columns.filter((column) => !column.markedForDrop);
+  const databaseOrder = localTableColumnDatabaseOrder(columns);
   return activeColumns.some((column, index) => column !== databaseOrder[index]);
 }
 

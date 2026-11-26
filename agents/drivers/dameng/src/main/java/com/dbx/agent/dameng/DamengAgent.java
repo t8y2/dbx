@@ -132,7 +132,16 @@ public final class DamengAgent extends AbstractJdbcAgent {
             String value = resultSet.getString(index);
             return resultSet.wasNull() ? null : value;
         }
+        if (sqlType == Types.FLOAT) {
+            return readFloatColumn(resultSet, index);
+        }
         return super.resultValue(resultSet, index, sqlType);
+    }
+
+    // DM FLOAT is double precision (the driver reports precision 53); getFloat would round it to 7 digits.
+    private static Double readFloatColumn(ResultSet resultSet, int index) throws SQLException {
+        double value = resultSet.getDouble(index);
+        return resultSet.wasNull() ? null : value;
     }
     private volatile boolean legacyJdbcMetadata;
     private volatile boolean dbmsOutputInitializationSupported = true;
@@ -613,7 +622,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
             if (isDamengInvalidDatetimeMetadataError(e)) {
                 return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
             }
-            if (!isDamengMetadataPermissionError(e)) {
+            if (!isDamengMetadataDictionaryUnavailableError(e)) {
                 throw e;
             }
             permissionError = e;
@@ -628,7 +637,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 if (isDamengInvalidDatetimeMetadataError(e)) {
                     return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
                 }
-                if (!isDamengMetadataPermissionError(e)) {
+                if (!isDamengMetadataDictionaryUnavailableError(e)) {
                     throw e;
                 }
                 permissionError.addSuppressed(e);
@@ -644,7 +653,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 if (isDamengInvalidDatetimeMetadataError(e)) {
                     return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
                 }
-                if (!isDamengMetadataPermissionError(e)) {
+                if (!isDamengMetadataDictionaryUnavailableError(e)) {
                     throw e;
                 }
                 permissionError.addSuppressed(e);
@@ -656,7 +665,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
             if (isDamengInvalidDatetimeMetadataError(e)) {
                 return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
             }
-            if (!isDamengMetadataPermissionError(e)) {
+            if (!isDamengMetadataDictionaryUnavailableError(e)) {
                 throw e;
             }
             permissionError.addSuppressed(e);
@@ -733,12 +742,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     continue;
                 }
                 String normalized = message.toLowerCase(Locale.ROOT);
-                boolean metadataObject = normalized.contains("all_objects")
-                    || normalized.contains("sysobjects")
-                    || normalized.contains("all_dependencies")
-                    || normalized.contains("all_tab_comments")
-                    || normalized.contains("dbms_metadata")
-                    || normalized.contains("get_ddl");
+                boolean metadataObject = looksLikeCoreMetadataObject(normalized);
                 boolean permissionDenied = normalized.contains("权限")
                     || normalized.contains("privilege")
                     || normalized.contains("permission denied")
@@ -750,6 +754,56 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
         }
         return false;
+    }
+
+    /**
+     * DM reports a missing dictionary view as {@code 无效的表或视图名[ALL_OBJECTS]} (vendor code
+     * -2106) on instances that do not expose {@code ALL_OBJECTS}. That is the same dead end as a
+     * privilege error, so metadata listing must degrade to JDBC metadata instead of failing the
+     * object tree with an agent error.
+     */
+    private static boolean isDamengMissingMetadataViewError(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (!(current instanceof SQLException sqlError)) {
+                continue;
+            }
+            for (SQLException candidate = sqlError; candidate != null; candidate = candidate.getNextException()) {
+                String message = candidate.getMessage();
+                if (message == null) {
+                    continue;
+                }
+                String normalized = message.toLowerCase(Locale.ROOT);
+                boolean metadataObject = looksLikeCoreMetadataObject(normalized);
+                // -2106 is DM's generic "invalid table or view name"; the metadataObject guard
+                // is what keeps unrelated user errors out of this branch.
+                boolean missingView = candidate.getErrorCode() == -2106
+                    || normalized.contains("无效的表或视图名")
+                    || normalized.contains("invalid table or view")
+                    || normalized.contains("table or view does not exist");
+                if (metadataObject && missingView) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Dictionary metadata is unusable when the session may not read the system views or when the
+     * views themselves are missing. Both cases fall through to JDBC {@link DatabaseMetaData}.
+     */
+    private static boolean isDamengMetadataDictionaryUnavailableError(Throwable error) {
+        return isDamengMetadataPermissionError(error) || isDamengMissingMetadataViewError(error);
+    }
+
+    /** Dictionary relations whose absence or inaccessibility degrades metadata to JDBC. */
+    private static boolean looksLikeCoreMetadataObject(String normalized) {
+        return normalized.contains("all_objects")
+            || normalized.contains("sysobjects")
+            || normalized.contains("all_dependencies")
+            || normalized.contains("all_tab_comments")
+            || normalized.contains("dbms_metadata")
+            || normalized.contains("get_ddl");
     }
 
     /**
@@ -1286,7 +1340,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
         try {
             return executeConstrainedObjects(schema, buildConstrainedObjectsQuery(schema, constraints), constraints);
         } catch (RuntimeException e) {
-            if (!isDamengMetadataPermissionError(e)) {
+            if (!isDamengMetadataDictionaryUnavailableError(e)) {
                 throw e;
             }
             permissionError = e;
@@ -1299,7 +1353,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     constraints
                 );
             } catch (RuntimeException e) {
-                if (!isDamengMetadataPermissionError(e)) {
+                if (!isDamengMetadataDictionaryUnavailableError(e)) {
                     throw e;
                 }
                 permissionError.addSuppressed(e);
@@ -1313,7 +1367,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     constraints
                 );
             } catch (RuntimeException e) {
-                if (!isDamengMetadataPermissionError(e)) {
+                if (!isDamengMetadataDictionaryUnavailableError(e)) {
                     throw e;
                 }
                 permissionError.addSuppressed(e);
@@ -1322,11 +1376,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
         try {
             return executeRawConstrainedObjects(schema, constraints);
         } catch (RuntimeException e) {
-            if (!isDamengMetadataPermissionError(e)) {
+            if (!isDamengMetadataDictionaryUnavailableError(e)) {
                 throw e;
             }
             permissionError.addSuppressed(e);
         }
+        // Exact-identity reads promise an exact name match that JDBC getTables cannot honour, so
+        // they must not silently degrade to the JDBC tier.
         if (requireDictionary) throw permissionError;
         try {
             return executeJdbcMetadataObjects(schema, constraints);
@@ -2969,7 +3025,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
             Object value = switch (sqlType) {
                 case Types.BIGINT -> rs.getLong(index);
                 case Types.INTEGER, Types.SMALLINT, Types.TINYINT -> rs.getInt(index);
-                case Types.FLOAT, Types.REAL -> rs.getFloat(index);
+                case Types.FLOAT -> readFloatColumn(rs, index);
+                case Types.REAL -> rs.getFloat(index);
                 case Types.DOUBLE -> rs.getDouble(index);
                 case Types.DECIMAL, Types.NUMERIC -> rs.getBigDecimal(index);
                 case Types.BOOLEAN -> rs.getBoolean(index);

@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 
 import { createApp, h, nextTick, reactive, ref, type App } from "vue";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { loadEditorTheme } from "@/lib/editor/editorThemes";
 import type { TableInfoTab, TableStructureEditorDraft } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
@@ -186,7 +187,7 @@ vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({ ...settings, updateEditorSettings: (patch: object) => Object.assign(settings.editorSettings, patch) }),
 }));
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: mocks.copyToClipboard }));
-vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: ref(false), themePalette: ref({}) }) }));
+vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: ref(true), themePalette: ref("custom"), activeCustomUiColors: ref({ background: "#ffffff" }) }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/lib/sql/sqlHighlighter", () => ({ createShikiSqlHighlighter: vi.fn(async () => (sql: string) => sql) }));
 vi.mock("@/lib/editor/editorThemes", () => ({
@@ -293,6 +294,28 @@ describe("TableStructureEditor DDL tab lifecycle", () => {
     // The first mount cold-loads CodeMirror; CI shards can exceed waitFor's 1s default.
     await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL), { timeout: 5000 });
     expect(mocks.loadObjectDdl).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ tableName: "users" }), { force: true });
+  });
+
+  it("uses the selected light custom theme for the DDL editor", async () => {
+    const previousSettings = settings.editorSettings;
+    const selectedColors = { gutterBackground: "#fff8ec", activeLine: "#f4e8d5" };
+    const customSettings = {
+      ...previousSettings,
+      theme: "custom",
+      activeCustomThemeId: "daylight",
+      customThemes: [
+        { id: "night", name: "Night", colors: { gutterBackground: "#121212", activeLine: "#202020" } },
+        { id: "daylight", name: "Daylight", colors: selectedColors },
+      ],
+    };
+    settings.editorSettings = customSettings;
+    onTestFinished(() => {
+      settings.editorSettings = previousSettings;
+    });
+
+    const { root } = mountDdlNavigationEditor();
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL), { timeout: 5000 });
+    expect(loadEditorTheme).toHaveBeenCalledWith("custom", "light", selectedColors, "custom");
   });
 
   it("refreshes a reused clean DDL tab for a new navigation request", async () => {

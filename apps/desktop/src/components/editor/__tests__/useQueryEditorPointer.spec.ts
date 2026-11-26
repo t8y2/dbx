@@ -186,13 +186,24 @@ describe("QueryEditor pointer ownership", () => {
     expect(anchorInsideContent()).toBe(true);
   });
 
-  it("leaves a short selection alone while dragging", () => {
-    const { view, pointer } = createHarness();
+  it("leaves a press that has not selected anything alone", () => {
+    const { view, pointer } = createHarness(false, { selection: { anchor: 4, head: 4 } });
     document.getSelection()!.collapse(view.contentDOM, 0);
     pointer.registerEditorNativeSelectionDragGuard(view);
 
     dispatchEditorMouseDown(view);
     expect(view.contentDOM.contains(document.getSelection()?.anchorNode ?? null)).toBe(true);
+
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+
+  it("parks a short selection while dragging", () => {
+    const { view, pointer } = createHarness();
+    document.getSelection()!.collapse(view.contentDOM, 0);
+    pointer.registerEditorNativeSelectionDragGuard(view);
+
+    dispatchEditorMouseDown(view);
+    expect(view.contentDOM.contains(document.getSelection()?.anchorNode ?? null)).toBe(false);
 
     document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
   });

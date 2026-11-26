@@ -2,7 +2,7 @@
 
 import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DATA_GRID_COPY_EXTRACTOR_IDS, DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, normalizeDataGridExtractorOptions, type DataGridCopyPreference, type DataGridExtractPreview } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DATA_GRID_COPY_EXTRACTOR_IDS, DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, normalizeDataGridExtractorOptions, type DataGridCopyPreference, type DataGridExtractPreview, type DataGridSmartSingleColumnFormat } from "@/lib/dataGrid/dataGridCopyExtractor";
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => (key === "grid.copyExtractorAdvancedOptions" ? "Advanced options" : key === "grid.copyExtractorVisibleFormats" ? "Visible formats" : key) }) }));
 vi.mock("@/components/ui/dialog", () => {
@@ -62,6 +62,7 @@ function mountDialog(preview = vi.fn(async () => result("initial")), open = fals
   const props = reactive({
     open,
     preference,
+    singleColumnFormat: undefined as DataGridSmartSingleColumnFormat | undefined,
     sourceTableName: undefined as string | undefined,
     visibleCopyExtractors: [...DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS],
     options: normalizeDataGridExtractorOptions({}),
@@ -176,6 +177,23 @@ describe("extractor draft preview", () => {
     await expandPreview(host);
     expect(preview).toHaveBeenCalledOnce();
     expect(host.querySelector("pre")?.textContent).toBe("initial");
+  });
+
+  it("previews and saves the configured Smart Copy single-column format", async () => {
+    const preview = vi.fn(async () => result("configured"));
+    const { props, host, save } = mountDialog(preview, false, "smart");
+    props.singleColumnFormat = "default";
+    props.open = true;
+    await nextTick();
+    const singleColumnFormatSelect = host.querySelectorAll<HTMLSelectElement>("select")[1];
+    singleColumnFormatSelect.value = "json";
+    singleColumnFormatSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+    await expandPreview(host);
+
+    expect(preview).toHaveBeenCalledWith("smart", expect.any(Object), "json");
+    [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("common.save"))!.click();
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ preference: "smart", singleColumnFormat: "json" }));
   });
 
   it("offers the database-name option for SQL updates as well (#11195, #12146)", async () => {

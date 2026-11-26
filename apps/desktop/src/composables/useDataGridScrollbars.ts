@@ -39,6 +39,7 @@ export function useDataGridScrollbars(options: DataGridScrollbarsOptions): DataG
   let pendingClientX = 0;
   let pendingClientY = 0;
   let resizeObserver: ResizeObserver | null = null;
+  let observedElements: Element[] = [];
 
   const cancelFrame = (frame: number | null) => {
     if (frame !== null) options.frameDriver.cancel(frame);
@@ -86,15 +87,16 @@ export function useDataGridScrollbars(options: DataGridScrollbarsOptions): DataG
       options.applyVerticalDrag(pendingClientY);
     },
     observeScroller() {
-      resizeObserver?.disconnect();
-      resizeObserver = null;
       if (!active || disposed) return;
       const scroller = options.getScroller();
-      if (scroller) {
-        resizeObserver = createResizeObserver(runtime.scheduleUpdate);
-        resizeObserver?.observe(scroller);
-        // Child size changes can alter scrollWidth without resizing the scroller itself.
-        for (const child of Array.from(scroller.children)) resizeObserver?.observe(child);
+      // Child size changes can alter scrollWidth without resizing the scroller itself.
+      const elements = scroller ? [scroller, ...Array.from(scroller.children)] : [];
+      const targetsChanged = elements.length !== observedElements.length || elements.some((element, index) => element !== observedElements[index]);
+      if (targetsChanged) {
+        resizeObserver?.disconnect();
+        observedElements = elements;
+        resizeObserver = elements.length > 0 ? createResizeObserver(runtime.scheduleUpdate) : null;
+        for (const element of elements) resizeObserver?.observe(element);
       }
       runtime.scheduleUpdate();
     },
@@ -102,6 +104,7 @@ export function useDataGridScrollbars(options: DataGridScrollbarsOptions): DataG
       active = false;
       resizeObserver?.disconnect();
       resizeObserver = null;
+      observedElements = [];
       cancelFrame(updateFrame);
       cancelFrame(horizontalFrame);
       cancelFrame(verticalFrame);

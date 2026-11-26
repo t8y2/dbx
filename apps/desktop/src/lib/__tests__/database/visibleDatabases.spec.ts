@@ -1,5 +1,39 @@
 import { describe, expect, it } from "vitest";
-import { connectionUsesVisibleSchemaFilter, filterSchemaNamesForConnection, filterSchemaNamesForVisiblePicker, isSystemSchemaName } from "@/lib/database/visibleDatabases";
+import { connectionUsesVisibleSchemaFilter, filterSchemaNamesForConnection, filterSchemaNamesForVisiblePicker, isSystemSchemaName, visibleNameMatchesSearch } from "@/lib/database/visibleDatabases";
+
+describe("visibleNameMatchesSearch", () => {
+  it("keeps the case-insensitive substring match when no wildcard is used", () => {
+    expect(visibleNameMatchesSearch("app_orders", "APP")).toBe(true);
+    expect(visibleNameMatchesSearch("app_orders", "orders")).toBe(true);
+    expect(visibleNameMatchesSearch("app_orders", "users")).toBe(false);
+  });
+
+  it("treats an underscore as a literal character, not a single-character wildcard", () => {
+    expect(visibleNameMatchesSearch("app_orders", "app_")).toBe(true);
+    expect(visibleNameMatchesSearch("appXorders", "app_")).toBe(false);
+  });
+
+  it("matches the whole name when % is present", () => {
+    expect(visibleNameMatchesSearch("app_orders", "app_%")).toBe(true);
+    expect(visibleNameMatchesSearch("my_app_orders", "app_%")).toBe(false);
+    expect(visibleNameMatchesSearch("reporting", "%port%")).toBe(true);
+    expect(visibleNameMatchesSearch("reporting", "%xyz%")).toBe(false);
+  });
+
+  it("is case-insensitive for % patterns too", () => {
+    expect(visibleNameMatchesSearch("App_Orders", "app_%")).toBe(true);
+  });
+
+  it("escapes regular-expression characters in the search text", () => {
+    expect(visibleNameMatchesSearch("a.b(c)", "a.b(c)")).toBe(true);
+    expect(visibleNameMatchesSearch("axb(c)", "a.b(c)")).toBe(false);
+    expect(visibleNameMatchesSearch("a.b(c)", "%.%")).toBe(true);
+  });
+
+  it("returns every name for a blank search", () => {
+    expect(visibleNameMatchesSearch("app_orders", "   ")).toBe(true);
+  });
+});
 
 describe("visibleDatabases schema filtering", () => {
   it("hides common Kingbase system schemas by default", () => {
@@ -148,5 +182,41 @@ describe("visible database wildcard patterns (issue #7164)", () => {
     expect(summary.isActive).toBe(true);
     expect(summary.selected).toBe(2);
     expect(summary.total).toBe(3);
+  });
+});
+
+describe("MySQL system databases and the show-system setting", () => {
+  const MYSQL_DATABASES = ["app", "information_schema", "mysql", "performance_schema", "sys"];
+
+  it("hides MySQL system databases by default", async () => {
+    const { filterDatabaseNamesForVisiblePicker } = await import("@/lib/database/visibleDatabases");
+    expect(filterDatabaseNamesForVisiblePicker(MYSQL_DATABASES, { db_type: "mysql" })).toEqual(["app"]);
+  });
+
+  it("keeps MySQL system databases visible when the setting is enabled", async () => {
+    const { filterDatabaseNamesForVisiblePicker } = await import("@/lib/database/visibleDatabases");
+    expect(filterDatabaseNamesForVisiblePicker(MYSQL_DATABASES, { db_type: "mysql", show_system_schemas: true })).toEqual(MYSQL_DATABASES);
+  });
+
+  it("reaches the sidebar path through filterDatabaseNamesForConnection", async () => {
+    const { filterDatabaseNamesForConnection } = await import("@/lib/database/visibleDatabases");
+    expect(filterDatabaseNamesForConnection(MYSQL_DATABASES, { db_type: "mysql", show_system_schemas: true })).toEqual(MYSQL_DATABASES);
+    expect(filterDatabaseNamesForConnection(MYSQL_DATABASES, { db_type: "mysql", show_system_schemas: false })).toEqual(["app"]);
+  });
+
+  it("lets an explicit visible_databases whitelist win over the setting", async () => {
+    const { filterDatabaseNamesForConnection } = await import("@/lib/database/visibleDatabases");
+    expect(filterDatabaseNamesForConnection(MYSQL_DATABASES, { db_type: "mysql", show_system_schemas: true, visible_databases: ["performance_schema"] })).toEqual(["performance_schema"]);
+  });
+
+  it("applies to MySQL-protocol engines that resolve to the MySQL type", async () => {
+    const { filterDatabaseNamesForVisiblePicker } = await import("@/lib/database/visibleDatabases");
+    expect(filterDatabaseNamesForVisiblePicker(MYSQL_DATABASES, { db_type: "gbase", show_system_schemas: true })).toEqual(MYSQL_DATABASES);
+  });
+
+  it("leaves schema-aware engines filtering their database list", async () => {
+    const { filterDatabaseNamesForVisiblePicker } = await import("@/lib/database/visibleDatabases");
+    // The setting governs schemas inside a database there, so template databases stay hidden.
+    expect(filterDatabaseNamesForVisiblePicker(["app", "postgres", "template0", "template1"], { db_type: "postgres", show_system_schemas: true })).toEqual(["app", "postgres"]);
   });
 });

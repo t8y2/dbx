@@ -48,6 +48,8 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         transport_layers: Vec::new(),
         connect_timeout_secs: 10,
         query_timeout_secs: 30,
+
+        write_timeout_secs: 0,
         idle_timeout_secs: 60,
         manual_transaction_timeout_secs: 300,
         idle_disconnect_secs: 0,
@@ -146,6 +148,9 @@ async fn manual_e2e_sqlserver_default_split_zip_export_then_import_skip_relation
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: Some(1),
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
         insert_dialect: Default::default(),
         insert_mode: Default::default(),
     };

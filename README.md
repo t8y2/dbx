@@ -93,46 +93,13 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">
-        <img src="docs/public/sponsors/jalapeno-card.png" alt="Jalapeño Cloud" width="175" />
-      </a>
-    </td>
-    <td>
-      Jalapeño Cloud is an AI infrastructure and token compute platform, with an exclusive DBX entry offering free credits and top-up bonuses.
-      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">Visit Jalapeño Cloud</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
-      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">
-        <img src="docs/public/sponsors/aicodemirror-card.png" alt="AICodeMirror" width="175" />
-      </a>
-    </td>
-    <td>
-      Special thanks to AICodeMirror for sponsoring this project! AICodeMirror provides a high-stability official relay service for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 7×24 dedicated support. Official-channel pricing for Claude Code / Codex / Gemini is as low as 38% / 2% / 9% of list price, with extra discounts on top-ups! AICodeMirror offers a special benefit for DBX users: register through this link to enjoy 20% off your first top-up, and enterprise customers up to 25% off.
-      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">Visit AICodeMirror</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
-      <a href="https://api.hualong.online/register?promo=DBX%26HUALONG" target="_blank">
+      <a href="https://dbx.hualong.online/" target="_blank">
         <img src="docs/public/sponsors/hualong-card.png" alt="HuaLongAI" width="175" />
       </a>
     </td>
     <td>
       HuaLongAI is a model API relay built for heavy AI developers, offering 100% official-source Codex and Claude models with transparent token-level billing, enterprise contracts, and invoicing.
-      <a href="https://api.hualong.online/register?promo=DBX%26HUALONG" target="_blank">Visit HuaLongAI</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
-      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-en" target="_blank">
-        <img src="docs/public/sponsors/hiapi-card.png" alt="HiAPI" width="175" />
-      </a>
-    </td>
-    <td>
-      HiAPI is a developer-focused API platform for image, video, audio, and text models — GPT Image 2.5 (Flare & Sunburst), OpenAI-compatible text endpoints, and Remote MCP/Agent Skills for Claude Code, Cursor, and more. Pay as you go with no minimum spend; new users get 200 Credits on signup, plus 10% bonus Credits on top-ups.
-      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-en" target="_blank">Visit HiAPI</a>
+      <a href="https://dbx.hualong.online/" target="_blank">Visit HuaLongAI</a>
     </td>
   </tr>
   <tr>
@@ -178,17 +145,6 @@
     <td>
       TrustAsia provides cloud-based code signing service for DBX, enabling trusted software through automated CI/CD builds.
       <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">Visit TrustAsia</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
-      </a>
-    </td>
-    <td>
-      Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">Visit Atlas Cloud</a>
     </td>
   </tr>
   <tr>
@@ -542,8 +498,8 @@ When building the frontend yourself with an absolute asset base, set
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) >= 18
-- [pnpm](https://pnpm.io/)
+- [Node.js](https://nodejs.org/) >= 22.13.0
+- [pnpm](https://pnpm.io/) 10.34.7
 - [Rust](https://www.rust-lang.org/tools/install) >= 1.88
 
 #### System Dependencies

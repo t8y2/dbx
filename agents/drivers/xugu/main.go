@@ -893,9 +893,7 @@ func (r *runtimeServer) openSession(agentSessionID string, params connectParams)
 			}
 		}
 	} else {
-		// SYSTEM control is optional for ordinary users (no SYSTEM account / no SYS_SESSIONS).
-		// Fall back to a business-database-only session so metadata and queries still
-		// work. Do not carry the optional APP_NAME into this degraded login path.
+		// Open the session with the original attributes if SYSTEM control is unavailable.
 		_, err = server.connectWithControl(businessParams, nil, false)
 		controlKey = ""
 	}
@@ -1422,12 +1420,11 @@ func xuguIdentifiedSessionParams(params connectParams, agentSessionID string) co
 	return params
 }
 
-// Ordinary Xugu users often cannot use the SYSTEM control session, and some
-// server builds close the socket when an optional APP_NAME is sent for them.
-// Keep that path for explicit SYSDBA logins only; other users use a direct
-// business session with the parameters they supplied.
+// Xugu authenticates SYSDBA separately for each database. Probing SYSTEM with
+// a business database's credentials can lock the client IP before fallback.
 func xuguControlSessionEligible(params connectParams) bool {
-	return strings.EqualFold(strings.TrimSpace(params.Username), "SYSDBA")
+	return strings.EqualFold(strings.TrimSpace(params.Username), "SYSDBA") &&
+		strings.EqualFold(configuredDatabaseName(params), "SYSTEM")
 }
 
 func xuguControlParams(params connectParams) connectParams {

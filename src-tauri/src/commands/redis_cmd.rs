@@ -134,8 +134,17 @@ pub async fn redis_get_stream_entries(
     db: u32,
     key_raw: String,
     cursor: Option<String>,
+    newest_first: Option<bool>,
 ) -> Result<RedisStreamPage, String> {
-    dbx_core::redis_ops::redis_stream_entries_in_db_core(&state, &connection_id, db, &key_raw, cursor.as_deref()).await
+    dbx_core::redis_ops::redis_stream_entries_in_db_core(
+        &state,
+        &connection_id,
+        db,
+        &key_raw,
+        cursor.as_deref(),
+        newest_first.unwrap_or_default(),
+    )
+    .await
 }
 
 #[tauri::command]

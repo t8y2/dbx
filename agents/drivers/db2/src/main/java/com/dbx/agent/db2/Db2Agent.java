@@ -19,21 +19,23 @@ import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
+import java.math.BigDecimal;
 import java.sql.Blob;
 import java.sql.Clob;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class Db2Agent extends AbstractJdbcAgent {
     private static final String LARGE_VALUE_BYTES_COLUMN_PREFIX = "__DBX_LARGE_VALUE_BYTES_";
     private static final String DEFERRED_LOB_MARKER = "D:1";
+    private static final int UNDECODABLE_CATALOG_VALUE_ERROR = -4220;
     private static final Set<String> NUMERIC_PRECISION_TYPES = Set.of(
         "DECIMAL", "NUMERIC", "INTEGER", "SMALLINT", "BIGINT", "REAL", "DOUBLE", "FLOAT"
     );
@@ -55,13 +57,6 @@ public final class Db2Agent extends AbstractJdbcAgent {
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
         return buildUrl(params);
-    }
-
-    @Override
-    protected Properties buildConnectionProperties(ConnectParams params) {
-        Properties properties = super.buildConnectionProperties(params);
-        properties.setProperty("db2.jcc.charsetDecoderEncoder", "3");
-        return properties;
     }
 
     @Override
@@ -119,7 +114,7 @@ public final class Db2Agent extends AbstractJdbcAgent {
                             case "V" -> "VIEW";
                             default -> db2Type;
                         };
-                        result.add(new TableInfo(rs.getString(1).trim(), type, rs.getString(3)));
+                        result.add(new TableInfo(rs.getString(1).trim(), type, metadataString(rs, 3)));
                     }
                 }
             }
@@ -157,7 +152,7 @@ public final class Db2Agent extends AbstractJdbcAgent {
                 MetadataSqlSupport.bind(stmt, args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new TableInfo(rs.getString(1).trim(), db2TableType(rs.getString(2)), rs.getString(3)));
+                        result.add(new TableInfo(rs.getString(1).trim(), db2TableType(rs.getString(2)), metadataString(rs, 3)));
                     }
                 }
             }
@@ -235,7 +230,7 @@ public final class Db2Agent extends AbstractJdbcAgent {
                 MetadataSqlSupport.bind(stmt, args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new ObjectInfo(rs.getString(1).trim(), rs.getString(2), schema, rs.getString(3)));
+                        result.add(new ObjectInfo(rs.getString(1).trim(), rs.getString(2), schema, metadataString(rs, 3)));
                     }
                 }
             }
@@ -304,10 +299,10 @@ public final class Db2Agent extends AbstractJdbcAgent {
                             name,
                             dataType,
                             "Y".equals(rs.getString("NULLS").trim()),
-                            trimNullable(rs.getString("DEFAULT")),
+                            trimNullable(metadataString(rs, "DEFAULT")),
                             pkColumns.contains(name),
                             null,
-                            rs.getString("REMARKS"),
+                            metadataString(rs, "REMARKS"),
                             NUMERIC_PRECISION_TYPES.contains(typeName) ? length : null,
                             NUMERIC_SCALE_TYPES.contains(typeName) ? scale : null,
                             CHARACTER_LENGTH_TYPES.contains(typeName) ? length : null
@@ -492,6 +487,10 @@ public final class Db2Agent extends AbstractJdbcAgent {
             if (sqlType == Types.BLOB || sqlType == Types.BINARY || sqlType == Types.VARBINARY || sqlType == Types.LONGVARBINARY) {
                 byte[] value = rs.getBytes(index);
                 return rs.wasNull() ? null : JdbcExecutor.bytesToHex(value);
+            }
+            if (sqlType == Types.DECIMAL || sqlType == Types.NUMERIC) {
+                BigDecimal value = rs.getBigDecimal(index);
+                return value == null ? null : value.toPlainString();
             }
             Object value = rs.getObject(index);
             return rs.wasNull() ? null : value == null ? null : value.toString();
@@ -709,6 +708,37 @@ public final class Db2Agent extends AbstractJdbcAgent {
             }
         }
         return result;
+    }
+
+    /**
+     * Reads an optional catalog attribute (comments, defaults). JCC fails the read with
+     * ERRORCODE=-4220 when a stored value contains bytes that are invalid for the database
+     * encoding (e.g. a comment written by a legacy client in another codeset). These
+     * attributes are decorative, so treat such a value as absent instead of failing the
+     * whole listing. Any other failure propagates: only the known conversion error is
+     * tolerated. Write encoding stays strict: substituting characters on write would
+     * silently change user data.
+     */
+    private static String metadataString(ResultSet rs, int column) throws SQLException {
+        try {
+            return rs.getString(column);
+        } catch (SQLException e) {
+            if (e.getErrorCode() != UNDECODABLE_CATALOG_VALUE_ERROR) {
+                throw e;
+            }
+            return null;
+        }
+    }
+
+    private static String metadataString(ResultSet rs, String column) throws SQLException {
+        try {
+            return rs.getString(column);
+        } catch (SQLException e) {
+            if (e.getErrorCode() != UNDECODABLE_CATALOG_VALUE_ERROR) {
+                throw e;
+            }
+            return null;
+        }
     }
 
     private static String trimNullable(String value) {

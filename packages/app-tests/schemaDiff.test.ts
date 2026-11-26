@@ -152,10 +152,7 @@ test("classifies identical, source-only and target-only tables by presence", () 
   ]);
 
   const groups = groupDiffObjects(objects);
-  const namesFor = (operationType: string) =>
-    groups
-      .find((group) => group.operationType === operationType)
-      ?.typeGroups.flatMap((typeGroup) => typeGroup.objects.map((object) => object.name));
+  const namesFor = (operationType: string) => groups.find((group) => group.operationType === operationType)?.typeGroups.flatMap((typeGroup) => typeGroup.objects.map((object) => object.name));
 
   assert.deepEqual(namesFor("modify"), []);
   assert.deepEqual(namesFor("create"), ["source_only"]);
@@ -170,10 +167,7 @@ test("case-different table names stay presence-based on case-sensitive servers",
   ]);
 
   const groups = groupDiffObjects(objects);
-  const namesFor = (operationType: string) =>
-    groups
-      .find((group) => group.operationType === operationType)
-      ?.typeGroups.flatMap((typeGroup) => typeGroup.objects.map((object) => object.name));
+  const namesFor = (operationType: string) => groups.find((group) => group.operationType === operationType)?.typeGroups.flatMap((typeGroup) => typeGroup.objects.map((object) => object.name));
 
   assert.deepEqual(namesFor("create"), ["Users"]);
   assert.deepEqual(namesFor("delete"), ["users"]);
@@ -279,6 +273,14 @@ test("does not double count children when an entire table is deleted", () => {
     },
   ]);
 
+  // #14726: a whole-table drop starts unselected so a review cannot turn into a
+  // destructive deploy by accident, so the projection reports no delete yet.
+  assert.deepEqual(summarizeSchemaDiffOperations(objects), { create: 0, modify: 0, delete: 0, none: 0 });
+  assert.equal(groupDiffObjects(objects).find((group) => group.operationType === "delete")?.selectedCount, 0);
+
+  // Once explicitly selected it counts as one deploy unit: the removed column and
+  // index stay inside the table instead of being counted as separate drops.
+  assert.equal(setSchemaDiffObjectSelected(objects, "table-legacy_users", true), true);
   const counts = summarizeSchemaDiffOperations(objects);
   const deleteGroup = groupDiffObjects(objects).find((group) => group.operationType === "delete");
   assert.equal(counts.delete, 1);

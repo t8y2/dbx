@@ -18,6 +18,7 @@ import { functionDiffsToWire, functionInfoFromWire, schemaDiffPreparationFromWir
 import type { OracleRoutineSnapshot, OracleRoutineOperation, OracleRoutineOperationObservation, OracleRoutineSaveInput, OracleRoutinePlanInput, OracleRoutinePlan, OracleRoutineReadOptions, OracleRoutineIdentity } from "@/types/schemaDiff";
 import type { PlDebugBootstrap, PlDebugSessionRef, PlDebugStartIntent, PlDebugOperationRequest, PlDebugReadRequest, PlDebugReceipt, PlDebugSnapshot } from "@/lib/debug/plDebugProtocol";
 import type { PlDebugInspectRequest, PlDebugInspectResult, PlDebugCompileIntent, PlDebugCompileRef, PlDebugCompileReceipt } from "@/lib/debug/plDebugProtocol";
+import { HOST_OBSERVATION_EVENT, HOST_OBSERVATION_GAP_EVENT, type PluginHostObservationEvent, type PluginHostObservationGap } from "@/types/pluginObservation";
 
 export function plDebugBootstrap(): Promise<PlDebugBootstrap> {
   return invoke("pl_debug_bootstrap");
@@ -3446,6 +3447,42 @@ export async function subscribePluginEvents(onEvent: (event: PluginEvent) => voi
     unlistenEvent();
     unlistenBinary();
   };
+}
+
+/**
+ * Subscribe to host observation events (`host.observe:*`). The plugin bridge
+ * filters each event by the workbench plugin's declared permissions; the
+ * sidecar fan-out lives in the Rust shell.
+ *
+ * `onGap` receives the host's explicit drop notices when the bus could not
+ * keep up. Event `id` gaps are not drop signals: ids are host-global while
+ * delivery is permission-filtered.
+ */
+export async function subscribeHostObservations(onEvent: (event: PluginHostObservationEvent) => void, onGap?: (gap: PluginHostObservationGap) => void): Promise<UnlistenFn> {
+  const unlistenEvent = await listen<PluginHostObservationEvent>(HOST_OBSERVATION_EVENT, (event) => onEvent(event.payload));
+  const unlistenGap = onGap ? await listen<PluginHostObservationGap>(HOST_OBSERVATION_GAP_EVENT, (event) => onGap(event.payload)) : undefined;
+  return () => {
+    unlistenEvent();
+    unlistenGap?.();
+  };
+}
+
+/**
+ * Register a plugin workbench as an observer of the host observation bus.
+ *
+ * The shell's bridges stay subscribed for the whole process, so the Rust bus
+ * cannot infer observers from its receivers; it only builds payloads for
+ * categories with registered interest. `ownerId` is per workbench mount (two
+ * tabs of one plugin are refcounted separately); the permissions are read from
+ * the installed manifest on the Rust side.
+ */
+export async function setPluginObservationInterest(ownerId: string, pluginId: string): Promise<void> {
+  await invoke("set_plugin_observation_interest", { ownerId, pluginId });
+}
+
+/** Drop the interest registered by `setPluginObservationInterest`. */
+export async function clearPluginObservationInterest(ownerId: string): Promise<void> {
+  await invoke("clear_plugin_observation_interest", { ownerId });
 }
 
 /**

@@ -22,6 +22,7 @@ import {
   type PluginAiRecommendationHostUpdate,
 } from "@/lib/plugins/pluginHostBridge";
 import { getCachedPluginUiHtml, getOrLoadPluginUiHtml, pluginUiAssetBaseUrl } from "@/lib/plugins/pluginUiHtmlCache";
+import { declaresAnyObservationPermission } from "@/lib/plugins/pluginObservation";
 import { isPluginGraphicsEngineEnabled } from "@/lib/plugins/pluginGraphicsEngine";
 import { beginFloatingWindowDrag, closeFloatingWindows, endFloatingWindowDrag, openFloatingWindow, setFloatingWindowSize } from "@/lib/plugins/pluginFloatingWindow";
 import { isFloatingPluginWindow } from "@/lib/app/windowContext";
@@ -162,6 +163,13 @@ const frameReady = ref(false);
 const error = ref("");
 let bridge: PluginHostBridge | undefined;
 let unsubscribeEvents: (() => void) | undefined;
+let unsubscribeObservationEvents: (() => void) | undefined;
+// Host observation interest is registered per workbench mount, because the
+// shell's Tauri bridges stay subscribed for the whole process and therefore
+// cannot tell the Rust bus whether anyone is watching. Two tabs of one plugin
+// hold two owners and are refcounted independently.
+const observationOwnerId = `plugin-workbench:${props.plugin.manifest.id}:${Math.random().toString(36).slice(2)}`;
+let observationInterestRegistered = false;
 let disposed = false;
 let loadGeneration = 0;
 // Boot timing (§8.3 loading lifecycle): one console.debug line per iframe load
@@ -551,6 +559,9 @@ function createBridge() {
       invoke: api.invokePlugin,
       notify: api.notifyPlugin,
       sendBinary: api.sendPluginBinary,
+      // Desktop-only for now (web SSE delivery is a follow-up), so the bridge
+      // advertises `observations` only when this entry exists.
+      ...(isTauriRuntime() ? { subscribeHostObservations: api.subscribeHostObservations } : {}),
       readAsset: api.readPluginUiAsset,
       openAiConversation,
       connectionEditor,
@@ -876,11 +887,37 @@ onMounted(async () => {
     (event) => bridge?.forwardEvent(event),
     (event) => bridge?.forwardBinary(event),
   );
+  // Only a plugin that declared `host.observe:*` can receive observations, so
+  // anything else skips both the interest registration and the event
+  // subscription: an unobserved workbench must not keep the host building
+  // payloads.
+  const observesHostEvents = isTauriRuntime() && declaresAnyObservationPermission(props.plugin.manifest.permissions);
+  let unsubscribeObservations: (() => void) | undefined;
+  if (observesHostEvents) {
+    try {
+      await api.setPluginObservationInterest(observationOwnerId, props.plugin.manifest.id);
+      observationInterestRegistered = true;
+    } catch (interestError) {
+      // Observation is additive: a registration failure must not break the
+      // workbench, it only silences the observation stream for this tab.
+      console.error("[DBX][plugin-workbench:observation-interest]", interestError);
+    }
+    unsubscribeObservations = await api.subscribeHostObservations(
+      (event) => bridge?.forwardObservation(event),
+      (gap) => bridge?.forwardObservationGap(gap),
+    );
+  }
   if (disposed) {
     unsubscribe();
+    unsubscribeObservations?.();
+    if (observationInterestRegistered) {
+      observationInterestRegistered = false;
+      void api.clearPluginObservationInterest(observationOwnerId).catch(() => undefined);
+    }
     return;
   }
   unsubscribeEvents = unsubscribe;
+  unsubscribeObservationEvents = unsubscribeObservations;
   await loadWorkbench();
 });
 
@@ -935,6 +972,11 @@ onBeforeUnmount(() => {
   document.removeEventListener("dbx:tauri-file-drop", onHostFileDrop);
   disposeLocalFileHandles();
   unsubscribeEvents?.();
+  unsubscribeObservationEvents?.();
+  if (observationInterestRegistered) {
+    observationInterestRegistered = false;
+    void api.clearPluginObservationInterest(observationOwnerId).catch(() => undefined);
+  }
 });
 </script>
 

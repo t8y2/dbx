@@ -12,6 +12,7 @@ import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/li
 import type { NativeJobContext, NativeJobDetails, NativeJobList, NativeJobListRequest, NativeJobRequest, NativeJobOperationStatus, NativeJobPreparedPlan, NativeJobRef, NativeJobReferenceCatalog, NativeJobReferenceListRequest } from "@/lib/database/nativeJobs";
 import type { PlDebugBootstrap, PlDebugSessionRef, PlDebugStartIntent, PlDebugOperationRequest, PlDebugReadRequest, PlDebugReceipt, PlDebugSnapshot } from "@/lib/debug/plDebugProtocol";
 import type { PlDebugInspectRequest, PlDebugInspectResult, PlDebugCompileIntent, PlDebugCompileRef, PlDebugCompileReceipt } from "@/lib/debug/plDebugProtocol";
+import type { PluginHostObservationEvent, PluginHostObservationGap } from "@/types/pluginObservation";
 
 export function plDebugBootstrap(): Promise<PlDebugBootstrap> {
   return post("/api/pl-debug/bootstrap", {});
@@ -915,6 +916,26 @@ export async function subscribePluginEvents(onEvent: (event: PluginEvent) => voi
     pluginEventSource = undefined;
   };
 }
+
+/**
+ * Host observation events (`host.observe:*`) are published by the desktop shell
+ * (`install_host_observation_bridge`) only; the web shell has no SSE endpoint
+ * yet. This no-op keeps both transports signature-compatible: the workbench
+ * host passes `subscribeHostObservations` only in the Tauri runtime, so
+ * `capabilities.observations` stays absent on web and plugins gate on it.
+ */
+export async function subscribeHostObservations(_onEvent: (event: PluginHostObservationEvent) => void, _onGap?: (gap: PluginHostObservationGap) => void): Promise<() => void> {
+  return () => {};
+}
+
+/**
+ * Observation interest is registered with the desktop bus only (see
+ * `subscribeHostObservations`); the web shell has no observation delivery, so
+ * both transport calls are no-ops there.
+ */
+export async function setPluginObservationInterest(_ownerId: string, _pluginId: string): Promise<void> {}
+
+export async function clearPluginObservationInterest(_ownerId: string): Promise<void> {}
 
 /**
  * Subscribe to backend connection-liveness messages (#4339).

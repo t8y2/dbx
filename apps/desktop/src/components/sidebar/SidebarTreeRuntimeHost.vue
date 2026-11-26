@@ -107,6 +107,7 @@ import * as api from "@/lib/backend/api";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { canClearDefaultDatabase, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { buildShowCreateDatabaseSql } from "@/lib/database/databaseDdl";
 import { connectionUsesVisibleSchemaFilter, isSystemSchemaName } from "@/lib/database/visibleDatabases";
 import { canTreeNodeExpand, canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { sidebarConnectionVisibleFilterMenu } from "@/lib/sidebar/sidebarVisibleFilterMenu";
@@ -2902,6 +2903,19 @@ async function openDdl() {
     return;
   }
   emit("open-ddl", targets[0]!);
+}
+
+const databaseDdlSql = computed(() => {
+  const node = activeNode.value;
+  if (node.type !== "database" || !node.database) return null;
+  return buildShowCreateDatabaseSql(currentDatabaseType(), node.database);
+});
+
+function openDatabaseDdl() {
+  const node = activeNode.value;
+  const sql = databaseDdlSql.value;
+  if (!node.connectionId || node.database === undefined || !sql) return;
+  openSqlTemplateTab(node.connectionId, node.database, node.schema, node.catalog, sql, `${node.database} - ${t("contextMenu.viewDdl")}`);
 }
 
 async function openDdlForSelection(node: TreeNode, selectedNodeIds: readonly string[]): Promise<boolean> {
@@ -8184,6 +8198,9 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     const profileWorkspace = node.type === "database" && node.connectionId ? driverProfileDatabaseWorkspace(connectionStore.getConfig(node.connectionId)?.driver_profile) : undefined;
     if (profileWorkspace?.entryScopes.includes("database")) {
       items.push({ label: t(profileWorkspace.menuLabelKey), action: openProfileDatabaseWorkspace, icon: GitBranch });
+    }
+    if (databaseDdlSql.value) {
+      items.push({ sidebarActionId: "contextMenu.viewDdl", label: t("contextMenu.viewDdl"), action: openDatabaseDdl, icon: FileCode });
     }
     if (node.type === "database" && currentDatabaseType() !== "cloudflare-d1") {
       if (!isNodeDefaultDatabase.value) {

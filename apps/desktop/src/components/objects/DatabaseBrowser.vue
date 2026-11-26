@@ -12,6 +12,7 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import { canClearDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { buildShowCreateDatabaseSql } from "@/lib/database/databaseDdl";
 import { connectionUsesConnectionRootSchemaMode } from "@/lib/database/jdbcDialect";
 import { objectBrowserTargetForNamespaceRow } from "@/lib/database/objectBrowserTarget";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
@@ -238,8 +239,7 @@ function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
         sidebarActionId: "contextMenu.viewDdl",
         label: t("contextMenu.viewDdl"),
         action: () => {
-          const dbType = props.connection.db_type;
-          const sql = dbType === "mysql" ? `SHOW CREATE DATABASE \`${row.name.replaceAll("`", "``")}\`;` : `-- ${row.name}\n-- Database DDL is not available for this driver.`;
+          const sql = buildShowCreateDatabaseSql(props.connection.db_type, row.name) ?? `-- ${row.name}\n-- Database DDL is not available for this driver.`;
           queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.viewDdl")}`, "query", target.schema, sql, undefined, { forceNew: true });
         },
         icon: Copy,

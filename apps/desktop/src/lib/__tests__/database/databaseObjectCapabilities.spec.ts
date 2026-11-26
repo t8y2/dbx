@@ -188,6 +188,22 @@ describe("databaseObjectCapabilities", () => {
     expect(databaseObjectCapabilities("opengauss", "A").sourceReadable).toEqual(expect.arrayContaining(["PACKAGE", "PACKAGE_BODY"]));
   });
 
+  it("exposes packages only for Vastbase A compatibility mode", () => {
+    expect(sidebarObjectKindsForDatabase("vastbase", "A")).toEqual(expect.arrayContaining(["PACKAGE", "PACKAGE_BODY"]));
+    expect(sidebarObjectKindsForDatabase("vastbase", "a")).toContain("PACKAGE");
+    // The agent reports the server's raw value, which may spell A-mode as O,
+    // ORA, or ORACLE on other kernels.
+    for (const mode of ["O", "ORA", "ORACLE", "oracle"]) {
+      expect(sidebarObjectKindsForDatabase("vastbase", mode), mode).toEqual(expect.arrayContaining(["PACKAGE", "PACKAGE_BODY"]));
+    }
+    for (const mode of ["B", "C", "PG", undefined]) {
+      expect(sidebarObjectKindsForDatabase("vastbase", mode), String(mode)).not.toContain("PACKAGE");
+    }
+    // A-mode packages are read back from gs_package, so their source actions
+    // must stay available (t8y2/dbx#15359).
+    expect(databaseObjectCapabilities("vastbase", "A").sourceReadable).toEqual(expect.arrayContaining(["PACKAGE", "PACKAGE_BODY"]));
+  });
+
   it("enables custom type details only for verified PG-family databases", () => {
     for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
       expect(customTypeCapabilities(dbType), dbType).toEqual({ details: true, members: true, ddl: true });

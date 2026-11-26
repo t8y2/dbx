@@ -5556,6 +5556,8 @@ export default withEnglishFallback({
     copyDdl: "Copiar DDL",
     confirmDropEventTitle: "Remover Evento",
     confirmDropEventMessage: 'Tem certeza de que deseja remover o evento "{name}"?',
+    ddlCopyOptions: "Opções de cópia de DDL",
+    copyDdlWithoutAutoIncrement: "Copiar DDL e omitir o valor inicial de AUTO_INCREMENT",
   },
   visibleDatabases: {
     title: "Bancos de dados visíveis",

@@ -5557,6 +5557,8 @@ export default withEnglishFallback({
       optimizeSuccess: "Tabla «{name}» OPTIMIZE TABLE: {message}",
       repairSuccess: "Tabla «{name}» REPAIR TABLE: {message}",
     },
+    ddlCopyOptions: "Opciones de copia de DDL",
+    copyDdlWithoutAutoIncrement: "Copiar DDL y omitir el valor inicial de AUTO_INCREMENT",
   },
   visibleDatabases: {
     title: "Bases de datos visibles",

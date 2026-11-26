@@ -5301,6 +5301,8 @@ export default withEnglishFallback({
       optimizeSuccess: "테이블 '{name}' OPTIMIZE TABLE: {message}",
       repairSuccess: "테이블 '{name}' REPAIR TABLE: {message}",
     },
+    ddlCopyOptions: "DDL 복사 옵션",
+    copyDdlWithoutAutoIncrement: "DDL 복사 및 AUTO_INCREMENT 초기값 생략",
   },
   visibleDatabases: {
     title: "표시할 데이터베이스",

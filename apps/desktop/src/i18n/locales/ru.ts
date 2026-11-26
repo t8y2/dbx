@@ -5487,6 +5487,8 @@ export default withEnglishFallback({
       optimizeSuccess: "Таблица «{name}» OPTIMIZE TABLE: {message}",
       repairSuccess: "Таблица «{name}» REPAIR TABLE: {message}",
     },
+    ddlCopyOptions: "Параметры копирования DDL",
+    copyDdlWithoutAutoIncrement: "Копировать DDL без начального значения AUTO_INCREMENT",
   },
   visibleDatabases: {
     title: "Видимые базы данных",

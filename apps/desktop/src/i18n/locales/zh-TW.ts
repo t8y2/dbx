@@ -5340,6 +5340,8 @@ export default withEnglishFallback({
       optimizeSuccess: "資料表「{name}」OPTIMIZE TABLE：{message}",
       repairSuccess: "資料表「{name}」REPAIR TABLE：{message}",
     },
+    ddlCopyOptions: "DDL 複製選項",
+    copyDdlWithoutAutoIncrement: "複製 DDL 並省略 AUTO_INCREMENT 初始值",
   },
   visibleDatabases: {
     title: "顯示資料庫",

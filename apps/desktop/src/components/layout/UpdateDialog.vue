@@ -576,7 +576,7 @@ watch(
         </div>
 
         <DialogFooter v-if="selectedTab === 'app'" data-update-footer class="mx-0 mb-0 min-w-0 shrink-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
-          <div v-if="!updateReady && !isInstallingUpdate && !updateDownloaded && (updateInfo?.update_available || updateCheckFailed)" data-update-source-controls class="flex flex-none items-center gap-1.5 whitespace-nowrap self-start sm:mr-auto sm:self-center">
+          <div v-if="!updateReady && !isInstallingUpdate && !updateDownloaded && (updateInfo?.update_available || updateCheckFailed)" class="flex flex-none items-center gap-1.5 whitespace-nowrap self-start sm:mr-auto sm:self-center">
             <span class="text-xs text-muted-foreground">{{ t("updates.source") }}</span>
             <Select :model-value="updateDownloadSource" :disabled="checkingUpdates || isIgnoringUpdate" @update:model-value="(value) => value && emit('change-download-source', value as UpdateDownloadSource)">
               <SelectTrigger class="h-8 w-[150px] shrink-0 text-xs">
@@ -588,7 +588,7 @@ watch(
               </SelectContent>
             </Select>
           </div>
-          <div v-if="appUpdateActionsVisible" data-update-app-actions class="flex max-w-full flex-wrap items-center gap-2 sm:justify-end">
+          <div v-if="appUpdateActionsVisible" class="flex max-w-full flex-wrap items-center gap-2 sm:justify-end">
             <template v-if="updateInfo?.update_available">
               <Button v-if="canIgnoreVersion" variant="ghost" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('ignore-version')">
                 <Loader2 v-if="isIgnoringUpdate" class="h-4 w-4 animate-spin" />

@@ -14440,6 +14440,8 @@ export default {
     nacosAdvancedDescription: "These settings have safe defaults and usually only need adjustment for custom deployments, metrics, or r-nacos extensions.",
     nacosContextPathHint: "Leave empty to use the selected profile default. Enter / to explicitly use the server root, or provide a reverse-proxy prefix such as /nacos.",
     nacosPageSizeHint: "Used for configuration and service lists; 1–500 items per page.",
+    defaultConfigGroup: "Default Configuration Group",
+    defaultConfigGroupHint: "New namespace tabs initially show only this group. Leave blank to show all groups.",
     nacosMetricsHint: "Query metrics from the service address automatically; choose a custom URL when the metrics endpoint differs.",
     nacosRnacosExtension: "r-nacos console features",
     nacosRnacosExtensionHint: "The console address and credentials enable user management, configuration details, and disabled-instance management. Configuration history is controlled separately below.",

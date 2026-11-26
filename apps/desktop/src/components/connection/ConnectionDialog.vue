@@ -1189,6 +1189,7 @@ const nacosTlsSkipVerify = ref(false);
 const nacosMetricsMode = ref<NacosMetricsMode>("auto");
 const nacosMetricsUrl = ref("");
 const nacosPageSize = ref(20);
+const nacosDefaultConfigGroup = ref("");
 let nacosScopeFingerprintBaseline = "";
 
 function currentNacosScopeFingerprint(): string {
@@ -1614,6 +1615,7 @@ function resetNacosFields(config?: Partial<NacosAdminConfig>) {
   nacosMetricsMode.value = config?.metricsMode || "auto";
   nacosMetricsUrl.value = config?.metricsUrl || "";
   nacosPageSize.value = Number(config?.pageSize) > 0 ? Number(config?.pageSize) : 20;
+  nacosDefaultConfigGroup.value = typeof config?.defaultConfigGroup === "string" ? config.defaultConfigGroup : "";
   const auth = (config?.auth || { kind: "none" }) as NacosAuthConfig;
   nacosAuthKind.value = auth.kind || "none";
   nacosUsername.value = auth.username || "nacos";
@@ -2403,6 +2405,7 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     metricsMode: nacosMetricsMode.value,
     metricsUrl,
     pageSize: Number(nacosPageSize.value) > 0 ? Number(nacosPageSize.value) : 20,
+    defaultConfigGroup: nacosDefaultConfigGroup.value.trim() || undefined,
   };
 }
 
@@ -10746,6 +10749,12 @@ function openExternalUrl(url: string) {
                       <Label for="nacos-page-size">{{ t("connection.nacosPageSize") }}</Label>
                       <Input id="nacos-page-size" v-model.number="nacosPageSize" type="number" min="1" max="500" />
                       <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosPageSizeHint") }}</p>
+                    </div>
+
+                    <div class="grid gap-1.5">
+                      <Label for="nacos-default-config-group">{{ t("nacos.defaultConfigGroup") }}</Label>
+                      <Input id="nacos-default-config-group" v-model="nacosDefaultConfigGroup" />
+                      <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.defaultConfigGroupHint") }}</p>
                     </div>
 
                     <div v-if="isNacosV3AdminPlane" class="grid gap-1.5 border-t pt-4">

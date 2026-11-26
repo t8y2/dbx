@@ -265,6 +265,7 @@ export interface NacosAdminConfig {
   metricsMode?: NacosMetricsMode;
   metricsUrl?: string;
   pageSize?: number;
+  defaultConfigGroup?: string;
 }
 
 export interface NacosConfigQuery {

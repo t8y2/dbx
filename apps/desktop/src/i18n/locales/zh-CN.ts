@@ -14398,6 +14398,8 @@ export default withEnglishFallback({
     nacosAdvancedDescription: "这些参数均有安全默认值，通常只有自定义部署、指标采集或 r-nacos 扩展能力需要调整。",
     nacosContextPathHint: "留空时使用当前连接模式的默认值；明确使用服务根路径请填写 /，反向代理场景可填写 /nacos 等前缀。",
     nacosPageSizeHint: "用于配置和服务列表，每页 1–500 条。",
+    defaultConfigGroup: "默认配置分组",
+    defaultConfigGroupHint: "新打开命名空间时只显示此分组的配置。留空显示所有分组。",
     nacosMetricsHint: "自动使用服务地址查询指标；若指标端点不同，请选择“自定义地址”。",
     nacosRnacosExtension: "r-nacos 控制台功能",
     nacosRnacosExtensionHint: "控制台地址和凭据用于用户管理、配置详情和禁用实例管理；配置历史由下方开关单独控制。",

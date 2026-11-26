@@ -4,7 +4,7 @@ import { invalidateTableMetadataCache, loadTableMetadata } from "@/lib/metadata/
 import { canApplyDataTabMetadata, canReuseActiveMongoTab, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isNoSnapshotErrorResult, isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/lib/table/tableSelectSql";
-import { loadTableDataQueryDefaults } from "@/lib/table/tableDataQueryDefaults";
+import { loadTableDataQueryDefaults, removeTableDataQueryDefaults, shouldRetryWithoutTableDataQueryDefaults } from "@/lib/table/tableDataQueryDefaults";
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { editableRowIdentifierColumns, isViewTableType, physicalTablePrimaryKeys, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
@@ -200,6 +200,35 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
         targetTab.orderByInput = savedOrderBy ?? defaultSort.orderBy;
       }
       await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
+      // 保存的默认筛选/排序随首查失败（列被删/改名，schema 漂移）：镜像 #12647
+      // 的降级契约——清掉过期默认值并不带它们重试一次，表仍能打开
+      if (savedQuery && isCurrentTarget() && shouldRetryWithoutTableDataQueryDefaults(savedQuery, queryStore.tabs.find((tab) => tab.id === tabId)?.result)) {
+        removeTableDataQueryDefaults({ ...target, schema: tableSchema });
+        const plainSql = await buildTableSelectSql({
+          databaseType: effectiveDbType,
+          driverProfile: config.driver_profile,
+          serverVersion: connectionStore.getConfig(target.connectionId)?.database_info?.productVersion,
+          identifierQuote,
+          schema: tableSchema,
+          catalog: target.catalog,
+          database: target.database,
+          tableName: target.tableName,
+          includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+          injectDefaultTimeSeriesWhere: true,
+          tableType: targetTableType,
+          columns: columns.map((column) => column.name),
+          primaryKeys,
+          orderBy: defaultSort.orderBy,
+          limit: pageLimit,
+        });
+        if (!isPreparationCurrent() || !isCurrentGeneration()) return;
+        queryStore.updateSql(tabId, plainSql);
+        if (targetTab) {
+          targetTab.whereInput = undefined;
+          targetTab.orderByInput = defaultSort.orderBy;
+        }
+        await queryStore.executeTabSql(tabId, plainSql, { pagination: { limit: pageLimit, offset: 0 } });
+      }
       if (!savedOrderBy && isCurrentTarget() && targetTab) applyTableDefaultSortResult(targetTab, defaultSort, queryStore.sortTabResultLocally);
       return;
     }
@@ -288,6 +317,20 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
       if (!isCurrentTarget()) return;
       const retryTab = queryStore.tabs.find((tab) => tab.id === tabId);
       if (shouldKeepRowIdLocatorDisabled(retryTab?.result)) markRowIdLocatorUnsupported(target.connectionId);
+    }
+    // 保存的默认筛选/排序随首查执行失败（列被删/改名，schema 漂移）：镜像
+    // #12647 的降级契约——清掉过期默认值并不带它们重试一次，表仍能打开；
+    // 用户主动停止不重试（与上方行定位器降级同一取消判定）。
+    if (!cancelRequestedDuringExecute && tabAfterFirstExecute?.isCancelling !== true && shouldRetryWithoutTableDataQueryDefaults(savedQuery, firstResult)) {
+      removeTableDataQueryDefaults({ ...target, schema: tableSchema });
+      const plainSql = await buildTableSelectSql({ ...tableSelectSqlOptions, whereInput: undefined, orderBy: defaultSort.orderBy });
+      if (!isCurrentTarget() || !isCurrentGeneration()) return;
+      queryStore.updateSql(tabId, plainSql);
+      if (targetTab) {
+        targetTab.whereInput = undefined;
+        targetTab.orderByInput = defaultSort.orderBy;
+      }
+      await queryStore.executeTabSql(tabId, plainSql, { pagination: { limit: pageLimit, offset: 0 } });
     }
     // executeTabSql surfaces query failures as an "Error" result instead of throwing.
     // A snapshot-less lake table fails the data preview above but its metadata still

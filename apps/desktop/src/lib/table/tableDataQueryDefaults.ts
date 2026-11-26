@@ -1,4 +1,6 @@
 import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import type { QueryResult } from "@/types/database";
 
 export interface TableDataQueryDefaultsScope {
   connectionId: string;
@@ -36,4 +38,18 @@ export function saveTableDataQueryDefaults(scope: TableDataQueryDefaultsScope, d
 
 export function removeTableDataQueryDefaults(scope: TableDataQueryDefaultsScope) {
   safeLocalStorageRemove(storageKey(scope));
+}
+
+/**
+ * Saved defaults are free-form SQL strings restored without validation against
+ * the table's current columns: a filtered/sorted column dropped or renamed
+ * between sessions makes the first query on reopen fail with a server error.
+ * Mirrors the #12647 synthetic-row-id degradation contract: when the first
+ * query of an open carried saved defaults and failed as an execution error
+ * (not a user cancel), the open retries once without them and the stale
+ * defaults are dropped so later opens stop failing.
+ */
+export function shouldRetryWithoutTableDataQueryDefaults(applied: TableDataQueryDefaults | undefined, result: QueryResult | undefined | null): boolean {
+  if (!applied?.whereInput && !applied?.orderBy) return false;
+  return !!result && isQueryExecutionErrorResult(result);
 }

@@ -13,7 +13,7 @@ import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataT
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/lib/table/tableSelectSql";
-import { loadTableDataQueryDefaults } from "@/lib/table/tableDataQueryDefaults";
+import { loadTableDataQueryDefaults, removeTableDataQueryDefaults, shouldRetryWithoutTableDataQueryDefaults } from "@/lib/table/tableDataQueryDefaults";
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { physicalTablePrimaryKeys, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
@@ -432,7 +432,7 @@ export function useSidebarDataOpenRuntime() {
       // #12647：首开路径同样尊重"该连接的行定位器已被引擎拒绝"的记忆，否则
       // 被降级过的连接每次重新单击表都会再发一次注定失败的定位器查询。
       const includeRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableType) && !rowIdLocatorUnsupported(node.connectionId) && !postgresTupleLocatorUnsupportedEngine(connectionStore.getConfig(node.connectionId));
-      const buildOpenSql = (withRowId: boolean) =>
+      const buildOpenSql = (withRowId: boolean, withSavedDefaults = true) =>
         buildTableSelectSql({
           databaseType: effectiveDbType,
           driverProfile: config?.driver_profile || (config?.db_type === "gbase8s" ? "gbase8s" : undefined),
@@ -450,8 +450,8 @@ export function useSidebarDataOpenRuntime() {
           limit,
           includeRowId: withRowId,
           injectDefaultTimeSeriesWhere: true,
-          whereInput: savedQuery?.whereInput,
-          orderBy: initialOrderBy,
+          whereInput: withSavedDefaults ? savedQuery?.whereInput : undefined,
+          orderBy: withSavedDefaults ? initialOrderBy : defaultSort.orderBy,
         });
       const sql = await buildOpenSql(includeRowId);
       let finalExecutedSql = sql;
@@ -524,6 +524,29 @@ export function useSidebarDataOpenRuntime() {
         } catch {
           // Fallback execution keeps its own error result visible and must not
           // change the connection capability memory.
+        }
+      } else if (shouldRetryWithoutTableDataQueryDefaults(savedQuery, publishedResult)) {
+        // 保存的默认筛选/排序随首开失败（列被删/改名，schema 漂移）：镜像
+        // #12647 的降级契约——清掉过期默认值并不带它们重试一次，表仍能打开；
+        // 与行定位器降级互斥（else-if），同一次失败只归一个降级路径管。
+        try {
+          removeTableDataQueryDefaults(dataTabTarget);
+          const plainSql = await buildOpenSql(includeRowId, false);
+          if (plainSql === sql) return; // 保存默认值本就未参与（显式 whereInput 等），保留原错误可见
+          if (!stillOwnsPublishedResult()) return;
+          queryStore.updateSql(tabId, plainSql);
+          if (openedTab) {
+            openedTab.whereInput = undefined;
+            openedTab.orderByInput = defaultSort.orderBy;
+          }
+          const plainPublished = await queryStore.executeTabSql(tabId, plainSql, executeOptions);
+          const plainTab = queryStore.tabs.find((item) => item.id === tabId);
+          if (plainPublished === false || !ownsNavigation() || !plainTab || plainTab !== openedTab || plainTab.isExecuting) {
+            return;
+          }
+          finalExecutedSql = plainSql;
+        } catch {
+          // Fallback execution keeps its own error result visible.
         }
       } else if (openExecuteError !== undefined) {
         throw openExecuteError;

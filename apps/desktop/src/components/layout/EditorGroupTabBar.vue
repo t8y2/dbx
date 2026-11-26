@@ -29,6 +29,7 @@ const TAB_DRAG_HORIZONTAL_THRESHOLD = 24;
 <script setup lang="ts">
 import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
 import { blockTabDragTextSelection } from "@/lib/tabs/tabDragSelection";
+import { tabDragAutoScrollStep } from "@/lib/tabs/tabDragAutoScroll";
 import type { Component, CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
@@ -1916,6 +1917,59 @@ function handleTabClick(tab: QueryTab) {
   activateTab(tab.id);
 }
 
+// While a tab is dragged near either end of a scrollable strip, keep scrolling
+// it so tabs outside the visible range can be reached. The loop runs per frame
+// (not per pointermove) because the pointer rests at the edge while it scrolls.
+let tabDragLastPointer: { x: number; y: number } | null = null;
+let tabDragAutoScrollFrame = 0;
+// Tabs and the drop indicator are measured against the current layout, so the
+// scroll container is resolved once per drag.
+let tabDragScrollContainer: HTMLElement | null = null;
+
+function resolveTabDragScrollContainer(): HTMLElement | null {
+  if (isWrapLayout.value) return null;
+  if (isVerticalLayout.value) return tabsContainerRef.value;
+  return hasHorizontalFixedRows.value ? (groupTabDragSourceEl?.closest<HTMLElement>(".tab-section--horizontal") ?? null) : tabsContainerRef.value;
+}
+
+function tabDragAutoScrollTick() {
+  tabDragAutoScrollFrame = 0;
+  const drag = groupTabDrag;
+  const pointer = tabDragLastPointer;
+  const container = tabDragScrollContainer;
+  if (!drag.active || !drag.tabId || !pointer || !container) return;
+  const vertical = isVerticalLayout.value;
+  const rect = container.getBoundingClientRect();
+  // Only the strip under the pointer scrolls: dragging towards another group or
+  // the editor must not keep scrolling this one.
+  const cross = vertical ? pointer.x : pointer.y;
+  const crossStart = vertical ? rect.left : rect.top;
+  const crossEnd = vertical ? rect.right : rect.bottom;
+  const crossMargin = 24;
+  if (cross >= crossStart - crossMargin && cross <= crossEnd + crossMargin) {
+    const step = vertical ? tabDragAutoScrollStep(pointer.y, rect.top, rect.bottom) : tabDragAutoScrollStep(pointer.x, rect.left, rect.right);
+    if (step !== 0) {
+      container.scrollBy({ left: vertical ? 0 : step, top: vertical ? step : 0, behavior: "instant" });
+      // The tabs moved under the resting pointer: re-resolve the drop target.
+      updateTabDragTarget(pointer.x, pointer.y);
+    }
+  }
+  tabDragAutoScrollFrame = requestAnimationFrame(tabDragAutoScrollTick);
+}
+
+function startTabDragAutoScroll() {
+  tabDragScrollContainer = resolveTabDragScrollContainer();
+  if (!tabDragScrollContainer || tabDragAutoScrollFrame) return;
+  tabDragAutoScrollFrame = requestAnimationFrame(tabDragAutoScrollTick);
+}
+
+function stopTabDragAutoScroll() {
+  if (tabDragAutoScrollFrame) cancelAnimationFrame(tabDragAutoScrollFrame);
+  tabDragAutoScrollFrame = 0;
+  tabDragLastPointer = null;
+  tabDragScrollContainer = null;
+}
+
 function cleanupTabDrag(event?: Event) {
   const trackedPointerId = groupTabDrag.pointerId;
   if (event && "pointerId" in event && trackedPointerId !== null && (event as PointerEvent).pointerId !== trackedPointerId) {
@@ -1925,6 +1979,7 @@ function cleanupTabDrag(event?: Event) {
   window.removeEventListener("pointerup", handleTabPointerUp);
   window.removeEventListener("pointercancel", cleanupTabDrag);
   window.removeEventListener("blur", cleanupTabDrag);
+  stopTabDragAutoScroll();
   releaseTabDragSelection?.();
   releaseTabDragSelection = undefined;
   // The shared drag session belongs to the bar that started it: another
@@ -1972,7 +2027,9 @@ function handleTabPointerMove(event: PointerEvent) {
       groupTabDragGhost = createTabDragGhost(groupTabDragSourceEl, event.clientX, event.clientY);
     }
     document.body.style.cursor = "grabbing";
+    startTabDragAutoScroll();
   }
+  tabDragLastPointer = { x: event.clientX, y: event.clientY };
   event.preventDefault();
   const sourceBar = groupTabDragSourceEl?.closest<HTMLElement>("[data-main-tab-bar]");
   if (sourceBar && tabWindowTransfer?.move(drag.tabId, event, () => cleanupTabDrag())) {
@@ -1983,8 +2040,13 @@ function handleTabPointerMove(event: PointerEvent) {
     return;
   }
   moveTabDragGhost(event.clientX, event.clientY);
+  updateTabDragTarget(event.clientX, event.clientY);
+}
 
-  const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+/** Resolves the tab and side under the pointer into the shared drag state. */
+function updateTabDragTarget(clientX: number, clientY: number) {
+  const drag = groupTabDrag;
+  const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
   const tabElement = element?.closest<HTMLElement>("[data-tab-id]");
   const groupElement = element?.closest<HTMLElement>("[data-group-id]");
   drag.targetGroupId = groupElement?.dataset.groupId ?? null;
@@ -1993,7 +2055,7 @@ function handleTabPointerMove(event: PointerEvent) {
   if (tabElement && groupElement) {
     drag.targetTabId = tabElement.dataset.tabId ?? null;
     const rect = tabElement.getBoundingClientRect();
-    const pointerPosition = isVerticalLayout.value ? event.clientY : event.clientX;
+    const pointerPosition = isVerticalLayout.value ? clientY : clientX;
     const targetMiddle = isVerticalLayout.value ? rect.top + rect.height / 2 : rect.left + rect.width / 2;
     drag.position = pointerPosition < targetMiddle ? "before" : "after";
   }

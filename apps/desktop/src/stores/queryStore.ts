@@ -9660,6 +9660,8 @@ export const useQueryStore = defineStore("query", () => {
           useAgentCursor,
           firstPageUsesActualSql: hiddenPrimaryKeys.length > 0,
           executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined,
+          ...(conn?.database_info?.productVersion ? { serverVersion: conn.database_info.productVersion } : {}),
+          ...(conn?.database_info?.serverComment ? { serverComment: conn.database_info.serverComment } : {}),
         });
         const canPaginateSqlServerUseScript = !!sqlServerUseScript && !!plan.pageSql && typeof plan.pageLimit === "number" && typeof plan.pageOffset === "number";
         if (plan.paginationError) throw new Error(plan.paginationError);
@@ -9684,7 +9686,16 @@ export const useQueryStore = defineStore("query", () => {
         }
         if (!plan.pageSql && !plan.useAgentResultSession && !sqlServerUseScript) {
           batchPagination = await prepareBatchQueryPagination(
-            { sql: sqlBeforePagination, queryBaseSql, databaseType: effectiveDbType, pagination, useAgentCursor, executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined },
+            {
+              sql: sqlBeforePagination,
+              queryBaseSql,
+              databaseType: effectiveDbType,
+              pagination,
+              useAgentCursor,
+              executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined,
+              ...(conn?.database_info?.productVersion ? { serverVersion: conn.database_info.productVersion } : {}),
+              ...(conn?.database_info?.serverComment ? { serverComment: conn.database_info.serverComment } : {}),
+            },
             api.prepareQueryPaginationExecutionPlan,
             sqlStatementParameterOptions,
             () => tab.executionId !== executionId || tab.isCancelling === true,
@@ -9735,6 +9746,8 @@ export const useQueryStore = defineStore("query", () => {
               databaseType: effectiveDbType,
               pagination,
               useAgentCursor: false,
+              ...(conn?.database_info?.productVersion ? { serverVersion: conn.database_info.productVersion } : {}),
+              ...(conn?.database_info?.serverComment ? { serverComment: conn.database_info.serverComment } : {}),
             });
             if (plan.pageProbeSql) {
               sqlToExecute = plan.pageProbeSql;
@@ -11996,6 +12009,8 @@ export const useQueryStore = defineStore("query", () => {
           useAgentCursor,
           firstPageUsesActualSql: true,
           executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined,
+          ...(conn?.database_info?.productVersion ? { serverVersion: conn.database_info.productVersion } : {}),
+          ...(conn?.database_info?.serverComment ? { serverComment: conn.database_info.serverComment } : {}),
         });
         if ((probeRowLimit || capture) && plan.paginationError) throw new Error(plan.paginationError);
         if (typeof plan.pageLimit !== "number" || typeof plan.pageOffset !== "number") return cachedResultForExport();

@@ -624,6 +624,10 @@ export interface QueryPaginationExecutionPlanOptions {
   /** Optimizer hint injected into the generated count (dbx_count) and page (dbx_page) SQL.
    *  Example: GaussDB parallel execution hint: + set(query_dop 8). */
   executionHint?: string;
+  /** Connected server version (e.g. ShardingSphere-Proxy) used to avoid proxy-unsafe SQL rewrites. */
+  serverVersion?: string;
+  /** Connected server comment (`@@version_comment`), used alongside `serverVersion` for proxy detection. */
+  serverComment?: string;
 }
 
 export interface QueryPaginationExecutionPlan {

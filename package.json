@@ -145,7 +145,7 @@
     "shadcn-vue": "^2.7.4",
     "tailwindcss": "^4.3.0",
     "tsx": "^4.22.4",
-    "typescript": "~6.0.3",
+    "typescript": "~7.0.0",
     "vite": "^8.2.1",
     "vitest": "^4.1.8",
     "vue-tsc": "^3.3.3",

@@ -6861,10 +6861,12 @@ impl Storage {
     /// overwritten by a stale transcript, and a failed content write would leave
     /// the pin the user was told had failed already on disk.
     ///
-    /// A missing row is not an error, but it is not success either: the
-    /// conversation may have been deleted while the click was in flight, and a
-    /// pin write must never resurrect it. `false` tells the caller the pin never
-    /// reached disk, so the UI drops the stale row instead of confirming it.
+    /// The result describes what is ON DISK after this write's prune, not merely
+    /// whether the UPDATE matched: a conversation deleted while the click was in
+    /// flight, or an unpin whose row then lost the one guaranteed budget slot to a
+    /// newer row, both answer `false` so the UI drops the row instead of confirming
+    /// a pin no record carries. The write never inserts — a pin write must not
+    /// resurrect a deleted conversation.
     pub async fn save_ai_conversation_pin(
         &self,
         id: &str,
@@ -6877,12 +6879,18 @@ impl Storage {
             let updated = tx
                 .execute(
                     "UPDATE ai_conversations SET pinned = ?1, pinned_at = ?2 WHERE id = ?3",
-                    params![pinned, pinned_at, id],
+                    params![pinned, pinned_at, &id],
                 )
                 .map_err(|e| e.to_string())?;
             prune_ai_conversations(&tx)?;
+            // The prune can remove the row this transaction just updated: at
+            // capacity an UNPINNED row survives only if its recency earns the one
+            // guaranteed slot, so the UPDATE's row count alone is not the result.
+            let persisted: i64 = tx
+                .query_row("SELECT EXISTS(SELECT 1 FROM ai_conversations WHERE id = ?1)", [&id], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
-            Ok(updated > 0)
+            Ok(updated > 0 && persisted != 0)
         })
         .await
     }
@@ -11935,6 +11943,44 @@ mod tests {
         let victim = conversations.iter().find(|conversation| conversation.id == "victim");
         assert!(victim.is_some(), "unpinning must not cost the user this history, on this write or the next");
         assert!(!victim.unwrap().pinned);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_pin_result_reflects_the_post_prune_state() {
+        let path = temp_db_path("ai-conversation-pin-post-prune");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        // The automatic budget is exhausted and keeps its one guaranteed slot.
+        for index in 0..50 {
+            let id = format!("running-{index}");
+            let timestamp = format!("{index:04}");
+            storage
+                .save_ai_run_state(
+                    &ai_conversation(&id, &timestamp),
+                    &ai_run(&format!("run-{index}"), &id, AiRunStatus::Running, &timestamp),
+                )
+                .await
+                .unwrap();
+        }
+        let mut victim = ai_conversation("victim", "0000");
+        victim.pinned = true;
+        victim.pinned_at = Some("0000".to_string());
+        storage.save_ai_conversation(&victim).await.unwrap();
+        // A newer unprotected row owns the single slot.
+        storage.save_ai_conversation(&ai_conversation("newer", "9999")).await.unwrap();
+
+        // Unpinning with an OLD recency hands the slot to `newer`: the prune
+        // removes the victim in this very transaction, so the write must not
+        // report the pin as persisted (#14226 review).
+        assert!(
+            !storage.save_ai_conversation_pin("victim", false, Some("4000".to_string())).await.unwrap(),
+            "the result must describe the post-prune state"
+        );
+        let conversations = storage.load_ai_conversations().await.unwrap();
+        assert!(!conversations.iter().any(|conversation| conversation.id == "victim"));
+        assert!(conversations.iter().any(|conversation| conversation.id == "newer"));
 
         let _ = std::fs::remove_file(path);
     }

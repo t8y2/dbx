@@ -2785,6 +2785,81 @@ describe("AiAssistant mount", () => {
     expect(errors.map(String)).toEqual([]);
   });
 
+  // #14226 review: a content snapshot owns content fields only. When its save
+  // completes after a reload adopted the disk pin (which retires the caches), a
+  // stale pin captured at build time must not overwrite the row.
+  it("keeps a reloaded pin when an older content snapshot lands afterwards", async () => {
+    const stale = storedConversation({ id: "conv-a", title: "Chat A", assistantMode: "ask" });
+    aiAssistantMountApi.conversations = [stale];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+
+    let releaseSave!: () => void;
+    const saveGate = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    aiAssistantMountApi.pinSaveGate = () => saveGate;
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "follow up";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted.length).toBeGreaterThan(0));
+
+    // Another window pins it; reopening the panel adopts the disk state and
+    // retires the local caches.
+    aiAssistantMountApi.loadConversations = () => Promise.resolve([{ ...stale, pinned: true, pinnedAt: "2026-11-26T00:00:00.000Z" }]);
+    const popover = await openHistory(container);
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+
+    // The delayed snapshot still carries the pre-pin value.
+    releaseSave();
+    await settle();
+    await settle();
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: overlapping history loads must apply in request order. An
+  // older answer arriving last must not replace the newer list or retire the
+  // caches the newer load established.
+  it("ignores a stale history load that resolves after a newer one", async () => {
+    const conv = storedConversation({ id: "conv-a", title: "Chat A" });
+    aiAssistantMountApi.conversations = [conv];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+
+    const pendingLoads: Array<(rows: Array<Record<string, unknown>>) => void> = [];
+    aiAssistantMountApi.loadConversations = () =>
+      new Promise<Array<Record<string, unknown>>>((resolve) => {
+        pendingLoads.push(resolve);
+      });
+
+    // Two overlapping loads: open, close, open again.
+    let popover = await openHistory(container);
+    historyTrigger(container).click();
+    await settle();
+    popover = await openHistory(container);
+    expect(pendingLoads).toHaveLength(2);
+
+    // The NEWER request answers first…
+    pendingLoads[1]([{ ...conv, pinned: true, pinnedAt: "2026-11-26T00:00:00.000Z" }]);
+    await vi.waitFor(() => expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true"));
+
+    // …and the older one, carrying the pre-pin state, arrives last.
+    pendingLoads[0]([{ ...conv, pinned: false }]);
+    await settle();
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+    expect(errors.map(String)).toEqual([]);
+  });
+
   // #14226 review: a rename must merge only the fields it owns. Its save can be
   // in flight while an earlier pin write fails; the rollback has to survive the
   // rename completing, or the row shows a pin the disk does not carry.

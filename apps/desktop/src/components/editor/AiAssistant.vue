@@ -5759,14 +5759,17 @@ const runSnapshotScheduler = createDesktopAiRunSnapshotScheduler<ChatMessage>({
 
 function syncPersistedConversation(conversation: AiConversation) {
   const index = conversations.value.findIndex((item) => item.id === conversation.id);
-  if (index >= 0) conversations.value.splice(index, 1, conversation);
-  else conversations.value.unshift(conversation);
-  // A snapshot can land while a pin write is still in flight (the stream keeps
-  // flushing), and its pin is the one confirmed BEFORE that write. Showing it
-  // would make a pinned conversation look unpinned — and the next click would
-  // try to pin it again (#14226 review). The pin shown is always the known one,
-  // never whatever the snapshot happened to carry.
-  applyKnownPin(conversation.id);
+  if (index >= 0) {
+    // A content snapshot owns content fields only. Its pin fields were captured
+    // when the snapshot was BUILT — a pin write or a reload that adopted the
+    // disk value can have moved on since — so the live row's pin fields are kept
+    // (#14226 review). This also holds while a pin write is in flight: the
+    // optimistic value is already on the row.
+    const { pinned, pinnedAt } = conversations.value[index];
+    conversations.value.splice(index, 1, { ...conversation, pinned, pinnedAt });
+  } else {
+    conversations.value.unshift(conversation);
+  }
   // Same comparator the backend uses, so a save never reshuffles the list into
   // an order the next load would contradict (#14226).
   conversations.value = sortAiConversations(conversations.value);
@@ -5901,13 +5904,23 @@ function reconcileLoadedPins(list: AiConversation[], seqAtLoad: number): AiConve
   return overlaid ? sortAiConversations(merged) : merged;
 }
 
+/** Generation of the newest history load (#14226 review). History loads can
+ *  overlap (popover open racing the mount), and responses can arrive out of
+ *  order: a stale answer must neither replace the list nor retire pin caches,
+ *  or it would undo the newer snapshot AND the writes in between. */
+let conversationLoadGeneration = 0;
+
 /** One history load for both entry points (popover open, mount), so the pin
  *  reconciliation can never diverge between them. */
-async function loadConversationList(): Promise<AiConversation[]> {
+async function reloadConversationList(): Promise<void> {
+  const generation = ++conversationLoadGeneration;
   // Capture the stamp BEFORE the request: anything that finishes later may be
   // missing from this answer.
   const seqAtLoad = pinMutationSeq;
-  return reconcileLoadedPins(await loadAiConversations().catch(() => []), seqAtLoad);
+  const list = await loadAiConversations().catch(() => []);
+  // Superseded by a newer request: it owns the list and the cache cleanup now.
+  if (generation !== conversationLoadGeneration) return;
+  conversations.value = reconcileLoadedPins(list, seqAtLoad);
 }
 
 async function setConversationListOpen(open: boolean) {
@@ -5916,7 +5929,7 @@ async function setConversationListOpen(open: boolean) {
     conversationSearchQuery.value = "";
     await nextTick();
     conversationSearchInput.value?.focus();
-    conversations.value = await loadConversationList();
+    await reloadConversationList();
   }
 }
 
@@ -5987,15 +6000,6 @@ function applyConversationPin(id: string, pinned: boolean, pinnedAt: string | un
 function showPendingConversationPin(id: string, pinned: boolean, pinnedAt: string | undefined) {
   displayedPins.set(id, { pinned, pinnedAt });
   applyConversationPin(id, pinned, pinnedAt);
-}
-
-/** Re-applies the pin this panel knows for `id` after a list entry was replaced
- *  wholesale by a record from disk (a snapshot sync): the in-flight optimistic
- *  value if there is one, else the last confirmed one. Falls back to the entry's
- *  own value when neither is known. */
-function applyKnownPin(id: string) {
-  const pin = displayedPins.get(id) ?? confirmedPins.get(id);
-  if (pin) applyConversationPin(id, pin.pinned, pin.pinnedAt);
 }
 
 /** One pin write. Runs only inside the conversation's chain. */
@@ -6482,7 +6486,7 @@ onMounted(async () => {
 
   // Same merge as the popover reload (#14226): a harmless no-op on a fresh mount,
   // but the two load sites must not diverge.
-  conversations.value = await loadConversationList();
+  await reloadConversationList();
   // Restore per-conversation queued "send later" inputs (parent PRD §5) — they
   // are persisted with the conversation and must surface again after a restart.
   // The queued mode/action belong to the conversation that queued them, not to

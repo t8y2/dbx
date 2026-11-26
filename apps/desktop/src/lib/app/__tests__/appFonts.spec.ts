@@ -5,8 +5,10 @@ import { displayFontFamily, isPresetFontFamily } from "../fontFamilyOptions";
 describe("appFonts", () => {
   it("keeps Cyrillic-capable system fonts ahead of CJK fallbacks in proportional font stacks", () => {
     for (const stack of [DEFAULT_UI_FONT_FAMILY, DEFAULT_DATA_GRID_FONT_FAMILY]) {
-      const firstCjkFallback = stack.indexOf('"PingFang SC"');
-      expect(firstCjkFallback).toBeGreaterThan(-1);
+      const cjkFallbacks = ['"PingFang SC"', '"Hiragino Sans GB"', '"Microsoft YaHei"'];
+      const cjkIndexes = cjkFallbacks.map((family) => stack.indexOf(family));
+      for (const index of cjkIndexes) expect(index).toBeGreaterThan(-1);
+      const firstCjkFallback = Math.min(...cjkIndexes);
       for (const family of ['"Segoe UI"', '"Helvetica Neue"', "Arial", '"Noto Sans"', "Roboto", '"Liberation Sans"', '"DejaVu Sans"']) {
         const familyIndex = stack.indexOf(family);
         expect(familyIndex, `${family} must be present in ${stack}`).toBeGreaterThan(-1);

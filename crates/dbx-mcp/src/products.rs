@@ -102,6 +102,19 @@ async fn dispatch_nacos(
         "config_history" => {
             to_json(nacos::nacos_list_config_history_core(state, id, parse::<NacosConfigHistoryQuery>(args)?).await?)
         }
+        "get_config_history" => {
+            let key = parse::<NacosConfigHistoryKey>(args)?;
+            let detail = nacos::nacos_get_config_history_core(state, id, key.clone()).await?;
+            let namespace_matches = key.namespace.as_deref().is_none_or(|namespace| {
+                detail.namespace == namespace || (namespace == "public" && detail.namespace.is_empty())
+            });
+            if !namespace_matches || detail.group != key.group || detail.data_id != key.data_id {
+                return Err("Nacos history details did not match the requested configuration.".into());
+            }
+            let mut value = to_json(detail)?;
+            value["historyId"] = json!(key.history_id);
+            Ok(value)
+        }
         "publish_config" => {
             nacos::nacos_publish_config_core(state, id, parse::<NacosConfigUpsert>(args)?).await?;
             Ok(json!({ "ok": true }))

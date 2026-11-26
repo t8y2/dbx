@@ -1697,9 +1697,11 @@ export async function saveAiConversation(conversation: AiConversation): Promise<
 
 /** Writes only the pin columns (#14226). Pinning is a property toggle, so it must
  *  not rewrite the transcript: a whole-record write races every streaming
- *  snapshot and would make a failed pin stick on disk via the snapshot path. */
-export async function saveAiConversationPin(id: string, pinned: boolean, pinnedAt?: string): Promise<void> {
-  return invoke("save_ai_conversation_pin", { id, pinned, pinnedAt: pinnedAt ?? null });
+ *  snapshot and would make a failed pin stick on disk via the snapshot path.
+ *  Resolves `false` when the conversation no longer exists, so the caller drops
+ *  its stale row instead of confirming a pin nothing on disk carries. */
+export async function saveAiConversationPin(id: string, pinned: boolean, pinnedAt?: string): Promise<boolean> {
+  return invoke<boolean>("save_ai_conversation_pin", { id, pinned, pinnedAt: pinnedAt ?? null });
 }
 
 export async function loadAiConversations(): Promise<AiConversation[]> {

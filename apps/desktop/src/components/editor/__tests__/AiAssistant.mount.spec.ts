@@ -46,6 +46,9 @@ const aiAssistantMountApi = vi.hoisted(() => ({
   savedRunStateConversations: [] as Array<Record<string, unknown>>,
   /** Column-only pin writes, in call order. */
   savedPins: [] as Array<{ id: string; pinned: boolean; pinnedAt?: string }>,
+  /** Simulates a pin write whose target row no longer exists: the backend
+   *  answers `false` and nothing is recorded. */
+  pinTargetMissing: false,
   /** Overrides the "disk" answer for `loadAiConversations`. */
   loadConversations: undefined as undefined | (() => Promise<Array<Record<string, unknown>>>),
   // Namespace listings the composer asks for when its pickers open (#12972).
@@ -196,18 +199,19 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     },
     // The pin toggle is a column-only write (#14226); it shares the same gate so
     // the failure/ordering tests drive one knob. A gated call is recorded only
-    // once it succeeded, so `savedPins` is what actually reached disk.
+    // once it succeeded, so `savedPins` is what actually reached disk. A missing
+    // target answers `false` — the row was deleted meanwhile (#14226 review).
     saveAiConversationPin: (id: string, pinned: boolean, pinnedAt?: string) => {
       const record = { id, pinned, pinnedAt };
+      const finish = () => {
+        if (aiAssistantMountApi.pinTargetMissing) return false;
+        aiAssistantMountApi.savedPins.push(record);
+        return true;
+      };
       const gate = aiAssistantMountApi.pinSaveGate;
-      if (!gate) {
-        aiAssistantMountApi.savedPins.push(record);
-        return Promise.resolve();
-      }
+      if (!gate) return Promise.resolve(finish());
       aiAssistantMountApi.pinSaveStarted.push(id);
-      return gate().then(() => {
-        aiAssistantMountApi.savedPins.push(record);
-      });
+      return gate().then(finish);
     },
     // The pin path flushes a run's streamed snapshot first; the panel only
     // mirrors that record into the list once the write succeeds, so the mock has
@@ -272,6 +276,7 @@ afterEach(() => {
   aiAssistantMountApi.pinSaveStarted = [];
   aiAssistantMountApi.savedRunStateConversations = [];
   aiAssistantMountApi.savedPins = [];
+  aiAssistantMountApi.pinTargetMissing = false;
   aiAssistantMountApi.loadConversations = undefined;
   aiAssistantMountApi.databaseNames = [];
   aiAssistantMountApi.schemaNames = [];
@@ -2361,6 +2366,20 @@ describe("AiAssistant mount", () => {
     return button!;
   }
 
+  /** The history popover's trigger (opening and closing both go through it). */
+  function historyTrigger(container: HTMLElement): HTMLButtonElement {
+    const trigger = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.getAttribute("title") === i18n.global.t("history.title"))!;
+    expect(trigger).toBeTruthy();
+    return trigger;
+  }
+
+  /** The rename pencil on the history row that shows `title`. */
+  function renameButton(popover: HTMLElement, title: string): HTMLButtonElement {
+    const button = Array.from(popover.querySelectorAll<HTMLButtonElement>("button")).find((candidate) => candidate.getAttribute("title") === i18n.global.t("ai.renameConversation") && candidate.closest("div")?.textContent?.includes(title));
+    expect(button, `rename button for ${title}`).toBeTruthy();
+    return button!;
+  }
+
   it("groups a pinned conversation above recent ones and persists the pin", async () => {
     aiAssistantMountApi.conversations = [storedConversation({ id: "conv-pinned", title: "Pinned chat", updatedAt: "2026-01-01T00:00:00.000Z", pinned: true, pinnedAt: "2026-01-02T00:00:00.000Z" }), storedConversation({ id: "conv-new", title: "Newest chat", updatedAt: "2026-10-01T00:00:00.000Z" })];
     const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
@@ -2700,6 +2719,138 @@ describe("AiAssistant mount", () => {
     releaseFirst();
     await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(2));
     expect(aiAssistantMountApi.savedPins.map((record) => record.pinned)).toEqual([true, false]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: the confirmed pin cache must not outlive the write that
+  // produced it — otherwise a reload can never adopt a pin another window or
+  // client changed.
+  it("adopts a pin changed elsewhere on the next reload", async () => {
+    const conv = storedConversation({ id: "conv-a", title: "Chat A" });
+    aiAssistantMountApi.conversations = [conv];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+
+    let popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedPins.at(-1)?.pinned).toBe(true));
+
+    // Another window unpins it; the next reload answers that state.
+    aiAssistantMountApi.loadConversations = () => Promise.resolve([{ ...conv, pinned: false }]);
+    historyTrigger(container).click();
+    await settle();
+    popover = await openHistory(container);
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("false");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: a reload that started BEFORE a pin write may answer the
+  // pre-write state even though its query ran after the write committed. The
+  // write's completion stamp is what keeps the row pinned across that race.
+  it("keeps a pin write that finishes while the reload is answering", async () => {
+    const conv = storedConversation({ id: "conv-a", title: "Chat A" });
+    aiAssistantMountApi.conversations = [conv];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+
+    let releasePin!: () => void;
+    const pinGate = new Promise<void>((resolve) => {
+      releasePin = resolve;
+    });
+    aiAssistantMountApi.pinSaveGate = () => pinGate;
+    let popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(1));
+
+    // Reopen while the write is pending: the reload will answer the pre-pin state.
+    let releaseLoad!: () => void;
+    const loadGate = new Promise<void>((resolve) => {
+      releaseLoad = resolve;
+    });
+    aiAssistantMountApi.loadConversations = () => loadGate.then(() => [{ ...conv, pinned: false }]);
+    historyTrigger(container).click();
+    await settle();
+    popover = await openHistory(container);
+
+    // The write lands after the reload started but before its answer applies.
+    releasePin();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedPins.at(-1)?.pinned).toBe(true));
+    releaseLoad();
+    await settle();
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: a rename must merge only the fields it owns. Its save can be
+  // in flight while an earlier pin write fails; the rollback has to survive the
+  // rename completing, or the row shows a pin the disk does not carry.
+  it("keeps a failed pin's rollback when a rename save is still in flight", async () => {
+    useToast().dismissToast();
+    useToast().message.value = "";
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A" })];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+
+    let rejectPin!: (error: Error) => void;
+    const pinGate = new Promise<void>((_, reject) => {
+      rejectPin = reject;
+    });
+    let releaseRename!: () => void;
+    const renameGate = new Promise<void>((resolve) => {
+      releaseRename = resolve;
+    });
+    let call = 0;
+    aiAssistantMountApi.pinSaveGate = () => {
+      call += 1;
+      return call === 1 ? pinGate : renameGate;
+    };
+
+    const popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(1));
+
+    // Rename while the pin write is still pending.
+    renameButton(popover, "Chat A").click();
+    await settle();
+    const titleInput = Array.from(popover.querySelectorAll<HTMLInputElement>("input")).find((input) => input.value === "Chat A")!;
+    expect(titleInput, "rename input").toBeTruthy();
+    titleInput.value = "Chat B";
+    titleInput.dispatchEvent(new Event("input"));
+    titleInput.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(2));
+
+    // The pin write fails and rolls the row back…
+    rejectPin(new Error("disk full"));
+    await vi.waitFor(() => expect(useToast().message.value).toBe(i18n.global.t("ai.conversationPinFailed")));
+    // …then the rename save completes: it must not resurrect the failed pin.
+    releaseRename();
+    await vi.waitFor(() => expect(pinButton(popover, "Chat B")).toBeTruthy());
+    expect(pinButton(popover, "Chat B").getAttribute("aria-pressed")).toBe("false");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: a pin write whose target row is gone must not be confirmed.
+  // The stale row is dropped (and the column-only write never re-inserts it).
+  it("drops a row when the backend reports the conversation no longer exists", async () => {
+    useToast().dismissToast();
+    useToast().message.value = "";
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A" })];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+    aiAssistantMountApi.pinTargetMissing = true;
+    const popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(popover.querySelectorAll("[data-ai-conversation-pin]").length).toBe(0));
+    expect(aiAssistantMountApi.savedPins).toEqual([]);
+    expect(useToast().message.value).not.toBe(i18n.global.t("ai.conversationPinFailed"));
     expect(errors.map(String)).toEqual([]);
   });
 });

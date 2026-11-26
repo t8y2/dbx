@@ -6722,7 +6722,10 @@ fn prune_terminal_ai_runs(tx: &Transaction<'_>) -> Result<(), String> {
 ///
 /// Pinned conversations additionally do not consume the budget at all: they are a
 /// user-owned list, so the automatic history keeps its own 50 slots beside them
-/// and the table is bounded at 50 + (pinned count).
+/// and the table is bounded at 50 + (pinned count). A conversation that is both
+/// run-protected and pinned is protected by the pin alone, so the budget only
+/// subtracts run-protected rows that are NOT pinned — counting the overlap would
+/// shrink the user's history for a row the budget never covers.
 ///
 /// Eviction order is `MAX(updated_at, pinned_at)`, and `pinned_at` records the
 /// last pin-STATE change (pin or unpin). Unpinning therefore refreshes the row's
@@ -6736,7 +6739,9 @@ fn prune_ai_conversations(tx: &Transaction<'_>) -> Result<(), String> {
          ), pinned AS (
              SELECT id FROM ai_conversations WHERE pinned = 1
          ), budget AS (
-             SELECT MAX(1, 50 - COUNT(*)) AS value FROM run_protected
+             SELECT MAX(1, 50 - COUNT(*)) AS value
+             FROM run_protected
+             WHERE id NOT IN (SELECT id FROM pinned)
          ), keepers AS (
              SELECT id FROM run_protected
              UNION
@@ -6856,24 +6861,28 @@ impl Storage {
     /// overwritten by a stale transcript, and a failed content write would leave
     /// the pin the user was told had failed already on disk.
     ///
-    /// A missing row is not an error: the conversation may have been deleted
-    /// while the click was in flight, and a pin write must never resurrect it.
+    /// A missing row is not an error, but it is not success either: the
+    /// conversation may have been deleted while the click was in flight, and a
+    /// pin write must never resurrect it. `false` tells the caller the pin never
+    /// reached disk, so the UI drops the stale row instead of confirming it.
     pub async fn save_ai_conversation_pin(
         &self,
         id: &str,
         pinned: bool,
         pinned_at: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let id = id.to_string();
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
-            tx.execute(
-                "UPDATE ai_conversations SET pinned = ?1, pinned_at = ?2 WHERE id = ?3",
-                params![pinned, pinned_at, id],
-            )
-            .map_err(|e| e.to_string())?;
+            let updated = tx
+                .execute(
+                    "UPDATE ai_conversations SET pinned = ?1, pinned_at = ?2 WHERE id = ?3",
+                    params![pinned, pinned_at, id],
+                )
+                .map_err(|e| e.to_string())?;
             prune_ai_conversations(&tx)?;
-            tx.commit().map_err(|e| e.to_string())
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(updated > 0)
         })
         .await
     }
@@ -11807,6 +11816,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pinned_and_run_protected_conversations_consume_one_budget_slot_not_two() {
+        let path = temp_db_path("ai-conversation-pinned-running-overlap");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        // Three conversations are BOTH pinned and running. The pin alone already
+        // protects them, so they must not be subtracted from the 50-slot automatic
+        // history as well (#14226 review) — that would leave the user with 47
+        // slots for rows the budget never covered.
+        for index in 0..3 {
+            let id = format!("pinned-running-{index}");
+            let timestamp = format!("{index:04}");
+            let mut conversation = ai_conversation(&id, &timestamp);
+            conversation.pinned = true;
+            conversation.pinned_at = Some(timestamp.clone());
+            storage
+                .save_ai_run_state(
+                    &conversation,
+                    &ai_run(&format!("run-{index}"), &id, AiRunStatus::Running, &timestamp),
+                )
+                .await
+                .unwrap();
+        }
+        for index in 0..50 {
+            let timestamp = format!("{index:04}");
+            storage.save_ai_conversation(&ai_conversation(&format!("terminal-{index}"), &timestamp)).await.unwrap();
+        }
+
+        let conversations = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(conversations.iter().filter(|conversation| conversation.pinned).count(), 3);
+        assert_eq!(
+            conversations.iter().filter(|conversation| !conversation.pinned).count(),
+            50,
+            "the overlap with the pinned set must not shrink the automatic-history budget"
+        );
+        assert!(conversations.iter().any(|conversation| conversation.id == "terminal-0"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn ai_conversation_pin_write_does_not_touch_message_content() {
         let path = temp_db_path("ai-conversation-pin-column-only");
         let storage = crate::persistence::test_storage::open(&path).await.unwrap();
@@ -11822,7 +11871,13 @@ mod tests {
         storage.save_ai_conversation(&newer).await.unwrap();
 
         // The pin write, working from the STALE copy, must leave content alone.
-        storage.save_ai_conversation_pin("pin-columns", true, Some("2026-11-05T00:00:00Z".to_string())).await.unwrap();
+        assert!(
+            storage
+                .save_ai_conversation_pin("pin-columns", true, Some("2026-11-05T00:00:00Z".to_string()))
+                .await
+                .unwrap(),
+            "a matched row reports the pin as written"
+        );
 
         let loaded = storage.load_ai_conversations().await.unwrap();
         let saved = loaded.iter().find(|item| item.id == "pin-columns").unwrap();
@@ -11832,8 +11887,12 @@ mod tests {
         assert_eq!(saved.title, "Renamed by the newer write", "a pin write must not rewrite metadata");
         assert_eq!(saved.updated_at, "0002", "a pin write must not bump updated_at");
 
-        // Unknown / deleted conversation: the write is a no-op, never a revive.
-        storage.save_ai_conversation_pin("never-existed", true, None).await.unwrap();
+        // Unknown / deleted conversation: the write is a no-op, never a revive,
+        // and it must tell the caller nothing was persisted so the UI drops the row.
+        assert!(
+            !storage.save_ai_conversation_pin("never-existed", true, None).await.unwrap(),
+            "a missing row is reported as not updated"
+        );
         assert_eq!(storage.load_ai_conversations().await.unwrap().len(), 1);
 
         let _ = std::fs::remove_file(path);

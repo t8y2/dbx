@@ -5764,9 +5764,9 @@ function syncPersistedConversation(conversation: AiConversation) {
   // A snapshot can land while a pin write is still in flight (the stream keeps
   // flushing), and its pin is the one confirmed BEFORE that write. Showing it
   // would make a pinned conversation look unpinned — and the next click would
-  // try to pin it again (#14226 review). The pin shown is always
-  // `pinForDisplay`, never whatever the snapshot happened to carry.
-  applyDisplayedPin(conversation.id);
+  // try to pin it again (#14226 review). The pin shown is always the known one,
+  // never whatever the snapshot happened to carry.
+  applyKnownPin(conversation.id);
   // Same comparator the backend uses, so a save never reshuffles the list into
   // an order the next load would contradict (#14226).
   conversations.value = sortAiConversations(conversations.value);
@@ -5874,19 +5874,40 @@ async function persistConversation() {
   await persistConversationSnapshot(conversationId.value, messages.value, pluginContext.value?.pluginName ?? connection?.name ?? "", pluginContext.value ? "" : binding.database, new Date().toISOString(), binding);
 }
 
-/** Re-applies the intended pin to every row of a freshly LOADED list (#14226).
+/** Reconciles a freshly LOADED list with pin writes the query could not see (#14226 review).
  *
- *  `loadAiConversations()` returns what was on disk when the query ran, which can
- *  predate a pin write that is still in flight (or that landed moments ago).
- *  Without this the row would show the OLD pin, and a second click would compute
- *  "pin" again instead of undoing the first one. */
-function applyDisplayedPinsToList(list: AiConversation[]): AiConversation[] {
-  if (!displayedPins.size) return list;
+ *  `loadAiConversations()` answers what was on disk when its query ran. Two cases
+ *  must win over that answer: a write still in flight (the user is looking at the
+ *  optimistic value) and a write that finished after this load started (the disk
+ *  answer predates it). Every other row adopts the disk value — a pin changed by
+ *  another window or client must reach this one — and its cached entries are
+ *  retired, so that cache can never mask a later external change either. */
+function reconcileLoadedPins(list: AiConversation[], seqAtLoad: number): AiConversation[] {
+  if (!list.length) return list;
+  let overlaid = false;
   const merged = list.map((conversation) => {
-    const displayed = displayedPins.get(conversation.id);
-    return displayed ? { ...conversation, pinned: displayed.pinned, pinnedAt: displayed.pinnedAt } : conversation;
+    const id = conversation.id;
+    const pending = pendingPinTokens.has(id);
+    if (!pending && (pinMutationSeqs.get(id) ?? -1) <= seqAtLoad) {
+      confirmedPins.delete(id);
+      displayedPins.delete(id);
+      return conversation;
+    }
+    const pin = displayedPins.get(id) ?? confirmedPins.get(id);
+    if (!pin) return conversation;
+    overlaid = true;
+    return { ...conversation, pinned: pin.pinned, pinnedAt: pin.pinnedAt };
   });
-  return sortAiConversations(merged);
+  return overlaid ? sortAiConversations(merged) : merged;
+}
+
+/** One history load for both entry points (popover open, mount), so the pin
+ *  reconciliation can never diverge between them. */
+async function loadConversationList(): Promise<AiConversation[]> {
+  // Capture the stamp BEFORE the request: anything that finishes later may be
+  // missing from this answer.
+  const seqAtLoad = pinMutationSeq;
+  return reconcileLoadedPins(await loadAiConversations().catch(() => []), seqAtLoad);
 }
 
 async function setConversationListOpen(open: boolean) {
@@ -5895,7 +5916,7 @@ async function setConversationListOpen(open: boolean) {
     conversationSearchQuery.value = "";
     await nextTick();
     conversationSearchInput.value?.focus();
-    conversations.value = applyDisplayedPinsToList(await loadAiConversations().catch(() => []));
+    conversations.value = await loadConversationList();
   }
 }
 
@@ -5914,16 +5935,21 @@ function cancelRenameConversation() {
 /**
  * The pin state each conversation is known to have ON DISK (#14226).
  *
- * Two jobs. It is the rollback target when a pin write fails (a click's own
+ * Three jobs. It is the rollback target when a pin write fails (a click's own
  * "before" value can already be an unpersisted optimistic value from an earlier
- * failed click), and it is what every whole-record writer — `buildConversationSnapshot`
+ * failed click), it is what every whole-record writer — `buildConversationSnapshot`
  * and `persistPendingInputRecovery` — puts in a snapshot, so a run-snapshot flush
- * can never persist a pin whose own write has not succeeded yet.
+ * can never persist a pin whose own write has not succeeded yet, and a reload
+ * re-applies it for a write that landed after that reload's query ran. Entries
+ * are dropped once a later read has become the source of truth, so this cache
+ * never masks a pin changed by another window.
  */
 const confirmedPins = new Map<string, { pinned: boolean; pinnedAt?: string }>();
-/** The pin value the user is currently being shown, per conversation: the click's
- *  optimistic value while its write is in flight, otherwise the confirmed one.
- *  This is what every list rewrite re-applies. */
+/** The OPTIMISTIC pin of a write still in flight, per conversation (#14226
+ *  review). Unlike `confirmedPins` it never outlives its write: retired on
+ *  success (disk carries the value now) and on failure (the confirmed value
+ *  takes over). Keeping it short-lived is what lets a reload adopt an external
+ *  change instead of re-asserting an old local one. */
 const displayedPins = new Map<string, { pinned: boolean; pinnedAt?: string }>();
 /** The pin write currently shown optimistically, per conversation. A click token
  *  is what lets a failed write roll back ONLY its own pin: a newer click owns a
@@ -5932,6 +5958,11 @@ const pendingPinTokens = new Map<string, symbol>();
 /** Serializes pin writes per conversation: rapid pin/unpin clicks must reach
  *  disk in click order, or the slower earlier write finishes last and wins. */
 const pinWriteChains = new Map<string, Promise<void>>();
+/** Ordering stamp of the last FINISHED pin write per conversation, plus the
+ *  counter it comes from. A load captures the counter when its request starts;
+ *  a write whose stamp is newer may be missing from that answer. */
+let pinMutationSeq = 0;
+const pinMutationSeqs = new Map<string, number>();
 
 /** The pin to put in a persisted snapshot: the last confirmed value, never the
  *  optimistic one. */
@@ -5951,18 +5982,20 @@ function applyConversationPin(id: string, pinned: boolean, pinnedAt: string | un
   conversations.value = sortAiConversations(conversations.value);
 }
 
-/** Sets what the user sees for `id` and records it as the display value. */
-function showConversationPin(id: string, pinned: boolean, pinnedAt: string | undefined) {
+/** Shows the optimistic pin of a write that is now in flight, and records it as
+ *  pending so list rewrites keep showing it until the write settles. */
+function showPendingConversationPin(id: string, pinned: boolean, pinnedAt: string | undefined) {
   displayedPins.set(id, { pinned, pinnedAt });
   applyConversationPin(id, pinned, pinnedAt);
 }
 
-/** Re-applies the intended pin after a list entry was replaced wholesale by a
- *  record from disk (a snapshot sync). Falls back to the entry's own value when
- *  nothing has been shown yet. */
-function applyDisplayedPin(id: string) {
-  const displayed = displayedPins.get(id);
-  if (displayed) applyConversationPin(id, displayed.pinned, displayed.pinnedAt);
+/** Re-applies the pin this panel knows for `id` after a list entry was replaced
+ *  wholesale by a record from disk (a snapshot sync): the in-flight optimistic
+ *  value if there is one, else the last confirmed one. Falls back to the entry's
+ *  own value when neither is known. */
+function applyKnownPin(id: string) {
+  const pin = displayedPins.get(id) ?? confirmedPins.get(id);
+  if (pin) applyConversationPin(id, pin.pinned, pin.pinnedAt);
 }
 
 /** One pin write. Runs only inside the conversation's chain. */
@@ -5976,15 +6009,34 @@ async function writeConversationPin(id: string, pinned: boolean, pinnedAt: strin
     const activeRun = desktopAiRun<ChatMessage>(id);
     if (activeRun) await runSnapshotScheduler.save(activeRun);
     // The flush ends with `syncPersistedConversation`, which re-applies the
-    // displayed pin — so the row still shows this click's value here.
+    // optimistic pin — so the row still shows this click's value here.
     // Column-only write: never rewrites `messages_json` / `updated_at` from a
     // record that a streaming snapshot may already have superseded.
-    await saveAiConversationPin(id, pinned, pinnedAt);
+    const persisted = await saveAiConversationPin(id, pinned, pinnedAt);
+    // Only an explicit `false` means the row is gone; a transport that predates
+    // this result must not make the UI drop a row it cannot judge.
+    if (persisted === false) {
+      // The row no longer exists (deleted or pruned while the click was in
+      // flight). Confirming the pin would leave the list showing a value no
+      // record carries, so the stale row is dropped instead — never re-inserted,
+      // which is what keeps a pin write from resurrecting a deleted conversation.
+      if (pendingPinTokens.get(id) === token) {
+        pendingPinTokens.delete(id);
+        confirmedPins.delete(id);
+        displayedPins.delete(id);
+        pinMutationSeqs.delete(id);
+        conversations.value = conversations.value.filter((item) => item.id !== id);
+      }
+      return;
+    }
     confirmedPins.set(id, { pinned, pinnedAt });
+    pinMutationSeqs.set(id, ++pinMutationSeq);
     // Only this click's display value is retired; a newer click owns its own.
     if (pendingPinTokens.get(id) === token) {
       pendingPinTokens.delete(id);
-      showConversationPin(id, pinned, pinnedAt);
+      // The write is on disk, so the optimistic entry has served its purpose; a
+      // later reload must adopt whatever disk says from here on.
+      displayedPins.delete(id);
     }
   } catch {
     // Roll back to the last CONFIRMED state, not to the value this click saw:
@@ -5993,7 +6045,9 @@ async function writeConversationPin(id: string, pinned: boolean, pinnedAt: strin
     if (pendingPinTokens.get(id) === token) {
       pendingPinTokens.delete(id);
       const confirmed = confirmedPins.get(id) ?? { pinned: false, pinnedAt: undefined };
-      showConversationPin(id, confirmed.pinned, confirmed.pinnedAt);
+      displayedPins.delete(id);
+      applyConversationPin(id, confirmed.pinned, confirmed.pinnedAt);
+      pinMutationSeqs.set(id, ++pinMutationSeq);
       toast(t("ai.conversationPinFailed"), 5000);
     }
   }
@@ -6025,7 +6079,7 @@ async function toggleConversationPin(id: string) {
   const pinnedAt = new Date().toISOString();
   const token = Symbol(id);
   pendingPinTokens.set(id, token);
-  showConversationPin(id, pinned, pinnedAt);
+  showPendingConversationPin(id, pinned, pinnedAt);
 
   const chain = (pinWriteChains.get(id) ?? Promise.resolve()).then(() => writeConversationPin(id, pinned, pinnedAt, token));
   pinWriteChains.set(id, chain);
@@ -6047,8 +6101,15 @@ async function commitRenameConversation(conv: AiConversation) {
     // during the await window cannot persist the previous title over it.
     renamedConversationTitles.set(conv.id, title);
     await saveAiConversation(updated);
-    const i = conversations.value.findIndex((item) => item.id === conv.id);
-    if (i >= 0) conversations.value[i] = updated;
+    // Merge only the fields this rename owns. Assigning `updated` wholesale
+    // would revert a pin — or a transcript a run-snapshot flush synced — that
+    // changed while the save was in flight (#14226 review).
+    const index = conversations.value.findIndex((item) => item.id === conv.id);
+    if (index >= 0) {
+      conversations.value.splice(index, 1, { ...conversations.value[index], title, updatedAt: updated.updatedAt });
+      // A rename bumps `updatedAt`, so re-apply the shared backend order.
+      conversations.value = sortAiConversations(conversations.value);
+    }
   } catch {
     // Save failed: retract the claim so the header, the history row and the
     // persisted record all stay on the old title until a rename succeeds.
@@ -6246,6 +6307,7 @@ async function performDeleteConversation(id: string) {
   displayedPins.delete(id);
   pendingPinTokens.delete(id);
   pinWriteChains.delete(id);
+  pinMutationSeqs.delete(id);
   await deleteConversationWithCancellation({
     id,
     currentConversationId: () => conversationId.value,
@@ -6420,7 +6482,7 @@ onMounted(async () => {
 
   // Same merge as the popover reload (#14226): a harmless no-op on a fresh mount,
   // but the two load sites must not diverge.
-  conversations.value = applyDisplayedPinsToList(await loadAiConversations().catch(() => []));
+  conversations.value = await loadConversationList();
   // Restore per-conversation queued "send later" inputs (parent PRD §5) — they
   // are persisted with the conversation and must surface again after a restart.
   // The queued mode/action belong to the conversation that queued them, not to

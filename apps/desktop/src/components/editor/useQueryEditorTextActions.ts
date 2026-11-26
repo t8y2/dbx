@@ -4,6 +4,7 @@ import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useToast } from "@/composables/useToast";
 import type { useSettingsStore } from "@/stores/settingsStore";
 import type { CodeSnapshotSource } from "@/lib/codeSnapshot/codeSnapshot";
+import type { ClipboardCompareSnapshot } from "./ClipboardCompareDialog.vue";
 import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
 import { queryEditorClipboardPasteChange } from "@/lib/editor/queryEditorClipboardPaste";
@@ -41,6 +42,11 @@ export function useQueryEditorTextActions(options: QueryEditorTextActionsOptions
   const codeSnapshotOpen = ref(false);
 
   const codeSnapshotSource = ref<CodeSnapshotSource | null>(null);
+
+  // Compare with Clipboard dialog state
+  const clipboardCompareOpen = ref(false);
+
+  const clipboardCompareSnapshot = ref<ClipboardCompareSnapshot | null>(null);
 
   function openDelimitedListDialog() {
     if (props.readOnly) return;
@@ -296,6 +302,28 @@ export function useQueryEditorTextActions(options: QueryEditorTextActionsOptions
     focusEditor();
   }
 
+  // Compares the selection (or the whole document when nothing is selected) with the clipboard text.
+  async function openClipboardCompare() {
+    const currentView = view.value;
+    if (!currentView) return;
+    const selection = currentView.state.selection.main;
+    const selectionOnly = !selection.empty;
+    const editorText = selectionOnly ? currentView.state.sliceDoc(selection.from, selection.to) : currentView.state.doc.toString();
+    let clipboardText: string;
+    try {
+      clipboardText = await readTextFromClipboard();
+    } catch (e: any) {
+      toast(t("editor.contextMenu.pasteClipboardReadFailed", { message: e?.message || String(e) }), 5000);
+      return;
+    }
+    if (!clipboardText) {
+      toast(t("editor.clipboardCompare.clipboardEmpty"), 3000);
+      return;
+    }
+    clipboardCompareSnapshot.value = { editorText, clipboardText, selectionOnly };
+    clipboardCompareOpen.value = true;
+  }
+
   function openCodeSnapshot() {
     if (selectedSql.value.trim()) {
       codeSnapshotSource.value = { code: selectedSql.value, lang: "sql" };
@@ -308,6 +336,9 @@ export function useQueryEditorTextActions(options: QueryEditorTextActionsOptions
     delimitedListSelectedText,
     codeSnapshotOpen,
     codeSnapshotSource,
+    clipboardCompareOpen,
+    clipboardCompareSnapshot,
+    openClipboardCompare,
     openCodeSnapshot,
     openDelimitedListDialog,
     applyDelimitedListResult,

@@ -185,12 +185,44 @@ describe("QueryEditor extracted text actions", () => {
     expect(editorView.state.doc.toString()).toBe("");
   });
 
+  it("compares the selected text with the clipboard, or the whole document when nothing is selected", async () => {
+    clipboard.readTextFromClipboard.mockResolvedValue("alice\ncarol");
+    const { actions, editorView } = mountActions("alice\nbob");
+
+    // The harness selects the whole document, so narrow it to the first line.
+    editorView.dispatch({ selection: { anchor: 0, head: 5 } });
+    await actions.openClipboardCompare();
+    expect(actions.clipboardCompareOpen.value).toBe(true);
+    expect(actions.clipboardCompareSnapshot.value).toEqual({ editorText: "alice", clipboardText: "alice\ncarol", selectionOnly: true });
+
+    actions.clipboardCompareOpen.value = false;
+    editorView.dispatch({ selection: { anchor: 3 } });
+    await actions.openClipboardCompare();
+    expect(actions.clipboardCompareOpen.value).toBe(true);
+    expect(actions.clipboardCompareSnapshot.value).toEqual({ editorText: "alice\nbob", clipboardText: "alice\ncarol", selectionOnly: false });
+  });
+
+  it("does not open the clipboard comparison when the clipboard is empty or unreadable", async () => {
+    const { actions } = mountActions("alice\nbob");
+
+    clipboard.readTextFromClipboard.mockResolvedValue("");
+    await actions.openClipboardCompare();
+    expect(actions.clipboardCompareOpen.value).toBe(false);
+
+    clipboard.readTextFromClipboard.mockRejectedValue(new Error("denied"));
+    await actions.openClipboardCompare();
+    expect(actions.clipboardCompareOpen.value).toBe(false);
+    expect(actions.clipboardCompareSnapshot.value).toBeNull();
+  });
+
   it("tolerates missing views and empty selections without dispatching", async () => {
     const { actions, view } = mountActions("");
     view.value = null;
     expect(actions.convertSelectedSqlCase("upper")).toBe(false);
     expect(actions.convertSelectedNamingStyle()).toBe(false);
     expect(await actions.pasteClipboardAsSqlInCondition()).toBe(false);
+    await actions.openClipboardCompare();
+    expect(actions.clipboardCompareOpen.value).toBe(false);
     expect(() => {
       actions.applyDelimitedListResult("text");
       actions.deleteEmptyLines();

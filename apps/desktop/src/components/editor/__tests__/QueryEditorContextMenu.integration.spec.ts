@@ -45,6 +45,7 @@ function mountMenu(layout: "full" | "grouped" = "full") {
     copyCurrentStatementFromContextMenu: vi.fn(),
     emitContextObjectAction: vi.fn(),
     openCodeSnapshot: vi.fn(),
+    openClipboardCompare: vi.fn(),
     sendSelectionToAi: vi.fn(),
     toggleFoldFromContextMenu: vi.fn(),
     foldAllFromContextMenu: vi.fn(),
@@ -319,6 +320,20 @@ describe("QueryEditor extracted context menu", () => {
     await open();
     button(label).click();
     expect(actions[action]).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers Compare with Clipboard only while the editor has content, even when read-only", async () => {
+    const { state, actions, open } = mountMenu();
+    state.readOnly = true;
+    await open();
+    expect(button("editor.contextMenu.compareWithClipboard").disabled).toBe(true);
+
+    await open(() => {
+      state.hasContent = true;
+    });
+    expect(button("editor.contextMenu.compareWithClipboard").disabled).toBe(false);
+    button("editor.contextMenu.compareWithClipboard").click();
+    expect(actions.openClipboardCompare).toHaveBeenCalledTimes(1);
   });
 
   it("enables explain plan only when executable SQL exists and explain is permitted", async () => {

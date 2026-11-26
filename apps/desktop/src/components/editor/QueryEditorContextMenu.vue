@@ -34,6 +34,7 @@ import {
   Trash2,
   UnfoldVertical,
   WandSparkles,
+  FileDiff,
   ListPlus,
 } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -94,6 +95,7 @@ export interface QueryEditorContextMenuActions {
   selectAllSqlFromContextMenu: () => void;
   emitContextObjectAction: (action: QueryContextObjectAction) => void;
   openCodeSnapshot: () => void;
+  openClipboardCompare: () => void;
   sendSelectionToAi: () => void;
   toggleFoldFromContextMenu?: () => void;
   foldAllFromContextMenu?: () => void;
@@ -347,6 +349,13 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       action: actions.pasteClipboardSqlRestoringSource,
       disabled: state.readOnly,
       icon: WandSparkles,
+    },
+    {
+      sidebarActionId: "editor.contextMenu.compareWithClipboard",
+      label: t("editor.contextMenu.compareWithClipboard"),
+      action: actions.openClipboardCompare,
+      disabled: !state.hasContent,
+      icon: FileDiff,
     },
     {
       sidebarActionId: "editor.contextMenu.sendToAi",

@@ -303,7 +303,7 @@ pub(crate) fn restore_tunnel_from_profiles(
 impl WebState {
     pub fn connection_response(&self, config: ConnectionConfig) -> ConnectionResponse {
         let jdbc_dialect = jdbc_dialect_hint(&config);
-        let response_config = if self.password_viewer_enabled { config } else { redact(&config) };
+        let response_config = redact(&config);
         ConnectionResponse::with_jdbc_dialect(response_config, jdbc_dialect)
     }
 

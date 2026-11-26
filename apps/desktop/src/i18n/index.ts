@@ -10,6 +10,12 @@ type I18nGlobal = {
   setLocaleMessage: (locale: Locale, messages: LocaleMessages) => void;
 };
 
+function syncDocumentLanguage(locale: Locale) {
+  if (typeof document !== "undefined") {
+    document.documentElement.lang = locale;
+  }
+}
+
 const supportedLocales: Locale[] = ["az", "en", "es", "id", "it", "ja", "ko", "pt-BR", "pl", "ru", "th", "tr", "zh-CN", "zh-TW"];
 const defaultLocale: Locale = "en";
 const loadedLocales = new Set<Locale>([defaultLocale]);
@@ -94,6 +100,7 @@ const i18n = createI18n({
   },
 });
 const i18nGlobal = i18n.global as unknown as I18nGlobal;
+syncDocumentLanguage(initialLocale);
 
 export async function loadLocaleMessages(locale: Locale) {
   if (loadedLocales.has(locale)) return;
@@ -114,6 +121,7 @@ async function applyTransientLocale(locale: Locale) {
   await loadLocaleMessages(locale);
   if (requestId !== localeRequestId) return;
   i18nGlobal.locale.value = locale;
+  syncDocumentLanguage(locale);
 }
 
 // Temporary previews deliberately skip persistence and backend synchronization.
@@ -139,6 +147,7 @@ export async function setLocale(locale: Locale) {
   // A later explicit selection wins; hover/restore requests must not undo it.
   if (persistedLocale !== locale) return;
   i18nGlobal.locale.value = locale;
+  syncDocumentLanguage(locale);
 }
 
 export async function applySharedLocale(value: string) {

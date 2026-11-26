@@ -1341,7 +1341,7 @@ describe("DataGridSortBuilder", () => {
     dispatch(searchInput, "input", { target: { value: "created" } });
     await nextTick();
 
-    const options = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem").map(hostText);
+    const options = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem").map((option) => option.props.value);
     expect(options).toContain("created_at");
     expect(options).not.toContain("display_name");
   });
@@ -1357,7 +1357,7 @@ describe("DataGridSortBuilder", () => {
     dispatch(searchInput, "input", { target: { value: "客户" } });
     await nextTick();
 
-    const options = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem").map(hostText);
+    const options = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem").map((option) => option.props.value);
     expect(options).toContain("customer_name");
     expect(options).not.toContain("created_at");
   });
@@ -1371,7 +1371,7 @@ describe("DataGridSortBuilder", () => {
       columns: ["name"],
     });
 
-    const nameOptions = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem" && hostText(node) === "name");
+    const nameOptions = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem" && node.props.value === "name");
     expect(nameOptions).toHaveLength(2);
     expect(nameOptions.every((option) => option.props.disabled !== true)).toBe(true);
 

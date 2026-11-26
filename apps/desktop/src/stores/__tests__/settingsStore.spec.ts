@@ -999,13 +999,20 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ tableFontFamily: "   " }).tableFontFamily).toBe(DEFAULT_DATA_GRID_FONT_FAMILY);
   });
 
-  it("migrates persisted legacy proportional default font families", () => {
+  it("migrates persisted legacy proportional default font families", async () => {
     const legacyUiFontFamily = `"Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif`;
     const legacyDataGridFontFamily = `"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
 
     expect(normalizeEditorSettings({ uiFontFamily: legacyUiFontFamily }).uiFontFamily).toBe(DEFAULT_UI_FONT_FAMILY);
     expect(normalizeEditorSettings({ tableFontFamily: legacyDataGridFontFamily }).tableFontFamily).toBe(DEFAULT_DATA_GRID_FONT_FAMILY);
     expect(normalizeEditorSettings({ uiFontFamily: `"Aptos", ${legacyUiFontFamily}` }).uiFontFamily).toBe(`"Aptos", ${legacyUiFontFamily}`);
+
+    setActivePinia(createPinia());
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settings = useSettingsStore();
+    settings.updateEditorSettings({ uiFontFamily: legacyUiFontFamily, tableFontFamily: legacyDataGridFontFamily });
+    expect(settings.editorSettings.uiFontFamily).toBe(DEFAULT_UI_FONT_FAMILY);
+    expect(settings.editorSettings.tableFontFamily).toBe(DEFAULT_DATA_GRID_FONT_FAMILY);
   });
 
   it("defaults the editor font with CJK fallbacks and migrates legacy default presets", () => {

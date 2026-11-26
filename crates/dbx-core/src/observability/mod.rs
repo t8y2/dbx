@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn payload_backstop_replaces_pathologically_large_payloads() {
         let mut payload = serde_json::json!({
-            "items": (0..MAX_OBSERVATION_PAYLOAD_NODES + 10).map(|index| index).collect::<Vec<_>>(),
+            "items": (0..MAX_OBSERVATION_PAYLOAD_NODES + 10).collect::<Vec<_>>(),
         });
         cap_observation_payload(&mut payload);
         assert_eq!(payload["truncated"], true);

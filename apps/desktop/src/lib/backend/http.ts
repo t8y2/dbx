@@ -1,3 +1,4 @@
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
 import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
 import type { MongoDeleteId } from "@/lib/mongo/mongoDocumentValues";
 import type { SqlFileEncoding } from "./tauri";
@@ -4118,8 +4119,10 @@ export async function exportQueryResultJson(filePath: string, columns: string[],
   downloadTextFile(filePath, "export.json", result.content, "application/json;charset=utf-8");
 }
 
-export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
-  const result = await post<{ content: string }>("/api/export/query-result-markdown", { columns, rows });
+export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], transposedMarkdown?: TransposedMarkdownLabels): Promise<void> {
+  // Layout belongs in the URL so the same records fit the same upload limit in either orientation.
+  const query = transposedMarkdown ? "?" + new URLSearchParams({ field: transposedMarkdown.field, data: transposedMarkdown.data }) : "";
+  const result = await post<{ content: string }>(`/api/export/query-result-markdown${query}`, { columns, rows });
   downloadTextFile(filePath, "export.md", result.content, "text/markdown;charset=utf-8");
 }
 

@@ -1,3 +1,4 @@
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
 import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
 import type { MongoDeleteId } from "@/lib/mongo/mongoDocumentValues";
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
@@ -7242,12 +7243,13 @@ export async function exportQueryResultJson(filePath: string, columns: string[],
   });
 }
 
-export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
+export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], transposedMarkdown?: TransposedMarkdownLabels): Promise<void> {
   return invoke("export_query_result_markdown", {
     request: {
       filePath,
       columns,
       rows,
+      transposedMarkdown,
     },
   });
 }

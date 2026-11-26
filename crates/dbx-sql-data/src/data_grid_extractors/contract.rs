@@ -316,6 +316,14 @@ pub struct DataGridExtractColumn {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DataGridTransposedMarkdownLabels {
+    pub field: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DataGridExtractRequest {
     pub version: u16,
     pub extractor: DataGridExtractorId,
@@ -337,6 +345,8 @@ pub struct DataGridExtractRequest {
     pub selection_kind: DataGridSelectionKind,
     #[serde(default)]
     pub options: DataGridExtractorOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transposed_markdown: Option<DataGridTransposedMarkdownLabels>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spatial_columns: Option<Vec<SpatialColumn>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

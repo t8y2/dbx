@@ -7634,8 +7634,17 @@ function exportSelectedRowsJson() {
 function exportSelectedRowsMarkdown() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
-  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
-  return exportMarkdown({ rowIds, columnIndexes });
+  let columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  const transposeRecords = isTransposeMode.value;
+  if (transposeRecords) {
+    const visibleIndexBySource = new Map(visibleColumnIndexes.value.map((sourceIndex, visibleIndex) => [sourceIndex, visibleIndex]));
+    const selectedColumns = columnIndexes ? new Set(columnIndexes) : undefined;
+    columnIndexes = transposeRows.value.flatMap(({ columnIndex }) => {
+      const visibleIndex = visibleIndexBySource.get(columnIndex);
+      return visibleIndex === undefined || (selectedColumns && !selectedColumns.has(visibleIndex)) ? [] : [visibleIndex];
+    });
+  }
+  return exportMarkdown({ rowIds, columnIndexes, transposeRecords });
 }
 
 function exportSelectedRowsHtml() {
@@ -10852,8 +10861,15 @@ async function onTransposeCellDblClick(rowIndex: number, actualColIdx: number, d
 }
 
 function onTransposeCellContext(rowIndex: number, actualColIdx: number, event: MouseEvent) {
-  selectTransposeCell(rowIndex, actualColIdx, event);
   const item = displayItemAt(rowIndex);
+  if (item && isRowSelected(item.id)) {
+    // Keep the selected records for export, but target this cell for actions such as filtering.
+    invalidateContextMenuTarget();
+    transposeRowIndex.value = rowIndex;
+    gridRef.value?.focus({ preventScroll: true });
+  } else {
+    selectTransposeCell(rowIndex, actualColIdx, event);
+  }
   contextCell.value = item ? { rowId: item.id, rowIndex, col: actualColIdx } : null;
 }
 
@@ -13390,6 +13406,14 @@ function selectTransposeRecord(rowIndex: number, event?: MouseEvent) {
   gridRef.value?.focus({ preventScroll: true });
 }
 
+function onTransposeRecordContext(rowIndex: number) {
+  const item = displayItemAt(rowIndex);
+  if (!item) return;
+  transposeRowIndex.value = rowIndex;
+  onRowContext(item.id, rowIndex);
+  gridRef.value?.focus({ preventScroll: true });
+}
+
 function transposeRecordIsSelected(rowIndex: number): boolean {
   const item = displayItemAt(rowIndex);
   return !!item && isRowSelected(item.id);
@@ -15536,7 +15560,8 @@ function buildExtractorContextItems(destination: "copy" | "export" = "copy"): Co
           // the saved default stays controlled by the toolbar/settings dialog.
           const wholeQueryResult = extractor === "sql-updates" && isResultsContext.value && props.databaseType === "mysql" && props.fullExportResult && !hasCompleteLocalResult.value && isSelectingAll.value && selectedCellCount.value === visibleDisplayItems.value.length * visibleColumns.value.length;
           const scope = wholeQueryResult ? "result" : "selection";
-          void (destination === "copy" ? copyWithExtractor(extractor) : exportWithExtractor(extractor, undefined, scope));
+          const fieldOrder = destination === "export" && extractor === "markdown" && isTransposeMode.value ? transposeRows.value.map((row) => row.columnIndex) : undefined;
+          void (destination === "copy" ? copyWithExtractor(extractor) : exportWithExtractor(extractor, undefined, scope, fieldOrder));
         },
         disabled: !canCopyWithExtractor(extractor),
       });
@@ -16582,7 +16607,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                         width: `${getTransposeRecordWidth(recordIndex)}px`,
                       }"
                       @click="selectTransposeRecord(recordIndex, $event)"
-                      @contextmenu="selectTransposeRecord(recordIndex, $event)"
+                      @contextmenu="onTransposeRecordContext(recordIndex)"
                     >
                       {{ rowNumberText(displayItems[recordIndex]) }}
                       <div data-grid-transpose-record-resize-handle class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeRecordResizeStart(recordIndex, $event)" @dblclick.stop="autoFitTransposeRecord(recordIndex)" />

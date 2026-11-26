@@ -1,5 +1,6 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
 import type { DataGridCopyInsertMode, DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
 
 export const DATA_GRID_COPY_EXTRACTOR_IDS = [
   "raw",
@@ -182,6 +183,7 @@ export interface DataGridExtractRequest {
   rows: unknown[][];
   selectionKind: DataGridSelectionKind;
   options: DataGridExtractorOptions;
+  transposedMarkdown?: TransposedMarkdownLabels;
   spatialColumns?: QueryResult["spatial_columns"];
   spatialValues?: QueryResult["spatial_values"];
 }

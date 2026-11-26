@@ -1,8 +1,15 @@
-use super::{value_text, write_bytes, DataGridExtractError, ExtractContext};
-use std::io::Write;
+use super::{
+    transposed_markdown_labels, value_text, write_bytes, DataGridExtractError, DataGridExtractErrorCode,
+    DataGridTransposedMarkdownLabels, ExtractContext,
+};
+use serde_json::Value;
+use std::io::{self, Write};
 use unicode_width::UnicodeWidthStr;
 
 pub(super) fn write_markdown(context: &ExtractContext<'_>, output: &mut dyn Write) -> Result<(), DataGridExtractError> {
+    if let Some(labels) = transposed_markdown_labels(context.request) {
+        return write_transposed_markdown(context, labels, output);
+    }
     let headers = context.selected_columns.iter().map(|column| markdown_text(&column.display_name));
     write_bytes(output, format!("| {} |\n", headers.collect::<Vec<_>>().join(" | ")).as_bytes())?;
     write_bytes(
@@ -16,6 +23,77 @@ pub(super) fn write_markdown(context: &ExtractContext<'_>, output: &mut dyn Writ
         write_bytes(output, format!("| {} |", values.collect::<Vec<_>>().join(" | ")).as_bytes())?;
     }
     Ok(())
+}
+
+fn write_transposed_markdown(
+    context: &ExtractContext<'_>,
+    labels: &DataGridTransposedMarkdownLabels,
+    output: &mut dyn Write,
+) -> Result<(), DataGridExtractError> {
+    write_bytes(output, b"| ")?;
+    write_markdown_text(output, &labels.field)?;
+    for index in 0..context.request.rows.len() {
+        write_bytes(output, b" | ")?;
+        write_markdown_text(output, &labels.data)?;
+        if context.request.rows.len() > 1 {
+            write_bytes(output, format!(" {}", index + 1).as_bytes())?;
+        }
+    }
+    write_bytes(output, b" |\n| ---")?;
+    for _ in &context.request.rows {
+        write_bytes(output, b" | ---")?;
+    }
+    write_bytes(output, b" |")?;
+    for column in &context.selected_columns {
+        write_bytes(output, b"\n| ")?;
+        write_markdown_text(output, &column.display_name)?;
+        for row in &context.request.rows {
+            write_bytes(output, b" | ")?;
+            match &row[column.source_index] {
+                Value::Null => write_bytes(output, b"NULL")?,
+                Value::String(text) => write_markdown_text(output, text)?,
+                value => serde_json::to_writer(MarkdownTextWriter(output), value).map_err(|error| {
+                    DataGridExtractError::new(DataGridExtractErrorCode::EncodingFailed, error.to_string())
+                })?,
+            }
+        }
+        write_bytes(output, b" |")?;
+    }
+    Ok(())
+}
+
+// Escape directly into the bounded output, including serialized JSON values,
+// rather than allocating an entire wide row or an expanded escaped cell.
+struct MarkdownTextWriter<'a>(&'a mut dyn Write);
+
+impl Write for MarkdownTextWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let mut start = 0;
+        for (index, byte) in buffer.iter().enumerate() {
+            let escaped: &[u8] = match byte {
+                b'\\' => b"\\\\",
+                b'|' => b"\\|",
+                b'\n' if index > 0 && buffer[index - 1] == b'\r' => b"",
+                b'\r' | b'\n' => b"<br>",
+                _ => continue,
+            };
+            self.0.write_all(&buffer[start..index])?;
+            self.0.write_all(escaped)?;
+            start = index + 1;
+        }
+        self.0.write_all(&buffer[start..])?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+fn write_markdown_text(output: &mut dyn Write, text: &str) -> Result<(), DataGridExtractError> {
+    MarkdownTextWriter(output)
+        .write_all(text.as_bytes())
+        .map_err(|error| DataGridExtractError::new(DataGridExtractErrorCode::EncodingFailed, error.to_string()))
 }
 
 pub(super) fn write_html(context: &ExtractContext<'_>, output: &mut dyn Write) -> Result<(), DataGridExtractError> {

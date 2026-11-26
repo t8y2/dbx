@@ -203,6 +203,11 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
    * queries and rolling back open transactions is destructive.
    */
   const blockedPreparation = ref<UpdatePreparationBlock | null>(null);
+  /**
+   * The confirmation is settling blockers before preparation starts. Kept apart
+   * from `phase` so the dialog can say what the wait is actually doing.
+   */
+  const isSettlingWork = ref(false);
   const isIgnoringUpdate = ref(false);
   const checkingUpdates = computed(() => phase.value === "checking");
   const isDownloadingUpdate = computed(() => phase.value === "downloading");
@@ -572,7 +577,9 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     let installed = restartOnly;
     let failed = false;
     try {
+      isSettlingWork.value = force;
       release = await options.prepareForUpdate?.({ force });
+      isSettlingWork.value = false;
       updatePreparationRelease = release;
       if (shouldBlockAppUpdate(activeTaskCount.value)) throw new UpdatePreparationError(t("updates.activeTasksBlockUpdate", { count: activeTaskCount.value }), "tasks");
       phase.value = "installing";
@@ -608,6 +615,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       else if (isUpdatePreparationError(error)) updateCheckMessage.value = t("updates.updateBlocked", { error: message });
       else updateCheckMessage.value = formatInstallError(message);
     } finally {
+      isSettlingWork.value = false;
       // Successful handoff must keep every window frozen until the process exits.
       if (failed) {
         release?.();
@@ -745,6 +753,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     isDownloadingUpdate,
     downloadProgress,
     blockedPreparation,
+    isSettlingWork,
     updateDownloaded,
     updateDownloadedVersion,
     isInstallingUpdate,

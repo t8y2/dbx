@@ -3,17 +3,25 @@
  * queries/plans and manual transactions.
  *
  * The confirmation that grants this is destructive, so order and failure
- * reporting matter: queries and tasks must be observed as *stopped* before a
- * transaction is rolled back, and a cancellation or rollback that fails — by
- * throwing, by answering `false`, or by never answering — has to reach the
- * caller instead of being dropped. An install that half-cleaned the editor
- * would kill work nobody agreed to lose.
+ * reporting matter:
+ * - queries and tasks must be observed as *stopped* before a transaction is
+ *   rolled back, and a transaction whose query could not be confirmed stopped
+ *   is left alone (rolling it back would race that query);
+ * - a cancellation or rollback that fails — by throwing, by answering `false`,
+ *   or by never answering — has to reach the caller instead of being dropped;
+ * - the whole settle shares one budget, so a hanging backend cannot keep the
+ *   confirmation on screen.
  */
 
 export interface UpdateSettleItem {
   id: string;
-  /** Shown in the failure message: the tab title, or the task's table/kind. */
+  /** Shown in the failure message: the tab title, or the task's name/kind. */
   label: string;
+  /**
+   * A stop was already requested (or there is nothing left to request): wait
+   * for the item, but do not ask the host again.
+   */
+  stopInFlight?: boolean;
 }
 
 export interface UpdateSettleSnapshot {
@@ -45,7 +53,7 @@ export type UpdateSettleFailureReason =
   | "rejected"
   /** The call answered `false` or never returned: stopping was not confirmed. */
   | "unconfirmed"
-  /** The call succeeded but the work is still there after the wait. */
+  /** The call succeeded but the work is still there when the budget ran out. */
   | "still-running";
 
 export interface UpdateSettleFailure {
@@ -58,17 +66,13 @@ export interface UpdateSettleFailure {
 }
 
 export interface UpdateSettleOptions {
-  /** How long each phase may take, including a call that never returns. */
+  /** Budget for the whole settle, including calls that never return. */
   timeoutMs?: number;
   pollMs?: number;
 }
 
-const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_POLL_MS = 100;
-
-export function hasUpdateSettleWork(snapshot: UpdateSettleSnapshot): boolean {
-  return snapshot.tasks.length > 0 || snapshot.executions.length > 0 || snapshot.explains.length > 0 || snapshot.transactions.length > 0;
-}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -98,7 +102,7 @@ interface SettleCall {
 type CallOutcome = { call: SettleCall; result: PromiseSettledResult<unknown> | "timeout" };
 
 /**
- * Wait for the calls, but never longer than the phase budget: a cancel or
+ * Wait for the calls, but never longer than the remaining budget: a cancel or
  * rollback whose backend never answers must not hang the confirmation.
  */
 async function runCalls(calls: SettleCall[], timeoutMs: number): Promise<CallOutcome[]> {
@@ -141,6 +145,8 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number, pollMs: nu
 export async function settleUpdateWork(host: UpdateSettleHost, options: UpdateSettleOptions = {}): Promise<UpdateSettleFailure[]> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS;
+  const deadline = Date.now() + timeoutMs;
+  const budget = () => Math.max(0, deadline - Date.now());
   const failures: UpdateSettleFailure[] = [];
   const failed = new Set<string>();
   const record = (kind: UpdateSettleFailureKind, item: UpdateSettleItem, reason: UpdateSettleFailureReason, error?: string) => {
@@ -156,17 +162,20 @@ export async function settleUpdateWork(host: UpdateSettleHost, options: UpdateSe
       else if (call.acknowledgement && result.value === false) record(call.kind, call.item, "unconfirmed");
     }
   };
+  /** Ask for the stops, then wait for those items to disappear from the snapshot. */
+  const stop = async (calls: SettleCall[], stillRunning: () => UpdateSettleItem[]) => {
+    if (budget() > 0) collect(await runCalls(calls, budget()));
+    else for (const call of calls) record(call.kind, call.item, "unconfirmed");
+    if (budget() > 0) await waitUntil(() => stillRunning().length === 0, budget(), pollMs);
+  };
 
   // 1. Background tasks own connections of their own but may also hold a query's
   //    connection open; stop and wait for them before touching tabs.
   const tasks = host.snapshot().tasks;
-  collect(
-    await runCalls(
-      tasks.map((item) => ({ kind: "task" as const, item, promise: started(() => host.cancelTask(item.id)), acknowledgement: false })),
-      timeoutMs,
-    ),
+  await stop(
+    tasks.filter((item) => !item.stopInFlight).map((item) => ({ kind: "task" as const, item, promise: started(() => host.cancelTask(item.id)), acknowledgement: false })),
+    () => host.snapshot().tasks,
   );
-  await waitUntil(() => host.snapshot().tasks.length === 0, timeoutMs, pollMs);
   for (const task of host.snapshot().tasks) record("task", task, "still-running");
 
   // 2. Queries and plans: request cancellation, then wait for the tabs to leave
@@ -174,27 +183,28 @@ export async function settleUpdateWork(host: UpdateSettleHost, options: UpdateSe
   //    having stopped. A `false` answer means the cancellation was not accepted,
   //    and the store clears its local state anyway, so it must be reported here.
   const { executions, explains } = host.snapshot();
-  const cancels: SettleCall[] = [
-    ...executions.map((item) => ({ kind: "execution" as const, item, promise: started(() => host.cancelExecution(item.id)), acknowledgement: true })),
-    ...explains.map((item) => ({ kind: "explain" as const, item, promise: started(() => host.cancelExplain(item.id)), acknowledgement: true })),
-  ];
-  collect(await runCalls(cancels, timeoutMs));
-  await waitUntil(() => host.snapshot().executions.length === 0 && host.snapshot().explains.length === 0, timeoutMs, pollMs);
+  await stop(
+    [
+      ...executions.filter((item) => !item.stopInFlight).map((item) => ({ kind: "execution" as const, item, promise: started(() => host.cancelExecution(item.id)), acknowledgement: true })),
+      ...explains.filter((item) => !item.stopInFlight).map((item) => ({ kind: "explain" as const, item, promise: started(() => host.cancelExplain(item.id)), acknowledgement: true })),
+    ],
+    () => [...host.snapshot().executions, ...host.snapshot().explains],
+  );
   const afterCancels = host.snapshot();
   for (const item of afterCancels.executions) record("execution", item, "still-running");
   for (const item of afterCancels.explains) record("explain", item, "still-running");
 
-  // 3. Only now roll back the transactions that are still open. Re-read the list:
-  //    a transaction may have closed, or another query may have opened one.
-  const transactions = host.snapshot().transactions;
-  collect(
-    await runCalls(
-      transactions.map((item) => ({ kind: "transaction" as const, item, promise: started(() => host.rollbackTransaction(item.id)), acknowledgement: false })),
-      timeoutMs,
-    ),
+  // 3. Only now roll back the transactions that are still open — and never one
+  //    whose query could not be confirmed stopped: a rollback on that session
+  //    would race the query it is supposed to follow.
+  const unstopped = new Set(failures.filter((failure) => failure.kind === "execution" || failure.kind === "explain").map((failure) => failure.id));
+  const openSafeTransactions = () => host.snapshot().transactions.filter((item) => !unstopped.has(item.id));
+  const transactions = openSafeTransactions();
+  await stop(
+    transactions.filter((item) => !item.stopInFlight).map((item) => ({ kind: "transaction" as const, item, promise: started(() => host.rollbackTransaction(item.id)), acknowledgement: false })),
+    openSafeTransactions,
   );
-  await waitUntil(() => host.snapshot().transactions.length === 0, timeoutMs, pollMs);
-  for (const item of host.snapshot().transactions) record("transaction", item, "still-running");
+  for (const item of openSafeTransactions()) record("transaction", item, "still-running");
 
   return failures;
 }

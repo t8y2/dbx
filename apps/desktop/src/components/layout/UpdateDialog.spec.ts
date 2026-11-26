@@ -981,6 +981,13 @@ describe("UpdateDialog blocked preparation confirmation", () => {
     expect(document.body.querySelector("[data-update-blocked-confirm]")).toBeNull();
   });
 
+  it("names the cleanup while the confirmed stop is running", async () => {
+    await mountDialog(0, { isInstallingUpdate: true }, undefined, { isSettlingWork: true });
+
+    expect(buttonWithText("Stopping running queries and tasks…")).toBeDefined();
+    expect(buttonWithText("Preparing update…")).toBeUndefined();
+  });
+
   it("hides the install actions while the confirmation is open", async () => {
     // The panel owns the decision: a second "Restart & Update" would just raise
     // the same block again.

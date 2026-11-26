@@ -37,6 +37,8 @@ const props = withDefaults(
     ignoredReleaseVersion?: string;
     isInstallingUpdate: boolean;
     isPreparingUpdate?: boolean;
+    /** The confirmed cleanup is stopping running work, before preparation starts. */
+    isSettlingWork?: boolean;
     updateReady: boolean;
     isIgnoringUpdate: boolean;
     activeTaskCount: number;
@@ -622,7 +624,7 @@ watch(
               <Button v-if="updateReady" class="shrink-0" :disabled="activeTaskCount > 0 || isIgnoringUpdate || isUpdatingAll" @click="emit('restart')">{{ t("updates.restart") }}</Button>
               <Button v-else-if="isInstallingUpdate" class="shrink-0" disabled>
                 <Loader2 class="h-4 w-4 animate-spin" />
-                {{ t(isPreparingUpdate ? "updates.preparing" : "updates.installing") }}
+                {{ t(isSettlingWork ? "updates.settlingWork" : isPreparingUpdate ? "updates.preparing" : "updates.installing") }}
               </Button>
               <template v-else-if="isDownloadingUpdate">
                 <Button variant="ghost" class="shrink-0" @click="emit('cancel-download')">{{ t("updates.cancelDownload") }}</Button>

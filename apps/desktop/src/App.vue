@@ -380,6 +380,7 @@ const {
   installDownloadedUpdate,
   restartApp,
   blockedPreparation,
+  isSettlingWork,
   confirmBlockedInstall,
   dismissBlockedInstall,
 } = useAppUpdater({
@@ -391,6 +392,12 @@ const {
     if (prepareOptions.force) await settleUpdateBlockers();
     return prepareUpdateWithDraftRecovery(() => updatePreparation!.prepare());
   },
+});
+
+// Closing the update center abandons the question the confirmation asked;
+// reopening it must not show a stale destructive prompt.
+watch(showUpdateDialog, (open) => {
+  if (!open) dismissBlockedInstall();
 });
 const { setupFileDrop } = useFileDrop();
 const { openSqlFile } = useSqlFilePicker();
@@ -1778,25 +1785,17 @@ async function settleUpdateBlockers() {
       snapshot: () => ({
         tasks: backgroundTasks.value
           .filter((task) => task.status === "Queued" || task.status === "Unknown" || task.status === "PreparingSnapshot" || task.status === "Running" || task.status === "Writing" || task.status === "Cancelling")
-          .map((task) => ({ id: task.exportId, label: task.tableName || task.kind })),
-        executions: queryStore.tabs.filter((tab) => tab.isExecuting || tab.isCancelling).map((tab) => ({ id: tab.id, label: tab.title })),
-        explains: queryStore.tabs.filter((tab) => tab.isExplaining || Boolean(tab.explainExecutionId)).map((tab) => ({ id: tab.id, label: tab.title })),
+          .map((task) => ({ id: task.exportId, label: task.tableName || task.dataTransferLabel || task.currentObject || t("updates.backgroundTaskLabel") })),
+        // `stopInFlight` keeps the store from being asked for a stop it would
+        // refuse without a backend call (already cancelling, no execution
+        // dispatched yet); settling still waits for those tabs.
+        executions: queryStore.tabs.filter((tab) => tab.isExecuting || tab.isCancelling).map((tab) => ({ id: tab.id, label: tab.title, stopInFlight: tab.isCancelling || !tab.executionId })),
+        explains: queryStore.tabs.filter((tab) => tab.isExplaining || Boolean(tab.explainExecutionId)).map((tab) => ({ id: tab.id, label: tab.title, stopInFlight: !tab.isExplaining || !tab.explainExecutionId })),
         transactions: queryStore.tabs.filter((tab) => Boolean(tab.txnSessionId)).map((tab) => ({ id: tab.id, label: tab.title })),
       }),
       cancelTask: (id) => cancelBackgroundTask(id),
-      // Only ask the store when there is something to ask about: a tab that is
-      // already cancelling (or has no dispatched execution) answers `false`
-      // without a backend call, and that is not a failed stop.
-      cancelExecution: (id) => {
-        const tab = queryStore.tabs.find((candidate) => candidate.id === id);
-        if (!tab || tab.isCancelling || !tab.isExecuting || !tab.executionId) return Promise.resolve(true);
-        return queryStore.cancelTabExecution(id);
-      },
-      cancelExplain: (id) => {
-        const tab = queryStore.tabs.find((candidate) => candidate.id === id);
-        if (!tab?.isExplaining || !tab.explainExecutionId) return Promise.resolve(true);
-        return queryStore.cancelTabExplain(id);
-      },
+      cancelExecution: (id) => queryStore.cancelTabExecution(id),
+      cancelExplain: (id) => queryStore.cancelTabExplain(id),
       rollbackTransaction: (id) => queryStore.rollbackTransaction(id),
     },
     { timeoutMs: UPDATE_SETTLE_TIMEOUT_MS },
@@ -6321,6 +6320,7 @@ onUnmounted(() => {
           @install-downloaded="installDownloadedUpdateWithComponentUpdates"
           @restart="restartAppWithComponentUpdates"
           :blocked-update-message="blockedPreparation?.message ?? ''"
+          :is-settling-work="isSettlingWork"
           @confirm-blocked-install="confirmBlockedInstallWithComponentUpdates"
           @dismiss-blocked-install="dismissBlockedInstall"
           :ignored-release-version="ignoredReleaseVersion"

@@ -416,6 +416,25 @@ describe("silent update lifecycle", () => {
     expect(updater.updateCheckFailed.value).toBe(true);
     expect(updater.updateCheckMessage.value).toContain("a new query started");
   });
+  it("reports the settling state while the confirmed cleanup runs", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    let settlingDuringCleanup: boolean | undefined;
+    const prepare = vi
+      .fn()
+      .mockRejectedValueOnce(new UpdatePreparationError("2 tasks running", "tasks"))
+      .mockImplementationOnce(async () => {
+        settlingDuringCleanup = updater.isSettlingWork.value;
+        return () => {};
+      });
+    const updater = mount({ prepareForUpdate: prepare });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+
+    await updater.confirmBlockedInstall();
+
+    expect(settlingDuringCleanup).toBe(true);
+    expect(updater.isSettlingWork.value).toBe(false);
+  });
   it("a failed cleanup can be retried without restarting DBX", async () => {
     mocks.getDownloadedUpdate.mockResolvedValue(cache);
     const prepare = vi

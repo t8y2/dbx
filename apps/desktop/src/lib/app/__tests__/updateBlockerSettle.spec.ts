@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { hasUpdateSettleWork, settleUpdateWork, type UpdateSettleHost, type UpdateSettleItem, type UpdateSettleSnapshot } from "../updateBlockerSettle";
+import { settleUpdateWork, type UpdateSettleHost, type UpdateSettleItem, type UpdateSettleSnapshot } from "../updateBlockerSettle";
 
 function item(id: string, label = id): UpdateSettleItem {
   return { id, label };
@@ -49,7 +49,6 @@ describe("settleUpdateWork", () => {
     const { host, calls } = makeHost(makeState());
     await expect(settleUpdateWork(host)).resolves.toEqual([]);
     expect(calls).toEqual([]);
-    expect(hasUpdateSettleWork(makeState())).toBe(false);
   });
 
   it("stops tasks and queries before rolling back an open transaction", async () => {
@@ -191,5 +190,47 @@ describe("settleUpdateWork", () => {
 
     expect(calls).toEqual(["cancelExecution:tab-1"]);
     expect(calls).not.toContain("rollback:tab-2");
+  });
+
+  it("waits for a stop that is already in flight without asking again", async () => {
+    // The store refuses a second cancel for a tab that is already cancelling
+    // (`canCancelQueryExecution` includes `!isCancelling`), so it must not be
+    // asked — but the tab still has to be waited for.
+    const state = makeState({ executions: [{ ...item("tab-1", "orders"), stopInFlight: true }] });
+    const { host, calls } = makeHost(state);
+    let cleared = false;
+    host.snapshot = () => ({ tasks: [], executions: cleared ? [] : state.executions, explains: [], transactions: [] });
+    setTimeout(() => {
+      cleared = true;
+    }, 5);
+
+    await expect(settleUpdateWork(host, { timeoutMs: 200, pollMs: 2 })).resolves.toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it("leaves a transaction alone when its query was not confirmed stopped", async () => {
+    const state = makeState({ executions: [item("tab-1", "orders")], transactions: [item("tab-1", "orders")] });
+    const { host, calls } = makeHost(state);
+    host.cancelExecution = () => new Promise(() => {});
+
+    const failures = await settleUpdateWork(host, { timeoutMs: 30, pollMs: 1 });
+
+    // Rolling that session back would race the query the confirmation promised
+    // to stop first.
+    expect(calls.filter((call) => call.startsWith("rollback:"))).toEqual([]);
+    expect(failures.some((failure) => failure.kind === "execution" && failure.reason === "unconfirmed")).toBe(true);
+  });
+
+  it("shares one budget across the phases instead of one per phase", async () => {
+    const state = makeState({ tasks: [item("export-1")], executions: [item("tab-1")] });
+    const { host } = makeHost(state);
+    host.cancelTask = () => new Promise(() => {});
+    host.cancelExecution = () => new Promise(() => {});
+
+    const startedAt = Date.now();
+    const failures = await settleUpdateWork(host, { timeoutMs: 40, pollMs: 2 });
+
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(failures.map((failure) => failure.kind)).toEqual(expect.arrayContaining(["task", "execution"]));
   });
 });

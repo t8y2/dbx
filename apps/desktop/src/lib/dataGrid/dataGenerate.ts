@@ -1774,7 +1774,10 @@ export function nextIntegerSequenceStart(value: unknown): number | string {
   let next: bigint | undefined;
   if (typeof value === "bigint") next = value + 1n;
   else if (typeof value === "number" && Number.isSafeInteger(value)) next = BigInt(value) + 1n;
-  else if (typeof value === "string" && /^[+-]?\d+$/.test(value.trim())) next = BigInt(value.trim()) + 1n;
+  else if (typeof value === "string") {
+    const integer = parseExactDecimalInteger(value.trim());
+    if (integer !== undefined) next = integer + 1n;
+  }
   if (next === undefined) return 1;
   return next >= BigInt(Number.MIN_SAFE_INTEGER) && next <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(next) : next.toString();
 }

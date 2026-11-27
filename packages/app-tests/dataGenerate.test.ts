@@ -31,6 +31,7 @@ test("generates exact twenty-digit integer sequences without rounding", () => {
 
 test("derives exact sequence starts from string-encoded large integer query results", () => {
   assert.equal(nextIntegerSequenceStart("12345678901234567890"), "12345678901234567891");
+  assert.equal(nextIntegerSequenceStart("12345678901234567890.0"), "12345678901234567891");
   assert.equal(nextIntegerSequenceStart("9007199254740991"), "9007199254740992");
   assert.equal(nextIntegerSequenceStart(41), 42);
   assert.equal(nextIntegerSequenceStart("not-an-integer"), 1);

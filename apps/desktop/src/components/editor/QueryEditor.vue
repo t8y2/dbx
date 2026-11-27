@@ -621,7 +621,7 @@ const {
   requestInsertValueHintTableColumns,
   refreshCompletionCache,
 } = completionMetadata;
-const hoverContent = createQueryEditorHoverContent({ isDark, t, toast });
+const hoverContent = createQueryEditorHoverContent({ isDark, t, toast, editorFontSize: liveFontSize });
 const { resolveSqlHoverTooltip } = useQueryEditorHover({ props, contextMenuOpen, settingsStore, connectionStore, metadata: completionMetadata, createHoverDom: hoverContent.createHoverDom, semanticCompletionEnabled: SEMANTIC_SQL_COMPLETION_ENABLED, maxCompletionTables: MAX_COMPLETION_TABLES });
 const pointerInteractions = useQueryEditorPointer({ props, clearTableNavigationHover: () => clearTableNavigationHover(), emit });
 const { registerEditorScrollbarPointerGuard, registerEditorNativeSelectionDragGuard, registerEditorNativeSelectionScrollGuard, startEditorSelectionDrag } = pointerInteractions;

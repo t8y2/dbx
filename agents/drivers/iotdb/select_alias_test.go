@@ -43,6 +43,10 @@ func TestTimeAggregationAliasesRecognizeAliasedTimeAggregates(t *testing.T) {
 		{"wildcard series", "SELECT max_time(*) AS w FROM root.db.d1", []string{"w"}},
 		{"keywords inside a path node are not clause keywords", "SELECT max_time(root.from.s1) AS m FROM root.from", []string{"m"}},
 		{"alias that spells a keyword", "SELECT max_time(s1) AS `from` FROM root.db.d1", []string{"from"}},
+		{"unquoted name characters are not keyword boundaries", "SELECT max_time(root.db.d$from.s1) AS x$as FROM root.db.d$from", []string{"x$as"}},
+		{"colon at and hash inside a name", "SELECT min_by(time, s1) AS a:from, max_time(s1) AS b@as, max_time(s1) AS c#into FROM root.db.d1", []string{"a:from", "b@as", "c#into"}},
+		{"braces inside a name", "SELECT max_time(s1) AS {from} FROM root.db.d1", []string{"{from}"}},
+		{"unquoted CJK alias", "SELECT max_by(time, s1) AS 最大值时刻 FROM root.db.d1 ALIGN BY DEVICE", []string{"最大值时刻"}},
 		{"clauses after FROM are ignored", "SELECT max_time(s1) AS m FROM root.db.d1 GROUP BY ([0, 10), 1ms) ALIGN BY DEVICE", []string{"m"}},
 		{"select into stops at INTO", "SELECT max_time(s1) AS m INTO root.copy.d1(t) FROM root.db.d1", []string{"m"}},
 	}

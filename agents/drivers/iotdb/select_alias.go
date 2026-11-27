@@ -183,8 +183,9 @@ func skipSpace(text string, index int) int {
 }
 
 // hasKeywordAt reports whether text holds the keyword at index as a whole word.
-// '.' counts as part of a word so a path node such as `root.from.s1` is never
-// read as a clause keyword.
+// '.' and every character IoTDB allows in an unquoted name count as part of a
+// word, so a path node such as `root.from.s1` or an identifier such as `x$as`
+// is never read as a clause keyword.
 func hasKeywordAt(text string, index int, keyword string) bool {
 	end := index + len(keyword)
 	if index < 0 || end > len(text) || !strings.EqualFold(text[index:end], keyword) {
@@ -200,6 +201,9 @@ func isFunctionNameByte(b byte) bool {
 	return b == '_' || b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }
 
+// isWordByte covers IoTDB's unquoted name characters (NAME_CHAR in the 1.3.7
+// SqlLexer.g4: letters, digits and _ : @ # $ { } plus CJK), a path's '.', and
+// every non-ASCII byte so multi-byte names stay in one word.
 func isWordByte(b byte) bool {
-	return isFunctionNameByte(b) || b == '.' || b >= 0x80
+	return isFunctionNameByte(b) || b >= 0x80 || strings.IndexByte(".:@#${}", b) >= 0
 }

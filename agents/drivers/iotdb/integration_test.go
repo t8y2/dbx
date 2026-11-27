@@ -165,6 +165,35 @@ func TestLiveIoTDBAgentTreeTimeAggregates(t *testing.T) {
 	if !reflect.DeepEqual(result.Rows[0], wantRow) {
 		t.Fatalf("tree time aggregate row = %#v, want %#v", result.Rows[0], wantRow)
 	}
+
+	// An AS alias hides the aggregate behind the reported column name, so the
+	// types must be resolved from the statement instead (#15876).
+	aliased, err := server.executeQuery(queryOptions{
+		SQL:     "SELECT max_time(s1) AS max_time, max_by(time,s1) AS 最大值时刻, min_by(time,s1) AS 最小值时刻, count(s1) AS 总数 FROM " + device,
+		MaxRows: 10,
+	})
+	if err != nil || len(aliased.Rows) != 1 {
+		t.Fatalf("aliased tree time aggregates = %#v, %v", aliased, err)
+	}
+	wantAliasedTypes := []string{"TIMESTAMP(ms)", "TIMESTAMP(ms)", "TIMESTAMP(ms)", "INT64"}
+	if !reflect.DeepEqual(aliased.ColumnTypes, wantAliasedTypes) {
+		t.Fatalf("aliased tree time aggregate types = %#v, want %#v", aliased.ColumnTypes, wantAliasedTypes)
+	}
+	wantAliasedRow := []any{"2", "2", "1", int64(2)}
+	if !reflect.DeepEqual(aliased.Rows[0], wantAliasedRow) {
+		t.Fatalf("aliased tree time aggregate row = %#v, want %#v", aliased.Rows[0], wantAliasedRow)
+	}
+	page, err := server.executeQueryPage(queryOptions{
+		SQL:     "SELECT max_by(time,s1) AS 最大值时刻, count(s1) AS 总数 FROM " + device,
+		MaxRows: 10,
+	}, 10)
+	if err != nil || len(page.Rows) != 1 {
+		t.Fatalf("aliased tree time aggregate page = %#v, %v", page, err)
+	}
+	wantPageTypes := []string{"TIMESTAMP(ms)", "INT64"}
+	if !reflect.DeepEqual(page.ColumnTypes, wantPageTypes) {
+		t.Fatalf("aliased tree time aggregate page types = %#v, want %#v", page.ColumnTypes, wantPageTypes)
+	}
 }
 
 func TestLiveIoTDBAgentProcessMultiSessionAndCancellation(t *testing.T) {

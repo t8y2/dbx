@@ -88,7 +88,7 @@ func (s *server) queryValues(sql, database string, limit, timeoutSecs int) (quer
 		}
 		defer dataset.Close()
 		columns := append([]string(nil), dataset.GetColumnNames()...)
-		columnTypes := normalizedColumnTypes(dataset.GetColumnTypes(), columns, connected.dialect, connected.timestampPrecision)
+		columnTypes := normalizedColumnTypes(dataset.GetColumnTypes(), columns, connected.dialect, connected.timestampPrecision, sql)
 		rows, truncated, err := readDataset(ctx, dataset, connected, columns, columnTypes, limit)
 		if err != nil {
 			return queryResult{}, err
@@ -164,7 +164,7 @@ func (s *server) executeQueryPage(options queryOptions, requestedPageSize int) (
 			dataset:     dataset,
 			client:      connected,
 			columns:     append([]string(nil), dataset.GetColumnNames()...),
-			columnTypes: normalizedColumnTypes(dataset.GetColumnTypes(), dataset.GetColumnNames(), connected.dialect, connected.timestampPrecision),
+			columnTypes: normalizedColumnTypes(dataset.GetColumnTypes(), dataset.GetColumnNames(), connected.dialect, connected.timestampPrecision, sql),
 			remaining:   limit,
 		}
 		rows, hasMore, truncated, err := s.readQuerySessionPage(ctx, queryState, pageSize)
@@ -470,8 +470,12 @@ func normalizeIoTDBValue(value any, columnType string) any {
 	}
 }
 
-func normalizedColumnTypes(values, columns []string, dialect, timestampPrecision string) []string {
+func normalizedColumnTypes(values, columns []string, dialect, timestampPrecision, sql string) []string {
 	result := make([]string, len(columns))
+	var aliases map[string]string
+	if dialect == client.TreeSqlDialect {
+		aliases = selectAliasExpressions(sql)
+	}
 	for index := range result {
 		if index < len(values) {
 			result[index] = strings.ToUpper(values[index])
@@ -485,8 +489,16 @@ func normalizedColumnTypes(values, columns []string, dialect, timestampPrecision
 		}
 		// max_time/min_time aggregates return INT64 epoch values in the tree
 		// dialect; type them as timestamps so the grid renders standard times.
-		if dialect == client.TreeSqlDialect && iotdbColumnTypeBase(result[index]) == "INT64" && isTimeAggregationColumn(columns[index]) {
-			result[index] = timestampColumnType(timestampPrecision)
+		if dialect == client.TreeSqlDialect && iotdbColumnTypeBase(result[index]) == "INT64" {
+			if isTimeAggregationColumn(columns[index]) {
+				result[index] = timestampColumnType(timestampPrecision)
+				continue
+			}
+			// An AS alias replaces the server-side name, which hides the
+			// aggregate behind it; resolve the SELECT item back (#15876).
+			if expression, ok := aliases[strings.TrimSpace(columns[index])]; ok && isTimeAggregationColumn(expression) {
+				result[index] = timestampColumnType(timestampPrecision)
+			}
 		}
 	}
 	return result

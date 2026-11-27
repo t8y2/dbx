@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { isPostgresTupleLocatorRejection, markRowIdLocatorSupported, markRowIdLocatorUnsupported, resetRowIdLocatorStateForTests, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
+import { isPostgresTupleLocatorRejection, markRowIdLocatorSupported, markRowIdLocatorUnsupported, resetRowIdLocatorStateForTests, rowIdLocatorTableKey, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import type { QueryResult } from "@/types/database";
 
 const locatorSql = `SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS "__DBX_ROWID", * FROM "public"."events" LIMIT 200;`;
@@ -43,6 +43,25 @@ describe("tableRowIdSupport", () => {
     markRowIdLocatorUnsupported("conn-1");
     expect(rowIdLocatorUnsupported("conn-1")).toBe(true);
     expect(rowIdLocatorUnsupported("conn-2")).toBe(false);
+  });
+
+  it("scopes a table mark to that table only (#15865)", () => {
+    const duckdbTable = rowIdLocatorTableKey("conn-1", "app", "chat", undefined, "room_messages");
+    const heapTable = rowIdLocatorTableKey("conn-1", "app", "translate", undefined, "strings");
+    markRowIdLocatorUnsupported("conn-1", duckdbTable);
+    expect(rowIdLocatorUnsupported("conn-1", duckdbTable)).toBe(true);
+    // The heap table on the same connection keeps its locator.
+    expect(rowIdLocatorUnsupported("conn-1", heapTable)).toBe(false);
+    expect(rowIdLocatorUnsupported("conn-1")).toBe(false);
+
+    markRowIdLocatorSupported("conn-1", duckdbTable);
+    expect(rowIdLocatorUnsupported("conn-1", duckdbTable)).toBe(false);
+  });
+
+  it("lets a connection-wide mark cover every table", () => {
+    const table = rowIdLocatorTableKey("conn-1", "app", "chat", undefined, "room_messages");
+    markRowIdLocatorUnsupported("conn-1");
+    expect(rowIdLocatorUnsupported("conn-1", table)).toBe(true);
   });
 });
 

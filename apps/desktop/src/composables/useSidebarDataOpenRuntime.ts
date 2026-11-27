@@ -16,7 +16,7 @@ import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/li
 import { loadTableDataQueryDefaults, removeTableDataQueryDefaults, shouldRetryWithoutTableDataQueryDefaults } from "@/lib/table/tableDataQueryDefaults";
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { physicalTablePrimaryKeys, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
-import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
+import { markRowIdLocatorUnsupported, rowIdLocatorTableKey, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { canActivateExistingDataTableTab } from "@/lib/tabs/dataTabActivation";
@@ -431,7 +431,8 @@ export function useSidebarDataOpenRuntime() {
       const initialOrderBy = savedOrderBy ?? defaultSort.orderBy;
       // #12647：首开路径同样尊重"该连接的行定位器已被引擎拒绝"的记忆，否则
       // 被降级过的连接每次重新单击表都会再发一次注定失败的定位器查询。
-      const includeRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableType) && !rowIdLocatorUnsupported(node.connectionId) && !postgresTupleLocatorUnsupportedEngine(connectionStore.getConfig(node.connectionId));
+      const locatorTableKey = rowIdLocatorTableKey(node.connectionId, node.database, tableSchema, node.catalog, node.label);
+      const includeRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableType, loadedTableMeta?.accessMethod) && !rowIdLocatorUnsupported(node.connectionId, locatorTableKey) && !postgresTupleLocatorUnsupportedEngine(connectionStore.getConfig(node.connectionId));
       const buildOpenSql = (withRowId: boolean, withSavedDefaults = true) =>
         buildTableSelectSql({
           databaseType: effectiveDbType,
@@ -520,7 +521,7 @@ export function useSidebarDataOpenRuntime() {
             return;
           }
           finalExecutedSql = fallbackSql;
-          if (shouldKeepRowIdLocatorDisabled(retryTab.result)) markRowIdLocatorUnsupported(node.connectionId);
+          if (shouldKeepRowIdLocatorDisabled(retryTab.result)) markRowIdLocatorUnsupported(node.connectionId, locatorTableKey);
         } catch {
           // Fallback execution keeps its own error result visible and must not
           // change the connection capability memory.

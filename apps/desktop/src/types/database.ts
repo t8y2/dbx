@@ -2979,6 +2979,8 @@ export interface QueryTab {
     database?: string;
     columns: ColumnInfo[];
     primaryKeys: string[];
+    /** PostgreSQL table access method (`pg_am.amname`); non-`heap` storage rejects the ctid tuple locator. */
+    accessMethod?: string;
     /** User-declared row identifier columns, used only when no automatic stable identifier exists. */
     virtualPrimaryKeys?: string[];
     /** Physical primary keys used for table-open default sorting; excludes unique and synthetic row identifiers. */

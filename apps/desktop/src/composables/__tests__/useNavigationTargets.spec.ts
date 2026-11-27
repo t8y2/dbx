@@ -356,7 +356,7 @@ describe("useNavigationTargets openTableTarget", () => {
   });
 
   it("retries without the synthetic row-id locator when the engine rejects system columns (Hologres, #12647)", async () => {
-    const { resetRowIdLocatorStateForTests, rowIdLocatorUnsupported } = await import("@/lib/table/tableRowIdSupport");
+    const { resetRowIdLocatorStateForTests, rowIdLocatorTableKey, rowIdLocatorUnsupported } = await import("@/lib/table/tableRowIdSupport");
     resetRowIdLocatorStateForTests();
     expect(rowIdLocatorUnsupported("connection-1")).toBe(false);
     // Hologres-like: keyless PostgreSQL base table; the engine rejects every
@@ -381,9 +381,10 @@ describe("useNavigationTargets openTableTarget", () => {
     expect(executedSql.some((sql) => sql.includes("__DBX_ROWID"))).toBe(true);
     // Same degradation contract as the sidebar open path: replay once without
     // the locator so the table still opens (read-only), then remember the
-    // connection so later opens skip the locator up front.
+    // table so later opens skip the locator up front (#15865: the memory is
+    // per table, so heap tables on the same connection keep theirs).
     expect(executedSql.some((sql) => !sql.includes("__DBX_ROWID") && sql.includes("FROM users"))).toBe(true);
-    expect(rowIdLocatorUnsupported("connection-1")).toBe(true);
+    expect(rowIdLocatorUnsupported("connection-1", rowIdLocatorTableKey("connection-1", "app", undefined, undefined, "users"))).toBe(true);
     resetRowIdLocatorStateForTests();
   });
 });

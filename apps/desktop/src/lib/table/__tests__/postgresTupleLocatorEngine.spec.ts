@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { postgresAccessMethodSupportsTupleLocator, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 
 const connection = (dbType: string, productName?: string, productVersion?: string) => ({
   db_type: dbType,
@@ -29,5 +29,26 @@ describe("postgresTupleLocatorUnsupportedEngine (#14745)", () => {
     // combination is what keeps Cloudberry AO tables from receiving the
     // tableoid/ctid/xmin projection.
     expect(shouldIncludeSyntheticRowId("postgres", keyless, "TABLE") && !postgresTupleLocatorUnsupportedEngine(connection("postgres", "Apache Cloudberry", "PostgreSQL 14.4 (Apache Cloudberry 1.2.0)"))).toBe(false);
+  });
+
+  it("skips the locator for non-heap access methods (#15865)", () => {
+    const keyless: string[] = [];
+    // PolarDB CSI column-store tables report a plain PostgreSQL version
+    // string, so only the per-table access method can gate the locator.
+    expect(shouldIncludeSyntheticRowId("postgres", keyless, "TABLE", "polar_duckdb")).toBe(false);
+    expect(shouldIncludeSyntheticRowId("postgres", keyless, "BASE TABLE", "ao_column")).toBe(false);
+    expect(shouldIncludeSyntheticRowId("postgres", keyless, "TABLE", "heap")).toBe(true);
+    // Unknown access method (probe unavailable) keeps the locator and the
+    // retry fallback decides.
+    expect(shouldIncludeSyntheticRowId("postgres", keyless, "TABLE", undefined)).toBe(true);
+    expect(shouldIncludeSyntheticRowId("postgres", keyless, "TABLE", "")).toBe(true);
+  });
+
+  it("classifies access methods by tuple-locator support", () => {
+    expect(postgresAccessMethodSupportsTupleLocator("heap")).toBe(true);
+    expect(postgresAccessMethodSupportsTupleLocator("polar_duckdb")).toBe(false);
+    expect(postgresAccessMethodSupportsTupleLocator(undefined)).toBe(true);
+    expect(postgresAccessMethodSupportsTupleLocator(null)).toBe(true);
+    expect(postgresAccessMethodSupportsTupleLocator("")).toBe(true);
   });
 });

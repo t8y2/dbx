@@ -200,12 +200,26 @@ export function usesSyntheticRowIdKey(databaseType: DatabaseType | undefined, pr
   return syntheticKey === "neo4j-element-id" && primaryKeys[0] === DBX_NEO4J_ELEMENT_ID_COLUMN;
 }
 
+/**
+ * Whether a PostgreSQL table access method (`pg_class.relam` -> `pg_am.amname`)
+ * supports the tableoid/ctid/xmin tuple locator. Only `heap` storage carries
+ * those system columns; column-store access methods such as PolarDB CSI's
+ * `polar_duckdb` reject them (`duckdb AM: sequential scan (scan_begin) is not
+ * supported`, #15865). An unknown access method (probe unavailable, partitioned
+ * parent with `relam = 0`) keeps the locator and relies on the retry fallback.
+ */
+export function postgresAccessMethodSupportsTupleLocator(accessMethod?: string | null): boolean {
+  const normalized = accessMethod?.trim().toLowerCase();
+  return !normalized || normalized === "heap";
+}
+
 /** Requests a hidden physical locator only when the backend knows the object type supports it. */
-export function shouldIncludeSyntheticRowId(databaseType: DatabaseType | undefined, primaryKeys: string[], tableType?: string): boolean {
+export function shouldIncludeSyntheticRowId(databaseType: DatabaseType | undefined, primaryKeys: string[], tableType?: string, accessMethod?: string): boolean {
   if (isViewTableType(tableType)) return false;
   const syntheticKey = getDatabaseCapability(databaseType).syntheticKey;
   if (syntheticKey === "oracle-rowid" && !isKnownOracleBaseTableType(tableType)) return false;
   if (syntheticKey === "postgres-ctid" && !isKnownPostgresBaseTableType(tableType)) return false;
+  if (syntheticKey === "postgres-ctid" && !postgresAccessMethodSupportsTupleLocator(accessMethod)) return false;
   if (usesSyntheticRowIdKey(databaseType, primaryKeys, tableType)) return true;
   return (databaseType === "xugu" || syntheticKey === "postgres-ctid") && primaryKeys.length === 0;
 }

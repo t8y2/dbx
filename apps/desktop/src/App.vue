@@ -3792,6 +3792,11 @@ function onOpenDependencyObject(context: ObjectDependencyTarget, target: SqlObje
   return onClickTable(target, context);
 }
 
+function objectSourceTabTitle(name: string, objectType: ObjectSourceKind, signature?: string): string {
+  const title = `Source - ${name}`;
+  return objectType === "PROCEDURE" && signature ? `${title}(${signature})` : title;
+}
+
 function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: boolean, context?: SqlObjectNavigationContext) {
   const provisionalTarget = tableTargetFromActiveTab(table, context);
   if (!provisionalTarget) return;
@@ -3814,7 +3819,7 @@ function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: bo
       queryStore.openObjectSourceTabPending({
         connectionId: target.connectionId,
         database: target.database,
-        title: `Source - ${sourceName}`,
+        title: objectSourceTabTitle(sourceName, objectType, sourceSignature),
         schema: sourceSchema || target.database,
         catalog: target.catalog,
         initialEditing,
@@ -4529,6 +4534,17 @@ async function handleQuickOpenSelect(item: any) {
         signature: item.signature,
         identifierQuote: connectionStore.connectionIdentifierQuote?.(item.connectionId),
       });
+      if (resolvedType === "PROCEDURE" && item.signature) {
+        queryStore.openObjectSourceTab({
+          connectionId: item.connectionId,
+          database: item.database,
+          schema,
+          title: objectSourceTabTitle(objectName, resolvedType, item.signature),
+          sql: editableSource,
+          objectSource: { schema, name: objectName, objectType: resolvedType, signature: item.signature },
+        });
+        return;
+      }
       const tabId = queryStore.createTab(item.connectionId, item.database, `Source - ${objectName}`, "query", undefined, undefined, undefined, { sourceView: true });
       queryStore.updateSql(tabId, editableSource);
       if (item.type !== "sequence" && item.type !== "trigger" && item.type !== "event" && item.type !== "type" && item.type !== "type-body") {

@@ -3689,6 +3689,8 @@ export default {
     dragColumnToReorder: "Drag column header to reorder",
     invertColumnVisibility: "Invert",
     resetColumnOrder: "Reset order",
+    confirmColumnHeaderReorder: "Confirm header drag",
+    saveColumnOrder: "Save column order",
     confirmColumnOrderTitle: "Save column order?",
     confirmColumnOrderDescription: "The new order will be saved for this table’s data view.",
     showAllColumns: "Show all",
@@ -9098,6 +9100,8 @@ export default {
     useRawForAll: "Use Raw SQL for All",
     preserveQuotedBracedParameters: "Keep template placeholders inside SQL strings",
     ignore: "Ignore",
+    requestPending: "A parameter request is already pending. Execute or cancel it before running another query.",
+    targetChanged: "The connection or database changed while parameters were pending, so the request was cancelled. Run the query again.",
     kind: {
       string: "String",
       number: "Number",

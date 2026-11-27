@@ -3398,6 +3398,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "列ヘッダーをドラッグして並べ替え",
     invertColumnVisibility: "反転",
     resetColumnOrder: "順序をリセット",
+    confirmColumnHeaderReorder: "列見出しをドラッグした後に保存を確認",
+    saveColumnOrder: "列順を保存",
     confirmColumnOrderTitle: "列の順序を保存しますか？",
     confirmColumnOrderDescription: "新しい順序はこのテーブルのデータ表示に保存されます。",
     showAllColumns: "すべて表示",

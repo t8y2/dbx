@@ -6,6 +6,7 @@ import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import "./sqlEditorWorkspace.css";
 import { useQueryStore } from "@/stores/queryStore";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { createGroupTabBarPortal, GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
 import { hasFocusableQueryResult, hasQueryOutput } from "@/lib/query/queryOutput";
@@ -58,7 +59,6 @@ const surfaceProps = computed(() => ({
 }));
 const contentEmits = createContentSurfaceEventForwarders(emit);
 const editorGroupBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits }));
-const resultSurfaceBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits, activeTab: activeQueryTab.value! }));
 
 defineExpose({
   copyActiveResult,
@@ -66,11 +66,7 @@ defineExpose({
   focusSqlEditor,
   focusSearch: (target: Element | null = null) => {
     const element = commandTargetElement(target);
-    // The shared result pane (and its Teleported cell-detail dialog) lives
-    // outside the group DOM, so route its search before the group fallback.
-    // A data-mode cell-detail dialog is portaled to body too but belongs to
-    // the group's grid — indistinguishable in the DOM, hence the gate.
-    if (element?.closest("[data-shared-result-surface]") || (showSharedResult.value && element?.closest("[data-cell-detail-editor-root]"))) {
+    if (sharedResultOwnsTarget(element)) {
       return resultSurfaceRef.value?.focusSearch(element) ?? false;
     }
     const group = groupForElement(element) ?? activeEditorGroup();
@@ -92,15 +88,10 @@ defineExpose({
     const group = groupForElement(element) ?? activeEditorGroup();
     return group?.refreshData() ?? resultSurfaceRef.value?.refreshData() ?? false;
   },
-  toggleResultsPane: () => toggleSharedResultsPane(),
+  toggleResultsPane: () => (activeQueryTab.value ? toggleSharedResultsPane() : (activeEditorGroup()?.toggleResultsPane() ?? false)),
   refreshQueryEditorCompletionCache: () => activeEditorGroup()?.refreshQueryEditorCompletionCache() ?? false,
   handleModRTarget: (target: Element) => {
-    // DataGrid, Elasticsearch JSON, and the cell-detail editor (Teleported
-    // outside the grid DOM) belong to the shared result surface while a query
-    // tab is active. Data-mode grids live inside a group's ContentArea and
-    // their cell-detail dialogs are portaled to body just the same, so route
-    // those to the group instead of the (unmounted) shared result surface.
-    if (showSharedResult.value && target.closest("[data-grid-root], [data-elasticsearch-json-response-root], [data-cell-detail-editor-root]")) {
+    if (sharedResultOwnsTarget(target)) {
       return resultSurfaceRef.value?.handleModRTarget(target) ?? false;
     }
     const group = groupForElement(target) ?? activeEditorGroup();
@@ -150,9 +141,49 @@ function setTabBarTarget(groupId: string, element: unknown) {
   if (element instanceof HTMLElement) workspaceTabBarPortal.targets.set(groupId, element);
   else workspaceTabBarPortal.targets.delete(groupId);
 }
-const activeQueryTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
-const showSharedResult = computed(() => activeQueryTab.value?.mode === "query");
-const hasSharedOutput = computed(() => showSharedResult.value && hasQueryOutput(activeQueryTab.value));
+const focusedTab = computed<QueryTab | undefined>(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
+const activeQueryTab = computed<QueryTab | undefined>(() => (focusedTab.value?.mode === "query" ? focusedTab.value : undefined));
+const lastFocusedQueryTabId = ref<string>();
+watch(
+  () => activeQueryTab.value?.id,
+  (tabId) => {
+    if (tabId) lastFocusedQueryTabId.value = tabId;
+  },
+  { immediate: true, flush: "sync" },
+);
+
+const sharedResultTab = computed<QueryTab | undefined>(() => {
+  if (activeQueryTab.value) return activeQueryTab.value;
+  if (focusedTab.value?.mode !== "data" || queryStore.groups.length < 2) return undefined;
+  const visibleTabIds = new Set(queryStore.groups.map((group) => group.activeTabId));
+  const queries = queryStore.tabs.filter((tab) => tab.mode === "query" && visibleTabIds.has(tab.id) && hasQueryOutput(tab) && !isObjectDependencySection(tab));
+  return queries.find((tab) => tab.id === lastFocusedQueryTabId.value) ?? queries[0];
+});
+const sharedResultConnection = computed<ContentAreaSurfaceProps["activeConnection"]>(() => {
+  const tab: QueryTab | undefined = sharedResultTab.value;
+  if (!tab) return undefined;
+  return tab.id === queryStore.activeTabId ? props.activeConnection : useConnectionStore().getConfig(tab.connectionId);
+});
+const sharedResultOutputView = computed<ContentAreaSurfaceProps["activeOutputView"]>(() => (activeQueryTab.value ? props.activeOutputView : (sharedResultTab.value?.uiState?.activeOutputView ?? "result")));
+const resultSurfaceBindings = computed(() => ({
+  ...surfaceProps.value,
+  ...contentEmits,
+  activeTab: sharedResultTab.value!,
+  activeConnection: sharedResultConnection.value,
+  activeOutputView: sharedResultOutputView.value,
+}));
+const hasSharedOutput = computed(() => hasQueryOutput(sharedResultTab.value));
+
+function focusSharedResultOwner() {
+  const tab = sharedResultTab.value;
+  if (tab && tab.id !== queryStore.activeTabId) queryStore.activateTab(tab.id);
+}
+
+function sharedResultOwnsTarget(target: Element | null): boolean {
+  // A cell-detail editor is portaled to the body. Its originating grid had
+  // focus when it opened, so the focused tab disambiguates the two grids.
+  return !!target?.closest("[data-shared-result-surface]") || (!!activeQueryTab.value && !!target?.closest("[data-cell-detail-editor-root]"));
+}
 
 const SHARED_RESULT_PANE_MIN_SIZE = 12;
 const SHARED_RESULT_PANE_MAX_SIZE = 80;
@@ -161,13 +192,13 @@ const SHARED_RESULT_PANE_STORAGE_KEY = "dbx-shared-results-pane-size";
 const storedResultPaneSize = Number(safeLocalStorageGet(SHARED_RESULT_PANE_STORAGE_KEY));
 const resultPaneSize = ref(Number.isFinite(storedResultPaneSize) && storedResultPaneSize >= SHARED_RESULT_PANE_MIN_SIZE && storedResultPaneSize <= SHARED_RESULT_PANE_MAX_SIZE ? storedResultPaneSize : SHARED_RESULT_PANE_DEFAULT_SIZE);
 const showResultPane = computed({
-  get: () => activeQueryTab.value?.uiState?.resultPaneOpen ?? true,
+  get: () => sharedResultTab.value?.uiState?.resultPaneOpen ?? true,
   set: (open: boolean) => {
-    const tab = activeQueryTab.value;
-    if (tab?.mode === "query") queryStore.updateTabUiState(tab.id, { resultPaneOpen: open });
+    const tab = sharedResultTab.value;
+    if (tab) queryStore.updateTabUiState(tab.id, { resultPaneOpen: open });
   },
 });
-const isResultPaneVisible = computed(() => hasSharedOutput.value && showResultPane.value && !isObjectDependencySection(activeQueryTab.value!));
+const isResultPaneVisible = computed(() => hasSharedOutput.value && showResultPane.value && !isObjectDependencySection(sharedResultTab.value!));
 const resultFullscreen = ref(false);
 let resultFullscreenButton: HTMLElement | undefined;
 
@@ -202,7 +233,7 @@ function withResultFullscreenClosed(action: () => boolean): boolean {
   return true;
 }
 
-watch([() => activeQueryTab.value?.id, isResultPaneVisible, () => props.contentSuppressed], () => closeResultFullscreen());
+watch([() => sharedResultTab.value?.id, isResultPaneVisible, () => props.contentSuppressed], () => closeResultFullscreen());
 
 // Keep the pane mounted, but apply its target size immediately so available
 // results never wait for an expansion animation before becoming visible.
@@ -217,9 +248,6 @@ const editorPaneSize = computed(() => 100 - resultPaneTargetSize.value);
  * ContentArea and keep their own per-tab resultsPaneOpen collapse behavior.
  */
 function toggleSharedResultsPane(): boolean {
-  if (!showSharedResult.value) {
-    return activeEditorGroup()?.toggleResultsPane() ?? false;
-  }
   if (!hasSharedOutput.value) return false;
   showResultPane.value = !showResultPane.value;
   return true;
@@ -270,7 +298,7 @@ function focusSqlEditor(): boolean {
 // behavior (see issue #6193): a collapsed shared pane comes back when the
 // active tab starts executing.
 watch(
-  () => [activeQueryTab.value?.id, activeQueryTab.value?.isExecuting, activeQueryTab.value?.isExplaining] as const,
+  () => [sharedResultTab.value?.id, sharedResultTab.value?.isExecuting, sharedResultTab.value?.isExplaining] as const,
   ([, isExecuting, isExplaining]) => {
     if (isExecuting || isExplaining) showResultPane.value = true;
   },
@@ -482,6 +510,8 @@ function handleFocusErrorOffset(tabId: string, offset: number): boolean {
                 :role="resultFullscreen ? 'dialog' : undefined"
                 :aria-modal="resultFullscreen || undefined"
                 :aria-label="resultFullscreen ? t('editor.fullscreenResultsPane') : undefined"
+                @pointerdown.capture="focusSharedResultOwner"
+                @focusin="focusSharedResultOwner"
                 @keydown.esc="onResultEscape"
               >
                 <QueryResultSurface

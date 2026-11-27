@@ -89,6 +89,7 @@ import ConnectionWatermark from "@/components/common/ConnectionWatermark.vue";
 import { resolveConnectionWatermark } from "@/lib/connection/connectionWatermark";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
 import OraclePackageMembers from "@/components/objects/OraclePackageMembers.vue";
+import type { OraclePackageSourceContext } from "@/lib/sql/oraclePackageMemberNavigation";
 import OracleTriggerStatus from "@/components/objects/OracleTriggerStatus.vue";
 import type { OracleTriggerSnapshot, OracleTriggerTarget, OracleTriggerExecutionResult } from "@/lib/database/oracleTriggerPlan";
 const OracleInvalidObjectsDialog = defineAsyncComponent(() => import("@/components/objects/OracleInvalidObjectsDialog.vue"));
@@ -474,6 +475,19 @@ const showPackageMembers = computed(() => {
   const type = effectiveDatabaseTypeForConnection(props.activeConnection);
   const source = props.activeTab.objectSource?.objectType ?? props.activeTab.objectDetails?.objectType;
   return (type === "oracle" || type === "oceanbase-oracle" || type === "dameng") && (source === "PACKAGE" || source === "PACKAGE_BODY");
+});
+/**
+ * 源码 tab 正在显示的包。编辑器拿它把包内的裸名解析成这个包的成员：包头里点声明跳到包体
+ * 实现，包体里点调用就地跳转，而不是按名字去数据字典找一个并不存在的独立过程。
+ */
+const packageSourceIdentity = computed<OraclePackageSourceContext | undefined>(() => {
+  if (!showPackageMembers.value) return undefined;
+  const tab = props.activeTab;
+  const objectType = tab.objectSource?.objectType ?? tab.objectDetails?.objectType;
+  if (objectType !== "PACKAGE" && objectType !== "PACKAGE_BODY") return undefined;
+  const name = tab.objectSource?.name ?? tab.objectDetails?.name;
+  if (!name) return undefined;
+  return { name, schema: tab.objectSource?.schema ?? tab.objectDetails?.schema ?? tab.schema, objectType };
 });
 const unfinishedTypeChange = computed(() => !!props.activeTab.typeManagementDraft && props.activeTab.typeManagementDraft.state !== "complete");
 const verifiedTypeDeletion = computed(() => props.activeTab.typeManagementDraft?.state === "complete" && props.activeTab.typeManagementDraft.operation.startsWith("delete"));
@@ -2448,6 +2462,7 @@ defineExpose({
                   :catalog="activeTab.catalog"
                   :database="activeTab.database"
                   :schema="activeTab.schema"
+                  :package-source="packageSourceIdentity"
                   :debug-routine="debugRoutine"
                   :client-session-id="activeTab.id"
                   :completion-context-version="activeTab.completionContextVersion"

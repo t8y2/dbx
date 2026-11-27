@@ -97,6 +97,7 @@ import * as api from "@/lib/backend/api";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
 import { objectDependencyTarget, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import { oraclePackageMemberSourceRequest, type OraclePackageSourceContext } from "@/lib/sql/oraclePackageMemberNavigation";
 import type { QueryTab } from "@/types/database";
 import type {
   ColumnInfo,
@@ -2513,6 +2514,37 @@ function openTableStructureEditor() {
  * The store owns connection setup, source loading and tab de-duplication, so
  * this path deliberately does not fall back to the side panel.
  */
+/**
+ * 源码面板显示的包。编辑器拿它把包内的裸名解析成这个包的成员，而不是去数据字典里
+ * 找一个同名的独立过程 —— 包成员不是独立对象，那样只会取回空源码。
+ */
+const sourcePackageIdentity = computed<OraclePackageSourceContext | undefined>(() => {
+  const row = sourceRow.value;
+  if (!row || (row.type !== "PACKAGE" && row.type !== "PACKAGE_BODY")) return undefined;
+  const type = effectiveDatabaseType.value;
+  if (type !== "oracle" && type !== "oceanbase-oracle" && type !== "dameng") return undefined;
+  return { name: row.name, schema: row.schema || selectedSchema.value || props.database, objectType: row.type };
+});
+
+/**
+ * 包头里 Ctrl+点击一个成员声明。面板本身只装得下一个对象的源码，所以把包体开成源码
+ * tab，并让光标落在该成员的实现上。
+ */
+function openPackageMemberSource(target: SqlObjectNavigationTarget) {
+  const request = oraclePackageMemberSourceRequest(target, selectedSchema.value || props.database);
+  if (!request) return;
+  queryStore.openObjectSourceTabPending({
+    connectionId: props.connection.id,
+    database: props.database,
+    title: `Source - ${request.name}`,
+    schema: request.schema || props.database,
+    catalog: props.catalog,
+    initialEditing: false,
+    request: { name: request.name, objectType: request.objectType },
+    focusMember: request.focusMember,
+  });
+}
+
 function openSourceTab(row: ObjectBrowserRow) {
   queryStore.openObjectSourceTabPending({
     connectionId: props.connection.id,
@@ -7950,8 +7982,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 :database-type="props.connection.db_type"
                 :dialect="sourceDialect"
                 :format-dialect="sourceFormatDialect"
+                :package-source="sourcePackageIdentity"
                 force-word-wrap
                 @save="sourceSection === 'source' && saveSource()"
+                @open-object-source="openPackageMemberSource"
               />
             </div>
             <QueryEditor
@@ -7965,9 +7999,11 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               :database-type="props.connection.db_type"
               :dialect="sourceDialect"
               :format-dialect="sourceFormatDialect"
+              :package-source="sourcePackageIdentity"
               force-word-wrap
               read-only
               data-object-source-preview
+              @open-object-source="openPackageMemberSource"
             />
             <div v-if="sourceSaveError" class="shrink-0 whitespace-pre-wrap break-words border-t px-3 py-2 text-xs text-destructive">
               {{ sourceSaveError }}

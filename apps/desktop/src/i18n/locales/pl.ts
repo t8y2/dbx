@@ -9155,6 +9155,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "Działanie dwukrotnego kliknięcia karty",
     tabDoubleClickActionDefault: "Zmień nazwę karty",
     tabDoubleClickActionClose: "Zamknij kartę",
+    tabDoubleClickActionNone: "Nic nie rób",
     tabDoubleClickActionDescription: "Zmień nazwę karty: zmiana nazwy kart zapytań i przełączanie trybu Zen dla kart danych. Zamknij kartę: zamykanie dwukrotnym kliknięciem, również kart danych.",
     tabMaxWidth: "Maksymalna szerokość karty",
     tabMaxWidthDescription: "Ogranicz maksymalną szerokość kart poziomych, skracając długie tytuły wielokropkiem. Najedź kursorem, aby zobaczyć pełny tytuł.",

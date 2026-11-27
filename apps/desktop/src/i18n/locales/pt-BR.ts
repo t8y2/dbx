@@ -9698,6 +9698,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "Ação de clique duplo na aba",
     tabDoubleClickActionDefault: "Renomear aba",
     tabDoubleClickActionClose: "Fechar aba",
+    tabDoubleClickActionNone: "Não fazer nada",
     tabDoubleClickActionDescription: "Renomear aba: renomear abas de consulta e alternar o modo Zen nas abas de dados. Fechar aba: fechar com clique duplo, incluindo abas de dados.",
     tabMaxWidth: "Largura máxima da aba",
     tabMaxWidthDescription: "Limita a largura máxima das abas horizontais, truncando títulos longos. Passe o mouse para ver o título completo.",

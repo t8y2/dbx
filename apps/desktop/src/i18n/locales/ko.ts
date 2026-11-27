@@ -9469,6 +9469,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "탭 더블 클릭 동작",
     tabDoubleClickActionDefault: "탭 이름 변경",
     tabDoubleClickActionClose: "탭 닫기",
+    tabDoubleClickActionNone: "아무 작업도 하지 않음",
     tabDoubleClickActionDescription: "탭 이름 변경: 쿼리 탭의 이름을 변경하고 데이터 탭의 Zen 모드를 전환합니다. 탭 닫기: 데이터 탭을 포함한 탭을 더블 클릭하여 닫습니다.",
     tabMaxWidth: "탭 최대 너비",
     tabMaxWidthDescription: "가로 탭의 최대 표시 너비를 제한하며, 긴 제목은 말줄임표로 표시하고 마우스 호버 시 전체 제목을 표시합니다.",

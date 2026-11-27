@@ -10929,6 +10929,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "Действие при двойном щелчке по вкладке",
     tabDoubleClickActionDefault: "Переименовать вкладку",
     tabDoubleClickActionClose: "Закрыть вкладку",
+    tabDoubleClickActionNone: "Ничего не делать",
     tabDoubleClickActionDescription: "Переименовать вкладку: переименование вкладок запросов и переключение режима Zen для вкладок данных. Закрыть вкладку: закрытие двойным щелчком, включая вкладки данных.",
     tabMaxWidth: "Максимальная ширина вкладки",
     tabMaxWidthDescription: "Ограничивает максимальную ширину горизонтальных вкладок, усекая длинные названия. Наведите курсор для полного названия.",

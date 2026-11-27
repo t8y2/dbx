@@ -7873,6 +7873,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "Sekmeye çift tıklama eylemi",
     tabDoubleClickActionDefault: "Sekmeyi yeniden adlandır",
     tabDoubleClickActionClose: "Sekmeyi kapat",
+    tabDoubleClickActionNone: "Hiçbir şey yapma",
     tabDoubleClickActionDescription: "Sekmeyi yeniden adlandır: sorgu sekmelerini yeniden adlandırır ve veri sekmelerinde Zen modunu değiştirir. Sekmeyi kapat: veri sekmeleri dahil sekmeleri çift tıklayarak kapatır.",
     tabMaxWidth: "Maksimum sekme genişliği",
     tabMaxWidthDescription: "Yatay sekmelerin maksimum genişliğini sınırlar, uzun başlıkları kısaltır. Tam başlığı görmek için üzerine gelin.",

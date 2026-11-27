@@ -9325,6 +9325,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "Azione del doppio clic sulla scheda",
     tabDoubleClickActionDefault: "Rinomina scheda",
     tabDoubleClickActionClose: "Chiudi scheda",
+    tabDoubleClickActionNone: "Non fare nulla",
     tabDoubleClickActionDescription: "Rinomina scheda: rinomina le schede delle query e attiva o disattiva la modalità Zen per le schede dei dati. Chiudi scheda: chiude con un doppio clic, incluse le schede dei dati.",
     tabMaxWidth: "Larghezza massima scheda",
     tabMaxWidthDescription: "Limita la larghezza massima delle schede orizzontali, troncando i titoli lunghi. Passa il cursore per vedere il titolo completo.",

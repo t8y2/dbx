@@ -8734,6 +8734,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "Tindakan klik ganda pada tab",
     tabDoubleClickActionDefault: "Ganti nama tab",
     tabDoubleClickActionClose: "Tutup tab",
+    tabDoubleClickActionNone: "Jangan lakukan apa pun",
     tabDoubleClickActionDescription: "Ganti nama tab: mengganti nama tab kueri dan beralih mode Zen pada tab data. Tutup tab: menutup tab dengan klik ganda, termasuk tab data.",
     tabMaxWidth: "Lebar tab maksimum",
     tabMaxWidthDescription: "Batasi lebar maksimum tab horizontal, memotong judul yang panjang. Arahkan kursor untuk melihat judul lengkap.",

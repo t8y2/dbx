@@ -7986,6 +7986,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "Vərəqə iki dəfə klik əməliyyatı",
     tabDoubleClickActionDefault: "Adı dəyişdir",
     tabDoubleClickActionClose: "Vərəqi bağla",
+    tabDoubleClickActionNone: "Heç nə etmə",
     tabDoubleClickActionDescription: "Adı dəyişdir: sorğu vərəqlərinin adını dəyişir və məlumat vərəqlərində Zen rejimini dəyişir. Vərəqi bağla: məlumat vərəqləri daxil olmaqla vərəqləri iki dəfə kliklə bağlayır.",
     tabMaxWidth: "Vərəqin maksimum eni",
     tabMaxWidthDescription: "Üfüqi vərəqlərin maksimum enini məhdudlaşdırır, uzun başlıqları qısaldır. Tam başlığı görmək üçün üzərinə gəlin.",

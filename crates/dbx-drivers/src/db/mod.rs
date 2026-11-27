@@ -21,6 +21,7 @@ pub mod easysearch_driver;
 pub mod external_config;
 pub use dbx_driver_elasticsearch as elasticsearch_driver;
 pub use dbx_driver_support::{elasticsearch_sql, file_validator};
+pub mod greenplum;
 pub mod hbase_driver;
 pub use dbx_driver_support::http_tunnel;
 pub mod influxdb3_driver;

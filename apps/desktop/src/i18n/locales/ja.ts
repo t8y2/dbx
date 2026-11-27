@@ -10329,6 +10329,8 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "FROM または JOIN でテーブル補完を選択すると、order_items AS oi のような生成済み別名を挿入します。",
     batchColumnSelectionIncludeComments: "選択した列の挿入時にコメントを含める",
     batchColumnSelectionIncludeCommentsDescription: "補完リストから SELECT の列を一括挿入するときに、データベースの列コメントを含めます。",
+    autoKeywordCase: "入力時にキーワードの大文字小文字を自動変換",
+    autoKeywordCaseDescription: "スペース、記号、改行を入力したとき、直前に入力したキーワードを SQL フォーマッターのキーワード大小文字設定に合わせて自動変換します。",
     sqlServerSpaceConfirmsCompletion: "スペースで補完を確定（SQL Server 方式）",
     sqlServerSpaceConfirmsCompletionDescription: "補完リストの表示中にスペースを押すと、選択中のキーワード・テーブル・列を確定し、空白を保持します。Enter と Tab は従来どおり動作します。",
     functionCompletionIncludeParams: "関数補完に引数プレースホルダーを含める",

@@ -407,6 +407,7 @@ describe("settings search", () => {
 
   it("registers every fixed settings control that needs a dedicated search result", () => {
     const expectedControls: ReadonlyArray<Pick<SettingsSearchDefinition, "titleKey" | "category" | "targetId">> = [
+      { titleKey: "settings.autoKeywordCase", category: "editor", targetId: "editor" },
       { titleKey: "settings.savedSqlOpenTarget", category: "editor", targetId: "editor" },
       { titleKey: "settings.confirmDangerousSqlExecution", category: "editor", targetId: "editor" },
       { titleKey: "settings.continueOnErrorOnBatch", category: "editor", targetId: "editor" },

@@ -65,6 +65,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     keys: under("pluginPlatform", ["marketplaceStatus.requires-newer-dbx", "marketplaceStatus.incompatible", "requiresNewerDbx", "requiresNewerDbxWithRequirement", "pluginVersionIncompatible", "updateBlockedByNewerDbx", "upgradeDbx"]),
   },
   { feature: "editor find whole word (#13287)", keys: ["editor.search.wholeWord"], translated: true },
+  { feature: "typing-time keyword case", keys: under("settings", ["autoKeywordCase", "autoKeywordCaseDescription"]), translated: true },
   { feature: "quick open", keys: ["quickOpen.*", "settings.shortcutGlobalSearch"] },
   {
     feature: "editor tab context menu",

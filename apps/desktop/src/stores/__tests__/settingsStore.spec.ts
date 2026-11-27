@@ -573,6 +573,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sqlServerSpaceConfirmsCompletion: "yes" as unknown as boolean }).sqlServerSpaceConfirmsCompletion).toBe(false);
   });
 
+  it("keeps typing-time keyword case conversion off by default and preserves an explicit opt-in", () => {
+    expect(normalizeEditorSettings({}).autoKeywordCase).toBe(false);
+    expect(normalizeEditorSettings({ autoKeywordCase: true }).autoKeywordCase).toBe(true);
+    expect(normalizeEditorSettings({ autoKeywordCase: "yes" as unknown as boolean }).autoKeywordCase).toBe(false);
+  });
+
   it("enables function completion parameter examples by default and preserves an explicit opt-out", () => {
     expect(DEFAULT_EDITOR_SETTINGS.functionCompletionIncludeParams).toBe(true);
     expect(normalizeEditorSettings({}).functionCompletionIncludeParams).toBe(true);

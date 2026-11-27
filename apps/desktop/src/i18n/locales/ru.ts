@@ -11605,6 +11605,8 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "При выборе автодополнения таблицы в FROM или JOIN вставлять сгенерированный псевдоним, например order_items AS oi.",
     batchColumnSelectionIncludeComments: "Добавлять комментарии при вставке выбранных столбцов",
     batchColumnSelectionIncludeCommentsDescription: "Включать комментарии столбцов базы данных при массовой вставке столбцов SELECT из списка автодополнения.",
+    autoKeywordCase: "Автоматически менять регистр ключевых слов при вводе",
+    autoKeywordCaseDescription: "После пробела, знака препинания или перевода строки только что введённое ключевое слово приводится к регистру из настроек SQL-форматтера.",
     sqlServerSpaceConfirmsCompletion: "Пробел подтверждает автодополнение (стиль SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Пока список автодополнения открыт, нажатие пробела принимает выбранное ключевое слово, таблицу или столбец и сохраняет пробел. Enter и Tab работают как раньше.",
     functionCompletionIncludeParams: "Примеры параметров при автодополнении функций",

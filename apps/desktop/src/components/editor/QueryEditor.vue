@@ -75,7 +75,7 @@ import { statementNavigationTarget, type StatementNavigationDirection } from "@/
 
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 
-import { canFormatSqlForDatabaseType, formatSqlText, compressSqlText, type SqlFormatterDiagnostic } from "@/lib/sql/sqlFormatter";
+import { canFormatSqlForDatabaseType, formatSqlText, compressSqlText, sqlFormatDialectForDbType, type SqlFormatterDiagnostic } from "@/lib/sql/sqlFormatter";
 import { applySqlKeywordCase, loadSqlKeywordSpans } from "@/lib/sql/sqlKeywordCase";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { restoreSqlFromSourcePaste } from "@/lib/sql/sqlSourcePaste";
@@ -142,6 +142,7 @@ import { createQueryEditorMultiCursorMouseSelection } from "@/lib/editor/queryEd
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 
 import { keepQueryEditorPasteCaretOnLastContentLine } from "@/lib/editor/queryEditorClipboardPaste";
+import { createQueryEditorKeywordCaseOnTypeFilter } from "@/lib/editor/queryEditorKeywordCaseOnType";
 import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCaretResync";
 
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
@@ -2344,6 +2345,16 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
           if (props.hideExecutionControls || settingsStore.editorSettings.executeMode !== "current" || queryEditorSelectionLanguage() !== "sql" || !supportsExecutionTargetPicker(props.databaseType)) return transaction;
           return keepQueryEditorPasteCaretOnLastContentLine(transaction);
         }),
+        EditorState.transactionFilter.of(
+          createQueryEditorKeywordCaseOnTypeFilter({
+            // Same language gate as the toolbar's a/A toggle: Mongo/ES/Redis
+            // documents can lex as SQL without being SQL.
+            enabled: () => queryEditorSelectionLanguage() === "sql" && settingsStore.editorSettings.autoKeywordCase,
+            keywordCase: () => settingsStore.editorSettings.sqlFormatter.keywordCase,
+            dialect: () => props.formatDialect ?? sqlFormatDialectForDbType(props.databaseType),
+            databaseType: () => props.databaseType,
+          }),
+        ),
         cmSearch({
           top: true,
           createPanel: () => {

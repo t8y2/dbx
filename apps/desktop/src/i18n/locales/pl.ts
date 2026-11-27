@@ -9788,6 +9788,8 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "Podczas wybierania uzupełnienia tabeli w klauzuli FROM lub JOIN wstawiaj wygenerowany alias, np. order_items AS oi.",
     batchColumnSelectionIncludeComments: "Dołączaj komentarze podczas wstawiania wybranych kolumn",
     batchColumnSelectionIncludeCommentsDescription: "Dołączaj komentarze kolumn bazy danych podczas zbiorczego wstawiania kolumn SELECT z listy autouzupełniania.",
+    autoKeywordCase: "Automatycznie zmieniaj wielkość liter słów kluczowych podczas pisania",
+    autoKeywordCaseDescription: "Po wpisaniu spacji, znaku interpunkcyjnego lub przejścia do nowej linii słowo kluczowe zostanie przekonwertowane na wielkość liter z ustawień formatera SQL.",
     sqlServerSpaceConfirmsCompletion: "Spacja zatwierdza uzupełnienie (styl SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Gdy lista uzupełniania jest otwarta, naciśnięcie Spacji akceptuje wybrane słowo kluczowe, tabelę lub kolumnę i zachowuje spację na końcu. Enter i Tab działają bez zmian.",
     functionCompletionIncludeParams: "Dołączaj przykłady parametrów w uzupełnianiu funkcji",

@@ -171,6 +171,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "tableCompletionSchemaQualification",
     "insertSpaceAfterCompletion",
     "sqlServerSpaceConfirmsCompletion",
+    "autoKeywordCase",
     "functionCompletionIncludeParams",
     "sequenceCompletionEnabled",
     "sortCompletionColumnsAlphabetically",

@@ -55,6 +55,8 @@ Open **Settings → SQL Formatter**. Form mode exposes:
 | Newline before semicolon | Places a statement-ending semicolon on a new line |
 | Parameter types | Recognizes positional, numbered, named, quoted, or custom-regex parameters |
 
+**Typing-time keyword case**: with **Auto-convert keyword case while typing** enabled in **Settings → Editor**, entering a space, a punctuation character (comma, parenthesis, ...), or a line break re-cases the keyword just typed to the keyword case above, without running a full format. Only keywords are touched — function names, data types, string literals, comments, quoted identifiers and qualified segments such as `t.select` are left alone, and `preserve` disables the conversion.
+
 **Restore Defaults** restores the formatter settings defined by the current DBX build. Click **Apply** in the settings dialog to persist changes.
 
 ## Separate SELECT, INSERT, and UPDATE Rules

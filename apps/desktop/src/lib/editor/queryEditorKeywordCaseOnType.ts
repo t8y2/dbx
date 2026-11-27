@@ -1,0 +1,179 @@
+import type { ChangeSet, EditorState, Transaction, TransactionSpec } from "@codemirror/state";
+import { StreamLanguage, language } from "@codemirror/language";
+import { casedKeywordBefore, type SqlKeywordCaseMode } from "@/lib/sql/sqlKeywordCase";
+import { isSqlCommentContext, isSqlStringLiteralContext } from "@/lib/sql/sqlCompletion";
+import { resolveLexicalLeafFromSyntaxTree, resolveStatementWindowFromSyntaxTree } from "@/lib/sql/sqlSyntaxTreeWindow";
+import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
+import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
+import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import type { DatabaseType } from "@/types/database";
+
+/**
+ * Re-casing the keyword just typed, the way DBeaver's
+ * `SQL_FORMAT_KEYWORD_CASE_AUTO` does: when a space, punctuation character or
+ * line break is entered, the word right before it is rewritten to
+ * `sqlFormatter.keywordCase` — in the same update as the typed character, so one
+ * keystroke stays one undo step.
+ *
+ * A transaction filter (rather than a Space keymap branch or an input handler)
+ * because the three trigger kinds reach the document through different paths —
+ * Space through the completion keymap or the browser input event, Enter through
+ * `insertQueryEditorNewline` or CodeMirror's newline command — and the filter is
+ * the one hook that sees all of them. `keepQueryEditorPasteCaretOnLastContentLine`
+ * already establishes the `[transaction, { ...sequential: true }]` shape used
+ * here for the follow-up edit.
+ */
+
+/** Statement windows past this size are left alone: tokenizing them per keypress is not free. */
+const KEYWORD_CASE_WINDOW_MAX_CHARS = 16 * 1024;
+
+/**
+ * Documents past this size are also left alone when the syntax tree cannot
+ * provide the statement window; the scanner fallback needs the whole text.
+ */
+const KEYWORD_CASE_FULL_DOC_MAX_CHARS = 200_000;
+
+const IDENTIFIER_CHARACTER = /[\p{L}\p{N}_$#]/u;
+
+/** The word the trigger character is terminating, at the end of the text before it. */
+const TRAILING_WORD = /[\p{L}_][\p{L}\p{N}_$#]*$/u;
+
+/** Characters that open a quoted identifier/literal or a qualifier segment. */
+const NON_KEYWORD_PRECEDING_CHARACTERS = new Set(['"', "`", "'", "[", "."]);
+
+function hasLezerSqlGrammar(state: EditorState): boolean {
+  const mounted = state.facet(language);
+  return !!mounted && !(mounted instanceof StreamLanguage);
+}
+
+export interface QueryEditorKeywordCaseOnTypeOptions {
+  /** The user's `autoKeywordCase` preference; read per transaction so toggling it applies immediately. */
+  enabled: () => boolean;
+  /** The formatter's keyword case; `preserve` disables conversion. */
+  keywordCase: () => SqlKeywordCaseMode | "preserve";
+  dialect: () => SqlFormatDialect;
+  databaseType: () => DatabaseType | undefined;
+}
+
+/**
+ * Whether `text` is a character whose entry should convert the word before it.
+ *
+ * Mirrors DBeaver: a line break, or exactly one character that cannot continue
+ * an identifier. A dot is excluded on purpose — `t.select` is a qualified
+ * identifier, and recasing the segment before the dot would rewrite a column
+ * name (the one deliberate difference from DBeaver).
+ */
+function isKeywordCaseTrigger(text: string): boolean {
+  if (text === "\n" || text === "\r" || text === "\r\n") return true;
+  // Indented newline commands insert the line break plus the indent in one edit.
+  if (/^\r?\n/.test(text)) return true;
+  if (text.length !== 1) return false;
+  if (IDENTIFIER_CHARACTER.test(text)) return false;
+  return text !== ".";
+}
+
+/**
+ * Start offset of the statement around `cursor`, or `null` when it cannot be
+ * resolved cheaply or the cursor sits in a comment / string literal.
+ *
+ * The syntax tree is preferred — it is already parsed, needs no document string
+ * and gives the lexical context in the same call. When the document is too large
+ * for the grammar (StreamLanguage fallback) or has not been parsed up to the
+ * cursor yet, the bounded scanner runs on the full text, which is only
+ * affordable for ordinary-sized documents.
+ */
+function resolveKeywordCaseWindowStart(state: EditorState, cursor: number, options: QueryEditorKeywordCaseOnTypeOptions): number | null {
+  // The node names the tree helpers read belong to the Lezer SQL grammar; with no
+  // language mounted, or the StreamLanguage fallback used for oversized documents,
+  // their answers describe a different tree (see sqlSyntaxTreeWindow.ts).
+  const tree = hasLezerSqlGrammar(state) ? resolveStatementWindowFromSyntaxTree(state, cursor) : null;
+  if (tree) {
+    const leaf = resolveLexicalLeafFromSyntaxTree(state, cursor);
+    if (!leaf) return null;
+    if (leaf.inLineComment || leaf.inBlockComment || leaf.inStringLiteral) return null;
+    return tree.from;
+  }
+
+  if (state.doc.length > KEYWORD_CASE_FULL_DOC_MAX_CHARS) return null;
+  const sql = state.doc.toString();
+  const databaseType = options.databaseType();
+  const contextOptions = { databaseType, editorState: state };
+  if (isSqlStringLiteralContext(sql, cursor, contextOptions) || isSqlCommentContext(sql, cursor, contextOptions)) return null;
+  return expandToSqlStatementWindow(sql, cursor, cursor, resolveSqlDialectId({ databaseType })).from;
+}
+
+interface TypedInsert {
+  text: string;
+  /** Old-document offset the text was inserted at. */
+  from: number;
+}
+
+/** The typed text when the transaction is exactly one pure insertion, otherwise `null`. */
+function singleTypedInsert(changes: ChangeSet): TypedInsert | null {
+  let result: TypedInsert | null = null;
+  let count = 0;
+  changes.iterChanges((from, to, _insertedFrom, _insertedTo, inserted) => {
+    count += 1;
+    if (count > 1) return;
+    // Only a pure insertion qualifies; a replacement is not typing a character.
+    if (from !== to) return;
+    result = { text: inserted.toString(), from };
+  });
+  return count === 1 ? result : null;
+}
+
+export function createQueryEditorKeywordCaseOnTypeFilter(options: QueryEditorKeywordCaseOnTypeOptions): (transaction: Transaction) => TransactionSpec | readonly TransactionSpec[] {
+  return (transaction: Transaction): TransactionSpec | readonly TransactionSpec[] => {
+    if (!transaction.docChanged || transaction.startState.readOnly) return transaction;
+    if (!transaction.isUserEvent("input")) return transaction;
+    // Paste/drop/replace/IME-composition inserts must not rewrite surrounding text.
+    if (transaction.isUserEvent("input.paste") || transaction.isUserEvent("input.drop") || transaction.isUserEvent("input.replace") || transaction.isUserEvent("input.type.compose")) return transaction;
+    if (!options.enabled()) return transaction;
+    const mode = options.keywordCase();
+    if (mode !== "upper" && mode !== "lower") return transaction;
+
+    const state = transaction.startState;
+    // Multi-cursor and non-empty selections belong to block editing, not typing.
+    if (state.selection.ranges.length !== 1 || !state.selection.main.empty) return transaction;
+
+    const insert = singleTypedInsert(transaction.changes);
+    if (!insert || insert.from <= 0) return transaction;
+    if (!isKeywordCaseTrigger(insert.text)) return transaction;
+
+    const typed = insert.text;
+    const wordEnd = insert.from;
+    const lineFrom = state.doc.lineAt(wordEnd).from;
+    const word = TRAILING_WORD.exec(state.sliceDoc(lineFrom, wordEnd))?.[0];
+    if (!word) return transaction;
+    const wordFrom = wordEnd - word.length;
+    const preceding = wordFrom > 0 ? state.sliceDoc(wordFrom - 1, wordFrom) : "";
+    // Quoted (`"select"`, `` `select` ``, `[select]`) or qualified (`t.select`) segments are identifiers.
+    if (NON_KEYWORD_PRECEDING_CHARACTERS.has(preceding)) return transaction;
+
+    const windowFrom = resolveKeywordCaseWindowStart(state, wordEnd, options);
+    if (windowFrom === null) return transaction;
+    const windowText = state.sliceDoc(windowFrom, wordEnd);
+    if (windowText.length > KEYWORD_CASE_WINDOW_MAX_CHARS) return transaction;
+
+    const replacement = casedKeywordBefore(windowText, options.dialect(), mode);
+    if (!replacement) return transaction;
+
+    return [
+      transaction,
+      {
+        changes: {
+          from: windowFrom + replacement.from,
+          to: windowFrom + replacement.to,
+          insert: replacement.insert,
+        },
+        // A transaction without its own selection (programmatic inserts) would
+        // otherwise keep the pre-typing caret, which never advances past the
+        // character just inserted; real typing carries its own selection and is
+        // mapped through the change below.
+        ...(transaction.selection ? {} : { selection: { anchor: insert.from + typed.length } }),
+        userEvent: "input.type",
+        sequential: true,
+      },
+    ];
+  };
+}

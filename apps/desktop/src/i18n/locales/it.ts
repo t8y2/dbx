@@ -9966,6 +9966,8 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "Quando scegli una tabella in FROM o JOIN, inserisce un alias generato come order_items AS oi.",
     batchColumnSelectionIncludeComments: "Includi i commenti quando inserisci le colonne selezionate",
     batchColumnSelectionIncludeCommentsDescription: "Include i commenti delle colonne del database quando inserisci più colonne SELECT dall'elenco di completamento.",
+    autoKeywordCase: "Converti automaticamente il caso delle parole chiave durante la digitazione",
+    autoKeywordCaseDescription: "Dopo uno spazio, un segno di punteggiatura o un a capo, la parola chiave appena digitata viene convertita nel caso configurato nel formattatore SQL.",
     sqlServerSpaceConfirmsCompletion: "Conferma il completamento con lo spazio (stile SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Con l'elenco dei suggerimenti aperto, premendo spazio si accetta la parola chiave, la tabella o la colonna selezionata mantenendo lo spazio. Invio e Tab restano invariati.",
     functionCompletionIncludeParams: "Includi esempi di parametri nel completamento funzioni",

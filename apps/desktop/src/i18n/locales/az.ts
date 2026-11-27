@@ -8160,6 +8160,7 @@ export default withEnglishFallback({
     dataGridCrosshairRowBg: "Sətir vurğu rəngi",
     dataGridCrosshairColBg: "Sütun vurğu rəngi",
     dataGridZebraRowBg: "Zolaq rəngi",
+    dataGridResultBackground: "Sorğu nəticəsinin fonu",
     infiniteScroll: "Sonsuz sürüşdürmə ilə yükləmə",
     autoCalculateTotalRows: "Ümumi sətir sayını avtomatik hesabla",
     autoCalculateTotalRowsDescription: "Uyğun gələn sətirlərin ümumi sayını göstərmək üçün hər sorğudan sonra COUNT(*) avtomatik işlədilir. Böyük sorğuların sürətini qorumaq üçün standart olaraq söndürülüb — ehtiyac olduqda nəticənin alt hissəsindən hesablayın.",

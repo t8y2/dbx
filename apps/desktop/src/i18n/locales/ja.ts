@@ -9905,6 +9905,7 @@ export default withEnglishFallback({
     dataGridCrosshairRowBg: "行ハイライト色",
     dataGridCrosshairColBg: "列ハイライト色",
     dataGridZebraRowBg: "縞模様の色",
+    dataGridResultBackground: "クエリ結果の背景色",
     tableColumnTemplateFields: "新規テーブルのプリセット列",
     tableColumnTemplateFieldsDescription: "データベース種別を選択し、新規テーブル作成時に使うプリセット列の型を設定します。",
     tableColumnTemplateAdd: "列を追加",

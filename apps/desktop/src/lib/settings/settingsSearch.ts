@@ -875,6 +875,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "data-data-grid-crosshair-row-bg", category: "data", titleKey: "settings.dataGridCrosshairRowBg", targetId: "data-grid-crosshair" },
   { id: "data-data-grid-crosshair-col-bg", category: "data", titleKey: "settings.dataGridCrosshairColBg", targetId: "data-grid-crosshair" },
   { id: "data-data-grid-zebra-row-bg", category: "data", titleKey: "settings.dataGridZebraRowBg", targetId: "data-grid-striped-rows" },
+  { id: "data-data-grid-result-background", category: "data", titleKey: "settings.dataGridResultBackground", targetId: "data-grid-result-background" },
   { id: "data-redis-database-display-limit", category: "data", titleKey: "settings.redisDatabaseDisplayLimit", descriptionKey: "settings.redisDatabaseDisplayLimitDescription", targetId: "data" },
   { id: "data-csv-quote-mode", category: "data", titleKey: "settings.csvQuoteMode", descriptionKey: "settings.csvQuoteModeDescription", targetId: "data", keywordKeys: ["settings.csvQuoteModeAll", "settings.csvQuoteModeNecessary"] },
   { id: "data-csv-null-mode", category: "data", titleKey: "settings.csvNullMode", descriptionKey: "settings.csvNullModeDescription", targetId: "data", keywordKeys: ["settings.csvNullModeMarker", "settings.csvNullModeEmpty"] },

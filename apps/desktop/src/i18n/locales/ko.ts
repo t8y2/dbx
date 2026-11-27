@@ -9651,6 +9651,7 @@ export default withEnglishFallback({
     dataGridCrosshairRowBg: "행 강조 색상",
     dataGridCrosshairColBg: "열 강조 색상",
     dataGridZebraRowBg: "줄무늬 색상",
+    dataGridResultBackground: "쿼리 결과 배경색",
     infiniteScroll: "무한 스크롤 로딩",
     autoCalculateTotalRows: "전체 행 수 자동 집계",
     autoCalculateTotalRowsDescription: "각 쿼리 후 자동으로 COUNT(*)를 실행하여 일치하는 전체 행 수를 표시합니다. 대규모 쿼리를 빠르게 유지하기 위해 기본적으로 꺼져 있으며, 결과 푸터에서 요청 시 집계할 수 있습니다.",

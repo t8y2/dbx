@@ -9764,6 +9764,7 @@ export default withEnglishFallback({
     dataGridCrosshairRowBg: "Color de fila resaltada",
     dataGridCrosshairColBg: "Color de columna resaltada",
     dataGridZebraRowBg: "Color de fila alterna",
+    dataGridResultBackground: "Fondo de los resultados de consulta",
     infiniteScroll: "Carga de desplazamiento infinito",
     autoCalculateTotalRows: "Calcular automáticamente el total de filas",
     autoCalculateTotalRowsDescription: "Ejecuta COUNT(*) automáticamente tras cada consulta para mostrar el total de filas coincidentes. Desactivado por defecto para mantener rápidas las consultas grandes; puedes calcularlo cuando quieras desde el pie de resultados.",

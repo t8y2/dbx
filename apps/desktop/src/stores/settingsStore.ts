@@ -1157,6 +1157,7 @@ export interface EditorSettings {
   dataGridCrosshairColBg: string;
   dataGridStripedRows: boolean;
   dataGridZebraRowBg: string;
+  dataGridResultBackground: string;
   dataGridMultiRowTranspose: boolean;
   dataGridHideNullColumns: boolean;
   dataGridHideEmptyColumns: boolean;
@@ -1577,6 +1578,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridCrosshairColBg: "",
   dataGridStripedRows: true,
   dataGridZebraRowBg: "",
+  dataGridResultBackground: "",
   dataGridMultiRowTranspose: false,
   dataGridHideNullColumns: false,
   dataGridHideEmptyColumns: false,
@@ -1806,6 +1808,11 @@ export function normalizeTabMaxWidth(value: unknown): number {
 
 function normalizeTabGroupRows(value: unknown): TabGroupRowMode {
   return TAB_GROUP_ROW_MODES.includes(value as TabGroupRowMode) ? (value as TabGroupRowMode) : DEFAULT_EDITOR_SETTINGS.tabGroupRows;
+}
+
+function normalizeDataGridResultBackground(value: unknown): string {
+  const color = typeof value === "string" ? value.trim() : "";
+  return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : "";
 }
 
 function normalizeCellDetailPanelLayout(value: unknown): CellDetailPanelLayout {
@@ -2358,6 +2365,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridCrosshairColBg: typeof settings.dataGridCrosshairColBg === "string" ? settings.dataGridCrosshairColBg.trim() : DEFAULT_EDITOR_SETTINGS.dataGridCrosshairColBg,
     dataGridStripedRows: typeof settings.dataGridStripedRows === "boolean" ? settings.dataGridStripedRows : DEFAULT_EDITOR_SETTINGS.dataGridStripedRows,
     dataGridZebraRowBg: typeof settings.dataGridZebraRowBg === "string" ? settings.dataGridZebraRowBg.trim() : DEFAULT_EDITOR_SETTINGS.dataGridZebraRowBg,
+    dataGridResultBackground: normalizeDataGridResultBackground(settings.dataGridResultBackground),
     dataGridMultiRowTranspose: settings.dataGridMultiRowTranspose === true,
     dataGridHideNullColumns: settings.dataGridHideNullColumns === true,
     dataGridHideEmptyColumns: settings.dataGridHideEmptyColumns === true,
@@ -3396,6 +3404,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridCrosshairColBg !== undefined) editorSettings.value.dataGridCrosshairColBg = typeof partial.dataGridCrosshairColBg === "string" ? partial.dataGridCrosshairColBg.trim() : DEFAULT_EDITOR_SETTINGS.dataGridCrosshairColBg;
     if (partial.dataGridStripedRows !== undefined) editorSettings.value.dataGridStripedRows = typeof partial.dataGridStripedRows === "boolean" ? partial.dataGridStripedRows : DEFAULT_EDITOR_SETTINGS.dataGridStripedRows;
     if (partial.dataGridZebraRowBg !== undefined) editorSettings.value.dataGridZebraRowBg = typeof partial.dataGridZebraRowBg === "string" ? partial.dataGridZebraRowBg.trim() : DEFAULT_EDITOR_SETTINGS.dataGridZebraRowBg;
+    if (partial.dataGridResultBackground !== undefined) editorSettings.value.dataGridResultBackground = normalizeDataGridResultBackground(partial.dataGridResultBackground);
     if (partial.dataGridMultiRowTranspose !== undefined) editorSettings.value.dataGridMultiRowTranspose = partial.dataGridMultiRowTranspose === true;
     if (partial.dataGridHideNullColumns !== undefined) editorSettings.value.dataGridHideNullColumns = partial.dataGridHideNullColumns === true;
     if (partial.dataGridHideEmptyColumns !== undefined) editorSettings.value.dataGridHideEmptyColumns = partial.dataGridHideEmptyColumns === true;

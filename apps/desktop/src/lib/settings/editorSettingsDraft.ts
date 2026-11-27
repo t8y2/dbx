@@ -107,6 +107,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "dataGridCrosshairColBg",
   "dataGridStripedRows",
   "dataGridZebraRowBg",
+  "dataGridResultBackground",
   "pageSize",
   "tableOpenPageSize",
   "tableOpenSortMode",

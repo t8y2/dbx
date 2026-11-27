@@ -9509,6 +9509,7 @@ export default withEnglishFallback({
     dataGridCrosshairRowBg: "Colore riga evidenziata",
     dataGridCrosshairColBg: "Colore colonna evidenziata",
     dataGridZebraRowBg: "Colore riga alterna",
+    dataGridResultBackground: "Sfondo dei risultati della query",
     infiniteScroll: "Caricamento a scorrimento infinito",
     autoCalculateTotalRows: "Calcola automaticamente il totale delle righe",
     autoCalculateTotalRowsDescription: "Esegue COUNT(*) automaticamente dopo ogni query per mostrare il totale delle righe corrispondenti. Disattivato per impostazione predefinita per mantenere veloci le query grandi; puoi calcolarlo all'occorrenza dal piè di pagina dei risultati.",

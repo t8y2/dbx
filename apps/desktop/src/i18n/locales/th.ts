@@ -11496,6 +11496,7 @@ export default withEnglishFallback({
     dataGridCrosshairRowBg: "สีไฮไลต์แถว",
     dataGridCrosshairColBg: "สีไฮไลต์คอลัมน์",
     dataGridZebraRowBg: "สีแถบสลับ",
+    dataGridResultBackground: "สีพื้นหลังผลลัพธ์การสืบค้น",
     infiniteScroll: "โหลดด้วยการเลื่อนแบบไม่สิ้นสุด",
     autoCalculateTotalRows: "คำนวณจำนวนแถวทั้งหมดอัตโนมัติ",
     autoCalculateTotalRowsDescription: "เรียกใช้ COUNT(*) อัตโนมัติหลังแต่ละ Query เพื่อแสดงจำนวนแถวที่ตรงกัน ปิดไว้โดยค่าเริ่มต้นเพื่อให้ Query ขนาดใหญ่เร็วขึ้น — คำนวณเมื่อจำเป็นจากส่วนท้ายผลลัพธ์",

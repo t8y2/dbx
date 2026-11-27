@@ -9883,6 +9883,7 @@ export default withEnglishFallback({
     dataGridCrosshairRowBg: "Cor de destaque da linha",
     dataGridCrosshairColBg: "Cor de destaque da coluna",
     dataGridZebraRowBg: "Cor da linha alternada",
+    dataGridResultBackground: "Plano de fundo dos resultados da consulta",
     infiniteScroll: "Carregamento por rolagem infinita",
     autoCalculateTotalRows: "Calcular automaticamente o total de linhas",
     autoCalculateTotalRowsDescription: "Executa COUNT(*) automaticamente após cada consulta para mostrar o total de linhas correspondentes. Desativado por padrão para manter consultas grandes rápidas; você pode calculá-lo quando quiser no rodapé dos resultados.",

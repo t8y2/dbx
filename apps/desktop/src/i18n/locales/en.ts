@@ -10959,6 +10959,7 @@ export default {
     dataGridCrosshairRowBg: "Row highlight color",
     dataGridCrosshairColBg: "Column highlight color",
     dataGridZebraRowBg: "Stripe Color",
+    dataGridResultBackground: "Query result background",
     infiniteScroll: "Infinite scroll loading",
     autoCalculateTotalRows: "Auto-calculate total row count",
     autoCalculateTotalRowsDescription: "Run COUNT(*) automatically after each query to show the total matching rows. Off by default to keep large queries fast — calculate it on demand from the result footer.",

@@ -751,7 +751,7 @@ async function loadGlobalTableSearchIndexes(shouldCancel: () => boolean, onProgr
   return results.flat();
 }
 
-function filterGloballyIndexedTables(nodes: TreeNode[]): TreeNode[] {
+function filterGloballyIndexedTables(nodes: TreeNode[], literalConnectionMatches: TreeNode[] = []): TreeNode[] {
   if (!deferredSearchQuery.value) return nodes;
   const qualified = qualifiedGlobalSearch.value;
   const matcher = createSidebarLabelMatcher(qualified?.name ?? deferredSearchQuery.value, { regexMode: regexMode.value, matchMode: searchMatchMode.value });
@@ -762,9 +762,8 @@ function filterGloballyIndexedTables(nodes: TreeNode[]): TreeNode[] {
       entries: scope.entries.filter((entry) => (!qualified || qualifiedTableQueryMatchesScope(qualified, { database: scope.database, schema: entry.schema ?? scope.schema, catalog: scope.catalog })) && (!!matcher(entry.name) || (includeComment && !!matcher(entry.comment || "")))),
     }))
     .filter((scope) => scope.entries.length > 0);
-  // A qualified query must surface only the matched schema, so do not merge the
-  // rest of the live tree back in the way an unqualified label search would.
-  return mergeSidebarRegexIndexScopes(nodes, matchingScopes, store.resolveSidebarSearchDetailTable, { scopesOnly: !!qualified });
+  // Keep the matched namespace and connections that match the literal query.
+  return mergeSidebarRegexIndexScopes(nodes, matchingScopes, store.resolveSidebarSearchDetailTable, { scopesOnly: !!qualified, literalConnectionMatches });
 }
 
 watch([deferredSearchQuery, regexMode, searchMatchMode, () => store.sidebarTableSearchIndexInvalidation.revision, () => [...store.connectedIds].join("\0")], store.clearSidebarSearchDetailTables, { flush: "sync" });
@@ -858,6 +857,7 @@ watch(
   },
 );
 
+const connectionSearchNodeTypes = new Set<TreeNodeType>(["connection"]);
 const filteredNodes = computed(() => {
   let nodes = displayedTreeNodes.value;
   if (showConnectedConnectionsOnly.value) {
@@ -866,19 +866,22 @@ const filteredNodes = computed(() => {
 
   if (!isTreeSearchFiltering.value) nodes = filterConnectionIndexes(nodes, indexSearchConnectionIds.value, connectionIndexSearchQueries.value);
   nodes = filterLocallySearchedTables(nodes, { enabled: settingsStore.editorSettings.sidebarTableSearchLocal, queries: store.sidebarTableSearchQueries, indexedResults: localTableSearchResults.value });
-  nodes = filterGloballyIndexedTables(nodes);
-  nodes = mergeSidebarRemoteSearchResults(nodes, remoteSearchResults.value);
-  if (settingsStore.editorSettings.sidebarObjectDisplay === "simple" && settingsStore.editorSettings.sidebarSimpleHideIndexes) nodes = hideSimpleSidebarIndexes(nodes);
-
-  // A qualified `schema.table` query is resolved entirely by the index scopes
-  // above; feeding the dotted text to the label filter would prune those results.
-  const q = qualifiedGlobalSearch.value ? "" : deferredSearchQuery.value;
-  nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value, {
+  const qualified = qualifiedGlobalSearch.value;
+  const treeSearchOptions = {
     regexMode: regexMode.value,
     matchMode: searchMatchMode.value,
     searchExpandedIds: searchExpandedIds.value,
-    resolveLabel: (node) => (node.type === "nacos-access-control" ? t("nacos.accessControlSidebarLabel") : node.label),
-  });
+    resolveLabel: (node: TreeNode) => (node.type === "nacos-access-control" ? t("nacos.accessControlSidebarLabel") : node.label),
+  };
+  // Dotted text can also be a literal part of a connection name, such as an IP address.
+  const literalConnectionMatches = qualified && (!searchableNodeTypes.value || searchableNodeTypes.value.has("connection")) ? filterSidebarTree(nodes, deferredSearchQuery.value, searchCollapsedIds.value, connectionSearchNodeTypes, treeSearchOptions) : [];
+  nodes = filterGloballyIndexedTables(nodes, literalConnectionMatches);
+  nodes = mergeSidebarRemoteSearchResults(nodes, remoteSearchResults.value);
+  if (settingsStore.editorSettings.sidebarObjectDisplay === "simple" && settingsStore.editorSettings.sidebarSimpleHideIndexes) nodes = hideSimpleSidebarIndexes(nodes);
+
+  // Qualified matches have already been filtered by name and namespace.
+  const q = qualified ? "" : deferredSearchQuery.value;
+  nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value, treeSearchOptions);
   if (q && !regexMode.value) {
     nodes = filterSidebarSearchRootsByConnectionState(nodes, store.connectedIds);
   }

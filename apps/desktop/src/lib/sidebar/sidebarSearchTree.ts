@@ -334,7 +334,7 @@ function mergeRegexTreeNodes(liveNodes: readonly TreeNode[], indexedNodes: reado
  * database, schema, and table-group ancestors are synthesized from manifest
  * scope metadata. Duplicate table identities prefer the narrowest scope.
  */
-export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], scopes: readonly SidebarRegexIndexScope[], resolveTable: (node: TreeNode) => TreeNode = (node) => node, options?: { scopesOnly?: boolean }): TreeNode[] {
+export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], scopes: readonly SidebarRegexIndexScope[], resolveTable: (node: TreeNode) => TreeNode = (node) => node, options?: { scopesOnly?: boolean; literalConnectionMatches?: readonly TreeNode[] }): TreeNode[] {
   const selected = new Map<string, { rank: number; scope: SidebarRegexIndexScope; entry: TableInfo }>();
   const rankFor = (scope: SidebarRegexIndexScope) => (scope.nodeType.startsWith("group-") ? 3 : scope.nodeType === "schema" ? 2 : 1);
   for (const scope of scopes) {
@@ -399,7 +399,7 @@ export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], sco
     }
   }
 
-  let merged = options?.scopesOnly ? [] : [...liveNodes];
+  let merged = options?.scopesOnly ? [...(options.literalConnectionMatches ?? [])] : [...liveNodes];
   // Same-id nodes can live in different branches (database "a:b" vs schema
   // "b" under database "a"), so every merge target is matched by id plus its
   // composite database context, never by the bare id.
@@ -420,9 +420,8 @@ export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], sco
   for (const { node, identity } of anchoredParents) {
     const result = mergeRoot(merged, node, identity);
     if (result.found) merged = result.nodes;
-    // A qualified query starts from an empty tree, so a scope whose parent is
-    // not in the live tree (legacy/local-mode indexes record no path) would
-    // otherwise disappear entirely; surface it at the root instead.
+    // The scoped projection can omit a parent, including for indexes without
+    // a recorded path. Keep its matched scope visible at the root.
     else if (options?.scopesOnly) merged = mergeRegexTreeNodes(merged, [node]);
   }
   return merged;

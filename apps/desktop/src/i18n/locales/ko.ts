@@ -11124,7 +11124,7 @@ export default withEnglishFallback({
     toolbarGroup_left: "주요 작업 표시줄 및 추가 메뉴",
     toolbarPinItem: "툴바에 {item} 고정",
     completionAutoActivationDelay: "자동 완성 자동 활성화 지연(밀리초)",
-    completionAutoActivationDelayDescription: "입력 후 자동 완성 후보가 표시되기까지의 지연 시간입니다. 기본값은 500밀리초이며, 값을 높이면 연속 입력 시 자동 완성 후보가 자주 표시되어 편집을 방해하는 것을 방지할 수 있습니다. 0은 즉시 표시를 의미합니다.",
+    completionAutoActivationDelayDescription: "입력 후 자동 완성 후보가 표시되기까지의 지연 시간입니다. 기본값은 50밀리초이며, 값을 높이면 연속 입력 시 자동 완성 후보가 자주 표시되어 편집을 방해하는 것을 방지할 수 있습니다. 0은 즉시 표시를 의미합니다.",
     tabWrapMaxRows: "탭 최대 타일 행 수",
     shortcutGoToLastEditLocation: "마지막 편집 위치로 이동",
     shortcutToggleLineCommentAndAdvance: "줄 주석 전환 및 다음 줄로 이동",

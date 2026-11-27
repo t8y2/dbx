@@ -1464,7 +1464,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   snippetTriggerKey: "tab",
   sortCompletionColumnsAlphabetically: true,
   selectFirstCompletionOnOpen: true,
-  completionAutoActivationDelayMs: 500,
+  completionAutoActivationDelayMs: 50,
   wordWrap: false,
   showWhitespace: false,
   tableDdlWordWrap: true,

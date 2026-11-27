@@ -11356,7 +11356,7 @@ export default withEnglishFallback({
     selectFirstCompletionOnOpen: "自动选中首个补全候选",
     selectFirstCompletionOnOpenDescription: "开启后，候选列表弹出时会选中第一项，可用 Enter 或 Tab 接受；关闭后，Enter 换行，Tab 接受第一项。",
     completionAutoActivationDelay: "补全自动激活延迟（毫秒）",
-    completionAutoActivationDelayDescription: "输入后延迟多久弹出补全候选，默认 500 毫秒；调大可避免连续输入时补全频繁弹出干扰编辑，0 表示立即弹出。",
+    completionAutoActivationDelayDescription: "输入后延迟多久弹出补全候选，默认 50 毫秒；调大可避免连续输入时补全频繁弹出干扰编辑，0 表示立即弹出。",
     completionTriggerMode: "SQL 补全触发方式",
     completionMatchMode: "SQL 补全匹配方式",
     completionMatchModeDescription: "选择 SQL 补全候选的匹配过滤规则。",

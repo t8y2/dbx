@@ -11441,7 +11441,7 @@ export default withEnglishFallback({
     toolbarGroup_left: "メイン操作バーとその他のメニュー",
     toolbarPinItem: "{item}をツールバーに固定",
     completionAutoActivationDelay: "補完の自動アクティブ化遅延（ミリ秒）",
-    completionAutoActivationDelayDescription: "入力後に補完候補が表示されるまでの遅延時間。デフォルトは 500 ミリ秒です。値を大きくすると、連続入力時に補完が頻繁に表示されて編集の妨げになるのを防げます。0 は即時に表示することを意味します。",
+    completionAutoActivationDelayDescription: "入力後に補完候補が表示されるまでの遅延時間。デフォルトは 50 ミリ秒です。値を大きくすると、連続入力時に補完が頻繁に表示されて編集の妨げになるのを防げます。0 は即時に表示することを意味します。",
     tabWrapMaxRows: "タブの最大折り返し行数",
     shortcutGoToLastEditLocation: "前回の編集位置に移動",
     shortcutToggleLineCommentAndAdvance: "行コメントを切り替えて次の行へ移動",

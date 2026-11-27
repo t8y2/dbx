@@ -142,7 +142,7 @@ import { createQueryEditorMultiCursorMouseSelection } from "@/lib/editor/queryEd
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 
 import { keepQueryEditorPasteCaretOnLastContentLine } from "@/lib/editor/queryEditorClipboardPaste";
-import { createQueryEditorKeywordCaseOnTypeFilter, deferredKeywordReplacement, type PendingKeywordCase } from "@/lib/editor/queryEditorKeywordCaseOnType";
+import { createDeferredKeywordCaseQueue, createQueryEditorKeywordCaseOnTypeFilter } from "@/lib/editor/queryEditorKeywordCaseOnType";
 import { loadEngine } from "@/lib/sql/layout/internals";
 import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCaretResync";
 
@@ -2224,18 +2224,15 @@ watch(
 );
 
 // A trigger typed before the engine import resolved could not be classified
-// (no engine yet, no readable syntax tree). Apply the authoritative conversion
-// once it resolves, but only if the word is still the one the user typed.
-function queueDeferredKeywordCase(pending: PendingKeywordCase) {
-  void loadEngine().then((engine) => {
-    if (!engine || !settingsStore.editorSettings.autoKeywordCase) return;
-    const currentView = view.value;
-    if (!currentView) return;
-    const replacement = deferredKeywordReplacement(currentView.state, pending);
-    if (!replacement) return;
-    currentView.dispatch({ changes: replacement, userEvent: "input.type" });
-  });
-}
+// (no engine yet, no readable syntax tree); the queue applies the authoritative
+// conversion once it resolves. Undo/redo transactions are dispatched with
+// `filter: false`, so the update listener below — not the transaction filter —
+// is what invalidates them; deferredKeywordReplacement re-validates the text.
+const deferredKeywordCases = createDeferredKeywordCaseQueue({
+  isEnabled: () => settingsStore.editorSettings.autoKeywordCase,
+  getState: () => view.value?.state ?? null,
+  dispatch: (replacement) => view.value?.dispatch({ changes: replacement, userEvent: "input.type" }),
+});
 
 function isEditorComposing(currentView: EditorViewType): boolean {
   if (imeCompositionActive) return true;
@@ -2380,9 +2377,14 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
             keywordCase: () => settingsStore.editorSettings.sqlFormatter.keywordCase,
             dialect: () => props.formatDialect ?? sqlFormatDialectForDbType(props.databaseType),
             databaseType: () => props.databaseType,
-            onPending: queueDeferredKeywordCase,
+            onPending: (pending) => deferredKeywordCases.enqueue(pending),
           }),
         ),
+        // Undo/redo skips transaction filters, so deferred conversions are
+        // invalidated here (see deferredKeywordCases above).
+        EditorView.updateListener.of((update) => {
+          if (update.transactions.some((transaction) => transaction.isUserEvent("undo") || transaction.isUserEvent("redo"))) deferredKeywordCases.cancelAll();
+        }),
         cmSearch({
           top: true,
           createPanel: () => {

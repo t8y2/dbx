@@ -56,8 +56,8 @@ export interface QueryEditorKeywordCaseOnTypeOptions {
   databaseType: () => DatabaseType | undefined;
   /**
    * Called when a trigger cannot be classified yet (engine import still pending
-   * and no usable syntax tree). The caller should apply
-   * {@link deferredKeywordReplacement} once `loadEngine()` resolves.
+   * and no usable syntax tree). The caller should enqueue it with
+   * {@link createDeferredKeywordCaseQueue}.
    */
   onPending?: (pending: PendingKeywordCase) => void;
 }
@@ -67,6 +67,8 @@ export interface PendingKeywordCase {
   word: string;
   wordFrom: number;
   wordEnd: number;
+  /** The character(s) the trigger inserted right after the word (space, punctuation, line break + indent). */
+  trigger: string;
   dialect: SqlFormatDialect;
   databaseType: DatabaseType | undefined;
   mode: SqlKeywordCaseMode;
@@ -126,7 +128,7 @@ interface TypedInsert {
 }
 
 /** A keyword rewrite in document offsets. */
-interface KeywordReplacement {
+export interface KeywordReplacement {
   from: number;
   to: number;
   insert: string;
@@ -219,7 +221,7 @@ export function createQueryEditorKeywordCaseOnTypeFilter(options: QueryEditorKey
       replacement = casedKeywordFromSyntaxTree(state, wordFrom, wordEnd, mode);
       // Neither classifier can answer yet: remember the word and let the caller
       // apply the authoritative conversion once the import resolves.
-      if (!replacement) options.onPending?.({ word, wordFrom, wordEnd, dialect: options.dialect(), databaseType: options.databaseType(), mode });
+      if (!replacement) options.onPending?.({ word, wordFrom, wordEnd, trigger: typed, dialect: options.dialect(), databaseType: options.databaseType(), mode });
     }
     if (!replacement) return transaction;
 
@@ -253,8 +255,11 @@ export function createQueryEditorKeywordCaseOnTypeFilter(options: QueryEditorKey
 export function deferredKeywordReplacement(state: EditorState, pending: PendingKeywordCase): KeywordReplacement | null {
   if (state.readOnly || pending.wordEnd > state.doc.length) return null;
   if (state.sliceDoc(pending.wordFrom, pending.wordEnd) !== pending.word) return null;
-  const next = state.sliceDoc(pending.wordEnd, pending.wordEnd + 1);
-  if (next && IDENTIFIER_CHARACTER.test(next)) return null;
+  // The trigger the user typed must still be there: an undo or backspace that
+  // removed it means the queued conversion was abandoned mid-type. It also
+  // re-proves the word boundary, since every trigger is a non-identifier
+  // character (`selectx` can never match a captured `select` + space).
+  if (state.sliceDoc(pending.wordEnd, pending.wordEnd + pending.trigger.length) !== pending.trigger) return null;
 
   const windowFrom = resolveKeywordCaseWindowStart(state, pending.wordEnd, { databaseType: () => pending.databaseType });
   if (windowFrom === null) return null;
@@ -263,4 +268,47 @@ export function deferredKeywordReplacement(state: EditorState, pending: PendingK
 
   const replacement = casedKeywordBefore(windowText, pending.dialect, pending.mode);
   return replacement && { from: windowFrom + replacement.from, to: windowFrom + replacement.to, insert: replacement.insert };
+}
+
+export interface DeferredKeywordCaseQueueOptions {
+  /** Re-checked when the import resolves: the user may have disabled the feature meanwhile. */
+  isEnabled: () => boolean;
+  /** The live document, or `null` when that editor is gone. */
+  getState: () => EditorState | null;
+  dispatch: (replacement: KeywordReplacement) => void;
+}
+
+export interface DeferredKeywordCaseQueue {
+  enqueue(pending: PendingKeywordCase): void;
+  /** Invalidate every queued conversion (the typed boundary no longer exists). */
+  cancelAll(): void;
+}
+
+/**
+ * Queues triggers captured while the formatter engine was loading, then applies
+ * the authoritative conversion once `loadEngine()` resolves.
+ *
+ * History's undo/redo transactions are dispatched with `filter: false`, so a
+ * transaction filter never sees them; the caller must wire `cancelAll()` from
+ * an `EditorView.updateListener`. `deferredKeywordReplacement` re-validates the
+ * word and the typed trigger anyway, so a stale entry cannot corrupt the text
+ * even if the cancel is missed.
+ */
+export function createDeferredKeywordCaseQueue(options: DeferredKeywordCaseQueueOptions): DeferredKeywordCaseQueue {
+  let generation = 0;
+  return {
+    enqueue(pending) {
+      const expected = generation;
+      void loadEngine().then((engine) => {
+        if (!engine || expected !== generation || !options.isEnabled()) return;
+        const state = options.getState();
+        if (!state) return;
+        const replacement = deferredKeywordReplacement(state, pending);
+        if (replacement) options.dispatch(replacement);
+      });
+    },
+    cancelAll() {
+      generation += 1;
+    },
+  };
 }

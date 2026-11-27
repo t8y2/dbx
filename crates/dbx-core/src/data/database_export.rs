@@ -597,26 +597,43 @@ fn sort_export_views_by_dependencies<'a>(
     sorted_names.iter().filter_map(|name| views_by_name.get(name.as_str()).copied()).collect()
 }
 
-/// Views and materialized views that read one of the exported tables. A
-/// PostgreSQL `DROP TABLE` is rejected while such a view exists, so the export
-/// has to drop them before the table DDL whenever it recreates them (#14178).
+/// Views and materialized views that read one of the exported tables, directly
+/// or through another view. A PostgreSQL `DROP TABLE` is rejected while such a
+/// view exists, so the export has to drop them before the table DDL whenever it
+/// recreates them (#14178).
+///
+/// The walk is recursive because a view that reads another view inherits the
+/// dependency: `v2 -> v -> table` is removed by `DROP VIEW v CASCADE` just like
+/// `v`, so leaving `v2` out of the list would let an excluded view disappear
+/// without a warning.
 ///
 /// The relation kind is returned as `v`/`m` instead of a boolean so the legacy
 /// text-row client stays usable, and the schema column lets the caller separate
 /// views it exports from views owned by another schema.
-const POSTGRES_EXPORT_TABLE_DEPENDENT_VIEWS_SQL: &str = "SELECT DISTINCT src_ns.nspname, src.relname, \
+const POSTGRES_EXPORT_TABLE_DEPENDENT_VIEWS_SQL: &str = "WITH RECURSIVE seeds(relid) AS ( \
+       SELECT to_regclass(ref_name) FROM unnest($1::text[]) AS ref_name \
+       WHERE to_regclass(ref_name) IS NOT NULL \
+     ), dependents(view_oid) AS ( \
+       SELECT DISTINCT rewrite.ev_class \
+       FROM pg_catalog.pg_depend dep \
+       JOIN pg_catalog.pg_rewrite rewrite ON rewrite.oid = dep.objid \
+       WHERE dep.classid = 'pg_catalog.pg_rewrite'::regclass \
+         AND dep.refclassid = 'pg_catalog.pg_class'::regclass \
+         AND dep.refobjid IN (SELECT relid FROM seeds) \
+       UNION \
+       SELECT DISTINCT rewrite.ev_class \
+       FROM dependents \
+       JOIN pg_catalog.pg_depend dep ON dep.classid = 'pg_catalog.pg_rewrite'::regclass \
+         AND dep.refclassid = 'pg_catalog.pg_class'::regclass \
+         AND dep.refobjid = dependents.view_oid \
+       JOIN pg_catalog.pg_rewrite rewrite ON rewrite.oid = dep.objid \
+     ) \
+     SELECT DISTINCT src_ns.nspname, src.relname, \
        CASE src.relkind WHEN 'm' THEN 'm' ELSE 'v' END AS view_kind \
-     FROM pg_catalog.pg_depend dep \
-     JOIN pg_catalog.pg_rewrite rewrite ON rewrite.oid = dep.objid \
-     JOIN pg_catalog.pg_class src ON src.oid = rewrite.ev_class \
+     FROM dependents \
+     JOIN pg_catalog.pg_class src ON src.oid = dependents.view_oid \
      JOIN pg_catalog.pg_namespace src_ns ON src_ns.oid = src.relnamespace \
-     WHERE dep.classid = 'pg_catalog.pg_rewrite'::regclass \
-       AND dep.refclassid = 'pg_catalog.pg_class'::regclass \
-       AND src.relkind IN ('v', 'm') \
-       AND dep.refobjid = ANY(ARRAY( \
-         SELECT to_regclass(ref_name) FROM unnest($1::text[]) AS ref_name \
-         WHERE to_regclass(ref_name) IS NOT NULL)) \
-       AND dep.refobjid <> src.oid \
+     WHERE src.relkind IN ('v', 'm') \
      ORDER BY view_kind, src_ns.nspname, src.relname";
 
 /// A view or materialized view that depends on one of the exported tables.
@@ -5636,34 +5653,6 @@ async fn export_database_sql_core_inner_with_phases(
             Vec::new()
         };
 
-    // Sort tables by foreign key dependency so referenced (parent) tables are
-    // exported before referencing (child) tables. MySQL exports always emit
-    // `SET FOREIGN_KEY_CHECKS = 0`, so both the generated DDL and any INSERTs
-    // already tolerate child-before-parent ordering; reordering away from the
-    // alphabetical listing there only makes the output look shuffled to users
-    // without providing any correctness benefit.
-    if tables.len() > 1 && db_type != DatabaseType::Mysql {
-        let table_names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
-        match crate::transfer::sort_tables_by_fk_dependency(
-            state,
-            &request.connection_id,
-            &request.database,
-            &request.schema,
-            &table_names,
-            true,
-        )
-        .await
-        {
-            Ok(sorted_names) => {
-                tables.sort_by_key(|t| sorted_names.iter().position(|n| n == &t.name).unwrap_or(usize::MAX));
-            }
-            Err(error) if request.fail_on_error => {
-                return Err(format!("Failed to resolve table dependency order: {error}"));
-            }
-            Err(_) => {}
-        }
-    }
-
     // PostgreSQL rejects `DROP TABLE` while a view depends on it, so resolve the
     // dependent views before anything is written: the pre-cleanup block belongs
     // ahead of the table DDL, and the table drops only skip CASCADE when that
@@ -5707,9 +5696,45 @@ async fn export_database_sql_core_inner_with_phases(
         .partition(|view| view.schema == request.schema && exported_view_names.contains(view.name.as_str()));
     let (postgres_views_other_schema, postgres_views_outside_export): (Vec<_>, Vec<_>) =
         postgres_views_other.into_iter().partition(|view| view.schema != request.schema);
+    // Views owned by another schema still depend on the exported tables, so their
+    // mere existence blocks a CASCADE-less `DROP TABLE`. Keep the cascade unless
+    // every dependent view is dropped and recreated by this export.
     let postgres_views_precleaned = db_type == DatabaseType::Postgres
         && !postgres_views_to_recreate.is_empty()
-        && postgres_views_outside_export.is_empty();
+        && postgres_views_outside_export.is_empty()
+        && postgres_views_other_schema.is_empty();
+
+    // Table order serves two opposite needs. Creating tables wants parents first;
+    // dropping them without CASCADE wants children first, because a parent cannot
+    // be dropped while another table's foreign key still references it
+    // (`2BP01`). Create order does not constrain us: PostgreSQL foreign keys are
+    // extracted into the file tail, so every table is created without them.
+    // MySQL exports always emit `SET FOREIGN_KEY_CHECKS = 0`, so both the
+    // generated DDL and any INSERTs already tolerate child-before-parent
+    // ordering; reordering away from the alphabetical listing there only makes
+    // the output look shuffled to users without providing any correctness
+    // benefit. The same is true everywhere while the table drops keep CASCADE.
+    if tables.len() > 1 && db_type != DatabaseType::Mysql {
+        let table_names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
+        match crate::transfer::sort_tables_by_fk_dependency(
+            state,
+            &request.connection_id,
+            &request.database,
+            &request.schema,
+            &table_names,
+            !postgres_views_precleaned,
+        )
+        .await
+        {
+            Ok(sorted_names) => {
+                tables.sort_by_key(|t| sorted_names.iter().position(|n| n == &t.name).unwrap_or(usize::MAX));
+            }
+            Err(error) if request.fail_on_error => {
+                return Err(format!("Failed to resolve table dependency order: {error}"));
+            }
+            Err(_) => {}
+        }
+    }
 
     // 8. Discover optional schema-wide objects before calculating workload.
     let mut procedures: Vec<crate::types::ObjectInfo> = Vec::new();
@@ -7119,7 +7144,8 @@ mod tests {
         ExportDestinationIdentity, ExportedTableSql, PostgresDependentViewNotice, PostgresExportDependentView,
         PostgresExportEnum, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
         SqlInsertDialect, SqlInsertMode, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
-        POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
+        POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_TABLE_DEPENDENT_VIEWS_SQL,
+        POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
     };
     use super::{
         await_export_operation, await_export_stream_operation, clear_export_cancelled, combine_schema_sql_export,
@@ -8769,6 +8795,17 @@ mod tests {
         ] {
             assert_eq!(postgres_export_dependent_views_sql(&[], notice), "");
         }
+    }
+
+    #[test]
+    fn postgres_dependent_view_lookup_walks_view_to_view_dependencies() {
+        // A view that reads another view inherits the table dependency; a single
+        // pg_depend hop would miss it and let DROP VIEW ... CASCADE remove it
+        // without a warning.
+        let sql = POSTGRES_EXPORT_TABLE_DEPENDENT_VIEWS_SQL;
+        assert!(sql.contains("WITH RECURSIVE"), "{sql}");
+        assert!(sql.contains("dep.refobjid = dependents.view_oid"), "{sql}");
+        assert!(sql.contains("src.relkind IN ('v', 'm')"), "{sql}");
     }
 
     #[test]

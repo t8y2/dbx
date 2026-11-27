@@ -386,3 +386,299 @@ async fn live_postgres_export_keeps_views_excluded_from_the_export() {
     .await
     .expect("drop disposable PostgreSQL database");
 }
+
+/// Foreign keys reference their parent table, so a CASCADE-less `DROP TABLE` of
+/// the parent fails with `2BP01` unless the children are dropped first. The
+/// export orders the drops children-first whenever it precleans views.
+#[tokio::test]
+#[ignore = "requires a live PostgreSQL account with CREATE DATABASE privilege"]
+async fn live_postgres_export_restores_tables_with_foreign_keys_and_views() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_database = format!("dbx_pgfk_src_{}", &suffix[..12]);
+    let target_database = format!("dbx_pgfk_dst_{}", &suffix[..12]);
+    let admin_connection_id = format!("pgfk-admin-{suffix}");
+    let source_connection_id = format!("pgfk-source-{suffix}");
+    let target_connection_id = format!("pgfk-target-{suffix}");
+    let dir = tempfile::tempdir().expect("create export temp directory");
+    let storage = Storage::open(&dir.path().join("storage.db")).await.expect("open temp storage");
+    let state = Arc::new(AppState::new(storage));
+    state
+        .configs
+        .write()
+        .await
+        .insert(admin_connection_id.clone(), live_postgres_config(&admin_connection_id, "postgres"));
+    for database in [&source_database, &target_database] {
+        Box::pin(execute_sql_statement(
+            &state,
+            &admin_connection_id,
+            "postgres",
+            &format!("CREATE DATABASE \"{database}\""),
+            None,
+            None,
+        ))
+        .await
+        .expect("create disposable PostgreSQL database");
+    }
+    state
+        .configs
+        .write()
+        .await
+        .insert(source_connection_id.clone(), live_postgres_config(&source_connection_id, &source_database));
+    state
+        .configs
+        .write()
+        .await
+        .insert(target_connection_id.clone(), live_postgres_config(&target_connection_id, &target_database));
+
+    for statement in [
+        "CREATE TABLE public.parents (id integer PRIMARY KEY, name text NOT NULL)",
+        "CREATE TABLE public.children (id integer PRIMARY KEY, parent_id integer REFERENCES public.parents(id), note text)",
+        "CREATE VIEW public.parent_view AS SELECT id, name FROM public.parents",
+        "INSERT INTO public.parents VALUES (1, 'root')",
+        "INSERT INTO public.children VALUES (10, 1, 'child')",
+    ] {
+        Box::pin(execute_sql_statement(&state, &source_connection_id, &source_database, statement, None, None))
+            .await
+            .expect("create source fixture");
+    }
+    // The target still has both tables with their foreign key, plus an older
+    // shape of the view.
+    for statement in [
+        "CREATE TABLE public.parents (id integer PRIMARY KEY, name text NOT NULL)",
+        "CREATE TABLE public.children (id integer PRIMARY KEY, parent_id integer REFERENCES public.parents(id), note text)",
+        "CREATE VIEW public.parent_view AS SELECT id, name, 'stale'::text AS stale FROM public.parents",
+    ] {
+        Box::pin(execute_sql_statement(&state, &target_connection_id, &target_database, statement, None, None))
+            .await
+            .expect("create target fixture");
+    }
+
+    let export_path = dir.path().join("postgres-foreign-keys.sql");
+    export_database_sql_core(
+        &state,
+        &export_request(
+            format!("pgfk-export-{suffix}"),
+            &source_connection_id,
+            &source_database,
+            export_path.display().to_string(),
+        ),
+        |_| {},
+    )
+    .await
+    .expect("export PostgreSQL schema with foreign keys and views");
+
+    let exported = std::fs::read_to_string(&export_path).expect("read export");
+    // Children are dropped before their parent: the parent drop has no CASCADE.
+    let child_drop = exported
+        .find("DROP TABLE IF EXISTS \"public\".\"children\";")
+        .unwrap_or_else(|| panic!("children must be dropped without CASCADE:\n{exported}"));
+    let parent_drop = exported
+        .find("DROP TABLE IF EXISTS \"public\".\"parents\";")
+        .unwrap_or_else(|| panic!("parents must be dropped without CASCADE:\n{exported}"));
+    assert!(child_drop < parent_drop, "children must be dropped before their parent:\n{exported}");
+
+    execute_sql_file_path(
+        &state,
+        &SqlFileRequest {
+            txn_session_id: None,
+            execution_id: format!("pgfk-import-{suffix}"),
+            connection_id: target_connection_id.clone(),
+            database: target_database.clone(),
+            schema: None,
+            file_path: export_path.display().to_string(),
+            continue_on_error: false,
+            selected_tables: None,
+            part_cooldown_ms: 0,
+            skip_relational_constraints: false,
+            failure_log_enabled: true,
+            resolve_includes: false,
+            encoding: Default::default(),
+        },
+        &export_path,
+        CancellationToken::new(),
+        std::time::Instant::now(),
+        |_| {},
+    )
+    .await
+    .expect("restore PostgreSQL export with foreign keys");
+
+    let restored = Box::pin(execute_sql_statement(
+        &state,
+        &target_connection_id,
+        &target_database,
+        "SELECT
+           (SELECT count(*) FROM public.parents),
+           (SELECT count(*) FROM public.children),
+           (SELECT count(*) FROM public.parent_view),
+           (SELECT count(*) FROM information_schema.table_constraints
+             WHERE table_schema = 'public' AND table_name = 'children' AND constraint_type = 'FOREIGN KEY')",
+        None,
+        None,
+    ))
+    .await
+    .expect("query restored foreign keys");
+    assert_eq!(
+        restored.rows,
+        vec![vec![serde_json::json!(1), serde_json::json!(1), serde_json::json!(1), serde_json::json!(1)]]
+    );
+}
+
+/// A view in another schema still blocks a CASCADE-less `DROP TABLE`, and this
+/// export cannot recreate it. The table drop must keep its CASCADE and the file
+/// must say which view it removes.
+#[tokio::test]
+#[ignore = "requires a live PostgreSQL account with CREATE DATABASE privilege"]
+async fn live_postgres_export_keeps_cascade_for_cross_schema_dependent_views() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_database = format!("dbx_pgxview_src_{}", &suffix[..12]);
+    let admin_connection_id = format!("pgxview-admin-{suffix}");
+    let source_connection_id = format!("pgxview-source-{suffix}");
+    let dir = tempfile::tempdir().expect("create export temp directory");
+    let storage = Storage::open(&dir.path().join("storage.db")).await.expect("open temp storage");
+    let state = Arc::new(AppState::new(storage));
+    state
+        .configs
+        .write()
+        .await
+        .insert(admin_connection_id.clone(), live_postgres_config(&admin_connection_id, "postgres"));
+    Box::pin(execute_sql_statement(
+        &state,
+        &admin_connection_id,
+        "postgres",
+        &format!("CREATE DATABASE \"{source_database}\""),
+        None,
+        None,
+    ))
+    .await
+    .expect("create disposable PostgreSQL database");
+    state
+        .configs
+        .write()
+        .await
+        .insert(source_connection_id.clone(), live_postgres_config(&source_connection_id, &source_database));
+
+    for statement in [
+        "CREATE SCHEMA reporting",
+        "CREATE TABLE public.items (id integer PRIMARY KEY)",
+        "CREATE VIEW reporting.item_view AS SELECT id FROM public.items",
+    ] {
+        Box::pin(execute_sql_statement(&state, &source_connection_id, &source_database, statement, None, None))
+            .await
+            .expect("create source fixture");
+    }
+
+    let export_path = dir.path().join("postgres-cross-schema-view.sql");
+    export_database_sql_core(
+        &state,
+        &export_request(
+            format!("pgxview-export-{suffix}"),
+            &source_connection_id,
+            &source_database,
+            export_path.display().to_string(),
+        ),
+        |_| {},
+    )
+    .await
+    .expect("export PostgreSQL schema with a cross-schema dependent view");
+
+    let exported = std::fs::read_to_string(&export_path).expect("read export");
+    assert!(
+        exported.contains("--   view \"reporting\".\"item_view\""),
+        "the note must name the cross-schema view:\n{exported}"
+    );
+    assert!(
+        exported.contains("DROP TABLE IF EXISTS \"public\".\"items\" CASCADE;"),
+        "a cross-schema dependent view must keep the table cascade:\n{exported}"
+    );
+    assert!(
+        !exported.contains("DROP VIEW IF EXISTS \"reporting\".\"item_view\""),
+        "views outside the exported schema must not be dropped:\n{exported}"
+    );
+
+    Box::pin(execute_sql_statement(
+        &state,
+        &admin_connection_id,
+        "postgres",
+        &format!("DROP DATABASE \"{source_database}\" WITH (FORCE)"),
+        None,
+        None,
+    ))
+    .await
+    .expect("drop disposable PostgreSQL database");
+}
+
+/// A view that reads another view inherits the dependency: excluding it must
+/// produce a warning and keep the table cascade instead of letting
+/// `DROP VIEW ... CASCADE` remove it silently.
+#[tokio::test]
+#[ignore = "requires a live PostgreSQL account with CREATE DATABASE privilege"]
+async fn live_postgres_export_warns_about_view_chains_outside_the_export() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_database = format!("dbx_pgchain_src_{}", &suffix[..12]);
+    let admin_connection_id = format!("pgchain-admin-{suffix}");
+    let source_connection_id = format!("pgchain-source-{suffix}");
+    let dir = tempfile::tempdir().expect("create export temp directory");
+    let storage = Storage::open(&dir.path().join("storage.db")).await.expect("open temp storage");
+    let state = Arc::new(AppState::new(storage));
+    state
+        .configs
+        .write()
+        .await
+        .insert(admin_connection_id.clone(), live_postgres_config(&admin_connection_id, "postgres"));
+    Box::pin(execute_sql_statement(
+        &state,
+        &admin_connection_id,
+        "postgres",
+        &format!("CREATE DATABASE \"{source_database}\""),
+        None,
+        None,
+    ))
+    .await
+    .expect("create disposable PostgreSQL database");
+    state
+        .configs
+        .write()
+        .await
+        .insert(source_connection_id.clone(), live_postgres_config(&source_connection_id, &source_database));
+
+    for statement in [
+        "CREATE TABLE public.items (id integer PRIMARY KEY)",
+        "CREATE VIEW public.item_view AS SELECT id FROM public.items",
+        "CREATE VIEW public.item_view_chain AS SELECT id FROM public.item_view",
+    ] {
+        Box::pin(execute_sql_statement(&state, &source_connection_id, &source_database, statement, None, None))
+            .await
+            .expect("create source fixture");
+    }
+
+    let export_path = dir.path().join("postgres-view-chain.sql");
+    let mut request = export_request(
+        format!("pgchain-export-{suffix}"),
+        &source_connection_id,
+        &source_database,
+        export_path.display().to_string(),
+    );
+    request.excluded_tables = vec!["item_view_chain".to_string()];
+    export_database_sql_core(&state, &request, |_| {}).await.expect("export PostgreSQL schema with a view chain");
+
+    let exported = std::fs::read_to_string(&export_path).expect("read export");
+    assert!(
+        exported.contains("--   view \"public\".\"item_view_chain\""),
+        "the warning must name the excluded chained view:\n{exported}"
+    );
+    assert!(
+        exported.contains("DROP TABLE IF EXISTS \"public\".\"items\" CASCADE;"),
+        "the table drop must keep CASCADE while a chained view stays unexported:\n{exported}"
+    );
+
+    Box::pin(execute_sql_statement(
+        &state,
+        &admin_connection_id,
+        "postgres",
+        &format!("DROP DATABASE \"{source_database}\" WITH (FORCE)"),
+        None,
+        None,
+    ))
+    .await
+    .expect("drop disposable PostgreSQL database");
+}

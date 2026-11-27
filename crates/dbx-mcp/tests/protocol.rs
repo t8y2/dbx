@@ -937,10 +937,7 @@ async fn dbx_query_rejects_writes_before_dispatch_even_when_writes_are_allowed()
             .expect("call dbx_query");
         let text = result.content[0].as_text().expect("tool result text").text.clone();
         assert_eq!(result.is_error, Some(true), "{sql} reached the backend");
-        assert!(
-            text.contains("READ_ONLY_QUERY_REJECTED"),
-            "expected READ_ONLY_QUERY_REJECTED for {sql}, got: {text}"
-        );
+        assert!(text.contains("READ_ONLY_QUERY_REJECTED"), "expected READ_ONLY_QUERY_REJECTED for {sql}, got: {text}");
         assert!(!text.contains("query should have been blocked"), "{sql} reached the backend");
 
         client.cancel().await.expect("close MCP client");

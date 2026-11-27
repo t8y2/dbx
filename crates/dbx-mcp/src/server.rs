@@ -2802,10 +2802,7 @@ impl DbxMcpServer {
     /// Run the shared execute path with the read-only gate enabled.
     /// `session_id` is intentionally dropped: a read-only query must not enter
     /// an open transaction or inherit session database state.
-    async fn execute_read_only_query(
-        &self,
-        Parameters(request): Parameters<ReadOnlyQueryRequest>,
-    ) -> CallToolResult {
+    async fn execute_read_only_query(&self, Parameters(request): Parameters<ReadOnlyQueryRequest>) -> CallToolResult {
         let request = ExecuteQueryRequest {
             selector: request.selector,
             database: request.database,
@@ -3222,17 +3219,8 @@ impl DbxMcpServer {
             self.backend.execute_query_agent_tool(connection, &database, arguments, permissions).await;
         let success = !result.is_error;
         let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
-        self.save_mcp_sql_history(
-            tool_name,
-            connection,
-            &database,
-            &history_sql,
-            started_at,
-            success,
-            error,
-            None,
-        )
-        .await;
+        self.save_mcp_sql_history(tool_name, connection, &database, &history_sql, started_at, success, error, None)
+            .await;
         query_tool_result(result, query_result)
     }
 
@@ -6509,10 +6497,7 @@ fn supports_read_only_sql_query(database_type: DatabaseType) -> bool {
     supports_sql_query(database_type)
         && !matches!(
             database_type,
-            DatabaseType::Salesforce
-                | DatabaseType::Plugin
-                | DatabaseType::MessageQueue
-                | DatabaseType::Mqtt
+            DatabaseType::Salesforce | DatabaseType::Plugin | DatabaseType::MessageQueue | DatabaseType::Mqtt
         )
 }
 

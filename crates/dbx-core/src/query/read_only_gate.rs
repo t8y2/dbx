@@ -55,10 +55,7 @@ impl std::error::Error for ReadOnlyGateError {}
 ///
 /// Returns `Ok(())` only for a statement the gate can prove read-only;
 /// anything else fails closed with the specific rejection reason.
-pub fn require_single_read_only_statement(
-    sql: &str,
-    database_type: DatabaseType,
-) -> Result<(), ReadOnlyGateError> {
+pub fn require_single_read_only_statement(sql: &str, database_type: DatabaseType) -> Result<(), ReadOnlyGateError> {
     // A script would let later statements escape the per-statement read-only
     // decision, so split with the dialect-aware splitter before counting.
     if crate::sql::split_sql_statements_for_database(sql, database_type).len() != 1 {
@@ -109,9 +106,7 @@ fn contains_explain_analyze(sql: &str) -> bool {
     }
     if let Some(options) = rest.strip_prefix('(') {
         let options = options.split(')').next().unwrap_or_default();
-        return options
-            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-            .any(|word| word == "ANALYZE");
+        return options.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').any(|word| word == "ANALYZE");
     }
     false
 }
@@ -119,9 +114,9 @@ fn contains_explain_analyze(sql: &str) -> bool {
 /// Whether `source` starts with `word` as a whole word (followed by a
 /// delimiter or end of input).
 fn starts_with_word(source: &str, word: &str) -> bool {
-    source.strip_prefix(word).is_some_and(|rest| {
-        rest.chars().next().is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
-    })
+    source
+        .strip_prefix(word)
+        .is_some_and(|rest| rest.chars().next().is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_'))
 }
 
 #[cfg(test)]

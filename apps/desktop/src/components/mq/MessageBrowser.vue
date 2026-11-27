@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Copy } from "@lucide/vue";
-import type { MqSystemKind, PeekedMessage, PeekMessagesOptions, TopicRef } from "@/types/mq";
+import type { MqSystemKind, PeekMessagesResult, PeekTruncatedReason, PeekedMessage, PeekMessagesOptions, TopicRef } from "@/types/mq";
 import { mqPeekMessages } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -35,16 +35,28 @@ const loading = ref(false);
 const error = ref<string>();
 const messages = ref<PeekedMessage[]>([]);
 const incomplete = ref(false);
+const truncated = ref(false);
+const truncatedReason = ref<PeekTruncatedReason>();
 const partition = ref<string | number>("");
 const offset = ref<string | number>("");
 const count = ref(20);
 const decodePayload = ref(false);
 const advancedExpanded = ref(false);
+// 大批量搜索结果分批渲染，滚动到底再追加，避免十万条一次性挂死界面。
+const MESSAGE_RENDER_BATCH = 100;
+const renderLimit = ref(MESSAGE_RENDER_BATCH);
 const messageSearchQuery = ref("");
+// 主题内搜索只在用户显式点击时触发，普通「加载消息」的条数上限与行为保持不变。
+const searchMaxResults = ref(1000);
+const activeSearchQuery = ref("");
+const MAX_TOPIC_SEARCH_RESULTS = 100000;
 type KafkaPeekStartPosition = NonNullable<PeekMessagesOptions["startPosition"]>;
 const kafkaStartPosition = ref<KafkaPeekStartPosition>("latest");
 const kafkaStartTimestamp = ref("");
 const kafkaEndTimestamp = ref("");
+// 搜索态独立的时间范围，避免与浏览态的读取起点/时间窗互相覆盖。
+const kafkaSearchStartTimestamp = ref("");
+const kafkaSearchEndTimestamp = ref("");
 const kafkaMessageDisplayOrder = ref<KafkaMessageDisplayOrder>("newest");
 let messageRequestVersion = 0;
 
@@ -53,6 +65,8 @@ const isKafkaOffsetMode = computed(() => kafkaStartPosition.value === "offset");
 const isKafkaTimestampMode = computed(() => kafkaStartPosition.value === "timestamp");
 const isMonitoring = computed(() => props.appearance === "monitoring");
 const normalizedMessageSearchQuery = computed(() => normalizeKafkaMessageSearchQuery(messageSearchQuery.value));
+// 输入了关键字即进入搜索模式：隐藏浏览用的读取起点/时间顺序，改显搜索时间范围。
+const isSearchMode = computed(() => isKafka.value && normalizedMessageSearchQuery.value !== "");
 const searchableMessages = computed(() =>
   messages.value.map((message) => ({
     message,
@@ -62,9 +76,25 @@ const searchableMessages = computed(() =>
 const filteredMessages = computed(() => {
   const query = normalizedMessageSearchQuery.value;
   if (!query) return messages.value;
+  // 主题内搜索结果已由 agent 按同一关键字过滤，避免对十万条再本地全量扫描。
+  if (query === activeSearchQuery.value) return messages.value;
   return searchableMessages.value.filter(({ searchText }) => kafkaMessageSearchTextMatches(searchText, query)).map(({ message }) => message);
 });
 const displayedMessages = computed(() => (isKafka.value ? sortKafkaMessagesByPublishTime(filteredMessages.value, kafkaMessageDisplayOrder.value) : filteredMessages.value));
+const visibleMessages = computed(() => displayedMessages.value.slice(0, renderLimit.value));
+const truncatedMessage = computed(() => {
+  if (!truncated.value) return "";
+  switch (truncatedReason.value) {
+    case "scanBudget":
+      return t("mqMessages.searchTruncatedScanBudget");
+    case "timeBudget":
+      return t("mqMessages.searchTruncatedTimeBudget");
+    case "resultLimit":
+      return t("mqMessages.searchTruncatedResultLimit");
+    default:
+      return t("mqMessages.searchTruncated");
+  }
+});
 
 function peekGroupName(): string {
   if (props.mqSystemKind === "rocketmq") return "__dbx_rocketmq_viewer__";
@@ -72,47 +102,87 @@ function peekGroupName(): string {
 }
 
 async function loadMessages() {
+  // 搜索模式下主按钮就是搜索动作，避免和已隐藏的浏览定位参数产生歧义。
+  if (isSearchMode.value) {
+    await searchTopic();
+    return;
+  }
+  const resultLimit = Math.max(1, Math.min(100, Math.trunc(Number(count.value) || 20)));
+  count.value = resultLimit;
+  await fetchMessages({ resultLimit });
+}
+
+/** 主题内搜索：关键字下发给 agent 扫描整个主题，而不只是过滤已加载的消息。 */
+async function searchTopic() {
+  const query = normalizedMessageSearchQuery.value;
+  if (!isKafka.value || !query || loading.value) return;
+  const resultLimit = Math.min(MAX_TOPIC_SEARCH_RESULTS, Math.max(1, Math.trunc(Number(searchMaxResults.value) || 1000)));
+  searchMaxResults.value = resultLimit;
+  await fetchMessages({ resultLimit, searchQuery: query });
+}
+
+async function fetchMessages({ resultLimit, searchQuery }: { resultLimit: number; searchQuery?: string }) {
   const topic = props.topic;
   if (!topic || loading.value) return;
   const requestVersion = ++messageRequestVersion;
   loading.value = true;
   error.value = undefined;
   incomplete.value = false;
+  truncated.value = false;
+  truncatedReason.value = undefined;
+  activeSearchQuery.value = searchQuery ?? "";
   try {
-    const resultLimit = Math.max(1, Math.min(100, Math.trunc(Number(count.value) || 20)));
-    count.value = resultLimit;
     const options: PeekMessagesOptions = {};
     const partitionText = String(partition.value).trim();
     const offsetText = String(offset.value).trim();
 
     if (isKafka.value) {
-      options.startPosition = kafkaStartPosition.value;
       if (partitionText !== "") {
         const parsedPartition = parseNonNegativeSafeInteger(partitionText);
         if (parsedPartition == null) throw new Error(t("mqMessages.partitionMustBeNonNegativeInt"));
         options.partition = parsedPartition;
         partition.value = String(parsedPartition);
       }
-      if (isKafkaOffsetMode.value) {
-        if (offsetText === "") throw new Error(t("mqMessages.offsetRequiredForOffset"));
-        const parsedOffset = parseNonNegativeSafeInteger(offsetText);
-        if (parsedOffset == null) throw new Error(t("mqMessages.offsetMustBeNonNegativeIntRequired"));
-        options.offset = parsedOffset;
-        offset.value = String(parsedOffset);
-      }
-      if (isKafkaTimestampMode.value) {
-        const parsedTime = Date.parse(String(kafkaStartTimestamp.value));
-        if (!Number.isFinite(parsedTime)) throw new Error(t("mqMessages.timestampRequired"));
-        options.timestamp = parsedTime;
-        const endTimestampText = String(kafkaEndTimestamp.value).trim();
-        if (endTimestampText !== "") {
-          const parsedEndTime = Date.parse(endTimestampText);
-          if (!Number.isFinite(parsedEndTime)) throw new Error(t("mqMessages.endTimestampInvalid"));
-          if (parsedEndTime < parsedTime) throw new Error(t("mqMessages.endTimestampBeforeStart"));
-          options.endTimestamp = parsedEndTime;
+      if (searchQuery) {
+        // 搜索态：时间范围可选，两个都不填就是各分区 [最早, 末尾) 的全主题查找。
+        options.searchQuery = searchQuery;
+        const startTimeText = String(kafkaSearchStartTimestamp.value).trim();
+        const endTimeText = String(kafkaSearchEndTimestamp.value).trim();
+        const parsedStartTime = startTimeText === "" ? undefined : Date.parse(startTimeText);
+        if (startTimeText !== "" && !Number.isFinite(parsedStartTime)) throw new Error(t("mqMessages.timestampRequired"));
+        const parsedEndTime = endTimeText === "" ? undefined : Date.parse(endTimeText);
+        if (endTimeText !== "" && !Number.isFinite(parsedEndTime)) throw new Error(t("mqMessages.endTimestampInvalid"));
+        if (parsedStartTime != null && parsedEndTime != null && parsedEndTime < parsedStartTime) {
+          throw new Error(t("mqMessages.endTimestampBeforeStart"));
         }
-        // 时间窗口下「时间顺序」即读取方向：最新优先让 agent 从截止时间一侧倒序回扫。
-        options.sortOrder = kafkaMessageDisplayOrder.value;
+        // 只填结束时间时用 earliest 起点 + endTimestamp；其余组合按时间戳起点推导。
+        options.startPosition = parsedStartTime != null ? "timestamp" : "earliest";
+        if (parsedStartTime != null) options.timestamp = parsedStartTime;
+        if (parsedEndTime != null) options.endTimestamp = parsedEndTime;
+        // 搜索恒为反向扫描、按时间倒序返回，不再下发 sortOrder。
+      } else {
+        options.startPosition = kafkaStartPosition.value;
+        if (isKafkaOffsetMode.value) {
+          if (offsetText === "") throw new Error(t("mqMessages.offsetRequiredForOffset"));
+          const parsedOffset = parseNonNegativeSafeInteger(offsetText);
+          if (parsedOffset == null) throw new Error(t("mqMessages.offsetMustBeNonNegativeIntRequired"));
+          options.offset = parsedOffset;
+          offset.value = String(parsedOffset);
+        }
+        if (isKafkaTimestampMode.value) {
+          const parsedTime = Date.parse(String(kafkaStartTimestamp.value));
+          if (!Number.isFinite(parsedTime)) throw new Error(t("mqMessages.timestampRequired"));
+          options.timestamp = parsedTime;
+          const endTimestampText = String(kafkaEndTimestamp.value).trim();
+          if (endTimestampText !== "") {
+            const parsedEndTime = Date.parse(endTimestampText);
+            if (!Number.isFinite(parsedEndTime)) throw new Error(t("mqMessages.endTimestampInvalid"));
+            if (parsedEndTime < parsedTime) throw new Error(t("mqMessages.endTimestampBeforeStart"));
+            options.endTimestamp = parsedEndTime;
+          }
+          // 时间窗口下「时间顺序」即读取方向：最新优先让 agent 从截止时间一侧倒序回扫。
+          options.sortOrder = kafkaMessageDisplayOrder.value;
+        }
       }
     } else {
       if (partitionText !== "") {
@@ -130,9 +200,12 @@ async function loadMessages() {
     }
     const result = await mqPeekMessages(props.connectionId, topic, peekGroupName(), resultLimit, options);
     if (requestVersion === messageRequestVersion) {
-      const browseResult = Array.isArray(result) ? { messages: result, incomplete: false } : result;
+      const browseResult: PeekMessagesResult = Array.isArray(result) ? { messages: result, incomplete: false } : result;
       messages.value = browseResult.messages;
       incomplete.value = browseResult.incomplete;
+      truncated.value = browseResult.truncated ?? false;
+      truncatedReason.value = browseResult.truncatedReason;
+      renderLimit.value = MESSAGE_RENDER_BATCH;
     }
   } catch (cause: unknown) {
     if (requestVersion === messageRequestVersion) {
@@ -151,6 +224,19 @@ function invalidateMessageRequest() {
   error.value = undefined;
   messages.value = [];
   incomplete.value = false;
+  truncated.value = false;
+  truncatedReason.value = undefined;
+  activeSearchQuery.value = "";
+  renderLimit.value = MESSAGE_RENDER_BATCH;
+}
+
+/** 列表滚动接近底部时追加下一批，避免一次性渲染十万条消息。 */
+function handleMessageListScroll(event: Event) {
+  const target = event.currentTarget as HTMLElement | null;
+  if (!target) return;
+  const distanceToBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+  if (distanceToBottom > 40) return;
+  renderLimit.value = Math.min(displayedMessages.value.length, renderLimit.value + MESSAGE_RENDER_BATCH);
 }
 
 function messagePayload(message: PeekedMessage): string {
@@ -205,19 +291,27 @@ watch(kafkaStartPosition, () => {
   // Keep offset values for switching back, but never retain results from another start mode.
   invalidateMessageRequest();
 });
+
+watch(displayedMessages, () => {
+  // 过滤条件或排序变化后重新从第一批渲染，避免保留过大的渲染窗口。
+  renderLimit.value = MESSAGE_RENDER_BATCH;
+});
 </script>
 
 <template>
   <section v-if="topic" class="message-browser" :class="{ 'is-monitoring': isMonitoring }" data-testid="message-browser">
     <div class="message-browser-header">
       <h4>{{ t("mqMessages.messageList") }}</h4>
-      <button type="button" class="btn-sm" :disabled="loading" @click="loadMessages">
-        {{ loading ? t("mqMessages.loading") : t("mqMessages.loadMessages") }}
+      <button type="button" class="btn-sm" :disabled="loading || (isSearchMode && !normalizedMessageSearchQuery)" @click="loadMessages">
+        {{ loading ? t("mqMessages.loading") : isSearchMode ? t("mqMessages.searchInTopic") : t("mqMessages.loadMessages") }}
       </button>
     </div>
 
     <p v-if="isKafka" class="peek-default-hint">
-      <template v-if="kafkaStartPosition === 'latest'">
+      <template v-if="isSearchMode">
+        {{ t("mqMessages.kafkaSearchHint") }}
+      </template>
+      <template v-else-if="kafkaStartPosition === 'latest'">
         {{ t("mqMessages.kafkaLatestHint") }}
       </template>
       <template v-else-if="kafkaStartPosition === 'earliest'">
@@ -234,9 +328,12 @@ watch(kafkaStartPosition, () => {
     <p v-if="incomplete" class="peek-incomplete" role="status" data-testid="peek-incomplete">
       {{ t("mqMessages.peekIncomplete") }}
     </p>
+    <p v-if="truncated" class="peek-incomplete" role="status" data-testid="peek-truncated">
+      {{ truncatedMessage }}
+    </p>
 
     <div class="peek-controls">
-      <label>
+      <label v-if="!isSearchMode">
         <span>{{ t("mqMessages.count") }}</span>
         <input v-model.number="count" data-testid="peek-count" type="number" min="1" max="100" :disabled="loading" />
       </label>
@@ -244,7 +341,7 @@ watch(kafkaStartPosition, () => {
         <input v-model="decodePayload" data-testid="rabbitmq-decode-payload" type="checkbox" />
         <span>{{ t("mqMessages.decodePayload") }}</span>
       </label>
-      <label v-if="isKafka && !isMonitoring">
+      <label v-if="isKafka && !isSearchMode && !isMonitoring">
         <span>{{ t("mqMessages.startPosition") }}</span>
         <Select v-model="kafkaStartPosition" :disabled="loading">
           <SelectTrigger data-testid="kafka-peek-start-position" class="message-browser-start-position">
@@ -258,15 +355,24 @@ watch(kafkaStartPosition, () => {
           </SelectContent>
         </Select>
       </label>
-      <label v-if="isKafka && isKafkaTimestampMode && !isMonitoring">
+      <label v-if="isKafka && !isSearchMode && isKafkaTimestampMode && !isMonitoring">
         <span>{{ t("mqMessages.startTimestamp") }}</span>
         <input v-model="kafkaStartTimestamp" data-testid="kafka-peek-start-timestamp" type="datetime-local" step="1" :disabled="loading" />
       </label>
-      <label v-if="isKafka && isKafkaTimestampMode && !isMonitoring">
+      <label v-if="isKafka && !isSearchMode && isKafkaTimestampMode && !isMonitoring">
         <span>{{ t("mqMessages.endTimestamp") }}</span>
         <input v-model="kafkaEndTimestamp" data-testid="kafka-peek-end-timestamp" type="datetime-local" step="1" :disabled="loading" />
       </label>
-      <label v-if="isKafka">
+      <!-- 搜索态的时间范围是可选收窄条件，留空即全主题查找。 -->
+      <label v-if="isKafka && isSearchMode && !isMonitoring">
+        <span>{{ t("mqMessages.startTimestamp") }}</span>
+        <input v-model="kafkaSearchStartTimestamp" data-testid="kafka-search-start-timestamp" type="datetime-local" step="1" :disabled="loading" />
+      </label>
+      <label v-if="isKafka && isSearchMode && !isMonitoring">
+        <span>{{ t("mqMessages.endTimestamp") }}</span>
+        <input v-model="kafkaSearchEndTimestamp" data-testid="kafka-search-end-timestamp" type="datetime-local" step="1" :disabled="loading" />
+      </label>
+      <label v-if="isKafka && !isSearchMode">
         <span>{{ t("mqMessages.timeOrder") }}</span>
         <Select v-model="kafkaMessageDisplayOrder">
           <SelectTrigger data-testid="kafka-message-display-order" class="message-browser-start-position">
@@ -282,7 +388,7 @@ watch(kafkaStartPosition, () => {
         <span>{{ t("mqMessages.partition") }}</span>
         <input v-model="partition" data-testid="kafka-peek-partition" type="number" min="0" :placeholder="t('mqMessages.partitionPlaceholderAll')" :disabled="loading" />
       </label>
-      <label v-if="isKafkaOffsetMode && !isMonitoring">
+      <label v-if="isKafkaOffsetMode && !isSearchMode && !isMonitoring">
         <span>{{ t("mqMessages.offset") }}</span>
         <input v-model="offset" data-testid="kafka-peek-offset" type="number" min="0" :placeholder="t('mqMessages.offsetPlaceholderRequired')" :disabled="loading" />
       </label>
@@ -306,9 +412,17 @@ watch(kafkaStartPosition, () => {
       </div>
     </template>
 
-    <div v-if="isKafka && messages.length" class="message-filter-row" data-testid="kafka-message-filter">
+    <!-- 表单外观下搜索入口始终可见；监控面板保持「有消息才显示」的原布局。 -->
+    <div v-if="isKafka && (messages.length || !isMonitoring)" class="message-filter-row" data-testid="kafka-message-filter">
       <MqSearchInput v-model="messageSearchQuery" :placeholder="t('mqMessages.filterLoadedPlaceholder')" :aria-label="t('mqMessages.filterLoadedPlaceholder')" :disabled="loading" data-testid="kafka-message-filter-input" />
-      <span class="mq-result-count" data-testid="kafka-message-filter-count" aria-live="polite">
+      <label v-if="isSearchMode" class="topic-search-max-results">
+        <span>{{ t("mqMessages.searchMaxResults") }}</span>
+        <input v-model.number="searchMaxResults" data-testid="kafka-topic-search-max" type="number" min="1" :max="MAX_TOPIC_SEARCH_RESULTS" :disabled="loading" />
+      </label>
+      <Button type="button" variant="outline" size="sm" class="message-topic-search h-7 px-2 text-xs" :disabled="loading || !normalizedMessageSearchQuery" :title="t('mqMessages.searchInTopicHint')" data-testid="kafka-topic-search" @click="searchTopic">
+        {{ t("mqMessages.searchInTopic") }}
+      </Button>
+      <span v-if="messages.length" class="mq-result-count" data-testid="kafka-message-filter-count" aria-live="polite">
         {{ t("mqMessages.filterLoadedCount", { matched: filteredMessages.length, loaded: messages.length }) }}
       </span>
     </div>
@@ -317,8 +431,8 @@ watch(kafkaStartPosition, () => {
     <div v-else-if="loading" class="message-empty">{{ t("mqMessages.messagesLoading") }}</div>
     <div v-else-if="!messages.length" class="message-empty">{{ t("mqMessages.noMessages") }}</div>
     <div v-else-if="!filteredMessages.length" class="message-empty" data-testid="kafka-message-filter-empty">{{ t("mqMessages.noMatchingMessages") }}</div>
-    <div v-else class="message-list">
-      <article v-for="message in displayedMessages" :key="`${message.properties?.partition ?? 'p'}-${message.messageId || message.position}`" class="message-row">
+    <div v-else class="message-list" data-testid="kafka-message-list" @scroll.passive="handleMessageListScroll">
+      <article v-for="message in visibleMessages" :key="`${message.properties?.partition ?? 'p'}-${message.messageId || message.position}`" class="message-row">
         <div class="message-meta">
           <span>#{{ message.position }}</span>
           <span v-if="message.properties?.partition != null">{{ t("mqMessages.metaPartition", { partition: message.properties.partition }) }}</span>
@@ -486,6 +600,23 @@ watch(kafkaStartPosition, () => {
 .message-filter-row :deep(.mq-search-input) {
   width: min(420px, 100%);
   flex: 1;
+}
+
+.topic-search-max-results {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.topic-search-max-results input {
+  width: 88px;
+}
+
+.message-topic-search {
+  flex-shrink: 0;
 }
 
 .collapse-toggle {

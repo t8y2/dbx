@@ -118,7 +118,10 @@ function deferred<T>() {
 }
 
 async function loadMessages(container: ParentNode) {
-  buttonByText(container, "mqMessages.loadMessages").click();
+  // 关键字输入后按钮会切换成搜索动作，两种文案都接受。
+  const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent?.includes("mqMessages.loadMessages") || item.textContent?.includes("mqMessages.searchInTopic")) ?? null;
+  if (!button) throw new Error("Load or search button not found");
+  button.click();
   await flushUi();
 }
 
@@ -473,13 +476,12 @@ describe("MessageBrowser", () => {
     const filter = browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]');
     const startPosition = browser.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
     if (!filter || !startPosition) throw new Error("Kafka message filter controls not found");
-    await setInputValue(filter, "keep");
-    await loadMessages(browser);
-    expect(browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]')?.value).toBe("keep");
 
+    // 先在浏览态切换读取起点，再输入关键字进入搜索态，验证过滤词不丢。
     await setSelectValue(startPosition, "earliest");
     await loadMessages(browser);
-
+    await setInputValue(filter, "keep");
+    await loadMessages(browser);
     expect(browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]')?.value).toBe("keep");
     expect(browser.textContent).toContain("keep this message");
   });
@@ -506,6 +508,136 @@ describe("MessageBrowser", () => {
     await loadMessages(browser);
 
     expect(browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]')?.value).toBe("");
+  });
+
+  it("searches the whole topic with the entered keyword and result cap", async () => {
+    const browser = await mountBrowser();
+    const filter = browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]');
+    if (!filter) throw new Error("Kafka message filter input not found");
+
+    await setInputValue(filter, "Payment-Failed");
+    await flushUi();
+
+    // 输入关键字即进入搜索模式：隐藏读取起点，显示搜索时间范围与「最多返回」。
+    const startPosition = browser.querySelector('[data-testid="kafka-peek-start-position"]');
+    const searchStart = browser.querySelector<HTMLInputElement>('[data-testid="kafka-search-start-timestamp"]');
+    const searchEnd = browser.querySelector<HTMLInputElement>('[data-testid="kafka-search-end-timestamp"]');
+    const maxResults = browser.querySelector<HTMLInputElement>('[data-testid="kafka-topic-search-max"]');
+    const searchButton = browser.querySelector<HTMLButtonElement>('[data-testid="kafka-topic-search"]');
+    if (!searchStart || !searchEnd || !maxResults || !searchButton) throw new Error("Kafka topic search controls not found");
+    expect(startPosition).toBeNull();
+
+    await setInputValue(maxResults, "5000");
+    await flushUi();
+    expect(searchButton.disabled).toBe(false);
+    searchButton.click();
+    await flushUi();
+
+    expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "__dbx_kafka_viewer__", 5000, {
+      startPosition: "earliest",
+      searchQuery: "payment-failed",
+    });
+    const searchCall = backend.mqPeekMessages.mock.calls.at(-1);
+    if (!searchCall) throw new Error("topic search call not found");
+    expect(searchCall[4]).not.toHaveProperty("endTimestamp");
+    expect(searchCall[4]).not.toHaveProperty("sortOrder");
+  });
+
+  it("maps optional search start and end times to the expected read window", async () => {
+    const browser = await mountBrowser();
+    const filter = browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]');
+    if (!filter) throw new Error("Kafka message filter input not found");
+    await setInputValue(filter, "needle");
+    await flushUi();
+
+    const startInput = browser.querySelector<HTMLInputElement>('[data-testid="kafka-search-start-timestamp"]');
+    const endInput = browser.querySelector<HTMLInputElement>('[data-testid="kafka-search-end-timestamp"]');
+    const searchButton = browser.querySelector<HTMLButtonElement>('[data-testid="kafka-topic-search"]');
+    if (!startInput || !endInput || !searchButton) throw new Error("Kafka search time controls not found");
+
+    // 只填开始时间：时间戳起点，窗口右端为分区末尾。
+    await setInputValue(startInput, "2026-11-04T10:00:00");
+    searchButton.click();
+    await flushUi();
+    expect(backend.mqPeekMessages.mock.calls.at(-1)?.[4]).toEqual({
+      startPosition: "timestamp",
+      timestamp: Date.parse("2026-11-04T10:00:00"),
+      searchQuery: "needle",
+    });
+
+    // 只填结束时间：earliest 起点 + endTimestamp。
+    await setInputValue(startInput, "");
+    await setInputValue(endInput, "2026-11-04T10:05:00");
+    searchButton.click();
+    await flushUi();
+    expect(backend.mqPeekMessages.mock.calls.at(-1)?.[4]).toEqual({
+      startPosition: "earliest",
+      endTimestamp: Date.parse("2026-11-04T10:05:00"),
+      searchQuery: "needle",
+    });
+
+    // 都填：时间戳起点 + endTimestamp。
+    await setInputValue(startInput, "2026-11-04T10:00:00");
+    searchButton.click();
+    await flushUi();
+    expect(backend.mqPeekMessages.mock.calls.at(-1)?.[4]).toEqual({
+      startPosition: "timestamp",
+      timestamp: Date.parse("2026-11-04T10:00:00"),
+      endTimestamp: Date.parse("2026-11-04T10:05:00"),
+      searchQuery: "needle",
+    });
+
+    // 结束早于开始：不发请求，只提示错误。
+    await setInputValue(startInput, "2026-11-04T11:00:00");
+    const callCountBeforeInvalidRange = backend.mqPeekMessages.mock.calls.length;
+    searchButton.click();
+    await flushUi();
+    expect(backend.mqPeekMessages.mock.calls.length).toBe(callCountBeforeInvalidRange);
+    expect(browser.textContent).toContain("mqMessages.endTimestampBeforeStart");
+  });
+
+  it("shows the topic search truncation reason returned by the agent", async () => {
+    backend.mqPeekMessages.mockResolvedValueOnce({ messages: [], incomplete: false, truncated: true, truncatedReason: "resultLimit" });
+    const browser = await mountBrowser();
+    const filter = browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]');
+    if (!filter) throw new Error("Kafka message filter input not found");
+    await setInputValue(filter, "needle");
+    await flushUi();
+    const searchButton = browser.querySelector<HTMLButtonElement>('[data-testid="kafka-topic-search"]');
+    if (!searchButton) throw new Error("Kafka topic search button not found");
+    searchButton.click();
+    await flushUi();
+
+    const warning = browser.querySelector('[data-testid="peek-truncated"]');
+    expect(warning?.textContent).toContain("mqMessages.searchTruncatedResultLimit");
+    expect(browser.querySelector('[data-testid="peek-incomplete"]')).toBeNull();
+  });
+
+  it("renders loaded messages in batches and appends on scroll", async () => {
+    backend.mqPeekMessages.mockResolvedValue(
+      Array.from({ length: 250 }, (_, index) => ({
+        position: index,
+        messageId: String(index),
+        payloadBase64: "",
+        payloadText: `message ${index}`,
+        properties: { partition: "0" },
+        headers: {},
+      })),
+    );
+    const browser = await mountBrowser();
+    await loadMessages(browser);
+
+    const messageList = browser.querySelector<HTMLElement>('[data-testid="kafka-message-list"]');
+    if (!messageList) throw new Error("Kafka message list not found");
+    expect(browser.querySelectorAll(".message-row").length).toBe(100);
+
+    Object.defineProperty(messageList, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(messageList, "clientHeight", { value: 500, configurable: true });
+    messageList.scrollTop = 600;
+    messageList.dispatchEvent(new Event("scroll"));
+    await flushUi();
+
+    expect(browser.querySelectorAll(".message-row").length).toBe(200);
   });
 
   it("does not expose the loaded-message filter for non-Kafka browsers", async () => {

@@ -67,6 +67,7 @@ import org.apache.kafka.common.TopicPartitionInfo;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.internals.KafkaFutureImpl;
+import org.apache.kafka.common.record.TimestampType;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
@@ -1222,6 +1223,84 @@ class KafkaAgentTest {
     }
 
     @Test
+    void topicSearchCountAllowsLargerResultSets() {
+        assertEquals(1, KafkaAgent.validatedSearchCount(1));
+        assertEquals(100_000, KafkaAgent.validatedSearchCount(100_000));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatedSearchCount(0));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatedSearchCount(100_001));
+    }
+
+    @Test
+    void topicSearchTruncationReasonsDistinguishStopCauses() {
+        assertEquals("resultLimit", KafkaAgent.searchTruncatedReason(5, 5, true, false));
+        assertEquals("resultLimit", KafkaAgent.searchTruncatedReason(5, 5, true, true));
+        assertEquals("scanBudget", KafkaAgent.searchTruncatedReason(3, 5, true, true));
+        assertEquals("timeBudget", KafkaAgent.searchTruncatedReason(3, 5, true, false));
+        assertNull(KafkaAgent.searchTruncatedReason(3, 5, false, false));
+    }
+
+    @Test
+    void topicSearchMatchesKeyOrUtf8ValueCaseInsensitively() {
+        ConsumerRecord<String, byte[]> keyMatch =
+            new ConsumerRecord<>("events", 0, 1, "Order-42", "{}".getBytes(StandardCharsets.UTF_8));
+        ConsumerRecord<String, byte[]> valueMatch = new ConsumerRecord<>(
+            "events", 0, 2, "k", "{\"kind\":\"PAYMENT_FAILED\"}".getBytes(StandardCharsets.UTF_8)
+        );
+
+        assertTrue(KafkaAgent.recordMatchesSearch(keyMatch, "order-42"));
+        assertTrue(KafkaAgent.recordMatchesSearch(valueMatch, "payment_failed"));
+        assertFalse(KafkaAgent.recordMatchesSearch(valueMatch, "payment_success"));
+    }
+
+    @Test
+    void topicSearchSkipsBinaryPayloads() {
+        ConsumerRecord<String, byte[]> binaryRecord =
+            new ConsumerRecord<>("events", 0, 1, "k", new byte[] { (byte) 0xFF, (byte) 0xFE, 0x00 });
+
+        assertFalse(KafkaAgent.recordMatchesSearch(binaryRecord, "f"));
+    }
+
+    @Test
+    void normalizedSearchQueryTrimsAndLowercases() {
+        JsonObject params = JsonParser.parseString("{\"searchQuery\":\"  Order-42  \"}").getAsJsonObject();
+        JsonObject blank = new JsonObject();
+        blank.addProperty("searchQuery", "   ");
+
+        assertEquals("order-42", KafkaAgent.normalizedSearchQuery(params));
+        assertNull(KafkaAgent.normalizedSearchQuery(blank));
+        assertNull(KafkaAgent.normalizedSearchQuery(new JsonObject()));
+    }
+
+    @Test
+    void limitSearchPeekedMessagesKeepsTheNewestMatchesInDescendingOrder() {
+        List<Map<String, Object>> messages = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            Map<String, Object> message = new HashMap<>();
+            message.put("timestamp", 1_000L + i);
+            message.put("partition", 0);
+            message.put("offset", (long) i);
+            messages.add(message);
+        }
+
+        List<Map<String, Object>> limited = KafkaAgent.limitSearchPeekedMessages(messages, 2);
+
+        assertEquals(List.of(4L, 3L), limited.stream().map(message -> (Long) message.get("offset")).toList());
+    }
+
+    @Test
+    void searchResultsExposeTruncatedFlagAndReason() {
+        Map<String, Object> truncated =
+            KafkaAgent.peekMessagesResult(List.of(), false, "resultLimit");
+        Map<String, Object> complete = KafkaAgent.peekMessagesResult(List.of(), false);
+
+        assertEquals(true, truncated.get("truncated"));
+        assertEquals("resultLimit", truncated.get("truncatedReason"));
+        assertEquals(false, complete.get("truncated"));
+        assertNull(complete.get("truncatedReason"));
+        assertEquals(false, complete.get("incomplete"));
+    }
+
+    @Test
     void peekUsesTheConfiguredConsumerRequestTimeout() {
         Properties properties = new Properties();
         properties.put("request.timeout.ms", "1500");
@@ -1550,6 +1629,217 @@ class KafkaAgentTest {
         );
 
         assertEquals(2, messages.size());
+    }
+
+    @Test
+    void collectPeekedMessagesNewestFirstKeepsNewerMatchesFromLaterPartitionsInTheSamePoll() {
+        // 回归 #14571：旧实现在 poll 循环里配额凑满就 return，
+        // 同一批 poll 里排在较旧分区之后的更新命中从未被检查。
+        TopicPartition older = new TopicPartition("events", 0);
+        TopicPartition newer = new TopicPartition("events", 1);
+        AtomicInteger polls = new AtomicInteger();
+        KafkaAgent.PeekCollectionState collection =
+            new KafkaAgent.PeekCollectionState(List.of(older, newer), 2, 2);
+
+        KafkaAgent.collectPeekedMessagesNewestFirst(
+            timeout -> {
+                polls.incrementAndGet();
+                return new ConsumerRecords<>(Map.of(
+                    older, List.of(searchRecord(older, 400L, 100L), searchRecord(older, 401L, 150L)),
+                    newer, List.of(searchRecord(newer, 400L, 900L), searchRecord(newer, 401L, 950L))
+                ));
+            },
+            partition -> 600L,
+            (partition, offset) -> {
+                throw new AssertionError("both quotas were met in the first poll");
+            },
+            record -> true,
+            List.of(older, newer),
+            Map.of(older, 0L, newer, 0L),
+            Map.of(older, 600L, newer, 600L),
+            collection,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(1, polls.get());
+        // 旧实现只返回分区 0 的 2 条；新实现必须把分区 1 的更新命中带回并裁到最新 2 条。
+        List<Map<String, Object>> results = KafkaAgent.limitSearchPeekedMessages(collection.messages, 2);
+        assertEquals(List.of(950L, 900L), results.stream()
+            .map(message -> message.get("timestamp")).toList());
+    }
+
+    @Test
+    void collectPeekedMessagesNewestFirstPrefersNewestMatchesWhenTheBatchStartsAtTheWindowLeftEdge() {
+        // 回归 #14571：真实 Kafka 只能正向 poll。窗口不足一批（500 条）时首批从窗口左端读起，
+        // 旧实现按到达顺序填满配额，会把分区里最旧的命中当作"最新 N 条"返回。
+        TopicPartition older = new TopicPartition("events", 0);
+        TopicPartition newer = new TopicPartition("events", 1);
+        Map<TopicPartition, Long> positions = new HashMap<>();
+        positions.put(older, 0L);
+        positions.put(newer, 0L);
+        KafkaAgent.PeekCollectionState collection =
+            new KafkaAgent.PeekCollectionState(List.of(older, newer), 5, 5);
+        long windowEnd = 20L;
+        int recordsPerPoll = 5;
+
+        KafkaAgent.PeekRecordPoller poller = timeout -> {
+            Map<TopicPartition, List<ConsumerRecord<String, byte[]>>> batch = new HashMap<>();
+            for (TopicPartition partition : List.of(older, newer)) {
+                long start = positions.get(partition);
+                if (start >= windowEnd) {
+                    continue;
+                }
+                List<ConsumerRecord<String, byte[]>> records = new ArrayList<>();
+                // offset 升序返回，模拟单分区正向消费；分区 0 的事件时间整体更早。
+                for (long offset = start; offset < Math.min(windowEnd, start + recordsPerPoll); offset++) {
+                    long timestamp = partition == older ? 100L + offset : 1_000L + offset;
+                    records.add(searchRecord(partition, offset, timestamp));
+                }
+                batch.put(partition, records);
+                positions.put(partition, Math.min(windowEnd, start + recordsPerPoll));
+            }
+            return batch.isEmpty() ? ConsumerRecords.empty() : new ConsumerRecords<>(batch);
+        };
+
+        KafkaAgent.collectPeekedMessagesNewestFirst(
+            poller,
+            positions::get,
+            (partition, offset) -> {
+                throw new AssertionError("window fits in one reverse batch; no seek expected");
+            },
+            record -> true,
+            List.of(older, newer),
+            Map.of(older, 0L, newer, 0L),
+            Map.of(older, windowEnd, newer, windowEnd),
+            collection,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        List<Map<String, Object>> results = KafkaAgent.limitSearchPeekedMessages(collection.messages, 5);
+        // 应为分区 1 最新的 5 条（时间戳 1019..1015），而不是分区 0/1 最旧的命中。
+        assertEquals(List.of(1_019L, 1_018L, 1_017L, 1_016L, 1_015L), results.stream()
+            .map(message -> message.get("timestamp")).toList());
+    }
+
+    @Test
+    void collectPeekedMessagesNewestFirstKeepsScanningOtherPartitionsPastTheQuota() {
+        // 分区 0 先凑满配额，但分区 1 尚未扫到 cutoff 以下，必须继续回扫，
+        // 否则会漏掉分区 1 里更旧的命中（更旧的记录仍可能挤进结果集）。
+        TopicPartition older = new TopicPartition("events", 0);
+        TopicPartition newer = new TopicPartition("events", 1);
+        AtomicInteger polls = new AtomicInteger();
+        Map<TopicPartition, Long> positions = new HashMap<>();
+        positions.put(older, 600L);
+        positions.put(newer, 600L);
+
+        KafkaAgent.PeekCollectionState collection =
+            new KafkaAgent.PeekCollectionState(List.of(older, newer), 2, 2);
+        boolean complete = KafkaAgent.collectPeekedMessagesNewestFirst(
+            timeout -> {
+                if (polls.getAndIncrement() == 0) {
+                    positions.put(older, 600L);
+                    positions.put(newer, 600L);
+                    return new ConsumerRecords<>(Map.of(
+                        older, List.of(searchRecord(older, 400L, 900L), searchRecord(older, 401L, 800L)),
+                        newer, List.of(searchRecord(newer, 400L, 1_000L))
+                    ));
+                }
+                // 回扫到分区 1 的下一批后抽干：最老时间 700 已低于 cutoff 900。
+                positions.put(newer, 100L);
+                return new ConsumerRecords<>(Map.of(
+                    newer, List.of(searchRecord(newer, 10L, 700L))
+                ));
+            },
+            positions::get,
+            (partition, offset) -> {
+                assertEquals(newer, partition);
+                assertEquals(0L, offset);
+                positions.put(partition, offset);
+            },
+            record -> true,
+            List.of(older, newer),
+            Map.of(older, 0L, newer, 0L),
+            Map.of(older, 600L, newer, 600L),
+            collection,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        collection.incomplete = !complete;
+        assertEquals(2, polls.get());
+        List<Map<String, Object>> results = KafkaAgent.limitSearchPeekedMessages(collection.messages, 2);
+        assertEquals(List.of(1_000L, 900L), results.stream()
+            .map(message -> message.get("timestamp")).toList());
+        // 结果达到上限且仍有更旧命中未返回：界面应显示 resultLimit 截断提示。
+        assertEquals("resultLimit", KafkaAgent.searchTruncatedReason(
+            collection.messages.size(), 2, collection.incomplete, collection.scanBudgetReached
+        ));
+    }
+
+    @Test
+    void collectPeekedMessagesNewestFirstDoesNotReportTruncationWhenTheWindowIsFullyScanned() {
+        // 窗口内记录少于配额时扫到左端即完成，不应误报截断。
+        TopicPartition first = new TopicPartition("events", 0);
+        TopicPartition second = new TopicPartition("events", 1);
+        Map<TopicPartition, Long> positions = new HashMap<>();
+        positions.put(first, 0L);
+        positions.put(second, 0L);
+        KafkaAgent.PeekCollectionState collection =
+            new KafkaAgent.PeekCollectionState(List.of(first, second), 5, 5);
+
+        boolean complete = KafkaAgent.collectPeekedMessagesNewestFirst(
+            timeout -> {
+                positions.put(first, 1L);
+                positions.put(second, 1L);
+                return new ConsumerRecords<>(Map.of(
+                    first, List.of(searchRecord(first, 0L, 10L)),
+                    second, List.of(searchRecord(second, 0L, 20L))
+                ));
+            },
+            positions::get,
+            (partition, offset) -> {
+                throw new AssertionError("the window was fully scanned; no seek expected");
+            },
+            record -> true,
+            List.of(first, second),
+            Map.of(first, 0L, second, 0L),
+            Map.of(first, 1L, second, 1L),
+            collection,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        collection.incomplete = !complete;
+        assertEquals(2, collection.messages.size());
+        assertNull(KafkaAgent.searchTruncatedReason(
+            collection.messages.size(), 5, collection.incomplete, collection.scanBudgetReached
+        ));
+    }
+
+    /** 带显式事件时间的记录，用于构造跨分区时间乱序的回归场景。 */
+    private static ConsumerRecord<String, byte[]> searchRecord(
+        TopicPartition partition,
+        long offset,
+        long timestamp
+    ) {
+        return new ConsumerRecord<>(
+            partition.topic(),
+            partition.partition(),
+            offset,
+            timestamp,
+            TimestampType.CREATE_TIME,
+            -1L,
+            -1,
+            -1,
+            "k",
+            "v".getBytes(StandardCharsets.UTF_8)
+        );
     }
 
     @Test
@@ -2006,16 +2296,22 @@ class KafkaAgentTest {
     }
 
     @Test
-    void peekAcceptsAnEndTimestampOnlyInsideATimestampWindow() {
+    void peekAcceptsAnEndTimestampWithTimestampOrEarliestStart() {
         assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
             KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
             1_700_000_000_000L, 1_700_000_060_000L, null));
+        // 只填结束时间：earliest 起点 + endTimestamp 也合法。
+        assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.EARLIEST, true, null, null,
+            null, 1_700_000_060_000L, null));
         assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
             KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
             1_700_000_000_000L, 1_699_999_999_999L, null));
         assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
             KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
             1_700_000_000_000L, -1L, null));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.EARLIEST, true, null, null, null, -1L, null));
         assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
             KafkaAgent.PeekStartPosition.LATEST, true, null, null, null, 1_700_000_060_000L, null));
     }

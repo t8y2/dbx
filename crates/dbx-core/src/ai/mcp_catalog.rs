@@ -138,6 +138,9 @@ pub const TOOLS: &[McpToolDescriptor] = &[
         "sql.query",
         McpCoverage::Capability { capability: DatabaseCapability::QueryExecution, exclude: &[] },
     ),
+    // Static Read: the handler rejects writes before dispatch, so the settings
+    // UI can grant this tool without the per-call SQL classifier.
+    tool("dbx_query", "sql.query", Read, SQL_QUERY),
     classified(
         "dbx_execute_batch",
         "sql.query",

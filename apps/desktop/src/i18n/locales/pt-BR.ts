@@ -11430,6 +11430,7 @@ export default withEnglishFallback({
     insertSpaceAfterCompletionDescription: "Adiciona um espaço depois de aceitar uma sugestão de palavra-chave, tabela ou coluna, quando o próximo caractere permitir",
     sortCompletionColumnsAlphabetically: "Ordenar colunas do autocompletar em ordem alfabética",
     sortCompletionColumnsAlphabeticallyDescription: "Desative para manter os campos da tabela na ordem original do banco de dados",
+    mcpToolQuery: "Executar consulta SQL somente leitura",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

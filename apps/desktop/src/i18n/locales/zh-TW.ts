@@ -10136,6 +10136,7 @@ export default withEnglishFallback({
     completionAutoActivationDelay: "補全自動啟用延遲（毫秒）",
     completionAutoActivationDelayDescription: "輸入後延遲多久彈出補全候選，預設 50 毫秒；調大可避免連續輸入時補全頻繁彈出干擾編輯，0 表示立即彈出。",
     shortcutGoToLastEditLocation: "跳轉到上次編輯位置",
+    mcpToolQuery: "執行唯讀 SQL 查詢",
   },
   driverStore: {
     jreDirRemoveFailed: "無法刪除舊的 JRE 目錄：{path}（原始錯誤：{error}）",

@@ -155,6 +155,7 @@ Ask the MCP client to:
 | `dbx_get_routine_source` | Return the source of a stored procedure or function by name, with an optional `signature` for overloaded names |
 | `dbx_get_schema_context` | Return compact schema context suitable for an AI model |
 | `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning 100 rows by default (up to 1000 with the `max_rows` parameter) |
+| `dbx_query` | Run one read-only SQL statement (SELECT, SHOW, DESC/DESCRIBE, EXPLAIN or WITH); writes, DDL, multi-statement scripts, EXPLAIN ANALYZE and locking reads are rejected |
 | `dbx_execute_batch` | Execute a SQL script containing multiple statements in one call, returning a result per statement (or a single merged result with `use_transaction` on a multi-statement script) |
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
 | `dbx_close_session` | Close a session and release its pinned connection resources |

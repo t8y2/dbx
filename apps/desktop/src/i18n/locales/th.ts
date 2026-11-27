@@ -12995,6 +12995,7 @@ export default withEnglishFallback({
     tabWrapMaxRows: "จำนวนแถวสูงสุดสำหรับการเรียงแท็บ",
     shortcutGoToLastEditLocation: "ไปยังตำแหน่งที่แก้ไขล่าสุด",
     shortcutToggleLineCommentAndAdvance: "สลับคอมเมนต์บรรทัดและย้ายไปยังบรรทัดถัดไป",
+    mcpToolQuery: "ดำเนินการคิวรี SQL แบบอ่านอย่างเดียว",
   },
   driverStore: {
     jreDirRemoveFailed: "ลบไดเรกทอรี JRE เก่าไม่สำเร็จ: {path} (ข้อผิดพลาดเดิม: {error})",

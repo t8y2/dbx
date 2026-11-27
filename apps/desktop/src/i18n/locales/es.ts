@@ -11311,6 +11311,7 @@ export default withEnglishFallback({
     tabWrapMaxRows: "Número máximo de filas de mosaico de pestañas",
     shortcutGoToLastEditLocation: "Ir a la última ubicación de edición",
     shortcutToggleLineCommentAndAdvance: "Alternar comentario de línea y pasar a la línea siguiente",
+    mcpToolQuery: "Ejecutar consulta SQL de solo lectura",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

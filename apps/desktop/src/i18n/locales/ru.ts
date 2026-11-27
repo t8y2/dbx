@@ -12632,6 +12632,7 @@ export default withEnglishFallback({
     tabWrapMaxRows: "Максимальное количество строк для вкладок",
     shortcutGoToLastEditLocation: "Перейти к последнему месту редактирования",
     shortcutToggleLineCommentAndAdvance: "Переключить комментарий строки и перейти к следующей строке",
+    mcpToolQuery: "Выполнить SQL-запрос только для чтения",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

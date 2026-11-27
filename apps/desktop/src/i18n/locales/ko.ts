@@ -3242,6 +3242,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "컬럼 머리글을 드래그하여 순서 변경",
     invertColumnVisibility: "반전",
     resetColumnOrder: "순서 초기화",
+    confirmColumnHeaderReorder: "열 머리글을 끈 후 저장 확인",
+    saveColumnOrder: "열 순서 저장",
     confirmColumnOrderTitle: "열 순서를 저장하시겠습니까?",
     confirmColumnOrderDescription: "새 순서가 이 테이블의 데이터 보기에 저장됩니다.",
     showAllColumns: "모두 표시",

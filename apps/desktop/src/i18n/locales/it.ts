@@ -3138,6 +3138,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "Trascina l'intestazione per riordinare",
     invertColumnVisibility: "Inverti",
     resetColumnOrder: "Reimposta ordine",
+    confirmColumnHeaderReorder: "Conferma dopo aver trascinato un'intestazione",
+    saveColumnOrder: "Salva ordine colonne",
     confirmColumnOrderTitle: "Salvare l’ordine delle colonne?",
     confirmColumnOrderDescription: "Il nuovo ordine verrà salvato nella vista dati di questa tabella.",
     showAllColumns: "Mostra tutte",

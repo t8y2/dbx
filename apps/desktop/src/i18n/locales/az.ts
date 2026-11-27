@@ -2369,6 +2369,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "Sıranı dəyişmək üçün sütun başlığını sürükləyin",
     invertColumnVisibility: "Tərsinə çevir",
     resetColumnOrder: "Sıranı sıfırla",
+    confirmColumnHeaderReorder: "Sütun başlığını sürüklədikdən sonra təsdiqlə",
+    saveColumnOrder: "Sütun sırasını saxla",
     showAllColumns: "Hamısını göstər",
     showSelectedColumns: "Seçilənləri göstər",
     showSelectedColumnsHint: "Yalnız cari axtarışa uyğun sahələri göstər.",

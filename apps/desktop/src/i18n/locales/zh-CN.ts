@@ -3614,6 +3614,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "拖拽列头调整顺序",
     invertColumnVisibility: "反选",
     resetColumnOrder: "重置顺序",
+    confirmColumnHeaderReorder: "拖动表头后确认保存",
+    saveColumnOrder: "保存列顺序",
     confirmColumnOrderTitle: "保存列顺序？",
     confirmColumnOrderDescription: "新顺序将保存到此表的数据视图。",
     showAllColumns: "显示全部",

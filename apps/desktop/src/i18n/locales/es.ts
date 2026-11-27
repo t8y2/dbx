@@ -3240,6 +3240,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "Arrastra el encabezado para reordenar",
     invertColumnVisibility: "Invertir",
     resetColumnOrder: "Restablecer orden",
+    confirmColumnHeaderReorder: "Confirmar tras arrastrar un encabezado",
+    saveColumnOrder: "Guardar orden de columnas",
     confirmColumnOrderTitle: "¿Guardar el orden de las columnas?",
     confirmColumnOrderDescription: "El nuevo orden se guardará en la vista de datos de esta tabla.",
     showAllColumns: "Mostrar todo",

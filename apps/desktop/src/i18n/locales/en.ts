@@ -3687,6 +3687,8 @@ export default {
     dragColumnToReorder: "Drag column header to reorder",
     invertColumnVisibility: "Invert",
     resetColumnOrder: "Reset order",
+    confirmColumnHeaderReorder: "Confirm header drag",
+    saveColumnOrder: "Save column order",
     confirmColumnOrderTitle: "Save column order?",
     confirmColumnOrderDescription: "The new order will be saved for this table’s data view.",
     showAllColumns: "Show all",

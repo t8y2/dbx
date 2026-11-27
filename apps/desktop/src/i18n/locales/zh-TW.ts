@@ -3118,6 +3118,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "拖曳欄位標題調整順序",
     invertColumnVisibility: "反選",
     resetColumnOrder: "重設順序",
+    confirmColumnHeaderReorder: "拖曳欄位標題後確認儲存",
+    saveColumnOrder: "儲存欄位順序",
     confirmColumnOrderTitle: "儲存欄位順序？",
     confirmColumnOrderDescription: "新順序將儲存至此資料表的資料檢視。",
     showAllColumns: "顯示全部",

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1903,6 +1904,14 @@ func normalizeValue(value any, columnTypeName string) any {
 	case nil:
 		return nil
 	case []byte:
+		// bit / bit varying 是位串，数据库自带工具和 DBX 内置驱动都按 `0`/`1`/`10101010`
+		// 展示。gokb 在文本协议下给出 `'0'`/`'1'` 文本，但 MySQL 兼容模式以及部分集群版本
+		// 会把位字段当裸字节返回，落到通用分支就成了 `$binary`（网格里表现为 `0x00`/`0x01`）。
+		if isKingbaseBitType(columnTypeName) {
+			if bits, ok := decodeKingbaseBitString(typed, kingbaseBitTypeWidth(columnTypeName)); ok {
+				return bits
+			}
+		}
 		if isTextBytes(typed) {
 			return string(typed)
 		}
@@ -1957,6 +1966,125 @@ func isKingbaseTimeOnlyType(columnTypeName string) bool {
 
 func normalizedKingbaseColumnType(columnTypeName string) string {
 	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
+}
+
+// isKingbaseBitType matches the type names a bit column can carry: the driver's
+// own name (`DatabaseTypeName` -> bit / varbit) as well as the catalog spelling
+// (`bit(1)`, `bit varying(8)`).
+func isKingbaseBitType(columnTypeName string) bool {
+	normalized := normalizedKingbaseColumnType(columnTypeName)
+	if strings.HasSuffix(normalized, "[]") {
+		// 位串数组的元素由 gokb 解成文本数组，不走这里的字节解码。
+		return false
+	}
+	switch normalized {
+	case "BIT", "VARBIT", "BITVARYING":
+		return true
+	}
+	return strings.HasPrefix(normalized, "BIT(") || strings.HasPrefix(normalized, "VARBIT(") || strings.HasPrefix(normalized, "BITVARYING(")
+}
+
+// kingbaseBitTypeWidth reads the declared width out of `bit(n)` / `varbit(n)`;
+// 0 means the type name carries no width.
+func kingbaseBitTypeWidth(columnTypeName string) int {
+	normalized := normalizedKingbaseColumnType(columnTypeName)
+	open := strings.IndexByte(normalized, '(')
+	if open < 0 || !strings.HasSuffix(normalized, ")") {
+		return 0
+	}
+	width, err := strconv.Atoi(normalized[open+1 : len(normalized)-1])
+	if err != nil || width < 0 {
+		return 0
+	}
+	return width
+}
+
+// decodeKingbaseBitString turns a bit column payload into its bit-string text and
+// mirrors DbxJdbcPlugin#bitStringFromPayload so the native agent and the JDBC path
+// render the same value for the same column:
+//
+//   - PostgreSQL binary payload (int32 bit length + packed bits) is expanded from the
+//     most significant bit of the first byte;
+//   - `'0'`/`'1'` text is what the text protocol already delivers, keep it verbatim;
+//   - anything else is a raw bit field (MySQL-compatible bit(1) -> 0x00/0x01), expanded
+//     right-aligned over the declared width, or the significant width when the catalog
+//     reported none.
+//
+// ok=false means the payload cannot be a value of that width; callers keep the
+// generic `$binary` encoding instead of silently truncating data.
+func decodeKingbaseBitString(raw []byte, declaredWidth int) (string, bool) {
+	if len(raw) == 0 {
+		return "", true
+	}
+	if len(raw) >= 4 {
+		bitLen := int(int32(binary.BigEndian.Uint32(raw[:4])))
+		payload := raw[4:]
+		if bitLen >= 0 && len(payload) == (bitLen+7)/8 {
+			return expandKingbaseBitsMSB(payload, bitLen), true
+		}
+	}
+	// Mirror the JDBC rule (DbxJdbcPlugin#bitStringFromPayload): an ASCII '0'/'1'
+	// payload is text only when it matches the declared width; otherwise a raw
+	// MySQL-compat bit(n>1) value of 0x30/0x31 must expand LSB over the full width
+	// instead of rendering a single '0'/'1'.
+	if isKingbaseBitText(raw) && (declaredWidth <= 0 || len(raw) == declaredWidth) {
+		return string(raw), true
+	}
+	width := declaredWidth
+	if width <= 0 {
+		width = kingbaseSignificantBitWidth(raw)
+	}
+	if width > len(raw)*8 {
+		return "", false
+	}
+	return expandKingbaseBitsLSB(raw, width), true
+}
+
+// expandKingbaseBitsMSB reads the PostgreSQL binary bit layout: bit 0 is the most
+// significant bit of the first byte, trailing bits of the last byte are padding.
+func expandKingbaseBitsMSB(payload []byte, width int) string {
+	var bits strings.Builder
+	bits.Grow(width)
+	for index := 0; index < width; index++ {
+		bits.WriteByte('0' + ((payload[index/8] >> (7 - index%8)) & 1))
+	}
+	return bits.String()
+}
+
+// expandKingbaseBitsLSB reads a raw bit field the way MySQL stores it: bit 0 is the
+// least significant bit of the last byte (`0x01` for bit(1) is `1`, `0xaa` for
+// bit(8) is `10101010`).
+func expandKingbaseBitsLSB(payload []byte, width int) string {
+	var bits strings.Builder
+	bits.Grow(width)
+	for bit := width - 1; bit >= 0; bit-- {
+		bits.WriteByte('0' + ((payload[len(payload)-1-bit/8] >> (bit % 8)) & 1))
+	}
+	return bits.String()
+}
+
+func isKingbaseBitText(payload []byte) bool {
+	for _, char := range payload {
+		if char != '0' && char != '1' {
+			return false
+		}
+	}
+	return true
+}
+
+// kingbaseSignificantBitWidth is the shortest width that still represents the
+// payload (`0x00` -> 1, `0xaa` -> 8).
+func kingbaseSignificantBitWidth(payload []byte) int {
+	for index, char := range payload {
+		if char != 0 {
+			width := 0
+			for value := char; value != 0; value >>= 1 {
+				width++
+			}
+			return (len(payload)-index-1)*8 + width
+		}
+	}
+	return 1
 }
 
 func isTextBytes(value []byte) bool {

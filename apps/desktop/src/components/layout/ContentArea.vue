@@ -85,7 +85,8 @@ import QueryMessagesView from "@/components/layout/QueryMessagesView.vue";
 import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarActions.vue";
 import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
-import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
+import ConnectionWatermark from "@/components/common/ConnectionWatermark.vue";
+import { resolveConnectionWatermark } from "@/lib/connection/connectionWatermark";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
 import OraclePackageMembers from "@/components/objects/OraclePackageMembers.vue";
 import OracleTriggerStatus from "@/components/objects/OracleTriggerStatus.vue";
@@ -594,6 +595,7 @@ const activeSqlStatementParameterOptions = computed(() =>
   sqlStatementParameterOptionsForCompatibility(activeEffectiveDatabaseType.value, activeEffectiveDatabaseType.value === "opengauss" ? connectionStore.databaseCompatibilityMode(activeResultConnectionId.value, activeResultDatabase.value) : undefined),
 );
 const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
+const activeWatermark = computed(() => resolveConnectionWatermark(props.activeConnection, activeProductionContext.value.active));
 const productionSessionDetail = computed(() => {
   if (!activeProductionContext.value.active) return "";
   if (activeProductionContext.value.reason === "connection") return t("production.connection");
@@ -2395,7 +2397,7 @@ defineExpose({
               <Button v-if="!unfinishedTypeChange && !verifiedTypeDeletion" variant="outline" size="sm" @click="refreshTypeSource">{{ t("structureEditor.refresh") }}</Button>
               <span v-if="verifiedTypeDeletion" role="status" class="text-sm text-muted-foreground">{{ t("objects.typeManagementDeleted") }}</span>
             </div>
-            <ProductionWatermark v-if="activeProductionContext.active" />
+            <ConnectionWatermark v-if="activeWatermark" v-bind="activeWatermark" />
             <ObjectDependenciesPanel :target="activeObjectDependencyTarget" :section="activeObjectSection" @update:section="setObjectSection" @view-sql="viewObjectDependencySql" @open-object="(context, target) => emit('openDependencyObject', context, target)">
               <OracleTriggerStatus
                 v-if="queryStore.oracleTriggerSourceState(activeTab.id)"

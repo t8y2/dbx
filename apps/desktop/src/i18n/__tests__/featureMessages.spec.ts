@@ -45,6 +45,7 @@ const under = (namespace: string, keys: string[]) => keys.map((key) => `${namesp
 // leaks the raw key path, and a key missing from a locale silently shows
 // English.
 const FEATURE_MESSAGES: FeatureMessages[] = [
+  { feature: "PolarDB edition guidance (#15659)", keys: ["connection.polarDbPostgresPickerHint"], locales: ["en", "zh-CN", "zh-TW"], translated: true },
   { feature: "query connection group path preview", keys: ["connection.groupPath"], translated: true },
   { feature: "SQL file includes", keys: under("sqlFile", ["resolveIncludes", "resolveIncludesHint"]), translated: true },
   { feature: "AstraFlow provider", keys: ["ai.astraflowDescription"], translated: true },
@@ -159,6 +160,11 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   {
     feature: "plugin AI tools and data access",
     keys: ["pluginPlatform.dataAccessConsent", "pluginPlatform.dataAccessConsentTitle", "pluginPlatform.aiTools.*", "pluginPlatform.dataAccess.*", "ai.toolApproval.*"],
+    translated: true,
+  },
+  {
+    feature: "plugin tool attachments (#13978)",
+    keys: under("ai", ["pluginToolsEntry", "pluginToolsTitle", "pluginToolsDescription", "pluginToolsEmpty", "pluginToolsHowTo", "pluginToolsClosedHint", "pluginToolsFollowsTarget", "pluginToolsNoneTitle", "pluginToolsSelectedTitle", "pluginToolsSaveFailed", "pluginToolsOverflowHint"]),
     translated: true,
   },
   { feature: "schema diff deploy ignores foreign key checks", keys: under("diff", ["ignoreForeignKeyChecks", "ignoreForeignKeyChecksHint"]), translated: true },

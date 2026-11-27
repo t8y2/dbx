@@ -541,3 +541,17 @@ async fn review_regression_completed_prerequisite_is_rechecked_before_the_next_d
         assert_eq!(original_io.writes.load(Ordering::SeqCst), 1, "completed work must not be replayed");
     }
 }
+
+#[test]
+fn routine_writes_skip_only_dbms_output_capture() {
+    let options = routine_write_options("exec-1");
+    // Unchanged write semantics: no client timeout, cancellation waits for the server.
+    assert_eq!(options.timeout_secs, Some(0));
+    assert!(options.await_cancel_completion);
+    assert_eq!(options.execution_id.as_deref(), Some("exec-1"));
+    assert!(!options.use_transaction.unwrap_or(false));
+    let params = crate::query::agent_execute_query_params(SOURCE, Some("tenant"), Some("OWNER"), options);
+    assert_eq!(params["skipServerOutput"], json!(true));
+    assert_eq!(params["schema"], json!("OWNER"));
+    assert!(params.get("reportCompilationErrors").is_none());
+}

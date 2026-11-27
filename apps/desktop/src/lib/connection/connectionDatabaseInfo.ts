@@ -104,6 +104,7 @@ export function connectionConfigFingerprint(config: ConnectionConfig, sourceName
     show_user_admin: _showUserAdmin,
     sidebar_auto_load_all_tables: _sidebarAutoLoadAllTables,
     redis_key_filter: _redisKeyFilter,
+    watermark: _watermark,
     jdbc_dialect: _jdbcDialect,
     ...submittedConfig
   } = config;

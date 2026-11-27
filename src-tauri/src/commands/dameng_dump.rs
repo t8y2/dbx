@@ -5,7 +5,8 @@ use crate::commands::connection::AppState;
 
 pub use dbx_core::dameng_dump::{resolve_damp_tool_path, DamengDumpKindArg, DamengDumpProgress, DamengDumpTaskRequest};
 
-fn emit_progress(app: &AppHandle, progress: DamengDumpProgress) {
+fn emit_progress(app: &AppHandle, state: &AppState, progress: DamengDumpProgress) {
+    crate::commands::observability::publish_transfer_progress(state, "dameng-dump", &progress.task_id, &progress);
     let _ = app.emit("dameng-dump-progress", progress);
 }
 
@@ -21,8 +22,10 @@ pub async fn start_dameng_dump(
     let state = state.inner().clone();
     let task_id = request.task_id.clone();
     dbx_core::export_runtime::spawn_export_task(async move {
-        let _ = dbx_core::dameng_dump::run_dameng_dump_task(&state, &request, |progress| emit_progress(&app, progress))
-            .await;
+        let _ = dbx_core::dameng_dump::run_dameng_dump_task(&state, &request, |progress| {
+            emit_progress(&app, &state, progress)
+        })
+        .await;
         dbx_core::dameng_dump::finish_dameng_dump_task(&task_id).await;
     });
     Ok(())

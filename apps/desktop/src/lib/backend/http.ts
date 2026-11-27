@@ -1,3 +1,4 @@
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
 import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
 import type { MongoDeleteId } from "@/lib/mongo/mongoDocumentValues";
 import type { SqlFileEncoding } from "./tauri";
@@ -12,6 +13,7 @@ import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/li
 import type { NativeJobContext, NativeJobDetails, NativeJobList, NativeJobListRequest, NativeJobRequest, NativeJobOperationStatus, NativeJobPreparedPlan, NativeJobRef, NativeJobReferenceCatalog, NativeJobReferenceListRequest } from "@/lib/database/nativeJobs";
 import type { PlDebugBootstrap, PlDebugSessionRef, PlDebugStartIntent, PlDebugOperationRequest, PlDebugReadRequest, PlDebugReceipt, PlDebugSnapshot } from "@/lib/debug/plDebugProtocol";
 import type { PlDebugInspectRequest, PlDebugInspectResult, PlDebugCompileIntent, PlDebugCompileRef, PlDebugCompileReceipt } from "@/lib/debug/plDebugProtocol";
+import type { PluginHostObservationEvent, PluginHostObservationGap } from "@/types/pluginObservation";
 
 export function plDebugBootstrap(): Promise<PlDebugBootstrap> {
   return post("/api/pl-debug/bootstrap", {});
@@ -915,6 +917,26 @@ export async function subscribePluginEvents(onEvent: (event: PluginEvent) => voi
     pluginEventSource = undefined;
   };
 }
+
+/**
+ * Host observation events (`host.observe:*`) are published by the desktop shell
+ * (`install_host_observation_bridge`) only; the web shell has no SSE endpoint
+ * yet. This no-op keeps both transports signature-compatible: the workbench
+ * host passes `subscribeHostObservations` only in the Tauri runtime, so
+ * `capabilities.observations` stays absent on web and plugins gate on it.
+ */
+export async function subscribeHostObservations(_onEvent: (event: PluginHostObservationEvent) => void, _onGap?: (gap: PluginHostObservationGap) => void): Promise<() => void> {
+  return () => {};
+}
+
+/**
+ * Observation interest is registered with the desktop bus only (see
+ * `subscribeHostObservations`); the web shell has no observation delivery, so
+ * both transport calls are no-ops there.
+ */
+export async function setPluginObservationInterest(_ownerId: string, _pluginId: string): Promise<void> {}
+
+export async function clearPluginObservationInterest(_ownerId: string): Promise<void> {}
 
 /**
  * Subscribe to backend connection-liveness messages (#4339).
@@ -2496,6 +2518,7 @@ export async function aiAgentStream(
   signal?: AbortSignal,
   selectedDatabases?: string[],
   allowSkills = false,
+  pluginConnectionIds: string[] = [],
 ): Promise<string> {
   const res = await fetch(apiUrl("/api/ai/agent-stream"), {
     method: "POST",
@@ -2517,6 +2540,7 @@ export async function aiAgentStream(
       // The web server ignores this by design: local skill files are never
       // exposed to it (there is no request field on that route either).
       allowSkills,
+      pluginConnectionIds,
     }),
     signal,
   });
@@ -3145,6 +3169,11 @@ export async function savePinnedTreeNodeIds(_ids: string[]): Promise<void> {
 
 export async function saveAiConversation(conversation: AiConversation): Promise<void> {
   return post("/api/ai/conversation", { conversation });
+}
+
+/** Patches only the plugin attachment list; see the Tauri counterpart. */
+export async function updateAiConversationPluginConnections(conversationId: string, pluginConnectionIds: string[]): Promise<void> {
+  return post("/api/ai/conversation/plugin-connections", { conversationId, pluginConnectionIds });
 }
 
 /** Column-only pin write (#14226); see the Tauri counterpart for why, including
@@ -4124,8 +4153,10 @@ export async function exportQueryResultJson(filePath: string, columns: string[],
   downloadTextFile(filePath, "export.json", result.content, "application/json;charset=utf-8");
 }
 
-export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
-  const result = await post<{ content: string }>("/api/export/query-result-markdown", { columns, rows });
+export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], transposedMarkdown?: TransposedMarkdownLabels): Promise<void> {
+  // Layout belongs in the URL so the same records fit the same upload limit in either orientation.
+  const query = transposedMarkdown ? "?" + new URLSearchParams({ field: transposedMarkdown.field, data: transposedMarkdown.data }) : "";
+  const result = await post<{ content: string }>(`/api/export/query-result-markdown${query}`, { columns, rows });
   downloadTextFile(filePath, "export.md", result.content, "text/markdown;charset=utf-8");
 }
 

@@ -559,3 +559,53 @@ test("UI root overrides and port collision fallback work without changing the pl
   await writeFile(join(root, "manifest.json"), JSON.stringify({ ...manifest, engines: { host_api: ">=2.0.0" } }));
   await assert.rejects(createMockHost({ project: root }), /does not support Host API/);
 });
+
+test("simulated observation events follow the host.observe permission gate", async (t) => {
+  const observedManifest = { ...manifest, permissions: [...manifest.permissions, "host.observe:queries"] };
+  const { host, request, headers } = await fixture(t, false, { pluginManifest: observedManifest });
+  const response = await fetch(`${host.origin}/api/events?page=observe`, { headers });
+  const reader = response.body.getReader();
+  t.after(() => reader.cancel());
+
+  const delivered = await request("observations/publish", {
+    event: { id: 1, tsMs: Date.now(), kind: "query.started", payload: { sql: "select 1" } },
+  });
+  assert.equal(delivered.value.delivered, true);
+
+  // The SSE frame spreads the event fields next to `type`, matching the shape
+  // the real host bridge posts into the sandbox. The stream opens with
+  // bootstrap frames (`page-frames`, `status`, ...), so scan for ours.
+  let buffer = "";
+  let event;
+  while (!event) {
+    const { value, done } = await reader.read();
+    assert.notEqual(done, true);
+    buffer += Buffer.from(value).toString("utf8");
+    for (const chunk of buffer.split("\n\n")) {
+      const line = chunk.split("\n").find((entry) => entry.startsWith("data: "));
+      if (!line) continue;
+      const parsed = JSON.parse(line.slice("data: ".length));
+      if (parsed.type === "hostevent") {
+        event = parsed;
+        break;
+      }
+    }
+  }
+  assert.equal(event.kind, "query.started");
+  assert.equal(event.payload.sql, "select 1");
+
+  // A kind without a matching permission is dropped even though the manifest
+  // declares a different observe category.
+  const dropped = await request("observations/publish", {
+    event: { id: 2, tsMs: Date.now(), kind: "ai.tool_call_started", payload: {} },
+  });
+  assert.equal(dropped.value.delivered, false);
+
+  // Only registered kinds are delivered: a kind under a category the manifest
+  // does observe still fails closed when it is not in the registry (this
+  // mirrors the exact-kind gate the real bridge applies).
+  const unregistered = await request("observations/publish", {
+    event: { id: 3, tsMs: Date.now(), kind: "query.internal_data", payload: {} },
+  });
+  assert.equal(unregistered.value.delivered, false);
+});

@@ -358,6 +358,9 @@ type queryOptions struct {
 	// ReportCompilationErrors is opt-in because SQL file imports and transfers
 	// legitimately create objects that stay INVALID until their dependencies exist.
 	ReportCompilationErrors bool `json:"reportCompilationErrors"`
+	// SkipServerOutput marks one of DBX's own dictionary reads. It runs without
+	// DBMS_OUTPUT capture and may reuse the session's schema (see internal_query.go).
+	SkipServerOutput bool `json:"skipServerOutput"`
 }
 
 const largeValueBytesColumnPrefix = "__DBX_LARGE_VALUE_BYTES_"
@@ -686,6 +689,10 @@ type server struct {
 	plTxBeginErr           error
 	plTxRollbackDone       chan struct{}
 	plTxRollbackErr        error
+
+	// sessionSchemas lets consecutive internal queries skip an identical
+	// CURRENT_SCHEMA switch; see internal_query.go.
+	sessionSchemas sessionSchemaCache
 }
 
 type agentSession struct {
@@ -1105,6 +1112,9 @@ func (s *server) handleLine(line string) (response, bool) {
 }
 
 func (s *server) dispatch(method string, params map[string]json.RawMessage) (any, bool, error) {
+	if !keepsSessionSchemas(method, params) {
+		s.sessionSchemas.clear()
+	}
 	if oracleMethodMayReadLOB(method) {
 		if err := s.ensureLegacyOracleLOBFetch(); err != nil {
 			return nil, false, err
@@ -5003,6 +5013,9 @@ func readQuerySessionPage(session *querySession, pageSize int) (result queryPage
 }
 
 func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
+	if runsWithoutServerOutput(opts) {
+		return s.executeInternalQuery(opts)
+	}
 	var result queryResult
 	var err error
 	messages := s.withStatementDBMSOutput(opts.SQL, func() error {
@@ -5019,7 +5032,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 func (s *server) executeQueryWithoutOutput(opts queryOptions) (queryResult, error) {
 	start := time.Now()
 	if strings.TrimSpace(opts.Schema) != "" && !s.hasManualTransaction() {
-		if err := s.setSchema(opts.Schema); err != nil {
+		if err := s.applyStatementSchema(opts); err != nil {
 			return queryResult{}, err
 		}
 	}

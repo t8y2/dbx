@@ -91,7 +91,14 @@ pub(super) fn write_sql_inserts(
     ensure_sql_builder_budget(context)?;
     reject_selected_opaque_aggregate_states(context)?;
     let data = sql_selected_data(context, false)?;
+    let insert_keyword =
+        if context.request.options.sql.replace_into && context.request.database_type == Some(DatabaseType::Mysql) {
+            "REPLACE"
+        } else {
+            "INSERT"
+        };
     let statement = build_data_grid_copy_insert_statement_with_formatters(
+        insert_keyword,
         DataGridCopyInsertStatementOptions {
             database_type: context.request.database_type,
             identifier_quote: context.request.identifier_quote.clone(),
@@ -382,6 +389,7 @@ pub(super) fn write_sql_deletes_inserts(
 
     let data = sql_selected_data(context, false)?;
     let insert_statements = build_data_grid_copy_insert_statements_with_formatters(
+        "INSERT",
         DataGridCopyInsertStatementOptions {
             database_type: context.request.database_type,
             identifier_quote: context.request.identifier_quote.clone(),

@@ -143,6 +143,11 @@ pub(in super::super) async fn package_save_preflight(
     origin: SourceOrigin,
 ) -> Result<ComparePreflight, String> {
     let current = readback::readback(catalog, endpoint, identity.clone(), &RoutineReadbackGoal::Inspect, origin).await;
+    if let Some(detail) = readback_failure_detail(&current) {
+        // Nothing has been prepared or dispatched yet; say why the save cannot start
+        // instead of the generic post-state message from_readback would give.
+        return Err(format!("Cannot verify the current package before saving; nothing was changed.\n{detail}"));
+    }
     let pair = ExpectedPackagePair::from_readback(&current)?;
     Ok(ComparePreflight {
         source: None,
@@ -538,9 +543,38 @@ pub(super) async fn read_grants(
     (snapshot, proofs)
 }
 
+/// The distinct reasons a package pair readback failed, for the selected kind and its
+/// companion, labelled with the object they belong to. The pair-level summary issue only
+/// repeats them, so it is used alone when nothing more specific was recorded.
+fn readback_failure_detail(readback: &RoutineReadback) -> Option<String> {
+    let label = |identity: &RoutineIdentity| {
+        let kind = match identity.kind {
+            db::ObjectSourceKind::Package => "PACKAGE".to_string(),
+            db::ObjectSourceKind::PackageBody => "PACKAGE BODY".to_string(),
+            ref other => format!("{other:?}"),
+        };
+        format!("{kind} {}.{}", identity.owner, identity.name)
+    };
+    let mut details = Vec::new();
+    for part in std::iter::once(readback).chain(readback.package_companion.as_deref()) {
+        for issue in part.issues.iter().filter(|issue| issue.stage != "package-pair") {
+            let detail = format!("{}: {}", label(&part.identity), issue.message);
+            if !details.contains(&detail) {
+                details.push(detail);
+            }
+        }
+    }
+    if details.is_empty() {
+        details.extend(readback.issues.iter().map(|issue| format!("{}: {}", label(&readback.identity), issue.message)));
+    }
+    (!details.is_empty()).then(|| details.join("\n"))
+}
+
 pub(super) fn observation_baseline(readback: &RoutineReadback) -> Result<ExpectedRoutine, String> {
-    if !readback.issues.is_empty() {
-        return Err("The package pair's recorded post-state is incomplete; observe the original operation again".into());
+    if let Some(detail) = readback_failure_detail(readback) {
+        return Err(format!(
+            "The package pair's recorded post-state is incomplete; observe the original operation again.\n{detail}"
+        ));
     }
     match (&readback.version, &readback.source, readback.exists) {
         (None, None, Some(false)) => Ok(ExpectedRoutine::Absent(readback.identity.clone())),
@@ -556,5 +590,62 @@ pub(super) fn observation_baseline(readback: &RoutineReadback) -> Result<Expecte
             }))
         }
         _ => Err("The package pair has no complete exact-kind post-state for correction".into()),
+    }
+}
+
+#[cfg(test)]
+mod failure_detail_tests {
+    use super::*;
+
+    fn failed(kind: db::ObjectSourceKind, issues: &[(&str, &str)]) -> RoutineReadback {
+        RoutineReadback {
+            identity: RoutineIdentity { owner: "SCOTT".into(), name: "TRY".into(), kind },
+            state: RoutineReadbackState::ReadbackFailed,
+            exists: Some(true),
+            version: None,
+            source: None,
+            source_origin: None,
+            package_companion: None,
+            definition_matches: None,
+            compiler_messages: Vec::new(),
+            issues: issues
+                .iter()
+                .map(|(stage, message)| RoutineReadIssue {
+                    stage: (*stage).into(),
+                    code: "read-failed".into(),
+                    message: (*message).into(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn package_preflight_failures_name_each_object_and_its_reason() {
+        let reason = "Oracle source declares a different object than TRY.";
+        let mut body = failed(
+            db::ObjectSourceKind::PackageBody,
+            &[("readback", reason), ("package-pair", "Package pair readback is incomplete: ...")],
+        );
+        body.package_companion = Some(Box::new(failed(db::ObjectSourceKind::Package, &[("readback", reason)])));
+        assert_eq!(
+            readback_failure_detail(&body).unwrap(),
+            format!(
+                "PACKAGE BODY SCOTT.TRY: {reason}
+PACKAGE SCOTT.TRY: {reason}"
+            )
+        );
+        let Err(error) = observation_baseline(&body) else {
+            panic!("a failed readback cannot serve as a baseline");
+        };
+        assert!(error.contains(&format!("PACKAGE BODY SCOTT.TRY: {reason}")), "{error}");
+
+        // A pair-level issue on its own is still reported rather than dropped.
+        let pair_only =
+            failed(db::ObjectSourceKind::Package, &[("package-pair", "Package pair namespace visibility is unknown")]);
+        assert_eq!(
+            readback_failure_detail(&pair_only).unwrap(),
+            "PACKAGE SCOTT.TRY: Package pair namespace visibility is unknown"
+        );
+        assert_eq!(readback_failure_detail(&failed(db::ObjectSourceKind::Package, &[])), None);
     }
 }

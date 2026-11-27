@@ -153,9 +153,9 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
   }
 
   function formatGridItemCell(item: LargeValueRowItem, columnIndex: number, includeSnapshotLabel = true): string {
-    void visibleLargeValuePreviewVersion.value;
     if (isPendingDecode(item, columnIndex)) return options.translate("grid.largeValuePendingDecode");
-    const text = options.formatCellCached(visibleLargeValuePreviewValue(item, columnIndex, item.data[columnIndex] ?? null), columnIndex, largeValueOriginalBytes(item, columnIndex));
+    const preview = visibleLargeValuePreviewValue(item.sourceIndex, columnIndex);
+    const text = options.formatCellCached(preview === undefined ? (item.data[columnIndex] ?? null) : preview, columnIndex, largeValueOriginalBytes(item, columnIndex));
     return includeSnapshotLabel && snapshotReference(item, columnIndex) ? options.translate("grid.largeValueSnapshotPreview", { value: text }) : text;
   }
 
@@ -272,10 +272,16 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     options.scheduleCanvasDraw();
   }
 
-  function visibleLargeValuePreviewValue(item: Pick<LargeValueRowItem, "sourceIndex"> | undefined, columnIndex: number, fallback: CellValue): CellValue {
-    if (item?.sourceIndex === undefined) return fallback;
-    const preview = visibleLargeValuePreviewCaches.get(options.result.value)?.get(item.sourceIndex, columnIndex);
-    return preview === undefined ? fallback : preview;
+  function visibleLargeValuePreviewValue(sourceIndex: number | undefined, columnIndex: number): CellValue | undefined {
+    if (sourceIndex === undefined || !largeValueCellsByKey.value.has(largeValueCellKey(sourceIndex, columnIndex))) return undefined;
+    void visibleLargeValuePreviewVersion.value;
+    return visibleLargeValuePreviewCaches.get(options.result.value)?.get(sourceIndex, columnIndex);
+  }
+
+  function visibleLargeValuePreviewSearchText(sourceIndex: number | undefined, columnIndex: number): string | undefined {
+    const preview = visibleLargeValuePreviewValue(sourceIndex, columnIndex);
+    if (preview === undefined) return undefined;
+    return preview === null ? "" : options.formatCellCached(preview, columnIndex).toLowerCase();
   }
 
   function visibleLargeValuePreviewColumnIndexes(): number[] {
@@ -827,7 +833,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     largeValueOriginalBytes,
     formatGridItemCell,
     formatGridItemCellForConfirmation,
-    visibleLargeValuePreviewValue,
+    visibleLargeValuePreviewSearchText,
     resolveLargeValueCells,
     hydrateLargeValueCells,
     hydrateLargeValueCell,

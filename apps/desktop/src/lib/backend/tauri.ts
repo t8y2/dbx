@@ -1,3 +1,4 @@
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
 import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
 import type { MongoDeleteId } from "@/lib/mongo/mongoDocumentValues";
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
@@ -18,6 +19,7 @@ import { functionDiffsToWire, functionInfoFromWire, schemaDiffPreparationFromWir
 import type { OracleRoutineSnapshot, OracleRoutineOperation, OracleRoutineOperationObservation, OracleRoutineSaveInput, OracleRoutinePlanInput, OracleRoutinePlan, OracleRoutineReadOptions, OracleRoutineIdentity } from "@/types/schemaDiff";
 import type { PlDebugBootstrap, PlDebugSessionRef, PlDebugStartIntent, PlDebugOperationRequest, PlDebugReadRequest, PlDebugReceipt, PlDebugSnapshot } from "@/lib/debug/plDebugProtocol";
 import type { PlDebugInspectRequest, PlDebugInspectResult, PlDebugCompileIntent, PlDebugCompileRef, PlDebugCompileReceipt } from "@/lib/debug/plDebugProtocol";
+import { HOST_OBSERVATION_EVENT, HOST_OBSERVATION_GAP_EVENT, type PluginHostObservationEvent, type PluginHostObservationGap } from "@/types/pluginObservation";
 
 export function plDebugBootstrap(): Promise<PlDebugBootstrap> {
   return invoke("pl_debug_bootstrap");
@@ -624,6 +626,10 @@ export interface QueryPaginationExecutionPlanOptions {
   /** Optimizer hint injected into the generated count (dbx_count) and page (dbx_page) SQL.
    *  Example: GaussDB parallel execution hint: + set(query_dop 8). */
   executionHint?: string;
+  /** Connected server version (e.g. ShardingSphere-Proxy) used to avoid proxy-unsafe SQL rewrites. */
+  serverVersion?: string;
+  /** Connected server comment (`@@version_comment`), used alongside `serverVersion` for proxy detection. */
+  serverComment?: string;
 }
 
 export interface QueryPaginationExecutionPlan {
@@ -850,6 +856,7 @@ export async function aiAgentStream(
   _signal?: AbortSignal,
   selectedDatabases?: string[],
   allowSkills = false,
+  pluginConnectionIds: string[] = [],
 ): Promise<string> {
   const unlisten: UnlistenFn = await listen<TauriAgentEvent>("ai-agent-event", (event) => {
     const payload = event.payload;
@@ -875,6 +882,7 @@ export async function aiAgentStream(
       confirmedSchema,
       selectedDatabases,
       allowSkills,
+      pluginConnectionIds,
     });
   } catch (e) {
     unlisten();
@@ -1658,6 +1666,11 @@ export interface AiConversation {
    *  the record keeps the ENTRY the user chose, not the action a send routed
    *  to. Same semantics as `assistantMode`. */
   assistantAction?: string;
+  /** Plugin connections the user attached to this conversation's agent runs.
+   *  Plugin tools are scoped to these open connections (plus the target when it
+   *  is itself a plugin connection); absent/empty means nothing is attached,
+   *  which is the safe default for records written before this field existed. */
+  pluginConnectionIds?: string[];
   /** Pinned to the top of the history list (#14226). Absent means unpinned, so
    *  legacy records and records written before the field existed load fine. */
   pinned?: boolean;
@@ -1693,6 +1706,12 @@ export interface AiRun {
 
 export async function saveAiConversation(conversation: AiConversation): Promise<void> {
   return invoke("save_ai_conversation", { conversation });
+}
+
+/** Patches only the plugin attachment list, so an old transcript snapshot is
+ *  never re-written over newer messages (attachment toggles + repair path). */
+export async function updateAiConversationPluginConnections(conversationId: string, pluginConnectionIds: string[]): Promise<void> {
+  return invoke("update_ai_conversation_plugin_connections", { conversationId, pluginConnectionIds });
 }
 
 /** Writes only the pin columns (#14226). Pinning is a property toggle, so it must
@@ -3433,6 +3452,42 @@ export async function subscribePluginEvents(onEvent: (event: PluginEvent) => voi
     unlistenEvent();
     unlistenBinary();
   };
+}
+
+/**
+ * Subscribe to host observation events (`host.observe:*`). The plugin bridge
+ * filters each event by the workbench plugin's declared permissions; the
+ * sidecar fan-out lives in the Rust shell.
+ *
+ * `onGap` receives the host's explicit drop notices when the bus could not
+ * keep up. Event `id` gaps are not drop signals: ids are host-global while
+ * delivery is permission-filtered.
+ */
+export async function subscribeHostObservations(onEvent: (event: PluginHostObservationEvent) => void, onGap?: (gap: PluginHostObservationGap) => void): Promise<UnlistenFn> {
+  const unlistenEvent = await listen<PluginHostObservationEvent>(HOST_OBSERVATION_EVENT, (event) => onEvent(event.payload));
+  const unlistenGap = onGap ? await listen<PluginHostObservationGap>(HOST_OBSERVATION_GAP_EVENT, (event) => onGap(event.payload)) : undefined;
+  return () => {
+    unlistenEvent();
+    unlistenGap?.();
+  };
+}
+
+/**
+ * Register a plugin workbench as an observer of the host observation bus.
+ *
+ * The shell's bridges stay subscribed for the whole process, so the Rust bus
+ * cannot infer observers from its receivers; it only builds payloads for
+ * categories with registered interest. `ownerId` is per workbench mount (two
+ * tabs of one plugin are refcounted separately); the permissions are read from
+ * the installed manifest on the Rust side.
+ */
+export async function setPluginObservationInterest(ownerId: string, pluginId: string): Promise<void> {
+  await invoke("set_plugin_observation_interest", { ownerId, pluginId });
+}
+
+/** Drop the interest registered by `setPluginObservationInterest`. */
+export async function clearPluginObservationInterest(ownerId: string): Promise<void> {
+  await invoke("clear_plugin_observation_interest", { ownerId });
 }
 
 /**
@@ -7257,12 +7312,13 @@ export async function exportQueryResultJson(filePath: string, columns: string[],
   });
 }
 
-export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
+export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], transposedMarkdown?: TransposedMarkdownLabels): Promise<void> {
   return invoke("export_query_result_markdown", {
     request: {
       filePath,
       columns,
       rows,
+      transposedMarkdown,
     },
   });
 }

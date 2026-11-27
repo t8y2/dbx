@@ -161,6 +161,12 @@ pub const TOOLS: &[McpToolDescriptor] = &[
         McpCoverage::Capability { capability: DatabaseCapability::MetadataBrowse, exclude: &[] },
     ),
     tool(
+        "dbx_search_schema",
+        "sql.schema",
+        Read,
+        McpCoverage::Capability { capability: DatabaseCapability::MetadataBrowse, exclude: NON_SQL_SESSION },
+    ),
+    tool(
         "dbx_list_routines",
         "sql.schema",
         Read,

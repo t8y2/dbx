@@ -193,8 +193,7 @@ function updateHttpTunnelProtocol(value: unknown) {
   profile.protocol = protocol === "navicat_mysql" || protocol === "sqlyog_mysql" ? protocol : "dbx_tcp";
   // Both MySQL-compatible PHP tunnels carry the account in every request instead of a token.
   if (profile.protocol !== "dbx_tcp") profile.token = "";
-  const defaultScript =
-    profile.protocol === "navicat_mysql" ? "ntunnel_mysql.php" : profile.protocol === "sqlyog_mysql" ? "SQLyogTunnel.php" : "";
+  const defaultScript = profile.protocol === "navicat_mysql" ? "ntunnel_mysql.php" : profile.protocol === "sqlyog_mysql" ? "SQLyogTunnel.php" : "";
   if (defaultScript && profile.url.trim()) {
     try {
       const url = new URL(profile.url.trim());

@@ -332,7 +332,9 @@ fn xml_escape(value: &str) -> String {
 // Response parsing (the tunnel output is small and regular; no XML crate needed)
 // ---------------------------------------------------------------------------
 
-pub fn parse_sqlyog_response(body: &[u8]) -> Result<NavicatResult, SqlyogError> {
+/// Parses one tunnel response. Private on purpose: the shared `NavicatResult`
+/// is only `pub(crate)`, so exposing this fn would widen its interface.
+fn parse_sqlyog_response(body: &[u8]) -> Result<NavicatResult, SqlyogError> {
     let mut cursor = Cursor::new(body);
     let mut count = 0usize;
     let mut last = None;
@@ -486,7 +488,8 @@ fn parse_u64(text: &[u8]) -> Option<u64> {
 fn xml_unescape(text: &[u8]) -> Vec<u8> {
     let text = String::from_utf8_lossy(text);
     let mut output = String::with_capacity(text.len());
-    let mut rest = text.as_str();
+    // `Cow::as_str` is still unstable; a plain borrow derefs to the same `&str`.
+    let mut rest: &str = &text;
     while let Some(index) = rest.find('&') {
         output.push_str(&rest[..index]);
         rest = &rest[index..];

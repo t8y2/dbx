@@ -199,6 +199,12 @@ let existingTablesRequestId = 0;
 let targetColumnsRequestId = 0;
 let previewRequestId = 0;
 let batchEncodingRequestId = 0;
+// Triggers can ask for the same preview while the previous parse is still running (assigning a
+// source, editing an option, re-entering the options step). Request ids only discard the stale
+// result afterwards, so every duplicate used to start another full parse of the file on the
+// backend — the reported #15047 logs showed four concurrent parses of one 30 MB dump. Identical
+// in-flight previews now share one request; a changed option still parses again.
+let inFlightPreview: { key: string; promise: Promise<api.TableImportPreview> } | null = null;
 
 const formatOptions: Array<{ value: api.TableImportSourceFormat; icon: any; labelKey: string; descriptionKey: string }> = [
   { value: "csv", icon: FileText, labelKey: "tableImport.formatCsv", descriptionKey: "tableImport.formatCsvDescription" },
@@ -929,16 +935,31 @@ async function loadTargetColumns() {
   }
 }
 
+function previewRequestSignature(fileOrPath: string | File, sourceRef: string | null, previewLimit: number) {
+  const source = typeof fileOrPath === "string" ? fileOrPath : `${fileOrPath.name}:${fileOrPath.size}:${fileOrPath.lastModified}`;
+  return JSON.stringify([source, sourceRef ?? "", sourceFormat.value, parseOptions.value, previewLimit]);
+}
+
 async function previewSelectedImportFile(fileOrPath: string | File) {
   const input = importPreviewInput(uploadedImportSourceFromPreview(preview.value), fileOrPath);
-  return api.previewTableImportFile(input.fileOrPath, {
+  const limit = Math.max(1, Number(previewLimit.value) || 50);
+  const key = previewRequestSignature(fileOrPath, input.sourceRef, limit);
+  if (inFlightPreview?.key === key) return inFlightPreview.promise;
+  const promise = api.previewTableImportFile(input.fileOrPath, {
     connectionId: props.prefillConnectionId,
     database: props.prefillDatabase || "",
     sourceRef: input.sourceRef,
     sourceFormat: sourceFormat.value,
     parseOptions: parseOptions.value,
-    previewLimit: Math.max(1, Number(previewLimit.value) || 50),
+    previewLimit: limit,
   });
+  const entry = { key, promise };
+  inFlightPreview = entry;
+  try {
+    return await promise;
+  } finally {
+    if (inFlightPreview === entry) inFlightPreview = null;
+  }
 }
 
 async function loadPreview(fileOrPath = selectedSource.value) {

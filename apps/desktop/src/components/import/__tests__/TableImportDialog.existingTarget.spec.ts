@@ -985,3 +985,79 @@ describe("TableImportDialog existing targets", () => {
     );
   });
 });
+
+describe("TableImportDialog preview requests (#15047)", () => {
+  function delimitedPreview() {
+    return {
+      fileName: "rows.csv",
+      filePath: "/tmp/rows.csv",
+      fileType: "csv" as const,
+      sizeBytes: 24,
+      columns: ["id", "name"],
+      rows: [[1, "Alice"]],
+      totalRows: 1,
+      sourceFingerprint: "rows-csv",
+    };
+  }
+
+  async function selectFile(file: File) {
+    const fileInput = document.body.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(fileInput).toBeTruthy();
+    Object.defineProperty(fileInput, "files", {
+      configurable: true,
+      value: [file],
+    });
+    fileInput?.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushAsyncUpdates();
+  }
+
+  it("shares one backend parse between identical in-flight previews", async () => {
+    i18n.global.locale.value = "en";
+    await mountDialog({ prefillTable: "existing_target" });
+
+    let releasePreview: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      releasePreview = resolve;
+    });
+    mocks.previewTableImportFile.mockReset().mockImplementation(async () => {
+      await gate;
+      return delimitedPreview();
+    });
+
+    const file = new File(["rows"], "rows.csv");
+    await selectFile(file);
+    // A second trigger while the first parse is still running must not start another parse:
+    // the previous 4x concurrent full-file parses in #15047 came from exactly this overlap.
+    await selectFile(file);
+    expect(mocks.previewTableImportFile).toHaveBeenCalledTimes(1);
+
+    releasePreview?.();
+    await flushAsyncUpdates();
+    expect(mocks.previewTableImportFile).toHaveBeenCalledTimes(1);
+
+    // Once the request settles, previewing the same selection again parses again.
+    await selectFile(file);
+    expect(mocks.previewTableImportFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps parsing separately for different sources", async () => {
+    i18n.global.locale.value = "en";
+    await mountDialog({ prefillTable: "existing_target" });
+
+    let releasePreview: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      releasePreview = resolve;
+    });
+    mocks.previewTableImportFile.mockReset().mockImplementation(async () => {
+      await gate;
+      return delimitedPreview();
+    });
+
+    await selectFile(new File(["rows"], "rows.csv"));
+    await selectFile(new File(["other rows"], "other.csv"));
+    expect(mocks.previewTableImportFile).toHaveBeenCalledTimes(2);
+
+    releasePreview?.();
+    await flushAsyncUpdates();
+  });
+});

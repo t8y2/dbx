@@ -195,6 +195,27 @@ pub(crate) fn apply_debug_log_level(debug_logging_enabled: bool) {
     log::set_max_level(if debug_logging_enabled { log::LevelFilter::Debug } else { log::LevelFilter::Off });
 }
 
+/// Third-party crates whose `debug!` output costs far more than it explains.
+///
+/// `sqlparser` emits one debug line per parsed expression (`parsing expr`,
+/// `prefix: {expr:?}`, `next precedence`, `infix`). A 30 MB MySQL dump holds
+/// hundreds of thousands of values, so with 调试日志 enabled the parser turns an
+/// import that parses in ~2 s into one that spends minutes formatting and
+/// writing hundreds of MB of log lines — issue #15047 measured 762 rows/s and
+/// ~2M log lines for a file that parses in 558 ms once this logging is gone.
+const SILENCED_DEBUG_LOG_TARGETS: &[&str] = &["sqlparser"];
+
+fn is_silenced_debug_log_target(target: &str, level: log::Level) -> bool {
+    // Only `debug!`/`trace!` spam is dropped; a warning or error from the parser still helps
+    // diagnose a failed statement.
+    if level < log::Level::Debug {
+        return false;
+    }
+    SILENCED_DEBUG_LOG_TARGETS
+        .iter()
+        .any(|prefix| target.strip_prefix(prefix).is_some_and(|rest| rest.is_empty() || rest.starts_with("::")))
+}
+
 fn should_hide_window_on_close(target_os: &str) -> bool {
     matches!(target_os, "macos" | "windows")
 }
@@ -1354,7 +1375,7 @@ pub(crate) fn cleanup_before_updater_forced_exit(app_handle: &tauri::AppHandle) 
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        app_menu_close_tab_label, app_menu_copy_support_info_label, app_menu_quit_label,
+        app_menu_close_tab_label, app_menu_copy_support_info_label, app_menu_quit_label, is_silenced_debug_log_target,
         linux_appimage_requires_dmabuf_workaround, linux_drm_driver_is_software_only,
         linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state, linux_pci_id_from_sysfs_value,
         linux_selected_drm_render_device, linux_uses_native_wayland, linux_webkit_environment_override,
@@ -1991,6 +2012,28 @@ mod tests {
         assert!(!linux_drm_driver_is_software_only(Some("i915")));
         assert!(!linux_drm_driver_is_software_only(Some("nouveau")));
     }
+
+    #[test]
+    fn silences_sqlparser_debug_spam_only() {
+        use log::Level::{Debug, Error, Info, Trace, Warn};
+
+        // `sqlparser` logs one debug line per parsed expression, which is what turned
+        // issue #15047 imports into minutes of log I/O.
+        assert!(is_silenced_debug_log_target("sqlparser", Debug));
+        assert!(is_silenced_debug_log_target("sqlparser::parser", Debug));
+        assert!(is_silenced_debug_log_target("sqlparser::dialect", Trace));
+
+        // Real problems from the parser must still reach the log file.
+        assert!(!is_silenced_debug_log_target("sqlparser::parser", Info));
+        assert!(!is_silenced_debug_log_target("sqlparser::parser", Warn));
+        assert!(!is_silenced_debug_log_target("sqlparser::parser", Error));
+
+        // DBX's own import diagnostics stay at debug level, and prefix matching must not
+        // swallow unrelated crates whose names merely start with the same letters.
+        assert!(!is_silenced_debug_log_target("dbx_core::data::table_import", Debug));
+        assert!(!is_silenced_debug_log_target("sqlparser_extras::parser", Debug));
+        assert!(!is_silenced_debug_log_target("tauri::app", Debug));
+    }
 }
 
 fn route_external_commands(
@@ -2325,6 +2368,10 @@ pub fn run() {
                         ));
                     })
                     .level(log::LevelFilter::Debug)
+                    // Keeps 调试日志 useful for DBX itself: a parser that logs one line per
+                    // value turns any sizeable import into minutes of log formatting instead of
+                    // parsing. See `is_silenced_debug_log_target`.
+                    .filter(|metadata| !is_silenced_debug_log_target(metadata.target(), metadata.level()))
                     .build(),
             )?;
             apply_debug_log_level(desktop_settings.debug_logging_enabled);

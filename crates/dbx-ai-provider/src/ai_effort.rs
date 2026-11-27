@@ -721,9 +721,7 @@ mod tests {
         };
         assert_eq!(options[0].selection, AiEffortSelection::Disabled);
         assert_eq!(default, AiEffortSelection::Disabled);
-        assert!(options
-            .iter()
-            .any(|option| option.selection == AiEffortSelection::Enum("max".to_string())));
+        assert!(options.iter().any(|option| option.selection == AiEffortSelection::Enum("max".to_string())));
     }
 
     #[test]

@@ -524,6 +524,7 @@ describe("TableStructureEditor primary key editing", () => {
         }),
       ),
     );
+    expect(root.querySelector("[data-primary-key-name-input]")).toBeNull();
   });
 
   it("allows enabling identity on an existing Dameng integer column", async () => {

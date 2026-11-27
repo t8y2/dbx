@@ -13563,6 +13563,8 @@ export default withEnglishFallback({
     peekMessageKey: "key={key}",
   },
   mqKafkaConsumerGroups: {
+    deleteGroup: "删除消费者组",
+    confirmDelete: "确定删除消费者组「{name}」吗？该组在所有主题中已提交的位点都会被删除。",
     title: "消费组",
     searchPlaceholder: "搜索消费组或 Topic",
     refresh: "刷新",

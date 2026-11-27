@@ -12259,6 +12259,8 @@ export default withEnglishFallback({
     committedOffset: "커밋된 오프셋",
     logEndOffset: "로그 끝 오프셋",
     lag: "지연",
+    deleteGroup: "컨슈머 그룹 삭제",
+    confirmDelete: '"{name}" 컨슈머 그룹을 삭제하시겠습니까? 이 그룹의 모든 토픽에서 커밋된 오프셋이 삭제됩니다.',
   },
   mqClients: {
     unloadTopicUnsupportedKafka: "Kafka는 토픽 언로드를 지원하지 않습니다",

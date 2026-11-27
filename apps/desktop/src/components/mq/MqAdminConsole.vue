@@ -584,7 +584,7 @@ onUnmounted(() => {
         :supports-expire-messages="canExpireMessages"
         @subscription-selected="handleSubscriptionSelected"
       />
-      <KafkaConsumerGroupsPanel v-else-if="activeTab === 'consumerGroups' && isKafkaCluster" :connection-id="connectionId" @navigate-subscriptions="handleKafkaConsumerGroupTopicSelected" />
+      <KafkaConsumerGroupsPanel v-else-if="activeTab === 'consumerGroups' && isKafkaCluster" :connection-id="connectionId" :read-only="readOnly" :confirm-write="confirmMqWrite" @navigate-subscriptions="handleKafkaConsumerGroupTopicSelected" />
       <RabbitMqMonitoringPanel v-else-if="activeTab === 'monitoring' && isRabbitMqCluster && canClusterMonitor" :connection-id="connectionId" />
       <MonitoringPanel v-else-if="activeTab === 'monitoring'" :connection-id="connectionId" :topic="selectedTopic" :tenant="effectiveTenant" :namespace="effectiveNamespace" :mq-system-kind="mqSystemKind" @navigate-tab="handleNavigateTab" />
       <RabbitMqClientsPanel v-else-if="activeTab === 'clients' && isRabbitMqCluster && canManageClientConnections" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />

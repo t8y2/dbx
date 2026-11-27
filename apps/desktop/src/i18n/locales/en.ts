@@ -13604,6 +13604,8 @@ export default {
     peekMessageKey: "key={key}",
   },
   mqKafkaConsumerGroups: {
+    deleteGroup: "Delete Group",
+    confirmDelete: 'Delete consumer group "{name}"? This removes its committed offsets across all topics.',
     title: "Consumer Groups",
     searchPlaceholder: "Search group or topic",
     refresh: "Refresh",

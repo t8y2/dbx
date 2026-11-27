@@ -12954,6 +12954,8 @@ export default withEnglishFallback({
     committedOffset: "Offset confirmado",
     logEndOffset: "Offset final do log",
     lag: "Atraso",
+    deleteGroup: "Excluir grupo de consumidores",
+    confirmDelete: 'Tem certeza de que deseja excluir o grupo de consumidores "{name}"? Os offsets confirmados desse grupo em todos os tópicos serão excluídos.',
   },
   mqClients: {
     unloadTopicUnsupportedKafka: "O Kafka não suporta o descarregamento de tópicos",

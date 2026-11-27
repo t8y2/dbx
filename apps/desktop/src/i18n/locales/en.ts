@@ -3210,6 +3210,7 @@ export default {
     querySuccess: "Query executed successfully",
     noRows: "No data",
     noRowsDescription: "This result set has no records.",
+    tdengineStableNeedsCondition: "Super tables are not scanned automatically. Enter a tag or time condition in the filter bar to query rows.",
     noSearchResults: "No matches",
     noSearchResultsDescription: "Try a different keyword.",
     noFilteredRows: "No rows match the filter",

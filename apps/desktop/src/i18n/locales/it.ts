@@ -2819,6 +2819,7 @@ export default withEnglishFallback({
     querySuccess: "Query eseguita con successo",
     noRows: "Nessun dato",
     noRowsDescription: "Questo set di risultati non contiene record.",
+    tdengineStableNeedsCondition: "Le super tabelle non vengono scansionate automaticamente. Inserisci una condizione su tag o tempo nella barra dei filtri per interrogare le righe.",
     noSearchResults: "Nessuna corrispondenza",
     noSearchResultsDescription: "Prova con un'altra parola chiave.",
     noFilteredRows: "Nessuna riga corrisponde al filtro",

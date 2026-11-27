@@ -2339,6 +2339,7 @@ export default withEnglishFallback({
     querySuccess: "Zapytanie wykonano pomyślnie",
     noRows: "Brak danych",
     noRowsDescription: "Ten zestaw wyników nie zawiera rekordów.",
+    tdengineStableNeedsCondition: "Supertabele nie są skanowane automatycznie. Wpisz warunek tagu lub czasu na pasku filtrów, aby zapytać o wiersze.",
     noSearchResults: "Brak wyników",
     noSearchResultsDescription: "Spróbuj innego słowa kluczowego.",
     noFilteredRows: "Żaden wiersz nie spełnia warunków filtra",

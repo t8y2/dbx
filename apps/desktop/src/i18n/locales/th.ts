@@ -3064,6 +3064,7 @@ export default withEnglishFallback({
     querySuccess: "เรียกใช้ Query สำเร็จ",
     noRows: "ไม่มีข้อมูล",
     noRowsDescription: "ชุดผลลัพธ์นี้ไม่มีระเบียน",
+    tdengineStableNeedsCondition: "ซูเปอร์เทเบิลจะไม่ถูกสแกนอัตโนมัติ โปรดป้อนเงื่อนไขแท็กหรือเวลาในแถบตัวกรองเพื่อค้นหาแถว",
     noSearchResults: "ไม่ตรงกัน",
     noSearchResultsDescription: "ลองใช้คีย์เวิร์ดอื่น",
     noFilteredRows: "ไม่มีแถวตรงกับตัวกรอง",

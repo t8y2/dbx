@@ -2824,6 +2824,7 @@ export default withEnglishFallback({
     querySuccess: "쿼리가 성공적으로 실행되었습니다",
     noRows: "데이터 없음",
     noRowsDescription: "이 결과 집합에 레코드가 없습니다.",
+    tdengineStableNeedsCondition: "슈퍼 테이블은 자동으로 전체 스캔되지 않습니다. 필터 바에 태그 또는 시간 조건을 입력해 행을 조회하세요.",
     noSearchResults: "일치 항목 없음",
     noSearchResultsDescription: "다른 키워드를 시도해 보세요.",
     noFilteredRows: "필터와 일치하는 행이 없습니다",

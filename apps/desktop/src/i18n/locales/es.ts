@@ -2920,6 +2920,7 @@ export default withEnglishFallback({
     querySuccess: "Consulta ejecutada exitosamente",
     noRows: "Sin datos",
     noRowsDescription: "Este conjunto de resultados no tiene registros.",
+    tdengineStableNeedsCondition: "Las supertablas no se escanean automáticamente. Introduce una condición de etiqueta o de tiempo en la barra de filtros para consultar filas.",
     noSearchResults: "Sin coincidencias",
     noSearchResultsDescription: "Intenta con otra palabra clave.",
     noFilteredRows: "Ninguna fila coincide con el filtro",

@@ -1979,6 +1979,7 @@ export default withEnglishFallback({
     querySuccess: "Sorğu uğurla icra edildi",
     noRows: "Verilənlər yoxdur",
     noRowsDescription: "Bu nəticə dəstində qeyd yoxdur.",
+    tdengineStableNeedsCondition: "Super cədvəllər avtomatik skan edilmir. Sətirləri sorğulamaq üçün filtr panelində tag və ya vaxt şərti daxil edin.",
     noSearchResults: "Uyğunluq yoxdur",
     noSearchResultsDescription: "Başqa açar söz sınayın.",
     noFilteredRows: "Süzgəcə uyğun sətir yoxdur",

@@ -3136,6 +3136,7 @@ export default withEnglishFallback({
     querySuccess: "查询执行成功",
     noRows: "暂无数据",
     noRowsDescription: "当前结果集没有任何记录。",
+    tdengineStableNeedsCondition: "超级表不会自动全表扫描。请在筛选栏输入 TAG 或时间条件后再查询。",
     noSearchResults: "没有匹配结果",
     noSearchResultsDescription: "换个关键词试试。",
     noFilteredRows: "没有符合条件的行",

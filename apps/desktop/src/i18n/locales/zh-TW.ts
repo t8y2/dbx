@@ -2798,6 +2798,7 @@ export default withEnglishFallback({
     querySuccess: "查詢執行成功",
     noRows: "暫無資料",
     noRowsDescription: "目前結果集沒有任何記錄。",
+    tdengineStableNeedsCondition: "超級資料表不會自動全表掃描。請在篩選列輸入 TAG 或時間條件後再查詢。",
     noSearchResults: "沒有相符結果",
     noSearchResultsDescription: "換個關鍵字試試。",
     noFilteredRows: "沒有符合條件的資料",

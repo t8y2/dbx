@@ -2910,6 +2910,7 @@ export default withEnglishFallback({
     querySuccess: "Запрос выполнен успешно",
     noRows: "Нет данных",
     noRowsDescription: "В этом наборе результатов нет записей.",
+    tdengineStableNeedsCondition: "Супертаблицы не сканируются автоматически. Введите условие по тегу или времени в строке фильтра, чтобы запросить строки.",
     noSearchResults: "Нет совпадений",
     noSearchResultsDescription: "Попробуйте другое ключевое слово.",
     noFilteredRows: "Нет строк, подходящих под фильтр",

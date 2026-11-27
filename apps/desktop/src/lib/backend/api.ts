@@ -236,6 +236,7 @@ export const deleteSchemaCachePrefix = forward("deleteSchemaCachePrefix");
 export const listSchemas = forward("listSchemas");
 export const listSchemaInfos = forward("listSchemaInfos");
 export const listTables = forward("listTables");
+export const listTableChildren = forward("listTableChildren");
 export const getTableComment = forward("getTableComment");
 export const getMysqlTableAutoIncrement = forward("getMysqlTableAutoIncrement");
 export const listObjects = forward("listObjects");

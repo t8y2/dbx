@@ -2272,6 +2272,7 @@ export default withEnglishFallback({
     querySuccess: "Kueri berhasil dieksekusi",
     noRows: "Tidak ada data",
     noRowsDescription: "Hasil ini tidak memiliki data.",
+    tdengineStableNeedsCondition: "Super table tidak dipindai otomatis. Masukkan kondisi tag atau waktu pada bilah filter untuk menampilkan baris.",
     noSearchResults: "Tidak ada kecocokan",
     noSearchResultsDescription: "Coba kata kunci lain.",
     noFilteredRows: "Tidak ada baris yang cocok dengan filter",

@@ -1979,6 +1979,7 @@ export default withEnglishFallback({
     querySuccess: "Sorgu başarıyla çalıştırıldı",
     noRows: "Veri yok",
     noRowsDescription: "Bu sonuç kümesinde kayıt yok.",
+    tdengineStableNeedsCondition: "Süper tablolar otomatik olarak taranmaz. Satırları sorgulamak için filtre çubuğuna bir etiket veya zaman koşulu girin.",
     noSearchResults: "Eşleşme yok",
     noSearchResultsDescription: "Farklı bir anahtar sözcük deneyin.",
     noFilteredRows: "Filtreyle eşleşen satır yok",

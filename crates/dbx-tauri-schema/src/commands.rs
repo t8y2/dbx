@@ -318,6 +318,21 @@ pub async fn list_tables(
     .await
 }
 
+/// Child tables of one parent table (TDengine super table), paged on demand.
+#[tauri::command]
+pub async fn list_table_children(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    parent_name: String,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<db::TableInfo>, String> {
+    dbx_core::schema::list_table_children_core(&state, &connection_id, &database, &schema, &parent_name, limit, offset)
+        .await
+}
+
 #[tauri::command]
 pub async fn get_table_comment(
     state: State<'_, Arc<AppState>>,

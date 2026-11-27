@@ -73,6 +73,18 @@ def handle(request):
                 objects = [obj for obj in objects if params['filter'].lower() in obj['name'].lower()]
             start = params.get('offset') or 0
             result = objects[start:][:params.get('limit') or len(objects)]
+    elif method == 'list_tables':
+        # Mimics an agent that ignores the hierarchy scope (parent_name unknown):
+        # a scoped request still gets an unrelated root row back.
+        parent = params.get('parent_name')
+        if parent and not (root / 'ignores-scope').exists():
+            result = [{'name': 'child_%d' % i, 'table_type': 'TABLE', 'parent_name': parent} for i in range(3)]
+        elif parent:
+            result = [{'name': 'root_table', 'table_type': 'STABLE'},
+                      {'name': 'child_0', 'table_type': 'TABLE', 'parent_name': parent},
+                      {'name': 'other_child', 'table_type': 'TABLE', 'parent_name': 'other'}]
+        else:
+            result = [{'name': 'root_table', 'table_type': 'STABLE'}]
     elif method == 'get_object_source':
         result = {'name': params['name'], 'object_type': 'VIEW', 'source': 'SELECT 1 AS id;'}
     elif method == 'get_table_comment':

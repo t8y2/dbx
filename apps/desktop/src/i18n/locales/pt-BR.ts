@@ -2919,6 +2919,7 @@ export default withEnglishFallback({
     querySuccess: "Consulta executada com sucesso",
     noRows: "Sem dados",
     noRowsDescription: "Este conjunto de resultados não possui registros.",
+    tdengineStableNeedsCondition: "Supertabelas não são varridas automaticamente. Informe uma condição de tag ou de tempo na barra de filtros para consultar as linhas.",
     noSearchResults: "Nenhuma correspondência",
     noSearchResultsDescription: "Tente uma palavra-chave diferente.",
     noFilteredRows: "Nenhuma linha corresponde ao filtro",

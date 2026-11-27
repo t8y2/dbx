@@ -3080,6 +3080,7 @@ export default withEnglishFallback({
     querySuccess: "クエリが正常に実行されました",
     noRows: "データなし",
     noRowsDescription: "この結果セットにはレコードがありません。",
+    tdengineStableNeedsCondition: "スーパーテーブルは自動では全件スキャンされません。フィルターバーにタグまたは時間の条件を入力して検索してください。",
     noSearchResults: "一致なし",
     noSearchResultsDescription: "別のキーワードを試してください。",
     noFilteredRows: "フィルターに一致する行がありません",

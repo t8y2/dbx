@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => ({
   readPluginUiEntry: vi.fn(),
   readPluginUiAsset: vi.fn(),
   subscribePluginEvents: vi.fn(),
+  subscribeHostObservations: vi.fn(),
+  setPluginObservationInterest: vi.fn(),
+  clearPluginObservationInterest: vi.fn(),
   repushPluginConnection: vi.fn(),
   reopenPluginConnection: vi.fn(),
   openDroppedPluginLocalFiles: vi.fn(),
@@ -32,6 +35,9 @@ vi.mock("@/lib/backend/api", () => ({
   readPluginUiEntry: mocks.readPluginUiEntry,
   readPluginUiAsset: mocks.readPluginUiAsset,
   subscribePluginEvents: mocks.subscribePluginEvents,
+  subscribeHostObservations: mocks.subscribeHostObservations,
+  setPluginObservationInterest: mocks.setPluginObservationInterest,
+  clearPluginObservationInterest: mocks.clearPluginObservationInterest,
 }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: vi.fn() }));
@@ -96,6 +102,9 @@ describe("PluginWorkbenchHost initialization", () => {
     vi.stubGlobal("getComputedStyle", () => Object.assign([], { getPropertyValue: () => "" }));
     mocks.readPluginUiEntry.mockResolvedValue({ dataBase64: btoa("<!doctype html><html><body></body></html>"), contentType: "text/html" });
     mocks.subscribePluginEvents.mockResolvedValue(vi.fn());
+    mocks.subscribeHostObservations.mockResolvedValue(vi.fn());
+    mocks.setPluginObservationInterest.mockResolvedValue(undefined);
+    mocks.clearPluginObservationInterest.mockResolvedValue(undefined);
     mocks.closePluginLocalFile.mockResolvedValue(undefined);
     mocks.repushPluginConnection.mockReset().mockResolvedValue(undefined);
     mocks.reopenPluginConnection.mockResolvedValue(undefined);
@@ -125,6 +134,36 @@ describe("PluginWorkbenchHost initialization", () => {
     postMessage.mockClear();
     return { frame: frame!, postMessage, ready };
   }
+
+  it("registers observation interest only for plugins that declare host.observe", async () => {
+    mocks.isTauriRuntime.mockReturnValue(true);
+
+    const observer: InstalledPlugin = {
+      manifest: { ...plugin.manifest, permissions: ["host.observe:queries"] },
+      compatibility: { compatible: true },
+    };
+    app = createApp(PluginWorkbenchHost, { plugin: observer, contribution, context: { connectionId: "connection" } });
+    app.mount(root);
+    await flushWorkbenchLoad();
+
+    expect(mocks.setPluginObservationInterest).toHaveBeenCalledTimes(1);
+    const [ownerId, pluginId] = mocks.setPluginObservationInterest.mock.calls[0] as [string, string];
+    expect(ownerId.startsWith("plugin-workbench:sample:")).toBe(true);
+    expect(pluginId).toBe("sample");
+    expect(mocks.subscribeHostObservations).toHaveBeenCalledTimes(1);
+
+    app.unmount();
+    app = undefined;
+    // The bus may not keep building payloads for a closed workbench.
+    expect(mocks.clearPluginObservationInterest).toHaveBeenCalledWith(ownerId);
+  });
+
+  it("skips observation wiring for plugins without host.observe", async () => {
+    mocks.isTauriRuntime.mockReturnValue(true);
+    await mountHost();
+    expect(mocks.setPluginObservationInterest).not.toHaveBeenCalled();
+    expect(mocks.subscribeHostObservations).not.toHaveBeenCalled();
+  });
 
   it("passes the packaged module URL and existing asset CSP into srcdoc", async () => {
     mocks.isTauriRuntime.mockReturnValue(true);

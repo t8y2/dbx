@@ -1189,6 +1189,22 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void readValueDecodesBitColumnsWithoutBitStringDialects() throws Exception {
+        Method method = bitStringReadValue();
+
+        // 自定义/代理 JDBC URL 不会命中 BIT_STRING_JDBC_URL_PREFIXES。此时 bit 列仍必须按位串展示，
+        // 否则 getObject() 的裸字节会渲染成 0x00/0x01（金仓 MySQL 兼容模式的 bit(1) 就是这么报的）。
+        assertEquals("0", method.invoke(null, objectResultSet(new byte[] { 0x00 }), columnMeta(Types.BIT, "bit", 1), 1, false, null, false));
+        assertEquals("1", method.invoke(null, objectResultSet(new byte[] { 0x01 }), columnMeta(Types.BIT, "bit", 1), 1, false, null, false));
+        assertEquals("10101010", method.invoke(null, objectResultSet(new byte[] { (byte) 0xaa }), columnMeta(Types.BIT, "bit(8)", 8), 1, false, null, false));
+        assertEquals("0", method.invoke(null, objectResultSet(new byte[] { '0' }), columnMeta(Types.OTHER, "varbit", 1), 1, false, null, false));
+        // 位宽不可信时保持原来的 0x.. 展示，不静默截断。
+        assertEquals("0x0102", method.invoke(null, objectResultSet(new byte[] { 0x01, 0x02 }), columnMeta(Types.BIT, "bit(24)", 24), 1, false, null, false));
+        // 非位串列的裸字节不受影响。
+        assertEquals("0x00", method.invoke(null, objectResultSet(new byte[] { 0x00 }), columnMeta(Types.BINARY, "bytea", 1), 1, false, null, false));
+    }
+
+    @Test
     void readValueRendersTinyInt1BitColumnsAsNumbers() throws Exception {
         Method method = bitStringReadValue();
 

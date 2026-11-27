@@ -169,6 +169,7 @@ pub fn comparable_oracle_routine_definition(mut input: OracleRoutineDefinitionIn
 pub fn compact_oracle_ddl(source: &str) -> Result<String, String> {
     let tokens =
         Tokenizer::new(&OracleDialect {}, source).tokenize_with_location().map_err(|error| error.to_string())?;
+    let locator = RoutineSourceLocator::new(source);
     let mut result = String::new();
     let mut cursor = 0;
     for token in tokens.iter().filter(|token| {
@@ -177,8 +178,8 @@ pub fn compact_oracle_ddl(source: &str) -> Result<String, String> {
             Token::Whitespace(Whitespace::Space | Whitespace::Tab | Whitespace::Newline) | Token::EOF
         )
     }) {
-        let start = routine_location_to_byte_offset(source, token.span.start).ok_or("Cannot locate DDL token")?;
-        let end = routine_location_to_byte_offset(source, token.span.end).ok_or("Cannot locate DDL token")?;
+        let start = locator.offset(token.span.start).ok_or("Cannot locate DDL token")?;
+        let end = locator.offset(token.span.end).ok_or("Cannot locate DDL token")?;
         let gap = &source[cursor..start];
         if let Some(last_newline) = gap.rfind(['\r', '\n']) {
             result.push_str(if gap.contains("\r\n") {
@@ -262,6 +263,47 @@ mod tests {
             source: source.into(),
             replace: false,
         }
+    }
+
+    /// The same package read two ways must compare equal: DBMS_METADATA.GET_DDL emits the
+    /// default EDITIONABLE clause and a qualified name, ALL_SOURCE stores neither. Before the
+    /// fingerprint ignored that default, a save committed its own DDL and then declared the
+    /// readback different from what it had just written.
+    #[test]
+    fn fingerprint_matches_across_edition_clause_and_owner_qualification() {
+        let fingerprint = |source: &str| {
+            comparable_oracle_routine_definition(OracleRoutineDefinitionInput {
+                database_type: DatabaseType::Oracle,
+                object_type: ObjectSourceKind::PackageBody,
+                source_owner: "SCOTT".into(),
+                target_owner: "SCOTT".into(),
+                name: "PKG1".into(),
+                source: source.into(),
+                replace: true,
+            })
+            .unwrap()
+        };
+
+        // What GET_DDL hands the editor.
+        let from_metadata = "CREATE OR REPLACE EDITIONABLE PACKAGE BODY \"SCOTT\".\"PKG1\" as
+  PROCEDURE P IS
+  BEGIN
+    NULL;
+  END;
+END PKG1;";
+        // What ALL_SOURCE stores and the readback reads.
+        let from_dictionary = "PACKAGE BODY \"PKG1\" as
+  PROCEDURE P IS
+  BEGIN
+    NULL;
+  END;
+END PKG1;";
+
+        assert_eq!(fingerprint(from_metadata), fingerprint(from_dictionary));
+        // Only the default clause is ignored; NONEDITIONABLE still changes the definition.
+        assert_ne!(fingerprint(&from_metadata.replace("EDITIONABLE", "NONEDITIONABLE")), fingerprint(from_dictionary));
+        // A real body change must still register.
+        assert_ne!(fingerprint(from_metadata), fingerprint(&from_dictionary.replace("NULL;", "COMMIT;")));
     }
 
     #[test]

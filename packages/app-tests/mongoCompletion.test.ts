@@ -44,6 +44,13 @@ function labels(text: string, input = {}) {
   return buildMongoCompletionItems(text, text.length, input).map((item) => item.label);
 }
 
+test("preserves command offsets after emoji in comments and refreshes the active database on edits", () => {
+  for (const database of ["analytics", "reporting"]) {
+    const text = `// 🐋🐋🐋\nuse ${database}\ndb.`;
+    assert.equal(getMongoCompletionContext(text, text.length).database, database);
+  }
+});
+
 test("suggests MongoDB root snippets and methods", () => {
   const items = buildMongoCompletionItems("fi", 2);
 
@@ -60,6 +67,22 @@ test("continues getCollection snippets with collection-name completion", () => {
 
   assert.equal(rootItem?.apply, 'db.getCollection("${}")');
   assert.equal(methodItem?.apply, 'getCollection("${}")');
+});
+
+test("typing db offers insertable collections from the active database", () => {
+  const text = "use analytics\ndb";
+  const context = getMongoCompletionContext(text, text.length);
+  assert.equal(context.database, "analytics");
+  const items = buildMongoCompletionItemsFromContext(context, { collections });
+  for (const [name, expression] of [["users", "db.users"], ["order-items", 'db.getCollection("order-items")']]) {
+    const item = items.find((candidate) => candidate.label === name);
+    assert.ok(item);
+    assert.ok((item.filterText ?? item.label).startsWith("db"));
+    assert.equal(text.slice(0, context.from) + item.apply, "use analytics\n" + expression);
+  }
+  assert.ok(items.some((item) => item.label === "db.getCollection"));
+  const cachedRoot = getMongoCompletionResultValidFor(getMongoCompletionContext("d", 1));
+  assert.equal(new RegExp(`^(?:${cachedRoot.source})$`).test("db"), false);
 });
 
 test("suggests collections after db dot", () => {

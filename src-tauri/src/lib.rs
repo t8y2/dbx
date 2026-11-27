@@ -2197,6 +2197,17 @@ pub fn run() {
         // setup and reads it to render the About panel.
         .manage(promoted_build::PromotedBuildState::new())
         .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Started {
+                // A renderer that loads a page again (including a WebView2 crash
+                // recovery reload) never runs the previous renderer's unmount
+                // cleanup, so its observation interest is released here before
+                // the new page registers its own. Without this a dead renderer
+                // would keep the host building observation payloads for the
+                // rest of the process lifetime.
+                if let Some(state) = webview.app_handle().try_state::<Arc<AppState>>() {
+                    commands::plugins::release_webview_observation_interest(state.inner(), webview.label());
+                }
+            }
             if payload.event() == PageLoadEvent::Started && is_workspace_window_label(webview.label()) {
                 let sessions = webview.app_handle().state::<workspace_session::WorkspaceSessionState>();
                 sessions.set_ready(webview.label(), false);
@@ -2388,6 +2399,7 @@ pub fn run() {
             let state = Arc::new(state);
             app.manage(state.clone());
             commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
+            commands::plugins::install_host_observation_bridge(app.handle(), state.clone());
             commands::connection::install_connection_liveness_bridge(app.handle(), state.clone());
             commands::connection::install_connection_idle_closed_bridge(app.handle(), state.clone());
             let app_identifier = app.config().identifier.clone();
@@ -2505,6 +2517,12 @@ pub fn run() {
                 if let Some(state) = window.try_state::<commands::plugin_file::PluginFileState>() {
                     state.clear_dropped_paths(window.label());
                 }
+                // Same for observation interest: the destroyed renderer cannot
+                // run its unmount cleanup, and a leaked owner would keep the
+                // host building payloads for the rest of the process lifetime.
+                if let Some(state) = window.app_handle().try_state::<Arc<AppState>>() {
+                    commands::plugins::release_webview_observation_interest(state.inner(), window.label());
+                }
                 if let Some(tab_id) = window.label().strip_prefix("detached-tab-") {
                     let _ = window.emit("dbx:detached-tab-lost", serde_json::json!({ "tabId": tab_id }));
                 }
@@ -2585,6 +2603,8 @@ pub fn run() {
             commands::ai::save_ai_chat_selection,
             commands::ai::load_ai_chat_selection,
             commands::ai::save_ai_conversation,
+            commands::ai::update_ai_conversation_plugin_connections,
+            commands::ai::save_ai_conversation_pin,
             commands::ai::load_ai_conversations,
             commands::ai::delete_ai_conversation,
             commands::ai::save_ai_run,
@@ -2778,6 +2798,8 @@ pub fn run() {
             commands::plugins::read_plugin_ui_entry,
             commands::plugins::read_plugin_asset,
             commands::plugins::read_plugin_ui_asset,
+            commands::plugins::set_plugin_observation_interest,
+            commands::plugins::clear_plugin_observation_interest,
             commands::plugins::list_jdbc_drivers,
             commands::plugins::list_jdbc_maven_bundles,
             commands::plugins::list_jdbc_local_bundles,

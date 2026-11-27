@@ -332,9 +332,17 @@ class SqlServerLegacyAgentTest {
         Assertions.assertEquals("sales", SqlServerLegacyAgent.normalizeMetadataSchema("sales", "dbo"));
         Assertions.assertEquals("tenant_owner", SqlServerLegacyAgent.normalizeMetadataSchema("", "tenant_owner"));
         Assertions.assertEquals("dbo", SqlServerLegacyAgent.normalizeMetadataSchema(null, "  "));
+        String unqualifiedSchemaSql = SqlServerLegacyAgent.unqualifiedObjectSchemaSql();
+        // SQL Server 2005 has no OBJECT_SCHEMA_NAME; the lookup has to stay on
+        // 2005 catalogs (sys.objects/sys.schemas) and 2005 syntax (TOP, no OFFSET).
+        Assertions.assertFalse(unqualifiedSchemaSql.contains("OBJECT_SCHEMA_NAME"));
+        Assertions.assertFalse(unqualifiedSchemaSql.contains("OFFSET"));
         Assertions.assertEquals(
-            "SELECT COALESCE(OBJECT_SCHEMA_NAME(OBJECT_ID(QUOTENAME(?))), NULLIF(SCHEMA_NAME(), N''), N'dbo') AS schema_name",
-            SqlServerLegacyAgent.unqualifiedObjectSchemaSql()
+            "SELECT COALESCE((SELECT TOP 1 s.name FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id "
+                + "WHERE o.name = ? AND o.type IN ('U', 'V') "
+                + "ORDER BY CASE WHEN s.name = SCHEMA_NAME() THEN 0 WHEN s.name = N'dbo' THEN 1 ELSE 2 END, s.name"
+                + "), NULLIF(SCHEMA_NAME(), N''), N'dbo') AS schema_name",
+            unqualifiedSchemaSql
         );
         Assertions.assertEquals(
             "SELECT TOP 1 u.name AS schema_name FROM sysobjects o JOIN sysusers u ON o.uid = u.uid "

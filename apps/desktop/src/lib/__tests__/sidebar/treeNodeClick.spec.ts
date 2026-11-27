@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { TreeNode } from "@/types/database";
 import {
   copyNameForTreeNode,
   isDirectNavigationTreeNode,
@@ -6,6 +7,7 @@ import {
   objectBrowserFilterForGroupNode,
   objectSourceKindForTreeNode,
   objectSourceTargetForTreeNode,
+  packageMemberFocusForTreeNode,
   shouldActivateTreeNodeOnSingleClick,
   shouldBrowseObjectsOnDatabaseActivation,
   shouldOpenQueryOnTreeNodeActivation,
@@ -219,9 +221,29 @@ describe("treeNodeClick", () => {
     ).toEqual({
       name: "business_api",
       schema: "app_schema",
-      objectType: "PACKAGE",
-      signature: "p_value IN INT",
+      objectType: "PACKAGE_BODY",
     });
+  });
+
+  it("keeps the member signature out of the package body source identity", () => {
+    const member: TreeNode = {
+      id: "pkg:member",
+      label: "calculate(p_value IN INT)",
+      type: "function",
+      objectName: "calculate",
+      parentName: "business_api",
+      parentSchema: "app_schema",
+      parentType: "package",
+      schema: "ignored_schema",
+      signature: "p_value IN INT",
+    };
+    // Same package body for every member: one tab, not one per overload.
+    expect(objectSourceTargetForTreeNode(member)?.signature).toBeUndefined();
+    expect(packageMemberFocusForTreeNode(member)).toEqual({ name: "calculate", kind: "function", signature: "p_value IN INT" });
+  });
+
+  it("reports no package member focus for a standalone routine", () => {
+    expect(packageMemberFocusForTreeNode({ id: "proc", label: "standalone_proc", type: "procedure", schema: "app" })).toBeNull();
   });
 
   it("routes the package body action to the owning package source", () => {

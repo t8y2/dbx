@@ -134,7 +134,11 @@ pub(super) async fn agent_reader(
                 &sql,
                 Some(&database),
                 Some(&schema),
-                QueryExecutionOptions { max_rows: Some(i32::MAX as usize), ..Default::default() },
+                QueryExecutionOptions {
+                    skip_server_output: true,
+                    max_rows: Some(i32::MAX as usize),
+                    ..Default::default()
+                },
             );
             Box::pin(async move { client.lock().await.execute_query_with_timeout(params, timeout).await })
         }),

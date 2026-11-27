@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DBX Activity Monitor</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        --bg: #0b1020;
+        --panel: rgba(15, 22, 42, 0.92);
+        --border: rgba(255, 255, 255, 0.12);
+        --text: #e8ecf8;
+        --muted: #8f9ab8;
+        --accent: #7ee7cb;
+        --warn: #ffb86b;
+        --error: #ff7a8a;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f4f6fb;
+          --panel: #ffffff;
+          --border: rgba(16, 24, 40, 0.14);
+          --text: #101828;
+          --muted: #5b6478;
+          --accent: #0f766e;
+          --warn: #b45309;
+          --error: #b42318;
+        }
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); }
+      header {
+        display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+        padding: 14px 18px; border-bottom: 1px solid var(--border);
+      }
+      header h1 { font-size: 15px; margin: 0 12px 0 0; letter-spacing: 0.02em; }
+      .filters { display: flex; flex-wrap: wrap; gap: 8px; }
+      .filter {
+        display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+        color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px;
+      }
+      .filter input { margin: 0; }
+      .spacer { flex: 1; }
+      button {
+        font: inherit; font-size: 12px; color: var(--text); background: transparent;
+        border: 1px solid var(--border); border-radius: 8px; padding: 5px 12px; cursor: pointer;
+      }
+      button:hover { border-color: var(--accent); color: var(--accent); }
+      .status { padding: 8px 18px; font-size: 12px; color: var(--muted); display: flex; gap: 16px; flex-wrap: wrap; }
+      .status strong { color: var(--text); font-weight: 600; }
+      main { padding: 0 18px 18px; }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      thead th {
+        text-align: left; font-weight: 600; color: var(--muted); padding: 8px 10px;
+        border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel); z-index: 1;
+      }
+      tbody td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+      tbody tr:hover { background: rgba(127, 127, 127, 0.08); cursor: pointer; }
+      .kind { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; white-space: nowrap; }
+      .kind.query { color: var(--accent); }
+      .kind.connection { color: #7fb2ff; }
+      .kind.ai { color: #c79bff; }
+      .kind.transfer { color: var(--warn); }
+      .kind.plugin { color: var(--error); }
+      .payload {
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--muted);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 640px;
+      }
+      .time { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--muted); white-space: nowrap; }
+      #unsupported { padding: 24px 18px; color: var(--warn); }
+      dialog {
+        border: 1px solid var(--border); border-radius: 12px; background: var(--panel); color: var(--text);
+        max-width: min(900px, 90vw); padding: 16px;
+      }
+      dialog pre { margin: 10px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Activity Monitor</h1>
+      <div class="filters" id="filters">
+        <label class="filter"><input type="checkbox" checked data-category="query" /> queries</label>
+        <label class="filter"><input type="checkbox" checked data-category="connection" /> connections</label>
+        <label class="filter"><input type="checkbox" checked data-category="ai" /> ai</label>
+        <label class="filter"><input type="checkbox" checked data-category="transfer" /> transfers</label>
+        <label class="filter"><input type="checkbox" checked data-category="plugin" /> plugins</label>
+      </div>
+      <div class="spacer"></div>
+      <button id="pause">Pause</button>
+      <button id="clear">Clear</button>
+    </header>
+    <div class="status">
+      <span>received <strong id="count">0</strong></span>
+      <span>dropped <strong id="dropped">0</strong></span>
+      <span>state <strong id="state">running</strong></span>
+    </div>
+    <main>
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 92px">time</th>
+            <th style="width: 220px">kind</th>
+            <th style="width: 200px">connection</th>
+            <th>payload</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="unsupported" hidden>
+        This host does not expose the observation bus (<code>window.dbxPlugin.onHostEvent</code> is missing).
+        Update DBX or run this plugin in the SDK dev host to simulate events.
+      </div>
+    </main>
+    <dialog id="detail">
+      <form method="dialog"><button>Close</button></form>
+      <pre id="detail-body"></pre>
+    </dialog>
+    <script>
+      (() => {
+        const MAX_ROWS = 500;
+        const rows = document.getElementById("rows");
+        const countEl = document.getElementById("count");
+        const droppedEl = document.getElementById("dropped");
+        const stateEl = document.getElementById("state");
+        const pauseButton = document.getElementById("pause");
+        const detail = document.getElementById("detail");
+        const detailBody = document.getElementById("detail-body");
+        let paused = false;
+        let received = 0;
+        let dropped = 0;
+
+        const plugin = window.dbxPlugin;
+        if (!plugin || typeof plugin.onHostEvent !== "function") {
+          document.getElementById("unsupported").hidden = false;
+          document.querySelector("main table").hidden = true;
+          return;
+        }
+        if (plugin.capabilities && plugin.capabilities.observations === false) {
+          document.getElementById("unsupported").hidden = false;
+          document.querySelector("main table").hidden = true;
+          return;
+        }
+
+        const categoryOf = (kind) => String(kind).split(".", 1)[0];
+        const enabled = () => {
+          const set = new Set();
+          document.querySelectorAll("#filters input:checked").forEach((input) => set.add(input.dataset.category));
+          return set;
+        };
+
+        const summarize = (event) => {
+          const payload = event.payload || {};
+          const parts = [];
+          if (payload.sql) parts.push(payload.sql);
+          else if (payload.toolName) parts.push(payload.toolName);
+          else if (payload.pluginId) parts.push(payload.pluginId);
+          else if (payload.taskKind) parts.push(payload.taskKind + (payload.taskId ? ":" + payload.taskId : ""));
+          else if (payload.state) parts.push(payload.state);
+          else parts.push(JSON.stringify(payload));
+          if (payload.status) parts.push("status=" + payload.status);
+          if (payload.durationMs !== undefined) parts.push(payload.durationMs + "ms");
+          if (payload.error) parts.push("error=" + String(payload.error).slice(0, 160));
+          return parts.join(" · ");
+        };
+
+        const addRow = (event) => {
+          const row = document.createElement("tr");
+          const time = document.createElement("td");
+          time.className = "time";
+          time.textContent = new Date(event.tsMs || Date.now()).toLocaleTimeString();
+          const kindCell = document.createElement("td");
+          kindCell.className = "kind " + categoryOf(event.kind);
+          kindCell.textContent = event.kind;
+          const sourceCell = document.createElement("td");
+          sourceCell.textContent = [event.connectionId, event.database].filter(Boolean).join(" / ");
+          const payloadCell = document.createElement("td");
+          payloadCell.className = "payload";
+          payloadCell.textContent = summarize(event);
+          payloadCell.title = payloadCell.textContent;
+          row.append(time, kindCell, sourceCell, payloadCell);
+          row.addEventListener("click", () => {
+            detailBody.textContent = JSON.stringify(event, null, 2);
+            detail.showModal();
+          });
+          rows.prepend(row);
+          while (rows.childElementCount > MAX_ROWS) rows.lastElementChild.remove();
+        };
+
+        const unsubscribe = plugin.onHostEvent((event) => {
+          if (!event || typeof event.kind !== "string") return;
+          received += 1;
+          countEl.textContent = String(received);
+          if (paused) return;
+          if (!enabled().has(categoryOf(event.kind))) return;
+          addRow(event);
+        });
+
+        // Drops are reported by the host, never inferred from `id` gaps: ids are
+        // host-global while delivery is filtered per permission, so gaps are
+        // normal (another category was filtered out).
+        const unsubscribeGap =
+          typeof plugin.onHostGap === "function"
+            ? plugin.onHostGap((gap) => {
+                dropped += Number(gap && gap.skipped) || 0;
+                droppedEl.textContent = String(dropped);
+              })
+            : undefined;
+
+        pauseButton.addEventListener("click", () => {
+          paused = !paused;
+          pauseButton.textContent = paused ? "Resume" : "Pause";
+          stateEl.textContent = paused ? "paused" : "running";
+        });
+        document.getElementById("clear").addEventListener("click", () => {
+          rows.replaceChildren();
+          received = 0;
+          dropped = 0;
+          countEl.textContent = "0";
+          droppedEl.textContent = "0";
+        });
+        window.addEventListener("beforeunload", () => {
+          unsubscribe && unsubscribe();
+          unsubscribeGap && unsubscribeGap();
+        });
+      })();
+    </script>
+  </body>
+</html>

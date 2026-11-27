@@ -40,6 +40,7 @@ use crate::models::connection::{
     validate_jdbc_transport_url, ConnectionConfig, ConnectionIdleClosedEvent, ConnectionLivenessFailureKind,
     ConnectionLivenessMessage, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig,
 };
+use crate::models::observability::{cap_observation_text, KIND_CONNECTION_OPENED, KIND_CONNECTION_OPEN_FAILED};
 use crate::mongo_oidc::MongoOidcBrowserOpener;
 use crate::nacos::config::{NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD};
 use crate::path_utils::expand_tilde;
@@ -562,6 +563,9 @@ pub struct AppState {
     pub storage: Storage,
     pub plugins: PluginRegistry,
     pub plugin_host: PluginHost,
+    /// Structured host activity for observability plugins (`host.observe:*`).
+    /// Taps publish here; shells forward to plugin UIs and sidecars.
+    pub host_observations: crate::observability::HostObservationBus,
     pub agent_manager: crate::agent_manager::AgentManager,
     pub pl_debug: Arc<crate::query::pl_debug::PlDebugRegistry>,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
@@ -1349,9 +1353,16 @@ impl PoolRoutingControl {
     }
 
     async fn close_removed(&self, removed: Vec<(String, PoolKind)>) {
-        for (pool_key, pool) in removed {
-            self.close_pool_with_timeout(pool_key, pool).await;
+        if removed.is_empty() {
+            return;
         }
+        // Close all removed pools concurrently so a slow or hung pool cannot
+        // exhaust the shutdown budget before sibling pools send COM_QUIT /
+        // disconnect (#15612).
+        futures::future::join_all(
+            removed.into_iter().map(|(pool_key, pool)| self.close_pool_with_timeout(pool_key, pool)),
+        )
+        .await;
     }
 
     fn close_removed_in_background(&self, removed: Vec<(String, PoolKind)>) {
@@ -1362,9 +1373,7 @@ impl PoolRoutingControl {
         let routing = self.clone();
         let task_key = format!("pool-close:{}", uuid::Uuid::new_v4());
         if !self.task_supervisor.spawn_once(task_key, move |_| async move {
-            for (pool_key, pool) in removed {
-                routing.close_pool_with_timeout(pool_key, pool).await;
-            }
+            routing.close_removed(removed).await;
         }) {
             log::debug!("Dropped {pool_count} detached pool handle(s) during application shutdown");
         }
@@ -2226,7 +2235,22 @@ impl AppState {
         let app_version = app_version.into();
         let data_dir = storage.data_dir().to_path_buf();
         let plugins = PluginRegistry::new_with_app_version(plugin_dir, app_version.clone());
-        let plugin_host = PluginHost::new(plugins.clone());
+        // One bus per AppState. Plugin lifecycle observations are wired into
+        // the same bus so a plugin watching `host.observe:plugins` sees its
+        // peers start/stop alongside queries and connections.
+        let host_observations = crate::observability::HostObservationBus::new();
+        let observation_interest = host_observations.interest().clone();
+        let plugin_host = {
+            let bus = host_observations.clone();
+            let sink: dbx_plugin_runtime::plugins::observation::PluginObservationSink =
+                Arc::new(move |observation: dbx_plugin_runtime::plugins::observation::PluginObservation| {
+                    bus.publish(observation.kind, None, None, observation.payload);
+                });
+            // The runtime registers the interest of every running sidecar that
+            // declared `host.observe:*`, so the bus only builds payloads while
+            // such a sidecar is actually alive.
+            PluginHost::with_observations(plugins.clone(), Some(sink), Some(observation_interest))
+        };
         Self {
             connections: Arc::new(RwLock::new(ConnectionPoolRegistry::new())),
             task_supervisor: TaskSupervisor::new(),
@@ -2244,6 +2268,7 @@ impl AppState {
             storage,
             plugins,
             plugin_host,
+            host_observations,
             agent_manager: crate::agent_manager::AgentManager::new_with_base_dir_and_app_version(
                 agent_dir,
                 app_version,
@@ -3210,13 +3235,13 @@ impl AppState {
                 self.persist_removed_mqtt_history(&mut removed_pools).await;
                 self.transaction_sessions.write().await.clear();
                 let routing = self.pool_routing_control();
-                let protected = async {
-                    if let Err(error) = debug_shutdown.wait().await {
-                        log::warn!("Debugger cleanup could not confirm controlled release during application shutdown: {error}");
-                    }
-                    stop_dependencies(application_deadline.saturating_duration_since(Instant::now())).await;
-                };
-                tokio::join!(routing.close_removed(removed_pools), protected);
+                let (_, debug_result) = tokio::join!(routing.close_removed(removed_pools), debug_shutdown.wait());
+                if let Err(error) = debug_result {
+                    log::warn!(
+                        "Debugger cleanup could not confirm controlled release during application shutdown: {error}"
+                    );
+                }
+                stop_dependencies(application_deadline.saturating_duration_since(Instant::now())).await;
             };
             if tokio::time::timeout_at(application_deadline.into(), shutdown).await.is_err() {
                 debug_shutdown.isolate_remaining();
@@ -3233,9 +3258,15 @@ impl AppState {
 
         let shutdown = async {
             let routing = self.pool_routing_control();
-            let (_, _, _, _, _, _, plugin_shutdown) = tokio::join!(
-                self.task_supervisor.shutdown(deadline),
-                routing.close_removed(removed_pools),
+            // Close pooled database connections and finish in-flight background
+            // pool-close tasks BEFORE stopping SSH/proxy tunnels, agent daemons,
+            // and plugins so COM_QUIT / disconnect reaches the server cleanly (#15612).
+            let pool_close_budget = deadline.saturating_sub(Duration::from_millis(500)).max(deadline / 2);
+            let _ = tokio::time::timeout(pool_close_budget, async {
+                tokio::join!(self.task_supervisor.shutdown(pool_close_budget), routing.close_removed(removed_pools),);
+            })
+            .await;
+            let (_, _, _, _, plugin_shutdown) = tokio::join!(
                 self.tunnels.stop_all_tunnels(),
                 self.proxy_tunnels.stop_all_tunnels(),
                 self.http_tunnels.stop_all_tunnels(),
@@ -3617,6 +3648,60 @@ impl AppState {
         }
     }
 
+    /// Publish a `connection.opened` observation when the core pool funnel
+    /// creates a pool on demand. Explicit user connects publish their own
+    /// event from the shell with `reason: "explicit"`; this funnel never runs
+    /// on that path, so the two cannot double count.
+    fn publish_connection_opened(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+        database: Option<&str>,
+        reason: &str,
+        duration_ms: u64,
+    ) {
+        if !self.host_observations.is_enabled(KIND_CONNECTION_OPENED) {
+            return;
+        }
+        self.host_observations.publish(
+            KIND_CONNECTION_OPENED,
+            Some(connection_id.to_string()),
+            database.map(str::to_string),
+            serde_json::json!({
+                "dbType": serde_json::to_value(config.db_type).unwrap_or(serde_json::Value::Null),
+                "reason": reason,
+                "durationMs": duration_ms,
+            }),
+        );
+    }
+
+    fn publish_connection_open_failed(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+        database: Option<&str>,
+        reason: &str,
+        duration_ms: u64,
+        error: &str,
+    ) {
+        if !self.host_observations.is_enabled(KIND_CONNECTION_OPEN_FAILED) {
+            return;
+        }
+        let (message, truncated) = cap_observation_text(error);
+        self.host_observations.publish(
+            KIND_CONNECTION_OPEN_FAILED,
+            Some(connection_id.to_string()),
+            database.map(str::to_string),
+            serde_json::json!({
+                "dbType": serde_json::to_value(config.db_type).unwrap_or(serde_json::Value::Null),
+                "reason": reason,
+                "durationMs": duration_ms,
+                "error": message,
+                "errorTruncated": truncated,
+            }),
+        );
+    }
+
     async fn get_or_create_pool_for_session_inner(
         &self,
         connection_id: &str,
@@ -3651,6 +3736,7 @@ impl AppState {
             let configs = self.configs.read().await;
             configs.get(connection_id).ok_or("Connection config not found")?.clone()
         };
+        let observation_started = Instant::now();
         validate_connection_url_params(&config)?;
         let validate_existing_pool = should_validate_existing_pool_before_reuse(config.db_type);
         let catalog = catalog.map(str::trim).filter(|value| !value.is_empty());
@@ -4392,14 +4478,43 @@ impl AppState {
         }.await;
         let pool = match pool_result {
             Ok(ConnectionPoolBuild::Candidate(pool)) => *pool,
-            Ok(ConnectionPoolBuild::Published(receipt)) => return Ok(receipt),
+            Ok(ConnectionPoolBuild::Published(receipt)) => {
+                // Some driver branches (native MongoDB) publish their pool
+                // internally and return `Published`, skipping the outer
+                // publish below; report the open here so exactly one event
+                // fires for this pool either way.
+                self.publish_connection_opened(
+                    connection_id,
+                    &config,
+                    database,
+                    "on_demand",
+                    observation_started.elapsed().as_millis() as u64,
+                );
+                return Ok(receipt);
+            }
             Err(error) => {
                 self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
+                self.publish_connection_open_failed(
+                    connection_id,
+                    &config,
+                    database,
+                    "on_demand",
+                    observation_started.elapsed().as_millis() as u64,
+                    &error,
+                );
                 return Err(error);
             }
         };
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
             self.discard_stale_connection_attempt_pool(connection_id, pool_key.clone(), pool, &transport_stamp).await;
+            self.publish_connection_open_failed(
+                connection_id,
+                &config,
+                database,
+                "on_demand",
+                observation_started.elapsed().as_millis() as u64,
+                &err,
+            );
             return Err(err);
         }
         let published = self
@@ -4411,8 +4526,25 @@ impl AppState {
                 connection_attempt,
             )
             .await;
-        if published.is_err() {
-            self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
+        match &published {
+            Ok(_) => self.publish_connection_opened(
+                connection_id,
+                &config,
+                database,
+                "on_demand",
+                observation_started.elapsed().as_millis() as u64,
+            ),
+            Err(error) => {
+                self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
+                self.publish_connection_open_failed(
+                    connection_id,
+                    &config,
+                    database,
+                    "on_demand",
+                    observation_started.elapsed().as_millis() as u64,
+                    error,
+                );
+            }
         }
         published
     }
@@ -7851,14 +7983,13 @@ impl AppState {
                 continue;
             }
 
-            // 5. 复用既有池回收路径：先摘除，再走后台关闭。close_removed_in_background 内部
-            //    经 close_pool_with_timeout，从而继承 Agent 共享 runtime / 手动事务共享 runtime
-            //    的保护逻辑，确保池被真正 close/释放而不只是从 map 移除。
+            // 5. 复用既有池回收路径：先摘除并并发关闭全部池，确保 COM_QUIT / disconnect
+            //    在通知前端触发 disconnect_db（可能重置隧道）之前真正送达服务端 (#15612)。
             let Some(_debug_fence) = self.pl_debug.try_idle_fence(&connection_id) else {
                 continue;
             };
             let removed = self.drain_connection_pools(&connection_id).await;
-            self.pool_routing_control().close_removed_in_background(removed);
+            self.pool_routing_control().close_removed(removed).await;
             log::info!(
                 "[connection][idle_disconnect] connection '{connection_id}' pools closed after {idle_disconnect_secs}s without query activity"
             );
@@ -7959,6 +8090,15 @@ impl AppState {
     pub async fn remove_plugin_connection_pools(&self, plugin_id: &str) {
         let removed = self.drain_plugin_connection_pools(plugin_id).await;
         self.pool_routing_control().close_removed(removed).await;
+    }
+
+    /// Whether any pool is currently registered for `connection_id` (the base
+    /// key itself or a `{connection_id}:…` session/database key). Lets shells
+    /// skip a `connection.closed` observation for a disconnect of a
+    /// never-connected id.
+    pub async fn has_connection_pools(&self, connection_id: &str) -> bool {
+        let pool_prefix = format!("{connection_id}:");
+        self.connections.read().await.keys().any(|key| *key == connection_id || key.starts_with(&pool_prefix))
     }
 
     async fn drain_connection_pools(&self, connection_id: &str) -> Vec<(String, PoolKind)> {
@@ -8815,6 +8955,8 @@ pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionCo
     // A default browser filter does not change the established Redis session.
     a.redis_key_filter = None;
     b.redis_key_filter = None;
+    a.watermark = None;
+    b.watermark = None;
     if !a.save_password && !b.save_password {
         a.password.clear();
         b.password.clear();
@@ -8845,6 +8987,7 @@ pub fn connection_configs_session_credentials_compatible(a: &ConnectionConfig, b
         config.show_native_jobs = None;
         config.show_user_admin = None;
         config.color = None;
+        config.watermark = None;
         config.docs_notes_path = None;
         config.connect_timeout_secs = 0;
         config.query_timeout_secs = 0;
@@ -9516,6 +9659,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connection_open_failed_observation_carries_reason_and_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, directory.path().join("plugins"));
+        let config = mysql_config(None);
+        state
+            .host_observations
+            .interest()
+            .acquire("test", &[dbx_types::models::observability::OBSERVE_CONNECTIONS_PERMISSION.to_string()]);
+        let mut events = state.host_observations.subscribe();
+
+        state.publish_connection_open_failed("conn-x", &config, Some("sales"), "on_demand", 42, "boom");
+
+        let event = events.recv().await.expect("connection.open_failed event");
+        assert_eq!(event.kind, dbx_types::models::observability::KIND_CONNECTION_OPEN_FAILED);
+        assert_eq!(event.connection_id.as_deref(), Some("conn-x"));
+        assert_eq!(event.database.as_deref(), Some("sales"));
+        assert_eq!(event.payload["reason"], "on_demand");
+        assert_eq!(event.payload["durationMs"], 42);
+        assert_eq!(event.payload["error"], "boom");
+        assert_eq!(event.payload["errorTruncated"], false);
+    }
+
+    #[tokio::test]
     async fn transport_oci_tns_identity_uses_the_effective_target_and_admin_directory() {
         let directory = tempfile::tempdir().unwrap();
         let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
@@ -9708,6 +9875,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }
@@ -13722,6 +13890,7 @@ sleep 30
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
@@ -14579,6 +14748,129 @@ for line in sys.stdin:
         let payload = serde_json::to_value(&event).unwrap();
         assert_eq!(payload["connectionId"], "conn");
         assert!(payload["closedAtMs"].as_u64().is_some_and(|value| value > 0));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sweep_idle_connections_and_shutdown_send_com_quit_to_all_mysql_pools() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn write_mysql_packet(socket: &mut tokio::net::TcpStream, seq: u8, payload: &[u8]) {
+            let len = payload.len();
+            let header = [(len & 0xff) as u8, ((len >> 8) & 0xff) as u8, ((len >> 16) & 0xff) as u8, seq];
+            let _ = socket.write_all(&header).await;
+            let _ = socket.write_all(payload).await;
+        }
+
+        fn build_handshake_v10() -> Vec<u8> {
+            use mysql_async::consts::CapabilityFlags as Caps;
+            let caps = (Caps::CLIENT_PROTOCOL_41
+                | Caps::CLIENT_SECURE_CONNECTION
+                | Caps::CLIENT_PLUGIN_AUTH
+                | Caps::CLIENT_DEPRECATE_EOF)
+                .bits();
+            let mut buf = Vec::new();
+            buf.push(10); // protocol version
+            buf.extend_from_slice(b"8.0.19\0");
+            buf.extend_from_slice(&1u32.to_le_bytes()); // conn id
+            buf.extend_from_slice(b"12345678"); // auth-plugin-data-part-1
+            buf.push(0); // filler
+            buf.extend_from_slice(&(caps as u16).to_le_bytes()); // lower caps
+            buf.push(45); // charset utf8mb4
+            buf.extend_from_slice(&2u16.to_le_bytes()); // SERVER_STATUS_AUTOCOMMIT
+            buf.extend_from_slice(&((caps >> 16) as u16).to_le_bytes()); // upper caps
+            buf.push(21); // auth plugin data len
+            buf.extend_from_slice(&[0u8; 10]); // reserved
+            buf.extend_from_slice(b"abcdefghijkl\0"); // auth-plugin-data-part-2 (13 bytes)
+            buf.extend_from_slice(b"mysql_native_password\0");
+            buf
+        }
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let com_quit = Arc::new(AtomicUsize::new(0));
+        let abrupt_eof = Arc::new(AtomicUsize::new(0));
+        let com_quit_s = Arc::clone(&com_quit);
+        let abrupt_eof_s = Arc::clone(&abrupt_eof);
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let com_quit_h = Arc::clone(&com_quit_s);
+                let abrupt_eof_h = Arc::clone(&abrupt_eof_s);
+                tokio::spawn(async move {
+                    write_mysql_packet(&mut socket, 0, &build_handshake_v10()).await;
+                    let mut hdr = [0u8; 4];
+                    if socket.read_exact(&mut hdr).await.is_err() {
+                        return;
+                    }
+                    let len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], 0]) as usize;
+                    let mut req = vec![0u8; len];
+                    if socket.read_exact(&mut req).await.is_err() {
+                        return;
+                    }
+                    write_mysql_packet(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    loop {
+                        let mut cmd_hdr = [0u8; 4];
+                        if socket.read_exact(&mut cmd_hdr).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        let cmd_len = u32::from_le_bytes([cmd_hdr[0], cmd_hdr[1], cmd_hdr[2], 0]) as usize;
+                        let mut cmd = vec![0u8; cmd_len];
+                        if socket.read_exact(&mut cmd).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        if cmd.first() == Some(&0x01) {
+                            com_quit_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        write_mysql_packet(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    }
+                });
+            }
+        });
+
+        let url = format!(
+            "mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled&max_allowed_packet=65536&wait_timeout=60&sessionVariables=group_concat_max_len%3D1024"
+        );
+
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "conn".to_string();
+        config.idle_disconnect_secs = 30;
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        // 1) Idle sweep closes every pool and sends COM_QUIT before returning.
+        for (key, max_conns) in [("conn", 3usize), ("conn:app", 3), ("conn:app:session:tab-1", 1)] {
+            let pool = db::mysql::connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(3), max_conns)
+                .await
+                .unwrap();
+            state.connections.write().await.insert(key.to_string(), PoolKind::Mysql(pool, MysqlMode::Normal));
+            state
+                .pool_activity
+                .write()
+                .await
+                .insert(key.to_string(), super::PoolActivity::idle_for(Duration::from_secs(120)));
+        }
+        assert_eq!(state.sweep_idle_connections().await, vec!["conn".to_string()]);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(com_quit.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(abrupt_eof.load(AtomicOrdering::SeqCst), 0);
+
+        // 2) Application shutdown closes all remaining MySQL pools concurrently with COM_QUIT.
+        for (key, max_conns) in [("conn", 3usize), ("conn:app", 3), ("conn:app:session:tab-1", 1)] {
+            let pool = db::mysql::connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(3), max_conns)
+                .await
+                .unwrap();
+            state.connections.write().await.insert(key.to_string(), PoolKind::Mysql(pool, MysqlMode::Normal));
+        }
+        state.shutdown(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        server.abort();
+        assert_eq!(com_quit.load(AtomicOrdering::SeqCst), 6);
+        assert_eq!(abrupt_eof.load(AtomicOrdering::SeqCst), 0);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -16516,7 +16808,7 @@ for line in sys.stdin:
                 request.extend_from_slice(&byte);
             }
             let request = String::from_utf8(request).unwrap();
-            assert!(request.starts_with("GET /?query=SELECT%201 "));
+            assert!(request.starts_with("POST / "));
             assert!(request.lines().any(|line| line.eq_ignore_ascii_case("host: clickhouse.proxy.invalid:8123")));
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n1\n").await.unwrap();
         });

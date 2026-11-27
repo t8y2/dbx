@@ -727,26 +727,26 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       }
     }
 
-    if (props.database && mongoCompletionNeedsCollections(completionContext.mode)) {
+    const activeDatabase = completionContext.database ?? props.database;
+    if (activeDatabase && mongoCompletionNeedsCollections(completionContext)) {
       try {
-        collections = await connectionStore.listMongoCompletionCollections(props.connectionId, completionContext.database ?? props.database);
+        collections = await connectionStore.listMongoCompletionCollections(props.connectionId, activeDatabase);
       } catch {
         collections = [];
       }
     }
 
-    if (props.database && mongoCompletionNeedsFields(completionContext.mode) && completionContext.collection) {
+    if (activeDatabase && mongoCompletionNeedsFields(completionContext.mode) && completionContext.collection) {
       try {
-        fields = await connectionStore.listMongoCompletionFields(props.connectionId, completionContext.database ?? props.database, completionContext.collection);
+        fields = await connectionStore.listMongoCompletionFields(props.connectionId, activeDatabase, completionContext.collection);
       } catch {
         fields = [];
       }
     }
 
-    const indexDatabase = completionContext.database ?? props.database;
-    if (indexDatabase && mongoCompletionNeedsIndexes(completionContext.mode) && completionContext.collection) {
+    if (activeDatabase && mongoCompletionNeedsIndexes(completionContext.mode) && completionContext.collection) {
       try {
-        indexes = await connectionStore.listMongoCompletionIndexes(props.connectionId, indexDatabase, completionContext.collection);
+        indexes = await connectionStore.listMongoCompletionIndexes(props.connectionId, activeDatabase, completionContext.collection);
       } catch {
         indexes = [];
       }
@@ -875,6 +875,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     const currentState = context.state;
     const position = context.pos;
     const explicit = context.explicit;
+    if (!explicit && Date.now() < compositionCompletionNotBefore) return null;
     const typedActivation = isTypedCompletionActivation(explicit);
     if (runtime.imeCompositionActive || view.value?.compositionStarted || view.value?.composing) return null;
     if (!props.connectionId) return null;
@@ -1178,48 +1179,69 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     }
   }
 
-  // Manual-trigger shortcut (default Alt+/). Opens the completion popup on the
-  // explicit path so auto-trigger mode gating is bypassed. Unlike
-  // scheduleSqlCompletionStart, it must NOT mark the activation as typed, or the
-  // session would be misclassified as typing and gated for 500ms.
+  // The shortcut starts a new explicit session even if an automatic trigger is pending.
   function triggerSqlCompletion(currentView: EditorViewType): boolean {
     if (!runtime.codeMirrorStartCompletion || isEditorComposing(currentView)) return false;
+    clearDeferredCompletionTrigger();
+    typedCompletionActivationUntil = 0;
+    activeCompletionOrigin = "explicit";
     return runtime.codeMirrorStartCompletion(currentView);
   }
 
-  function scheduleSqlCompletionStart(currentView: EditorViewType, delayMs = 0) {
-    window.setTimeout(() => {
-      if (!runtime.codeMirrorStartCompletion || isEditorComposing(currentView)) return;
-      markTypedCompletionActivation();
-      activeCompletionOrigin = originForTypedSqlCompletionStart(activeCompletionOrigin);
-      runtime.codeMirrorStartCompletion(currentView);
-    }, delayMs);
+  function startTypedSqlCompletion(currentView: EditorViewType) {
+    if (!runtime.codeMirrorStartCompletion || isEditorComposing(currentView)) return;
+    markTypedCompletionActivation();
+    activeCompletionOrigin = originForTypedSqlCompletionStart(activeCompletionOrigin);
+    runtime.codeMirrorStartCompletion(currentView);
   }
 
+  function scheduleSqlCompletionStart(currentView: EditorViewType, delayMs = 0) {
+    window.setTimeout(() => startTypedSqlCompletion(currentView), delayMs);
+  }
+
+  let deferredCompletionTriggerVersion = 0;
+  let compositionCompletionNotBefore = 0;
+
   function clearDeferredCompletionTrigger() {
+    deferredCompletionTriggerVersion++;
     if (deferredCompletionTriggerTimer === null) return;
     clearTimeout(deferredCompletionTriggerTimer);
     deferredCompletionTriggerTimer = null;
   }
 
-  function scheduleDeferredCompletionTrigger(currentView: EditorViewType, insertedText: string, removedText: string) {
+  function scheduleDeferredCompletionTrigger(currentView: EditorViewType, insertedText?: string, removedText = "") {
     clearDeferredCompletionTrigger();
+    const version = deferredCompletionTriggerVersion;
     const expectedDoc = currentView.state.doc;
-    const expectedPosition = currentView.state.selection.main.head;
-    deferredCompletionTriggerTimer = setTimeout(async () => {
-      deferredCompletionTriggerTimer = null;
-      if (view.value !== currentView || currentView.state.doc !== expectedDoc || currentView.state.selection.main.head !== expectedPosition || isEditorComposing(currentView)) return;
-      if (await shouldStartSqlCompletionAfterInput(insertedText, removedText, currentView)) {
-        if (view.value !== currentView || currentView.state.doc !== expectedDoc || currentView.state.selection.main.head !== expectedPosition || isEditorComposing(currentView)) return;
-        scheduleSqlCompletionStart(currentView);
-      }
-    }, COMPLETION_TRIGGER_DEFER_DELAY_MS);
+    const expectedSelection = currentView.state.selection;
+    const delay = settingsStore.editorSettings.completionAutoActivationDelayMs;
+    const mode = settingsStore.editorSettings.completionTriggerMode;
+    const compositionEnded = insertedText === undefined;
+    // CodeMirror can start an implicit query immediately after composition ends.
+    compositionCompletionNotBefore = compositionEnded ? Date.now() + delay : 0;
+    const stillCurrent = () =>
+      version === deferredCompletionTriggerVersion &&
+      view.value === currentView &&
+      currentView.state.doc === expectedDoc &&
+      currentView.state.selection.eq(expectedSelection) &&
+      settingsStore.editorSettings.completionAutoActivationDelayMs === delay &&
+      settingsStore.editorSettings.completionTriggerMode === mode &&
+      !isEditorComposing(currentView);
+    const alreadyCompleting = () => !!runtime.codeMirrorCompletionStatus?.(currentView.state);
+    // This fallback handles edits CodeMirror doesn't activate on, such as deletion
+    // or paste. startCompletion bypasses CodeMirror's activateOnTypingDelay.
+    deferredCompletionTriggerTimer = setTimeout(
+      async () => {
+        deferredCompletionTriggerTimer = null;
+        if (!stillCurrent() || alreadyCompleting()) return;
+        const canStart = compositionEnded ? await shouldTriggerSqlCompletionForPosition(expectedDoc.toString(), expectedSelection.main.head) : await shouldStartSqlCompletionAfterInput(insertedText, removedText, currentView);
+        if (canStart && stillCurrent() && !alreadyCompleting()) startTypedSqlCompletion(currentView);
+      },
+      Math.max(COMPLETION_TRIGGER_DEFER_DELAY_MS, delay),
+    );
   }
 
-  /**
-   * Returns true when the current SQL position should trigger completion under the active trigger mode.
-   * Used by flushImeComposition and shouldStartSqlCompletionAfterInput.
-   */
+  /** Returns whether the current SQL position should trigger automatic completion. */
   async function shouldTriggerSqlCompletionForPosition(fullDoc: string, position: number): Promise<boolean> {
     const mode = settingsStore.editorSettings.completionTriggerMode;
     if (mode === "manual") return false;
@@ -2144,7 +2166,6 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     triggerSqlCompletion,
     markCompletionAccepted,
     shouldTriggerSqlCompletionForPosition,
-    scheduleSqlCompletionStart,
     provideSqlCompletions,
     getProcedureCall: (source: string, truncatedPrefix: boolean) => getSqlProcedureCall(source, sqlCompletionDialectOptions(), truncatedPrefix),
     loadProcedureSignatures,
@@ -2152,6 +2173,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     scheduleDeferredCompletionTrigger,
     clearDeferredCompletionTrigger,
     invalidateRequests() {
+      clearDeferredCompletionTrigger();
       completionEpoch++;
       cancelEditorSqlCompletionAnalysis();
     },

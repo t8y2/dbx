@@ -305,7 +305,7 @@ impl RoutineCatalog for LiveCatalog<'_> {
             sql,
             Some(&self.endpoint.database),
             Some(&self.endpoint.schema),
-            QueryExecutionOptions { max_rows: Some(PAGE_SIZE + 1), ..Default::default() },
+            QueryExecutionOptions { skip_server_output: true, max_rows: Some(PAGE_SIZE + 1), ..Default::default() },
         );
         let timeout = agent_metadata_timeout(Some(self.config));
         match pool {

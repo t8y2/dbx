@@ -1725,7 +1725,7 @@ function normalizeUiScale(value: unknown): number {
 export const MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS = 0;
 export const MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS = 5000;
 
-function normalizeCompletionAutoActivationDelay(value: unknown): number {
+export function normalizeCompletionAutoActivationDelay(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs;
   return Math.min(MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.max(MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.round(value)));
 }

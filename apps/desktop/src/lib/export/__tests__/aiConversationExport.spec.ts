@@ -51,6 +51,38 @@ describe("buildAiConversationExport", () => {
     expect(result!.defaultFileName).toMatch(/^prod-mysql_\d{12}\.md$/);
   });
 
+  it("markdown export carries every new chart-json type through byte-identically", () => {
+    // The export never parses chart-json, so a type the renderer learned about
+    // later (scatter / heatmap / funnel) must survive untouched — no shape-aware
+    // rewriting is allowed to creep into this path.
+    const bodies = [
+      '{"version":1,"type":"scatter","series":[{"name":"s","data":[[1,2]]}]}',
+      '{"version":1,"type":"heatmap","xAxis":{"values":["Mon"]},"yAxis":{"values":["9am"]},"data":[{"x":"Mon","y":"9am","value":1}]}',
+      '{"version":1,"type":"funnel","data":[{"name":"a","value":1},{"name":"b","value":2}]}',
+      '{"version":1,"type":"line","area":true,"step":"middle","stack":"total","marks":[{"name":"t","value":3}],"xAxis":{"values":["a"]},"series":[{"name":"s","data":[1]}]}',
+    ];
+    const result = buildAiConversationExport({
+      ...BASE,
+      messages: [msg({ role: "assistant", content: bodies.map((body) => "```chart-json\n" + body + "\n```").join("\n") })],
+      format: "markdown",
+    });
+    for (const body of bodies) expect(result!.content).toContain("```chart-json\n" + body + "\n```");
+  });
+
+  it("html export keeps new chart-json types as escaped plain code", () => {
+    const body = '{"version":1,"type":"heatmap","xAxis":{"values":["Mon"]},"yAxis":{"values":["9am"]},"data":[{"x":"Mon","y":"9am","value":1}]}';
+    const result = buildAiConversationExport({
+      ...BASE,
+      messages: [msg({ role: "assistant", content: "```chart-json\n" + body + "\n```" })],
+      format: "html",
+    });
+    const html = result!.content;
+    expect(html).toContain("chart-json");
+    // The fence label and JSON survive as text; nothing is turned into markup.
+    expect(html).toContain("&quot;type&quot;:&quot;heatmap&quot;");
+    expect(html).not.toContain("<heatmap");
+  });
+
   it("markdown export marks failed assistant replies", () => {
     const result = buildAiConversationExport({
       ...BASE,

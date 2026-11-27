@@ -58,6 +58,7 @@ import {
   Columns3,
   PencilRuler,
   Pin,
+  Bookmark,
   Settings2,
   WandSparkles,
   Camera,
@@ -73,7 +74,8 @@ import { Input } from "@/components/ui/input";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import DataGridBusyOverlay from "@/components/grid/DataGridBusyOverlay.vue";
 import { DATA_GRID_CLIPBOARD_BATCH_CHARS, DataGridClipboardCapacityError, dataGridPendingRowLimit, dataGridPreparationBatchSize, type DataGridRowPreparationOptions, type DataGridRowPreparationProgress } from "@/lib/dataGrid/dataGridRowPreparation";
-import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
+import ConnectionWatermark from "@/components/common/ConnectionWatermark.vue";
+import { resolveConnectionWatermark } from "@/lib/connection/connectionWatermark";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdownMenu from "@/components/ui/LightDropdownMenu.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -478,6 +480,7 @@ import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
 import { buildColumnIndexMap, columnIndexCacheAction, columnIndexColorClass, columnIndexNameKey, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { isSchemaAware, supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
+import { loadTableDataQueryDefaults, removeTableDataQueryDefaults, saveTableDataQueryDefaults, type TableDataQueryDefaultsScope } from "@/lib/table/tableDataQueryDefaults";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 import { buildDataGridLocalFilterOptions, restoreDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint } from "@/lib/database/jdbcDialect";
@@ -961,7 +964,10 @@ const tableDependencyTarget = computed(() => {
 function viewRelationSql(context: ObjectDependencyTarget, sql: string) {
   queryStore.createTab(context.connectionId, context.database, t("objectDependencies.viewSql"), "query", context.schema, sql, context.catalog, { forceNew: true });
 }
-const productionContext = computed(() => productionContextForDatabase(resolvedConnectionConfig.value, props.database));
+const watermark = computed(() => {
+  const connection = resolvedConnectionConfig.value;
+  return resolveConnectionWatermark(connection, productionContextForDatabase(connection, props.database).active);
+});
 // The collection grid and Mongo query-result grids share the document-grid value
 // encoding (BSON null sentinel + JSON-prefixed containers), so every display,
 // editor and clipboard path must decode it whenever MongoDB values are on screen.
@@ -1306,7 +1312,11 @@ const dataGridSearch = useDataGridSearch({
   columns: () => props.result.columns,
   suggestionColumns: () => props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns,
   rows: () => displayItems.value,
-  getCellSearchText: (row, columnIndex) => (row.data[columnIndex] === null ? "" : rowLowerTextCache.get(row.data, columnIndex)),
+  getCellSearchText: (row, columnIndex) => {
+    if (row.data[columnIndex] === null) return "";
+    const preview = props.context === "table-data" && !replaceOpen.value && !row.isDirtyCol[columnIndex] ? largeValueRuntime?.visibleLargeValuePreviewSearchText(row.sourceIndex, columnIndex) : undefined;
+    return preview ?? rowLowerTextCache.get(row.data, columnIndex);
+  },
   getCellRawSearchText: (row, columnIndex) => (typeof row.data[columnIndex] === "string" ? (row.data[columnIndex] as string) : replaceOpen.value ? "" : String(row.data[columnIndex] ?? "")),
   caseSensitive: () => replaceOpen.value && replaceCaseSensitive.value,
   literalQuery: replaceOpen,
@@ -1434,6 +1444,8 @@ const allFilterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
   { value: "like", labelKey: "grid.filterBuilderContains" },
   { value: "not-like", labelKey: "grid.filterBuilderNotContains" },
+  { value: "ilike", labelKey: "grid.filterBuilderContainsCaseInsensitive" },
+  { value: "not-ilike", labelKey: "grid.filterBuilderNotContainsCaseInsensitive" },
   { value: "begins-with", labelKey: "grid.filterBuilderBeginsWith" },
   { value: "ends-with", labelKey: "grid.filterBuilderEndsWith" },
   { value: "not-begins-with", labelKey: "grid.filterBuilderNotBeginsWith" },
@@ -2255,14 +2267,12 @@ function focusWhere(): boolean {
 }
 
 function focusSearch(target: Element | null = null): boolean {
-  const tableInfoDrawer = target?.closest<HTMLElement>("[data-table-info-drawer]");
-  if (tableInfoDrawer) {
-    const input = tableInfoDrawer.querySelector<HTMLInputElement>("[data-table-info-search]");
-    if (input) {
-      input.focus();
-      input.select();
-      return true;
-    }
+  const panel = target?.closest("[data-column-lookup-panel], [data-table-info-drawer]");
+  const input = panel?.querySelector<HTMLInputElement>("[data-column-lookup-search], [data-table-info-search]");
+  if (input) {
+    input.focus();
+    input.select();
+    return true;
   }
   searchOverlayVisible.value = true;
   nextTick(() => {
@@ -2274,6 +2284,16 @@ function focusSearch(target: Element | null = null): boolean {
 function closeSearch() {
   replaceOpen.value = false;
   dataGridSearch.close();
+}
+
+function handleGridFindShortcut(event: KeyboardEvent): boolean {
+  const shortcuts = settingsStore.editorSettings.shortcuts;
+  if (event.defaultPrevented || !isFocusSearchShortcut(event, shortcuts)) return false;
+  const target = event.target instanceof Element ? event.target : document.activeElement;
+  if (isGoToColumnShortcut(event, shortcuts) && !target?.closest("[data-column-lookup-panel]")) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  return focusSearch(target);
 }
 
 const PAIRS: Record<string, string> = { "'": "'", '"': '"', "(": ")" };
@@ -2844,7 +2864,35 @@ function moveGoToColumnSelection(delta: number) {
   scrollGoToColumnSelectionIntoView();
 }
 
+let goToColumnComposition: "composing" | "saw-enter" | undefined;
+let goToColumnCommit: { timeStamp: number; acceptEqualTimeStamp: boolean } | undefined;
+
+function finishGoToColumnComposition(event?: CompositionEvent) {
+  goToColumnCommit = undefined;
+  if (goToColumnComposition === "composing" && event && event.data !== "") {
+    // WebKit can deliver an earlier physical keydown after compositionend.
+    const commit = { timeStamp: event.timeStamp, acceptEqualTimeStamp: true };
+    goToColumnCommit = commit;
+    // Rounded timestamps can tie. Expire only the tie so a later press at the same precision can select a column.
+    window.setTimeout(() => {
+      commit.acceptEqualTimeStamp = false;
+    }, 0);
+  }
+  goToColumnComposition = undefined;
+}
+
+function onGoToColumnInputKeydown(event: KeyboardEvent) {
+  const commit = goToColumnCommit;
+  goToColumnCommit = undefined;
+  const plainEnter = event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+  const trailingImeEnter = plainEnter && commit && (event.timeStamp < commit.timeStamp || (event.timeStamp === commit.timeStamp && commit.acceptEqualTimeStamp));
+  if (!trailingImeEnter && !isAiPromptImeCompositionEvent(event, goToColumnComposition !== undefined)) return;
+  if (goToColumnComposition && (event.key === "Enter" || event.code === "Enter" || event.code === "NumpadEnter")) goToColumnComposition = "saw-enter";
+  event.stopPropagation();
+}
+
 function onGoToColumnKeydown(event: KeyboardEvent) {
+  if (handleGridFindShortcut(event)) return;
   if (event.key === "ArrowDown") {
     event.preventDefault();
     event.stopPropagation();
@@ -2853,7 +2901,7 @@ function onGoToColumnKeydown(event: KeyboardEvent) {
     event.preventDefault();
     event.stopPropagation();
     moveGoToColumnSelection(-1);
-  } else if (event.key === "Enter") {
+  } else if (matchesShortcut(event, "Enter")) {
     const selected = filteredGoToColumns.value[goToColumnSelectedIndex.value];
     if (!selected) return;
     event.preventDefault();
@@ -2869,6 +2917,7 @@ function onGoToColumnKeydown(event: KeyboardEvent) {
 
 watch(goToColumnOpen, (open) => {
   if (!open) {
+    finishGoToColumnComposition();
     goToColumnSearch.value = "";
     return;
   }
@@ -3754,6 +3803,16 @@ function refreshGridScrollerMetrics() {
   scheduleVisibleLargeValuePreviewHydration();
 }
 
+let scrollerMetricsRefreshFrame: number | null = null;
+
+function scheduleScrollerMetricsRefresh() {
+  if (!gridScrollbarsRuntime.active || scrollerMetricsRefreshFrame !== null) return;
+  scrollerMetricsRefreshFrame = requestAnimationFrame(() => {
+    scrollerMetricsRefreshFrame = null;
+    if (gridScrollbarsRuntime.active) refreshGridScrollerMetrics();
+  });
+}
+
 let columnLayoutRefreshFrame = 0;
 function scheduleColumnLayoutRefresh() {
   if (columnLayoutRefreshFrame) return;
@@ -4233,6 +4292,39 @@ watch(
 );
 function currentWhereInput(): string | undefined {
   return combineWhereInputs(whereFilterInput.value, appliedStructuredWhereInput.value);
+}
+
+const tableQueryDefaultsScope = computed<TableDataQueryDefaultsScope | undefined>(() => {
+  const meta = props.tableMeta;
+  const database = meta?.database ?? props.database;
+  if (props.context !== "table-data" || !props.connectionId || database === undefined || !meta?.tableName) return undefined;
+  return { connectionId: props.connectionId, database, schema: meta.schema ?? props.schema, catalog: meta.catalog, tableName: meta.tableName };
+});
+const hasSavedTableQueryDefaults = ref(false);
+const canSaveTableQueryDefaults = computed(() => !gridSurfaceBusy.value && !props.result.execution_error && !hasPendingConditionInputs() && !!(currentWhereInput() || (dataGridOrderByVisible.value && effectiveOrderBy())));
+
+function refreshTableQueryDefaults() {
+  const scope = tableQueryDefaultsScope.value;
+  hasSavedTableQueryDefaults.value = !!scope && !!loadTableDataQueryDefaults(scope);
+}
+
+watch(tableQueryDefaultsScope, refreshTableQueryDefaults, { immediate: true });
+
+function saveCurrentTableQueryDefaults() {
+  const scope = tableQueryDefaultsScope.value;
+  if (!scope || !canSaveTableQueryDefaults.value) return;
+  if (!saveTableDataQueryDefaults(scope, { whereInput: currentWhereInput(), orderBy: dataGridOrderByVisible.value ? effectiveOrderBy() : undefined })) {
+    toast(t("grid.tableQueryDefaultsSaveFailed"));
+    return;
+  }
+  refreshTableQueryDefaults();
+}
+
+function clearSavedTableQueryDefaults() {
+  const scope = tableQueryDefaultsScope.value;
+  if (!scope) return;
+  removeTableDataQueryDefaults(scope);
+  refreshTableQueryDefaults();
 }
 
 function effectiveOrderBy(): string | undefined {
@@ -6183,7 +6275,8 @@ const sortedRows = computed(() => {
       const data = rows[sourceIndex];
       return data.some((cell, columnIndex) => {
         if (cell === null) return false;
-        const text = rowLowerTextCache.get(data, columnIndex);
+        const preview = props.context === "table-data" ? largeValueRuntime?.visibleLargeValuePreviewSearchText(sourceIndex, columnIndex) : undefined;
+        const text = preview ?? rowLowerTextCache.get(data, columnIndex);
         if (text.includes(q)) return true;
         // The display cache is truncated at the cell display cap, so a match
         // past the cut would wrongly hide a row that a WHERE clause finds;
@@ -6718,13 +6811,7 @@ const hasVisibleRows = computed(() => displayRowCount.value > 0);
 const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !replaceOpen.value && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value || hasServerColumnFilters.value);
 const emptyTitle = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRows") : t("grid.noRows")));
 const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription")));
-watch(
-  () => [hasVisibleRows.value, props.result.columns.length] as const,
-  () => {
-    nextTick(refreshGridScrollerMetrics);
-  },
-  { immediate: true },
-);
+watch([hasVisibleRows, () => props.result.columns.length], scheduleScrollerMetricsRefresh, { flush: "post", immediate: true });
 const isErrorResult = computed(() => isQueryExecutionErrorResult(props.result) && props.result.rows.length > 0);
 const errorMessage = computed(() => (isErrorResult.value ? String(props.result.rows[0]?.[0] ?? "") : ""));
 // --- Selection composable ---
@@ -7630,8 +7717,17 @@ function exportSelectedRowsJson() {
 function exportSelectedRowsMarkdown() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
-  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
-  return exportMarkdown({ rowIds, columnIndexes });
+  let columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  const transposeRecords = isTransposeMode.value;
+  if (transposeRecords) {
+    const visibleIndexBySource = new Map(visibleColumnIndexes.value.map((sourceIndex, visibleIndex) => [sourceIndex, visibleIndex]));
+    const selectedColumns = columnIndexes ? new Set(columnIndexes) : undefined;
+    columnIndexes = transposeRows.value.flatMap(({ columnIndex }) => {
+      const visibleIndex = visibleIndexBySource.get(columnIndex);
+      return visibleIndex === undefined || (selectedColumns && !selectedColumns.has(visibleIndex)) ? [] : [visibleIndex];
+    });
+  }
+  return exportMarkdown({ rowIds, columnIndexes, transposeRecords });
 }
 
 function exportSelectedRowsHtml() {
@@ -8960,16 +9056,9 @@ const { elapsedMs: resultViewUpdateMs, canvasDrawCompleted: completeResultCanvas
   () => (useCanvasGridRows.value ? "canvas" : "dom"),
 );
 
-watch(
-  () => [totalWidth.value, displayRowCount.value, useCanvasGridRows.value, props.result.columns.join("\u0000")],
-  () => {
-    nextTick(() => {
-      refreshGridScrollerMetrics();
-      observeGridHorizontalScrollbarScroller();
-    });
-  },
-  { flush: "post" },
-);
+// Width reads can force a full WebKit layout. Coalesce result changes outside
+// Vue's flush so the refresh cannot keep re-entering the same render cycle.
+watch([totalWidth, displayRowCount, useCanvasGridRows, () => props.result.columns.join("\u0000")], scheduleScrollerMetricsRefresh, { flush: "post" });
 
 function canvasScrollerElement(): HTMLElement | null {
   const scroller = scrollerRef.value;
@@ -9827,6 +9916,8 @@ function pauseCanvasGridWork() {
   lastPresentedCanvasBackingKey = null;
   stopCanvasResizeTracking();
   gridScrollbarsRuntime.pause();
+  if (scrollerMetricsRefreshFrame !== null) cancelAnimationFrame(scrollerMetricsRefreshFrame);
+  scrollerMetricsRefreshFrame = null;
   disconnectCellEditResizeObserver();
   dataGridTopbarResizeObserver?.disconnect();
   dataGridTopbarResizeObserver = null;
@@ -9850,8 +9941,7 @@ function resumeCanvasGridWork() {
     attachCanvasResizeObserver();
     observeDataGridTopbarWidth();
     observeTransposeViewport();
-    refreshGridScrollerMetrics();
-    observeGridHorizontalScrollbarScroller();
+    scheduleScrollerMetricsRefresh();
   });
 }
 
@@ -10854,8 +10944,15 @@ async function onTransposeCellDblClick(rowIndex: number, actualColIdx: number, d
 }
 
 function onTransposeCellContext(rowIndex: number, actualColIdx: number, event: MouseEvent) {
-  selectTransposeCell(rowIndex, actualColIdx, event);
   const item = displayItemAt(rowIndex);
+  if (item && isRowSelected(item.id)) {
+    // Keep the selected records for export, but target this cell for actions such as filtering.
+    invalidateContextMenuTarget();
+    transposeRowIndex.value = rowIndex;
+    gridRef.value?.focus({ preventScroll: true });
+  } else {
+    selectTransposeCell(rowIndex, actualColIdx, event);
+  }
   contextCell.value = item ? { rowId: item.id, rowIndex, col: actualColIdx } : null;
 }
 
@@ -12359,7 +12456,14 @@ function cancelPendingRowOrRestoreCell(): boolean {
   return restoreCellValue(item.id, actualColumnIndex(position.colIndex));
 }
 
-async function onGridKeydown(event: KeyboardEvent) {
+function onGridKeydown(event: KeyboardEvent) {
+  // Grid actions claim their key synchronously, including those that continue asynchronously.
+  const action = handleGridActionKeydown(event);
+  handleGridFindShortcut(event);
+  return action;
+}
+
+async function handleGridActionKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
 
   if (pendingPasteAsNewRows.value) {
@@ -12395,11 +12499,6 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (!targetAllowsNativeClipboard && handleGridPaginationShortcut(event)) return;
-  if (isFocusSearchShortcut(event) && !isGoToColumnShortcut(event, settingsStore.editorSettings.shortcuts)) {
-    event.preventDefault();
-    focusSearch(event.target instanceof Element ? event.target : document.activeElement instanceof Element ? document.activeElement : null);
-    return;
-  }
   if (isModRShortcut(event)) {
     event.preventDefault();
     event.stopPropagation();
@@ -13389,6 +13488,14 @@ function selectTransposeRecord(rowIndex: number, event?: MouseEvent) {
     }
     contextCell.value = { rowId: item.id, rowIndex, col: -1 };
   }
+  gridRef.value?.focus({ preventScroll: true });
+}
+
+function onTransposeRecordContext(rowIndex: number) {
+  const item = displayItemAt(rowIndex);
+  if (!item) return;
+  transposeRowIndex.value = rowIndex;
+  onRowContext(item.id, rowIndex);
   gridRef.value?.focus({ preventScroll: true });
 }
 
@@ -15538,7 +15645,8 @@ function buildExtractorContextItems(destination: "copy" | "export" = "copy"): Co
           // the saved default stays controlled by the toolbar/settings dialog.
           const wholeQueryResult = extractor === "sql-updates" && isResultsContext.value && props.databaseType === "mysql" && props.fullExportResult && !hasCompleteLocalResult.value && isSelectingAll.value && selectedCellCount.value === visibleDisplayItems.value.length * visibleColumns.value.length;
           const scope = wholeQueryResult ? "result" : "selection";
-          void (destination === "copy" ? copyWithExtractor(extractor) : exportWithExtractor(extractor, undefined, scope));
+          const fieldOrder = destination === "export" && extractor === "markdown" && isTransposeMode.value ? transposeRows.value.map((row) => row.columnIndex) : undefined;
+          void (destination === "copy" ? copyWithExtractor(extractor) : exportWithExtractor(extractor, undefined, scope, fieldOrder));
         },
         disabled: !canCopyWithExtractor(extractor),
       });
@@ -16221,6 +16329,17 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     </TooltipTrigger>
                     <TooltipContent side="bottom">{{ t("grid.copyQuerySql") }}</TooltipContent>
                   </Tooltip>
+                  <DropdownMenu v-if="tableQueryDefaultsScope && canUseWhereSearch" @update:open="(open) => open && refreshTableQueryDefaults()">
+                    <DropdownMenuTrigger as-child>
+                      <Button type="button" variant="ghost" size="icon" class="h-5 w-5" :class="{ 'text-primary': hasSavedTableQueryDefaults }" :title="t('grid.tableQueryDefaults')" :aria-label="t('grid.tableQueryDefaults')">
+                        <Bookmark class="h-3 w-3" :class="{ 'fill-current': hasSavedTableQueryDefaults }" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" class="min-w-52">
+                      <DropdownMenuItem :disabled="!canSaveTableQueryDefaults" @select="saveCurrentTableQueryDefaults">{{ t("grid.tableQueryDefaultsSave") }}</DropdownMenuItem>
+                      <DropdownMenuItem :disabled="!hasSavedTableQueryDefaults" @select="clearSavedTableQueryDefaults">{{ t("grid.tableQueryDefaultsClear") }}</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </div>
               </template>
 
@@ -16538,7 +16657,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 </Button>
               </div>
               <div class="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-                <ProductionWatermark v-if="productionContext.active" />
+                <ConnectionWatermark v-if="watermark" v-bind="watermark" />
                 <div data-grid-transpose-header class="data-grid-transpose-header data-grid-header-shell relative z-20 h-7 w-full shrink-0 overflow-hidden border-b border-border font-semibold text-muted-foreground">
                   <div class="absolute left-0 top-0 z-30 h-full" :style="{ width: `${transposePinnedWidth}px` }">
                     <div class="data-grid-header-cell relative flex h-full w-full shrink-0 items-center border-r border-border px-3 py-1.5 truncate">
@@ -16584,7 +16703,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                         width: `${getTransposeRecordWidth(recordIndex)}px`,
                       }"
                       @click="selectTransposeRecord(recordIndex, $event)"
-                      @contextmenu="selectTransposeRecord(recordIndex, $event)"
+                      @contextmenu="onTransposeRecordContext(recordIndex)"
                     >
                       {{ rowNumberText(displayItems[recordIndex]) }}
                       <div data-grid-transpose-record-resize-handle class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeRecordResizeStart(recordIndex, $event)" @dblclick.stop="autoFitTransposeRecord(recordIndex)" />
@@ -17378,7 +17497,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                    `top`/`inset` offsets are measured from the body instead of from the
                    grid's outer relative container (which starts at the header row). -->
               <div class="data-grid-scroll-body relative min-h-0 flex-1 flex flex-col overflow-hidden" :class="{ 'has-vertical-scrollbar': hasGridVerticalOverflow }">
-                <ProductionWatermark v-if="productionContext.active" />
+                <ConnectionWatermark v-if="watermark" v-bind="watermark" />
                 <div v-if="!hasVisibleRows" class="relative min-h-0 flex-1">
                   <div class="data-grid-scroller h-full overflow-x-auto overflow-y-hidden overscroll-none" :class="{ 'is-scrolling': isScrolling }" @scroll="onScrollerScroll" @wheel="onDomGridWheel">
                     <div class="h-full min-h-[220px]" :style="{ width: 'max(100%, var(--total-w))' }" />
@@ -17845,6 +17964,12 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               <input
                 ref="goToColumnSearchInput"
                 v-model="goToColumnSearch"
+                data-column-lookup-search
+                @compositionstart="goToColumnComposition = 'composing'"
+                @compositionend="finishGoToColumnComposition"
+                @blur="finishGoToColumnComposition()"
+                @keydown="onGoToColumnInputKeydown"
+                @keyup="goToColumnCommit = undefined"
                 :placeholder="t('grid.searchColumn')"
                 :aria-label="t('grid.searchColumn')"
                 class="h-8 w-full rounded-md border bg-transparent pl-7 pr-28 text-xs outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
@@ -17856,6 +17981,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     class="absolute right-7 top-1/2 inline-flex -translate-y-1/2 items-center gap-0.5 rounded px-1 text-[10px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
                     :title="goToColumnMatchMode === 'exact' ? t('grid.useFuzzyColumnSearch') : t('grid.useExactColumnSearch')"
                     :aria-label="goToColumnMatchMode === 'exact' ? t('grid.useFuzzyColumnSearch') : t('grid.useExactColumnSearch')"
+                    @keydown.capture="handleGridFindShortcut"
                     @keydown.stop
                   >
                     {{ goToColumnMatchMode === "exact" ? t("grid.exactColumnSearch") : t("grid.fuzzyColumnSearch") }}
@@ -18439,6 +18565,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       :preference="selectedCopyPreference"
       :single-column-format="settingsStore.editorSettings.dataGridSmartSingleColumnFormat"
       :source-table-name="props.tableMeta?.tableName"
+      :database-type="props.databaseType"
       :visible-copy-extractors="settingsStore.editorSettings.dataGridVisibleCopyExtractors"
       :options="settingsStore.editorSettings.dataGridExtractorOptions"
       :items="copyPreferenceMenuItems"
@@ -18451,6 +18578,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       mode="copy"
       :preference="selectedCopyPreference"
       :source-table-name="props.tableMeta?.tableName"
+      :database-type="props.databaseType"
       :visible-copy-extractors="settingsStore.editorSettings.dataGridVisibleCopyExtractors"
       :options="settingsStore.editorSettings.dataGridExtractorOptions"
       :items="copyPreferenceMenuItems"

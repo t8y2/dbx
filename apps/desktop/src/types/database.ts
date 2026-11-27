@@ -246,8 +246,18 @@ export interface ConnectionConfig {
   production_databases?: string[];
   /** Sidebar presentation only; absent means database/schema rows plus sticky context. */
   production_badge_scope?: ProductionBadgeScope;
+  watermark?: ConnectionWatermarkConfig;
   /** Metadata captured from the latest successful connection test for the saved config. */
   database_info?: DatabaseConnectionInfo;
+}
+
+export type ConnectionWatermarkMode = "auto" | "custom" | "off";
+
+export interface ConnectionWatermarkConfig {
+  mode: ConnectionWatermarkMode;
+  text?: string;
+  font_size?: number;
+  color?: string;
 }
 
 export type ProductionBadgeScope = "connection" | "database" | "table";
@@ -1177,6 +1187,16 @@ export interface ObjectStatistics {
 }
 
 export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+
+/**
+ * 包内某个子程序的身份：打开包源码后用它把光标定位到该子程序上。
+ * `signature` 是数据字典给出的形参文本，仅用于重载消歧。
+ */
+export interface PackageMemberFocus {
+  name: string;
+  kind: "procedure" | "function";
+  signature?: string;
+}
 
 export type RoutineParameterMetadataMode = "IN" | "OUT" | "INOUT" | "RETURN" | "UNKNOWN";
 
@@ -2924,6 +2944,14 @@ export interface QueryTab {
     objectType: ObjectSourceKind;
     signature?: string;
   };
+  /**
+   * 源码落地后要把光标定位到的包成员（树上点中某个子程序时写入）。编辑区解析出
+   * 它在源码里的偏移、移动光标后立刻清空：这是一次导航意图，不是 tab 的状态，
+   * 留着会让后续的刷新/切回重新跳一次，把用户自己挪过的光标又拽走。
+   *
+   * 纯运行期字段，刻意不进 openTabsPersistence 的落盘白名单。
+   */
+  objectSourceFocusMember?: PackageMemberFocus;
   /** Durable TYPE definitions and step records; restored plans require fresh verification. */
   typeManagementDraft?: import("@/lib/table/oracleTypeManagement").OracleTypeManagementDraft;
   /** Explicit edit mode; TYPE source opens read-only and restores read-only. */

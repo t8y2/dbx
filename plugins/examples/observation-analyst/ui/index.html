@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DBX Observation Analyst</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        --bg: #f4f6fb; --panel: #ffffff; --border: rgba(16, 24, 40, 0.14);
+        --text: #101828; --muted: #5b6478; --accent: #0f766e;
+        --ok: #027a48; --warn: #b45309; --error: #b42318;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0b1020; --panel: rgba(15, 22, 42, 0.92); --border: rgba(255, 255, 255, 0.12);
+          --text: #e8ecf8; --muted: #8f9ab8; --accent: #7ee7cb;
+          --ok: #47cd89; --warn: #ffb86b; --error: #ff7a8a;
+        }
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--text); font-size: 13px; }
+      header {
+        display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+        padding: 12px 18px; border-bottom: 1px solid var(--border); position: sticky; top: 0;
+        background: var(--panel); z-index: 2;
+      }
+      header h1 { font-size: 15px; margin: 0 12px 0 0; }
+      button {
+        font: inherit; font-size: 12px; color: var(--text); background: transparent;
+        border: 1px solid var(--border); border-radius: 8px; padding: 5px 12px; cursor: pointer;
+      }
+      button:hover { border-color: var(--accent); color: var(--accent); }
+      .spacer { flex: 1; }
+      .kpis {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; padding: 14px 18px;
+      }
+      .kpi { border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; background: var(--panel); }
+      .kpi .label { color: var(--muted); font-size: 11px; letter-spacing: 0.04em; }
+      .kpi .value { font-size: 20px; font-weight: 700; margin-top: 2px; }
+      .kpi .sub { color: var(--muted); font-size: 11px; }
+      .kpi.warn .value { color: var(--warn); }
+      .kpi.error .value { color: var(--error); }
+      section { padding: 0 18px 18px; }
+      section h2 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); letter-spacing: 0.04em; }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; background: var(--panel); }
+      th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+      th { color: var(--muted); font-weight: 600; }
+      td.num { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+      .status-ok { color: var(--ok); }
+      .status-error { color: var(--error); }
+      .status-cancelled { color: var(--warn); }
+      .bars { display: flex; align-items: flex-end; gap: 2px; height: 60px; margin-top: 8px; }
+      .bars div { flex: 1; background: var(--accent); opacity: 0.75; min-height: 2px; }
+      #audit-status { color: var(--muted); font-size: 11px; }
+      #unsupported { padding: 20px 18px; color: var(--warn); }
+      textarea {
+        width: 100%; min-height: 120px; font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+        border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Observation Analyst</h1>
+      <button id="pause">Pause</button>
+      <button id="reset">Reset</button>
+      <button id="export">Copy JSONL audit log</button>
+      <span class="spacer"></span>
+      <span id="audit-status"></span>
+    </header>
+    <div id="unsupported" hidden>
+      This host does not expose the observation bus (missing <code>window.dbxPlugin.onHostEvent</code>).
+      Run on a recent DBX desktop build or in the SDK dev host.
+    </div>
+    <div class="kpis">
+      <div class="kpi"><div class="label">EVENTS RECEIVED</div><div class="value" id="k-received">0</div><div class="sub" id="k-rate">0 events/min</div></div>
+      <div class="kpi warn"><div class="label">DROPPED (HOST GAP)</div><div class="value" id="k-dropped">0</div><div class="sub">bus back-pressure indicator</div></div>
+      <div class="kpi"><div class="label">QUERIES OK / ERROR / CANCELLED</div><div class="value" id="k-queries">0 / 0 / 0</div><div class="sub" id="k-rows">0 rows returned</div></div>
+      <div class="kpi"><div class="label">QUERY DURATION p50 / p95 / MAX</div><div class="value" id="k-latency">– / – / –</div><div class="sub" id="k-slowest">no samples</div></div>
+      <div class="kpi"><div class="label">CONNECTIONS OPENED / FAILED / CLOSED</div><div class="value" id="k-connections">0 / 0 / 0</div><div class="sub" id="k-conn-sub">–</div></div>
+      <div class="kpi"><div class="label">AI TOOL CALLS / APPROVALS / ERRORS</div><div class="value" id="k-ai">0 / 0 / 0</div><div class="sub" id="k-tokens">0 tokens in / 0 out</div></div>
+      <div class="kpi"><div class="label">TRANSFER TASKS TRACKED</div><div class="value" id="k-transfers">0</div><div class="sub" id="k-transfer-sub">no snapshots</div></div>
+      <div class="kpi"><div class="label">PLUGINS ACTIVATED / FAILED / STOPPED</div><div class="value" id="k-plugins">0 / 0 / 0</div><div class="sub" id="k-plugin-sub">–</div></div>
+    </div>
+    <section>
+      <h2>QUERY DURATION DISTRIBUTION (ms)</h2>
+      <div class="bars" id="latency-bars"></div>
+    </section>
+    <section>
+      <h2>SLOWEST STATEMENTS</h2>
+      <table><thead><tr><th>#</th><th>duration</th><th>status</th><th>statement</th></tr></thead><tbody id="slow-rows"></tbody></table>
+      <h2>RECENT ERRORS</h2>
+      <table><thead><tr><th>time</th><th>kind</th><th>error</th></tr></thead><tbody id="error-rows"></tbody></table>
+      <h2>TRANSFER SNAPSHOTS</h2>
+      <table><thead><tr><th>task</th><th>kind</th><th>status</th><th>progress</th></tr></thead><tbody id="transfer-rows"></tbody></table>
+      <h2>RECENT EVENTS</h2>
+      <table><thead><tr><th>time</th><th>kind</th><th>source</th><th>summary</th></tr></thead><tbody id="event-rows"></tbody></table>
+      <h2>EXPORT PREVIEW (last lines)</h2>
+      <textarea id="audit-preview" readonly spellcheck="false"></textarea>
+    </section>
+    <script>
+      (() => {
+        const MAX_SAMPLES = 5000;
+        const MAX_AUDIT = 20000;
+        const MAX_FEED = 200;
+        const MAX_ERRORS = 50;
+        const MAX_SLOW = 10;
+
+        const $ = (id) => document.getElementById(id);
+        const state = {
+          paused: false,
+          received: 0,
+          dropped: 0,
+          audit: [],
+          query: { ok: 0, error: 0, cancelled: 0, rows: 0, durations: [], slowest: [] },
+          connection: { opened: 0, failed: 0, closed: 0, lost: 0, idle: 0, openMs: 0 },
+          ai: { toolCalls: 0, approvals: 0, errors: 0, deltas: 0, tokensIn: 0, tokensOut: 0 },
+          transfers: new Map(),
+          plugins: { activated: 0, failed: 0, stopped: 0, lastFailure: "" },
+        };
+
+        const categoryOf = (kind) => String(kind).split(".", 1)[0];
+        const fmtMs = (value) => (value === undefined || value === null ? "–" : Math.round(value) + " ms");
+
+        function percentile(samples, ratio) {
+          if (!samples.length) return undefined;
+          const sorted = [...samples].sort((a, b) => a - b);
+          const index = Math.min(sorted.length - 1, Math.floor(sorted.length * ratio));
+          return sorted[index];
+        }
+
+        function renderLatency() {
+          const { durations } = state.query;
+          $("k-latency").textContent =
+            fmtMs(percentile(durations, 0.5)) + " / " + fmtMs(percentile(durations, 0.95)) + " / " + fmtMs(Math.max(0, ...durations, 0));
+          const slowest = state.query.slowest[0];
+          $("k-slowest").textContent = slowest ? `${slowest.duration} ms · ${String(slowest.sql || "").slice(0, 60)}` : "no samples";
+          const bars = $("latency-bars");
+          bars.replaceChildren();
+          if (!durations.length) return;
+          const buckets = new Array(20).fill(0);
+          const max = Math.max(...durations, 1);
+          for (const value of durations) buckets[Math.min(19, Math.floor((value / max) * 20))] += 1;
+          const peak = Math.max(...buckets, 1);
+          for (const count of buckets) {
+            const bar = document.createElement("div");
+            bar.style.height = Math.max(2, Math.round((count / peak) * 60)) + "px";
+            bars.append(bar);
+          }
+        }
+
+        function renderSlowest() {
+          const body = $("slow-rows");
+          body.replaceChildren();
+          state.query.slowest.slice(0, MAX_SLOW).forEach((item, index) => {
+            const row = document.createElement("tr");
+            const rank = document.createElement("td"); rank.className = "num"; rank.textContent = String(index + 1);
+            const duration = document.createElement("td"); duration.className = "num"; duration.textContent = item.duration + " ms";
+            const status = document.createElement("td"); status.textContent = item.status;
+            status.className = item.status === "ok" ? "status-ok" : "status-error";
+            const sql = document.createElement("td"); sql.textContent = String(item.sql || "").slice(0, 120);
+            row.append(rank, duration, status, sql);
+            body.append(row);
+          });
+        }
+
+        function renderErrors() {
+          const body = $("error-rows");
+          body.replaceChildren();
+          const errors = state.audit.filter((event) => {
+            if (event.kind === "query.finished") return event.payload && event.payload.status === "error";
+            return event.kind === "ai.error" || event.kind === "connection.open_failed" || event.kind === "plugin.activate_failed";
+          }).slice(0, MAX_ERRORS);
+          for (const event of errors) {
+            const row = document.createElement("tr");
+            const time = document.createElement("td"); time.className = "num";
+            time.textContent = new Date(event.tsMs || Date.now()).toLocaleTimeString();
+            const kind = document.createElement("td"); kind.textContent = event.kind;
+            const error = document.createElement("td");
+            error.textContent = String((event.payload && (event.payload.error || event.payload.message)) || "").slice(0, 160);
+            row.append(time, kind, error);
+            body.append(row);
+          }
+        }
+
+        function renderTransfers() {
+          const body = $("transfer-rows");
+          body.replaceChildren();
+          $("k-transfers").textContent = String(state.transfers.size);
+          let latest = "";
+          for (const [taskId, snapshot] of state.transfers) {
+            const row = document.createElement("tr");
+            const id = document.createElement("td"); id.className = "num"; id.textContent = taskId;
+            const kind = document.createElement("td"); kind.textContent = snapshot.taskKind;
+            const status = document.createElement("td"); status.textContent = String(snapshot.status ?? "–");
+            status.className = snapshot.status === "Error" ? "status-error" : snapshot.terminal ? "status-ok" : "";
+            const progress = document.createElement("td");
+            progress.textContent = String(snapshot.rowsTransferred ?? snapshot.rowsExported ?? snapshot.documentsWritten ?? snapshot.rowsImported ?? snapshot.rowsInserted ?? "–");
+            row.append(id, kind, status, progress);
+            body.append(row);
+            latest = `${state.transfers.size} tracked · last: ${taskId} (${snapshot.taskKind})`;
+          }
+          $("k-transfer-sub").textContent = latest || "no snapshots";
+        }
+
+        function renderKpis() {
+          const elapsedMinutes = Math.max(1 / 60, (Date.now() - sessionStart) / 60000);
+          $("k-received").textContent = String(state.received);
+          $("k-rate").textContent = Math.round(state.received / elapsedMinutes) + " events/min";
+          $("k-dropped").textContent = String(state.dropped);
+          $("k-queries").textContent = `${state.query.ok} / ${state.query.error} / ${state.query.cancelled}`;
+          $("k-rows").textContent = state.query.rows + " rows returned";
+          $("k-connections").textContent = `${state.connection.opened} / ${state.connection.failed} / ${state.connection.closed}`;
+          const connSub = [];
+          if (state.connection.openMs > 0 && state.connection.opened > 0) {
+            connSub.push("avg open " + Math.round(state.connection.openMs / state.connection.opened) + " ms");
+          }
+          if (state.connection.lost) connSub.push(state.connection.lost + " liveness lost");
+          if (state.connection.idle) connSub.push(state.connection.idle + " idle closed");
+          $("k-conn-sub").textContent = connSub.join(" · ") || "–";
+          $("k-ai").textContent = `${state.ai.toolCalls} / ${state.ai.approvals} / ${state.ai.errors}`;
+          $("k-tokens").textContent = `${state.ai.tokensIn} tokens in / ${state.ai.tokensOut} out · ${state.ai.deltas} deltas`;
+          $("k-plugins").textContent = `${state.plugins.activated} / ${state.plugins.failed} / ${state.plugins.stopped}`;
+          $("k-plugin-sub").textContent = state.plugins.lastFailure ? state.plugins.lastFailure.slice(0, 80) : "–";
+          renderLatency();
+          renderSlowest();
+          renderErrors();
+          renderTransfers();
+        }
+
+        function trackQuery(event) {
+          const payload = event.payload || {};
+          if (event.kind === "query.started") return;
+          if (event.kind === "query.message") return;
+          const status = payload.status;
+          if (status === "ok") state.query.ok += 1;
+          else if (status === "cancelled") state.query.cancelled += 1;
+          else state.query.error += 1;
+          state.query.rows += Number(payload.rowCount) || 0;
+          if (typeof payload.durationMs === "number") {
+            state.query.durations.push(payload.durationMs);
+            if (state.query.durations.length > MAX_SAMPLES) state.query.durations.shift();
+            const record = { duration: payload.durationMs, status, sql: payload.sql };
+            state.query.slowest.push(record);
+            state.query.slowest.sort((a, b) => b.duration - a.duration);
+            if (state.query.slowest.length > MAX_SLOW) state.query.slowest.length = MAX_SLOW;
+          }
+        }
+
+        function trackConnection(event) {
+          const payload = event.payload || {};
+          if (event.kind === "connection.opened") { state.connection.opened += 1; state.connection.openMs += Number(payload.durationMs) || 0; }
+          else if (event.kind === "connection.open_failed") state.connection.failed += 1;
+          else if (event.kind === "connection.closed") state.connection.closed += 1;
+          else if (event.kind === "connection.liveness_lost") state.connection.lost += 1;
+          else if (event.kind === "connection.idle_closed") state.connection.idle += 1;
+        }
+
+        function trackAi(event) {
+          const payload = event.payload || {};
+          if (event.kind === "ai.tool_call_started") state.ai.toolCalls += 1;
+          else if (event.kind === "ai.approval_required") state.ai.approvals += 1;
+          else if (event.kind === "ai.error") state.ai.errors += 1;
+          else if (event.kind === "ai.text_delta" || event.kind === "ai.reasoning_delta") state.ai.deltas += 1;
+          else if (event.kind === "ai.agent_finished") {
+            state.ai.tokensIn += payload.input_tokens || 0;
+            state.ai.tokensOut += payload.output_tokens || 0;
+          }
+        }
+
+        function trackTransfer(event) {
+          const payload = event.payload || {};
+          const taskId = payload.taskId;
+          if (!taskId) return;
+          state.transfers.set(taskId, { ...payload, receivedAt: event.tsMs });
+        }
+
+        function trackPlugin(event) {
+          const payload = event.payload || {};
+          if (event.kind === "plugin.activated") state.plugins.activated += 1;
+          else if (event.kind === "plugin.activate_failed") {
+            state.plugins.failed += 1;
+            state.plugins.lastFailure = `${payload.pluginId}: ${payload.error || ""}`;
+          } else if (event.kind === "plugin.stopped") state.plugins.stopped += 1;
+        }
+
+        function summarize(event) {
+          const payload = event.payload || {};
+          const source = [event.connectionId, event.database].filter(Boolean).join("/");
+          if (payload.sql) return source + " · " + String(payload.sql).slice(0, 90);
+          if (payload.toolName) return source + " · " + payload.toolName;
+          if (payload.pluginId) return payload.pluginId;
+          if (payload.taskKind) return `${payload.taskKind}:${payload.taskId ?? ""}`;
+          return JSON.stringify(payload).slice(0, 90);
+        }
+
+        const feedBody = $("event-rows");
+        function renderFeed(event) {
+          const row = document.createElement("tr");
+          const time = document.createElement("td"); time.className = "num";
+          time.textContent = new Date(event.tsMs || Date.now()).toLocaleTimeString();
+          const kind = document.createElement("td"); kind.className = "num"; kind.textContent = event.kind;
+          const source = document.createElement("td"); source.textContent = [event.connectionId, event.database].filter(Boolean).join(" / ");
+          const summary = document.createElement("td"); summary.textContent = summarize(event);
+          row.append(time, kind, source, summary);
+          feedBody.prepend(row);
+          while (feedBody.childElementCount > MAX_FEED) feedBody.lastElementChild.remove();
+        }
+
+        const sessionStart = Date.now();
+        let sessionSeconds = 0;
+        setInterval(() => {
+          sessionSeconds += 1;
+          if (!state.paused && sessionSeconds % 5 === 0) renderKpis();
+        }, 1000);
+
+        const plugin = window.dbxPlugin;
+        if (!plugin || typeof plugin.onHostEvent !== "function" || (plugin.capabilities && plugin.capabilities.observations === false)) {
+          $("unsupported").hidden = false;
+          document.querySelector(".kpis").hidden = true;
+          document.querySelectorAll("section").forEach((node) => { node.hidden = true; });
+          return;
+        }
+
+        const unsubscribe = plugin.onHostEvent((event) => {
+          if (!event || typeof event.kind !== "string") return;
+          state.received += 1;
+          state.audit.push(event);
+          if (state.audit.length > MAX_AUDIT) {
+            state.audit.splice(0, state.audit.length - MAX_AUDIT);
+            $("audit-status").textContent = `audit buffer capped at ${MAX_AUDIT} events (oldest dropped)`;
+          }
+          if (!state.paused) {
+            const category = categoryOf(event.kind);
+            if (category === "query") trackQuery(event);
+            else if (category === "connection") trackConnection(event);
+            else if (category === "ai") trackAi(event);
+            else if (category === "transfer") trackTransfer(event);
+            else if (category === "plugin") trackPlugin(event);
+            renderFeed(event);
+            renderKpis();
+            $("audit-preview").value = state.audit.slice(-12).map((entry) => JSON.stringify(entry)).join("\n");
+          }
+        });
+
+        // Drops come from the host's explicit gap notice. `id` gaps are not a
+        // drop signal: ids are host-global while delivery is permission-filtered.
+        const unsubscribeGap =
+          typeof plugin.onHostGap === "function"
+            ? plugin.onHostGap((gap) => {
+                state.dropped += Number(gap && gap.skipped) || 0;
+                $("k-dropped").textContent = String(state.dropped);
+              })
+            : undefined;
+
+        $("pause").addEventListener("click", () => {
+          state.paused = !state.paused;
+          $("pause").textContent = state.paused ? "Resume" : "Pause";
+        });
+        $("reset").addEventListener("click", () => {
+          state.received = 0; state.dropped = 0; state.audit = [];
+          state.query = { ok: 0, error: 0, cancelled: 0, rows: 0, durations: [], slowest: [] };
+          state.connection = { opened: 0, failed: 0, closed: 0, lost: 0, idle: 0, openMs: 0 };
+          state.ai = { toolCalls: 0, approvals: 0, errors: 0, deltas: 0, tokensIn: 0, tokensOut: 0 };
+          state.transfers = new Map();
+          state.plugins = { activated: 0, failed: 0, stopped: 0, lastFailure: "" };
+          feedBody.replaceChildren();
+          $("audit-status").textContent = "";
+          renderKpis();
+        });
+        $("export").addEventListener("click", () => {
+          const payload = state.audit.map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+          // Clipboard needs no permission and works on every host; the textarea
+          // below mirrors the same bytes so the audit log can also be saved
+          // manually when the sandbox blocks programmatic clipboard writes.
+          $("audit-preview").value = payload;
+          if (plugin.copy) plugin.copy(payload).then(() => {
+            $("audit-status").textContent = `copied ${state.audit.length} events to clipboard`;
+          }).catch(() => {
+            $("audit-status").textContent = "clipboard unavailable — select the preview text and copy manually";
+          });
+        });
+        window.addEventListener("beforeunload", () => {
+          unsubscribe && unsubscribe();
+          unsubscribeGap && unsubscribeGap();
+        });
+        renderKpis();
+      })();
+    </script>
+  </body>
+</html>

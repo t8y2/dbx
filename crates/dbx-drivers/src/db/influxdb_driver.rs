@@ -216,6 +216,8 @@ struct InfluxSeries {
     #[allow(dead_code)]
     name: String,
     columns: Vec<String>,
+    // An empty series may omit its row array in the InfluxQL response.
+    #[serde(default)]
     values: Vec<Vec<serde_json::Value>>,
     #[serde(default)]
     tags: BTreeMap<String, String>,
@@ -339,7 +341,7 @@ fn influx_query_error_message(client: &InfluxdbClient, results: &[InfluxQueryRes
     // A multi-statement script can fail one statement while another still
     // returns rows. Prefer the rows over a hard error so a working query never
     // turns into a false failure; the statement failure stays in the log.
-    if results.iter().any(|result| !result.series.is_empty()) {
+    if results.iter().flat_map(|result| &result.series).any(|series| !series.values.is_empty()) {
         log::warn!("[influxdb] statement error alongside returned rows: {error}");
         return None;
     }
@@ -1335,6 +1337,24 @@ mod tests {
     }
 
     #[test]
+    fn series_without_values_preserves_columns() {
+        let body = r#"{"results":[{"statement_id":0,"series":[{"name":"m","columns":["time","value"]}]}]}"#;
+        let json: InfluxJsonResult = serde_json::from_str(body).unwrap();
+        let series = &json.results[0].series[0];
+        let (columns, rows) = merge_v1_series(&[series]);
+        assert_eq!(columns, ["time", "value"]);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_series_values() {
+        for invalid in [json!(null), json!({})] {
+            let body = json!({"results":[{"series":[{"columns":["time"],"values":invalid}]}]});
+            assert!(serde_json::from_value::<InfluxJsonResult>(body).is_err());
+        }
+    }
+
+    #[test]
     fn keeps_v1_error_messages_free_of_the_v2_mapping_hint() {
         let json: InfluxJsonResult =
             serde_json::from_str(r#"{"results":[{"statement_id":0,"error":"  database not found  "}]}"#).unwrap();
@@ -1342,6 +1362,19 @@ mod tests {
             influx_query_error_message(&v1_client(), &json.results).as_deref(),
             Some("InfluxDB query error: database not found")
         );
+    }
+
+    #[test]
+    fn surfaces_statement_error_alongside_series_without_rows() {
+        let client = v1_client();
+        for series in [json!({"columns":["time","value"],"values":[]}), json!({"columns":["time","value"]})] {
+            let body = json!({"results":[{"statement_id":0,"series":[series]},{"statement_id":1,"error":"boom"}]});
+            let json: InfluxJsonResult = serde_json::from_value(body).unwrap();
+            assert_eq!(
+                influx_query_error_message(&client, &json.results).as_deref(),
+                Some("InfluxDB query error: boom")
+            );
+        }
     }
 
     #[test]

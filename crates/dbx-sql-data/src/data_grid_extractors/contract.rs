@@ -186,6 +186,7 @@ pub struct DataGridSqlExtractorOptions {
     pub skip_computed_columns: bool,
     pub skip_generated_columns: bool,
     pub insert_mode: DataGridCopyInsertMode,
+    pub replace_into: bool,
     pub primary_key_mode: DataGridPrimaryKeyMode,
     pub include_database_name: bool,
     pub quote_identifiers: bool,
@@ -198,6 +199,7 @@ impl Default for DataGridSqlExtractorOptions {
             skip_computed_columns: DEFAULT_SQL_SKIP_COMPUTED_COLUMNS,
             skip_generated_columns: DEFAULT_SQL_SKIP_GENERATED_COLUMNS,
             insert_mode: DataGridCopyInsertMode::Merged,
+            replace_into: false,
             primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_database_name: true,
             quote_identifiers: true,
@@ -316,6 +318,14 @@ pub struct DataGridExtractColumn {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DataGridTransposedMarkdownLabels {
+    pub field: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DataGridExtractRequest {
     pub version: u16,
     pub extractor: DataGridExtractorId,
@@ -337,6 +347,8 @@ pub struct DataGridExtractRequest {
     pub selection_kind: DataGridSelectionKind,
     #[serde(default)]
     pub options: DataGridExtractorOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transposed_markdown: Option<DataGridTransposedMarkdownLabels>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spatial_columns: Option<Vec<SpatialColumn>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

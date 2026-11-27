@@ -145,6 +145,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 - `host.data:read` 允许 `window.dbxPlugin.queryData` 在用户授权给插件的连接上执行一条只读 SQL（见 [只读数据查询](#只读数据查询)）。每个连接都需要用户同意；它不会授予写入、DDL 或重连。
 - `host.connections:read` 允许通过 `window.dbxPlugin.getConnections()` 或 `window.dbxPlugin.connections.list()` 获取当前所有已配置连接的只读脱敏信息（见 [连接信息读取](#连接信息读取)）。
 - `host.connections:edit` 允许工作台[预填已保存连接的编辑表单](#预填已保存连接的编辑表单)，由用户确认保存。
+- `host.observe:queries`、`host.observe:connections`、`host.observe:ai`、`host.observe:transfers`、`host.observe:plugins` 让工作台 UI（以及已在运行的 sidecar）订阅结构化的宿主活动，用于调试、性能分析和审计插件（见 [宿主观测事件](#宿主观测事件)）。每个权限对应一类事件；`host.observe:queries` 与 `host.observe:ai` 会暴露 SQL 文本、工具参数和 AI 内容，因此标记为敏感权限。观测行为本身不会激活插件：sidecar 只有在已运行时才会收到事件。
 - `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 64 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
 - `host.openUrl:http(s)://host[:port]` 允许请求打开指定站点，最多 8 个精确 origin；与网络权限独立，不允许路径、凭据、通配符或尾部斜杠。使用标准化的 `URL.origin`（默认端口应省略）；IPv6 地址使用方括号。
 
@@ -394,11 +395,13 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })`   | 返回 `sql` 的估算执行计划；需要 `host.plans:read`。                                                                                                                                                                                                                                                                                                               |
 | `getTableMetadata({ connectionId, database?, schema?, table })`              | 读取已打开连接的窄化 table schema metadata；需要 `host.schema:read`。                                                                                                                                                                                                                                                                                             |
 | `queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` | 在用户授权给插件的连接上执行一条只读 SQL；需要 `host.data:read`。                                                                                                                                                                                                                                                                                                 |
-| `capabilities`                                                               | 来自 init 消息的 `{ downloadFile, planApi, schemaMetadataApi, dataApi, storage, ai, aiRecommendations, clipboardWrite, clipboardRead, floating, workbenchTitle }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。                                                                                                     |
+| `capabilities`                                                               | 来自 init 消息的 `{ downloadFile, planApi, schemaMetadataApi, dataApi, storage, ai, aiRecommendations, clipboardWrite, clipboardRead, floating, workbenchTitle, observations }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。                                                                                     |
 | `ai.openConversation({ title, prompt, context, send?, mode? })`              | 在内置 AI 面板新建插件对话；`send` 默认 `false`，`mode` 默认 `ask`。`mode: "agent"` 会在 context 包含已打开插件连接时使用实时插件工具；需要 `host.ai`，并以 `capabilities.ai` 广播。                                                                                                                                                                              |
 | `ai.setRecommendations({ context, items })`                                  | 覆盖当前工作台的默认推荐问题并立即刷新全局 AI 面板；每次最多 5 条，支持 `{{path.to.value}}` 占位符；需要 `host.ai` 和 `capabilities.aiRecommendations`。                                                                                                                                                                                                          |
 | `ai.clearRecommendations()`                                                  | 清空当前工作台的推荐问题；需要 `host.ai` 和 `capabilities.aiRecommendations`。                                                                                                                                                                                                                                                                                    |
 | `onInit(fn)` / `onEvent(fn)`                                                 | 监听初始化、环境变化或后端事件；转发后端事件需要 `host.events`。                                                                                                                                                                                                                                                                                                  |
+| `onHostEvent(fn)`                                                            | 接收结构化宿主活动（`query.*`、`connection.*`、`ai.*`、`transfer.*`、`plugin.*`）；需要对应的 `host.observe:*` 权限与 `capabilities.observations`（见 [宿主观测事件](#宿主观测事件)）。                                                                                                                                                                          |
+| `onHostGap(fn)`                                                              | 观测总线落后时接收显式丢弃通知（`{ skipped }`）；需要任意 `host.observe:*` 权限与 `capabilities.observations`。`id` 缺口不是丢事件信号。                                                                                                                                                                                                                          |
 | `storage`                                                                    | 本插件独享的持久化键值状态；需要 `host.storage`；见下文。                                                                                                                                                                                                                                                                                                         |
 | `fileTransfer`                                                               | 本地文件流式传输、下载与（桌面端）系统拖放；见下文。                                                                                                                                                                                                                                                                                                              |
 | `clipboard`                                                                  | 沙箱内的系统剪贴板访问；见下文。                                                                                                                                                                                                                                                                                                                                  |
@@ -714,6 +717,67 @@ if (window.dbxPlugin.capabilities.storage) {
 
 键为不超过 256 字符的字符串；单个值序列化后上限 256 KiB，整库上限 1 MiB——这是 UI 状态存储，不是数据落盘通道。数据保存在插件自己的 `plugin-data/<id>` 目录里，按插件隔离，版本升级和卸载后都保留。大批量数据、缓存以及 Sidecar 产生的任何文件请放进 Sidecar 的数据目录（见 [原生 Sidecar 和 RPC](#原生-sidecar-和-rpc)）。Web 宿主上同一 API 由浏览器本地存储支撑，两端代码完全一致。
 
+### 宿主观测事件
+
+声明一个或多个 `host.observe:*` 权限后，在工作台 UI 中订阅：
+
+```js
+const unsubscribe = window.dbxPlugin.onHostEvent((event) => {
+  // event: { id, tsMs, kind, connectionId?, database?, payload }
+  if (event.kind === "query.finished") {
+    console.log(event.payload);
+  }
+});
+```
+
+先检查 init 消息中的 `capabilities.observations`：没有观测总线的宿主会省略该字段，而较旧的 DBX 也会在安装时拒绝未知权限。
+
+每个事件包含宿主全局单调递增的 `id`、墙钟时间 `tsMs`、点分格式的 `kind`、可选的 `connectionId` / `database`，以及按 kind 定义的 `payload`。宿主只下发**已登记**的事件类型：每个 kind 在下表中固定归属一个 `host.observe:*` 权限，未登记的 kind 永远不会下发，因此新事件不会仅凭同前缀就继承相邻类别的权限。工作台仅在打开期间接收事件，宿主也只为确实存在观察者的类别构建载荷。
+
+`id` 只用于排序和去重，**不能**用来判断丢事件：id 由整个宿主统一分配，而下发按权限过滤，因此出现缺口是正常的（其他类别被过滤掉了），并发发布时相邻 id 也可能略有乱序。真正的丢事件由宿主显式通知，见下文「背压与事件丢弃」。
+
+原生批量路径（MySQL 多语句管道、SQL Server `GO` 批次）会发出一个 `query.started` 与恰好一个 `scope: "batch"` 的终态 `query.finished`（终态事件带 `batchComplete: true`，起始事件带 `statementCount`），以及每条已上报语句一个 `scope: "statement"`、带 `statementIndex` 的 `query.finished`。区分两种生命周期请使用 `scope` 字段而不是事件名：终态事件含 `status`：`ok` / `error` / `cancelled`、`completedStatements`、`failedStatements`，失败时附带上限截断的 `error`。即使批次在跑任何语句之前就失败（只读拒绝、连接池启动失败、取消），终态事件也会发出，因此请用 `batchComplete` 而不是逐语句事件来配对 `query.started`。批次成功返回但内部含失败结果的情况（如获取连接失败，或 `continue_on_error` 批次中部分语句失败）同样会得到 `status: "error"`；用户取消优先于语句错误。
+
+| 类别   | 事件类型                                                                                                                                                                                                                                                                                                                                                              |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 查询   | `query.started`、`query.finished`、`query.message`                                                                                                                                                                                                                                                                                                                    |
+| 连接   | `connection.opened`、`connection.open_failed`、`connection.closed`、`connection.liveness_lost`、`connection.idle_closed`                                                                                                                                                                                                                                              |
+| AI     | `ai.turn_started`、`ai.turn_ended`、`ai.text_delta`、`ai.reasoning_delta`、`ai.tool_call_started`、`ai.tool_call_finished`、`ai.approval_required`、`ai.approval_resolved`、`ai.write_sql_confirmation_required`、`ai.production_write_blocked`、`ai.response_complete`、`ai.output_truncated`、`ai.agent_finished`、`ai.context_compacted`、`ai.error` |
+| 传输   | `transfer.progress` —— `payload.taskKind` 取值为 `transfer`、`database-export`、`table-import`、`table-export`、`sql-file`、`mongo-dump`、`mongo-restore`、`mongo-import`、`mongo-export`、`query-result-export`、`dameng-dump`                                                                                                                                       |
+| 插件   | `plugin.activated`、`plugin.activate_failed`、`plugin.status_changed`、`plugin.stopped`                                                                                                                                                                                                                                                                                |
+
+SQL 文本、工具参数、工具结果、上下文摘要、AI 增量与错误信息上限为 16 KiB；被截断的字段会在 `payload` 中设置 `<field>Truncated: true`。宿主还会对任何载荷中的每个字符串执行同样的上限，作为最后一道保护，新增字段无法绕过；整体超出体积预算的载荷会被替换为 `{ "truncated": true, "reason": "payload_too_large" }`。`ai.text_delta` 与 `ai.reasoning_delta` 属高频事件，仅投递到工作台 UI —— 声明 `host.observe:ai` 的 sidecar 会收到其他所有 AI 事件但收不到增量，因此请从 `ai.agent_finished` 的 `text` 字段持久化最终回答（即运行返回的最终文本，上限 16 KiB，被截断时带 `textTruncated`）。`ai.response_complete` 只有 CLI 适配器会发出，且明确是非终态事件。被取消的运行同样会以 `ai.agent_finished` 结束，其 `text` 包含宿主追加的取消提示。自身没有发出终态事件的失败运行会以 `ai.error` 结束（`message` 有限截断，用户主动停止时带 `cancelled: true`），因此每次运行都会关闭；循环自身已发出的 `ai.error` 不会被重复发送。
+
+`transfer.progress` 按设计不含内容：只发布白名单内的 id、状态、计数器、耗时和对象名。SQL 语句、驱动错误文本、导入的行/文档数据和本地文件路径都不会进入传输事件流；它们属于已经单独授权的 `host.observe:queries` / `host.observe:ai`。
+
+#### 背压与事件丢弃
+
+观测总线是有界广播通道：落后太多的消费者会被断开而不是拖慢查询执行，因此事件可能被丢弃。丢事件由宿主显式通知，绝不能从 `id` 缺口推断：
+
+```js
+const stopGaps = window.dbxPlugin.onHostGap(({ skipped }) => {
+  // 有 skipped 个事件在下发前被丢弃；需要精确计数的审计场景应记录该缺口。
+});
+```
+
+只要插件声明了任意一个 `host.observe:*` 权限就会收到 `onHostGap`，因为丢事件发生在按类别过滤之前。
+
+sidecar 收到的同样是事件内容，但以无 id 的 JSON-RPC 通知下发：
+
+```json
+{"jsonrpc":"2.0","method":"host/observation","params":{"id":42,"tsMs":1730000000000,"kind":"query.finished","connectionId":"…","database":"…","payload":{…}}}
+```
+
+通知只投递给清单中声明了对应权限且**已在运行**的 sidecar；观测不会自行激活插件。每个在运行的观察者拥有独立的有界队列，因此某个 sidecar 停止读取 stdin 时只会丢失自己的事件（以 `host/observation_gap` 报告），不会拖慢其他 sidecar 或工作台 UI 的投递。超过投递时限仍无响应的 sidecar 会被停止并发出 `plugin.stopped`，而不是静默跳过——写了一半的 JSONL 帧会破坏 RPC 流。处理应保持轻量、持久化异步执行，因为该帧与常规 RPC 共用 stdin。
+
+总线落后时，sidecar 也会以同样方式收到无 id 的丢弃通知：
+
+```json
+{"jsonrpc":"2.0","method":"host/observation_gap","params":{"skipped":12}}
+```
+
+该通知会发给所有声明了任意 `host.observe:*` 权限的在运行会话。
+
 ### 在 DBX AI 中分析插件数据
 
 在 manifest 中声明 `"permissions": ["host.ai"]`。插件可以直接打开全局 AI 面板，也可以为每个 Workbench 注册快捷推荐问题。两种能力都沿用 DBX 的模型选择、历史、追问、停止和导出功能。
@@ -948,7 +1012,7 @@ Sidecar 约束：stdout 只能输出协议消息，日志写 stderr；请求 ID 
 宿主在此之上负责：
 
 - **显式加入、可撤销。** 插件只有在用户于「插件中心 → 已安装 → 内置 AI 工具」中开启后才会贡献工具——仅安装不会暴露任何东西。同一面板会列出工具并标出哪些需要确认，开关可把某个插件永久关闭。manifest 中的 `mcp` 贡献声明 `ai_tools: false` 可让插件即使被用户开启也不进入该面。
-- **只用已打开的连接。** 只为用户当前已打开的插件连接提供工具。连接由 DBX 绑定：模型看到的 schema 中会去掉 `connectionId` / `connectionName`；如果插件 schema 声明了 `connectionId`，宿主会在转发参数中注入绑定连接的 id。打开了多个连接时，模型通过额外的 `dbx_connection` 参数选择其一。
+- **只用已打开且已附加到会话的连接。** 只为既处于打开状态、又被附加到当前 AI 会话的插件连接提供工具（在输入框的 **插件工具** 控件里勾选；如果会话目标本身就是插件连接，则该连接自动附加）。仅在其他地方打开连接不会把它的工具暴露给助手。连接由 DBX 绑定：模型看到的 schema 中会去掉 `connectionId` / `connectionName`；如果插件 schema 声明了 `connectionId`，宿主会在转发参数中注入绑定连接的 id。附加了多个连接时，模型通过额外的 `dbx_connection` 参数选择其一。
 - **默认需要确认。** 只有声明了 `"annotations": { "readOnlyHint": true }` 的工具才会直接执行。其他调用都会暂停运行，并向用户展示将要转发的完整参数，由用户选择允许一次或拒绝；五分钟未响应视为拒绝。请为真正只读的工具加上标注，同时保留插件自身的防护（只读连接标志、两阶段确认等）——宿主确认拦截的是模型的误操作，不能替代插件自己的安全规则。
 - **可移植的 schema。** 工具以 `<前缀>__<工具名>` 暴露（例如 `ssh__ssh_exec`），schema 会被收敛到所有支持的模型供应商都接受的子集：`type`、`description`、`properties`、`required`、`items`、字符串 `enum` 以及数值、长度和元素数量边界。参数名请只使用字母、数字和下划线。
 - **结果有上限。** 单次调用 120 秒超时，结果在交给模型前会被压缩。长任务请作为后台任务启动并返回句柄，不要阻塞。

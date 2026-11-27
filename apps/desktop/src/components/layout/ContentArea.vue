@@ -90,6 +90,9 @@ import { resolveConnectionWatermark } from "@/lib/connection/connectionWatermark
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
 import OraclePackageMembers from "@/components/objects/OraclePackageMembers.vue";
 import type { OraclePackageSourceContext } from "@/lib/sql/oraclePackageMemberNavigation";
+import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
+import type { OraclePackageMemberEntry } from "@/lib/sql/oraclePackageMembers";
+import type { OraclePackageProcedureTarget } from "@/lib/table/routineParameters";
 import OracleTriggerStatus from "@/components/objects/OracleTriggerStatus.vue";
 import type { OracleTriggerSnapshot, OracleTriggerTarget, OracleTriggerExecutionResult } from "@/lib/database/oracleTriggerPlan";
 const OracleInvalidObjectsDialog = defineAsyncComponent(() => import("@/components/objects/OracleInvalidObjectsDialog.vue"));
@@ -489,6 +492,31 @@ const packageSourceIdentity = computed<OraclePackageSourceContext | undefined>((
   if (!name) return undefined;
   return { name, schema: tab.objectSource?.schema ?? tab.objectDetails?.schema ?? tab.schema, objectType };
 });
+const packageProcedureContext = computed(() => {
+  const tab = props.activeTab;
+  const source = tab.objectSource ?? tab.objectDetails;
+  const schema = source?.schema ?? tab.schema;
+  if (effectiveDatabaseTypeForConnection(props.activeConnection) !== "oracle" || !schema || !source || (source.objectType !== "PACKAGE" && source.objectType !== "PACKAGE_BODY")) return undefined;
+  return { connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog, schema, packageName: source.name };
+});
+const packageProcedureTarget = shallowRef<OraclePackageProcedureTarget & { catalog?: string }>();
+const packageProcedureOpen = ref(false);
+
+function openPackageProcedure(member: OraclePackageMemberEntry) {
+  const context = packageProcedureContext.value;
+  if (!context || member.isFunction || queryStore.isTabDirty(props.activeTab)) return;
+  packageProcedureTarget.value = { ...context, member };
+  packageProcedureOpen.value = true;
+}
+
+async function openPackageProcedureSql(sql: string, execute = false) {
+  const target = packageProcedureTarget.value;
+  if (!target) return;
+  const title = `Execute - ${target.packageName}.${target.member.databaseName}`;
+  const tabId = queryStore.createTab(target.connectionId, target.database, title, "query", target.schema, sql, target.catalog, { forceNew: true });
+  if (execute) await queryStore.executeTabSql(tabId, sql);
+}
+
 const unfinishedTypeChange = computed(() => !!props.activeTab.typeManagementDraft && props.activeTab.typeManagementDraft.state !== "complete");
 const verifiedTypeDeletion = computed(() => props.activeTab.typeManagementDraft?.state === "complete" && props.activeTab.typeManagementDraft.operation.startsWith("delete"));
 function resumeTypeManagement() {
@@ -2449,7 +2477,19 @@ defineExpose({
                 </Button>
               </div>
               <div v-else :class="showPackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
-                <OraclePackageMembers v-if="showPackageMembers" :key="activeTab.id" :source="activeTab.sql" @navigate="queryEditorRef?.focusPackageMember($event)" />
+                <OraclePackageMembers v-if="showPackageMembers" :key="activeTab.id" :source="activeTab.sql" :can-execute-procedure="!!packageProcedureContext && !queryStore.isTabDirty(activeTab)" @navigate="queryEditorRef?.focusPackageMember($event)" @execute-procedure="openPackageProcedure" />
+                <ProcedureExecutionDialog
+                  v-if="packageProcedureTarget"
+                  v-model:open="packageProcedureOpen"
+                  :connection-id="packageProcedureTarget.connectionId"
+                  :database="packageProcedureTarget.database"
+                  database-type="oracle"
+                  :schema="packageProcedureTarget.schema"
+                  :routine-name="packageProcedureTarget.member.databaseName"
+                  :package-procedure="packageProcedureTarget"
+                  @open-sql="openPackageProcedureSql($event)"
+                  @execute="openPackageProcedureSql($event, true)"
+                />
                 <QueryEditor
                   ref="queryEditorRef"
                   class="relative z-0 flex-1"

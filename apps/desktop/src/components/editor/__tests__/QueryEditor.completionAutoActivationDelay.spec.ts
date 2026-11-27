@@ -73,10 +73,10 @@ function lastConfig(): Parameters<typeof import("@codemirror/autocomplete").auto
 }
 
 describe("completion auto-activation delay (#15340)", () => {
-  it("opens the extension with the 500 ms default delay", async () => {
+  it("opens the extension with the 50 ms default delay", async () => {
     await mountEditor();
     expect(lastConfig().activateOnTyping).toBe(true);
-    expect(lastConfig().activateOnTypingDelay).toBe(500);
+    expect(lastConfig().activateOnTypingDelay).toBe(50);
   });
 
   it("rebuilds the extension when the delay setting changes", async () => {
@@ -126,10 +126,10 @@ describe("completion auto-activation delay (#15340)", () => {
   });
 
   it("normalizes persisted values into the 0–5000 ms range", () => {
-    expect(normalizeEditorSettings({}).completionAutoActivationDelayMs).toBe(500);
+    expect(normalizeEditorSettings({}).completionAutoActivationDelayMs).toBe(50);
     expect(normalizeEditorSettings({ completionAutoActivationDelayMs: 1234 }).completionAutoActivationDelayMs).toBe(1234);
     expect(normalizeEditorSettings({ completionAutoActivationDelayMs: -5 }).completionAutoActivationDelayMs).toBe(0);
     expect(normalizeEditorSettings({ completionAutoActivationDelayMs: 99999 }).completionAutoActivationDelayMs).toBe(5000);
-    expect(normalizeEditorSettings({ completionAutoActivationDelayMs: "600" as unknown as number }).completionAutoActivationDelayMs).toBe(500);
+    expect(normalizeEditorSettings({ completionAutoActivationDelayMs: "600" as unknown as number }).completionAutoActivationDelayMs).toBe(50);
   });
 });

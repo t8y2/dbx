@@ -19,6 +19,9 @@ const mocks = vi.hoisted(() => ({
   closePluginLocalFile: vi.fn(),
   openPluginWorkbench: vi.fn(),
   isTauriRuntime: vi.fn(),
+  // Made reactive by the settingsStore mock so a test can flip the per-plugin
+  // unsafe-eval grant after mount.
+  editorSettings: { uiFontFamily: "", fontFamily: "", fontSize: 14, pluginGraphicsEngineIds: [] as string[] },
 }));
 
 vi.mock("@/lib/backend/tauri", () => ({
@@ -42,7 +45,11 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: vi.fn() }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: ref(false), themeRevision: ref(0) }) }));
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { uiFontFamily: "", fontFamily: "", fontSize: 14 } }) }));
+vi.mock("@/stores/settingsStore", async () => {
+  const { reactive } = await import("vue");
+  mocks.editorSettings = reactive(mocks.editorSettings);
+  return { useSettingsStore: () => ({ editorSettings: mocks.editorSettings }) };
+});
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     repushPluginConnection: mocks.repushPluginConnection,
@@ -93,6 +100,7 @@ describe("PluginWorkbenchHost initialization", () => {
   beforeEach(() => {
     clearPluginUiHtmlCache();
     vi.clearAllMocks();
+    mocks.editorSettings.pluginGraphicsEngineIds = [];
     mocks.isTauriRuntime.mockReturnValue(false);
     const settings = (window as unknown as { happyDOM: { settings: Record<string, boolean> } }).happyDOM.settings;
     settings.disableJavaScriptFileLoading = true;
@@ -180,6 +188,35 @@ describe("PluginWorkbenchHost initialization", () => {
     expect(srcdoc).toContain('<base href="dbx-plugin://localhost/sample/entry/">');
     expect(srcdoc).toContain("script-src 'unsafe-inline' blob: dbx-plugin:;");
     expect(mocks.readPluginUiAsset).not.toHaveBeenCalled();
+  });
+
+  it("reuses the cached sandbox document across boots without re-reading the ui build", async () => {
+    const first = await mountHost();
+    const firstSrcdoc = first.frame.getAttribute("srcdoc") ?? "";
+    expect(firstSrcdoc).toContain("<body>");
+    expect(mocks.readPluginUiEntry).toHaveBeenCalledTimes(1);
+
+    app!.unmount();
+    const second = await mountHost();
+
+    // The inlined html was released after the document was built; a second
+    // panel still boots from the cached document alone.
+    expect(mocks.readPluginUiEntry).toHaveBeenCalledTimes(1);
+    expect(second.frame.getAttribute("srcdoc")).toBe(firstSrcdoc);
+  });
+
+  it("re-reads the ui build when the unsafe-eval grant flips after the html was released", async () => {
+    const { frame } = await mountHost();
+    expect(frame.getAttribute("srcdoc")).not.toContain("'unsafe-eval'");
+    expect(mocks.readPluginUiEntry).toHaveBeenCalledTimes(1);
+
+    // The cached document carries the CSP it was built with, and the html it was
+    // built from is gone, so the grant change must trigger a fresh read.
+    mocks.editorSettings.pluginGraphicsEngineIds = ["sample"];
+    await vi.waitFor(() => expect(mocks.readPluginUiEntry).toHaveBeenCalledTimes(2));
+    await flushWorkbenchLoad();
+
+    expect(root.querySelector("iframe")?.getAttribute("srcdoc")).toContain("'unsafe-eval'");
   });
 
   it("runs reinit before one init when load precedes ready", async () => {

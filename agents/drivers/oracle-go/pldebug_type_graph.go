@@ -30,7 +30,7 @@ func (r plDebugNativeTypeRef) declaration() string {
 }
 
 func plDebugNativeArgumentTypeRef(a plDebugNativeArgument) (*plDebugNativeTypeRef, error) {
-	if a.scalar() {
+	if a.scalar() || a.cursorOutput() {
 		return nil, nil
 	}
 	if a.TypeOwner == nil || *a.TypeOwner == "" || a.TypeName == nil || *a.TypeName == "" {

@@ -351,7 +351,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     titleKey: "settings.tabDoubleClickAction",
     descriptionKey: "settings.tabDoubleClickActionDescription",
     targetId: "appearance",
-    keywordKeys: ["settings.tabDoubleClickActionDefault", "settings.tabDoubleClickActionClose", "contextMenu.renameTab"],
+    keywordKeys: ["settings.tabDoubleClickActionDefault", "settings.tabDoubleClickActionClose", "settings.tabDoubleClickActionNone", "contextMenu.renameTab"],
   },
   {
     id: "appearance-tab-max-width",

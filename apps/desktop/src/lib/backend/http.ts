@@ -1,3 +1,4 @@
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
 import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
 import type { MongoDeleteId } from "@/lib/mongo/mongoDocumentValues";
 import type { SqlFileEncoding } from "./tauri";
@@ -316,7 +317,7 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { OracleTriggerSqlInput, PreparedOracleTriggerSql } from "@/lib/database/oracleTriggerSql";
 import type { OracleTableReferenceRewriteInput, OracleViewRenameSource, OracleViewRenameSourceInput, OracleViewRenameSourceReview } from "@/types/database";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
-import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
+import type { BuildRenameObjectSqlOptions, MysqlRenameDatabaseSqlOptions, MysqlRenameDatabaseStatements } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
 import type {
   DatabaseNameSqlOptions,
@@ -2141,6 +2142,10 @@ export async function buildRenameObjectSql(options: BuildRenameObjectSqlOptions)
 
 export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean; identifierQuote?: string }): Promise<string> {
   return post("/api/query/build-rename-database-sql", options);
+}
+
+export async function buildMysqlRenameDatabaseSql(options: MysqlRenameDatabaseSqlOptions): Promise<MysqlRenameDatabaseStatements> {
+  return post("/api/query/build-mysql-rename-database-sql", { options });
 }
 
 export async function buildRenameDatabasePreflightSql(options: { databaseType?: DatabaseType; databaseName: string }): Promise<string> {
@@ -4152,8 +4157,10 @@ export async function exportQueryResultJson(filePath: string, columns: string[],
   downloadTextFile(filePath, "export.json", result.content, "application/json;charset=utf-8");
 }
 
-export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
-  const result = await post<{ content: string }>("/api/export/query-result-markdown", { columns, rows });
+export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], transposedMarkdown?: TransposedMarkdownLabels): Promise<void> {
+  // Layout belongs in the URL so the same records fit the same upload limit in either orientation.
+  const query = transposedMarkdown ? "?" + new URLSearchParams({ field: transposedMarkdown.field, data: transposedMarkdown.data }) : "";
+  const result = await post<{ content: string }>(`/api/export/query-result-markdown${query}`, { columns, rows });
   downloadTextFile(filePath, "export.md", result.content, "text/markdown;charset=utf-8");
 }
 

@@ -1,3 +1,4 @@
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
 import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
 import type { MongoDeleteId } from "@/lib/mongo/mongoDocumentValues";
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
@@ -240,7 +241,7 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { OracleTriggerSqlInput, PreparedOracleTriggerSql } from "@/lib/database/oracleTriggerSql";
 import type { OracleTableReferenceRewriteInput, OracleViewRenameSource, OracleViewRenameSourceInput, OracleViewRenameSourceReview } from "@/types/database";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
-import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
+import type { BuildRenameObjectSqlOptions, MysqlRenameDatabaseSqlOptions, MysqlRenameDatabaseStatements } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
 import type {
   DatabaseNameSqlOptions,
@@ -625,6 +626,10 @@ export interface QueryPaginationExecutionPlanOptions {
   /** Optimizer hint injected into the generated count (dbx_count) and page (dbx_page) SQL.
    *  Example: GaussDB parallel execution hint: + set(query_dop 8). */
   executionHint?: string;
+  /** Connected server version (e.g. ShardingSphere-Proxy) used to avoid proxy-unsafe SQL rewrites. */
+  serverVersion?: string;
+  /** Connected server comment (`@@version_comment`), used alongside `serverVersion` for proxy detection. */
+  serverComment?: string;
 }
 
 export interface QueryPaginationExecutionPlan {
@@ -2633,6 +2638,10 @@ export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseT
     terminateConnections: options.terminateConnections,
     identifierQuote: options.identifierQuote,
   });
+}
+
+export async function buildMysqlRenameDatabaseSql(options: MysqlRenameDatabaseSqlOptions): Promise<MysqlRenameDatabaseStatements> {
+  return invoke("build_mysql_rename_database_sql", { options });
 }
 
 export async function buildRenameDatabasePreflightSql(options: { databaseType?: DatabaseType; databaseName: string }): Promise<string> {
@@ -7307,12 +7316,13 @@ export async function exportQueryResultJson(filePath: string, columns: string[],
   });
 }
 
-export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
+export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], transposedMarkdown?: TransposedMarkdownLabels): Promise<void> {
   return invoke("export_query_result_markdown", {
     request: {
       filePath,
       columns,
       rows,
+      transposedMarkdown,
     },
   });
 }

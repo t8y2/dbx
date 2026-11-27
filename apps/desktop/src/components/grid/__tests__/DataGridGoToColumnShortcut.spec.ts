@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { DatabaseType, QueryResult } from "@/types/database";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import HBaseBrowser from "@/components/hbase/HBaseBrowser.vue";
+import * as api from "@/lib/backend/api";
 import type { DataGridToolbarActionCapability } from "@/lib/dataGrid/dataGridToolbar";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 
@@ -452,6 +454,127 @@ describe("DataGrid go-to-column shortcut", () => {
     expect(grid.value?.goToColumnToolbarCapability.active).toBe(false);
   });
 
+  it.each([
+    { view: "table", modifier: { ctrlKey: true } },
+    { view: "transpose", modifier: { metaKey: true } },
+  ])("routes Find to the focused column lookup or data grid in $view view", async ({ view, modifier }) => {
+    const { host } = mountGrid({ columns: ["id", "name"] });
+    await settle();
+    const root = gridRoot(host);
+    root.focus();
+    if (view === "transpose") {
+      root.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+      await settle();
+      expect(host.querySelector("[data-grid-transpose-header]")).not.toBeNull();
+    }
+    goToColumnEvent(root);
+    await settle();
+    const input = host.querySelector<HTMLInputElement>("[data-column-lookup-panel] input")!;
+    expect(document.activeElement).toBe(input);
+    input.value = "name";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.setSelectionRange(input.value.length, input.value.length);
+    await settle();
+
+    const find = () => new KeyboardEvent("keydown", { key: "f", ...modifier, bubbles: true, cancelable: true });
+    input.dispatchEvent(find());
+    await settle();
+    expect(host.querySelector("[data-grid-search-bar]")).toBeNull();
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe("name");
+    expect([input.selectionStart, input.selectionEnd]).toEqual([0, input.value.length]);
+
+    root.focus();
+    root.dispatchEvent(find());
+    await settle();
+    expect(document.activeElement).toBe(host.querySelector("[data-grid-search-bar] input"));
+  });
+
+  it.each([
+    { binding: "Mod+Shift+J", keys: { key: "J", shiftKey: true } },
+    { binding: "Mod+Alt+Enter", keys: { key: "Enter", altKey: true } },
+  ])("honors $binding as Find in column lookup and as transpose on the grid", async ({ binding, keys }) => {
+    const { host, settingsStore } = mountGrid({ columns: ["id", "name"] });
+    settingsStore.updateEditorSettings({ shortcuts: { ...settingsStore.editorSettings.shortcuts, focusSearch: binding, toggleTranspose: binding } });
+    await settle();
+    goToColumnEvent(gridRoot(host));
+    await settle();
+    const input = host.querySelector<HTMLInputElement>("[data-column-lookup-search]")!;
+    input.value = "name";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.setSelectionRange(input.value.length, input.value.length);
+    await settle();
+
+    const oldShortcut = new KeyboardEvent("keydown", { key: "f", ctrlKey: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(oldShortcut);
+    expect(oldShortcut.defaultPrevented).toBe(false);
+    expect(input.selectionStart).toBe(input.value.length);
+
+    const remappedFind = () => new KeyboardEvent("keydown", { ...keys, ctrlKey: true, bubbles: true, cancelable: true });
+    const newShortcut = remappedFind();
+    input.dispatchEvent(newShortcut);
+    await settle();
+    expect(newShortcut.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(input);
+    expect([input.selectionStart, input.selectionEnd]).toEqual([0, input.value.length]);
+    expect(host.querySelector("[data-grid-search-bar]")).toBeNull();
+
+    const root = gridRoot(host);
+    root.focus();
+    root.dispatchEvent(remappedFind());
+    await settle();
+    expect(host.querySelector("[data-grid-transpose-header]")).not.toBeNull();
+    expect(host.querySelector("[data-grid-search-bar]")).toBeNull();
+  });
+
+  it.each([
+    { binding: "Mod+F", keys: { key: "f" }, menuKey: "Enter" },
+    { binding: "Mod+Alt+Enter", keys: { key: "Enter", altKey: true }, menuKey: "ArrowDown" },
+  ])("routes $binding from the match-mode button and opens its menu with $menuKey", async ({ binding, keys, menuKey }) => {
+    const { host, settingsStore } = mountGrid();
+    settingsStore.updateEditorSettings({ shortcuts: { ...settingsStore.editorSettings.shortcuts, focusSearch: binding } });
+    await settle();
+    goToColumnEvent(gridRoot(host));
+    await settle();
+    const trigger = host.querySelector<HTMLButtonElement>('[data-column-lookup-panel] button[aria-haspopup="menu"]')!;
+    const input = host.querySelector<HTMLInputElement>("[data-column-lookup-search]")!;
+    trigger.focus();
+    trigger.dispatchEvent(new KeyboardEvent("keydown", { ...keys, metaKey: true, bubbles: true, cancelable: true }));
+    await settle();
+    expect(document.activeElement).toBe(input);
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+
+    trigger.focus();
+    trigger.dispatchEvent(new KeyboardEvent("keydown", { key: menuKey, bubbles: true, cancelable: true }));
+    await settle();
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("opens column lookup and refocuses its search with a shared Go to Column and Find shortcut", async () => {
+    const { host, settingsStore } = mountGrid();
+    settingsStore.updateEditorSettings({ shortcuts: { ...settingsStore.editorSettings.shortcuts, goToColumn: "Mod+F", focusSearch: "Mod+F" } });
+    await settle();
+    const find = () => new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true, cancelable: true });
+    const root = gridRoot(host);
+    root.focus();
+    root.dispatchEvent(find());
+    await settle();
+    const input = host.querySelector<HTMLInputElement>("[data-column-lookup-search]")!;
+    expect(document.activeElement).toBe(input);
+    input.value = "id";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.setSelectionRange(input.value.length, input.value.length);
+
+    const trigger = host.querySelector<HTMLButtonElement>('[data-column-lookup-panel] button[aria-haspopup="menu"]')!;
+    trigger.focus();
+    trigger.dispatchEvent(find());
+    await settle();
+    expect(document.activeElement).toBe(input);
+    expect([input.selectionStart, input.selectionEnd]).toEqual([0, input.value.length]);
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(host.querySelector("[data-grid-search-bar]")).toBeNull();
+  });
+
   it("moves the lookup selection with arrows and chooses it with Enter", async () => {
     const { host } = mountGrid({ columns: ["id", "name"] });
     await settle();
@@ -474,6 +597,120 @@ describe("DataGrid go-to-column shortcut", () => {
 
     expect(enter.defaultPrevented).toBe(true);
     expect(host.querySelector("[data-column-lookup-panel]")).not.toBeNull();
+    expect(document.activeElement).toBe(root);
+  });
+
+  it.each([
+    { key: "Enter", isComposing: true },
+    { key: "Enter", keyCode: 229 },
+    { key: "Escape", isComposing: true },
+    { key: "ArrowDown", isComposing: true },
+    { key: "ArrowUp", keyCode: 229 },
+  ])("leaves the column lookup unchanged during IME input: %j", async (init) => {
+    const { host } = mountGrid({ columns: ["id", "name"] });
+    await settle();
+    goToColumnEvent(gridRoot(host));
+    await settle();
+    const input = host.querySelector<HTMLInputElement>("[data-column-lookup-panel] input")!;
+    expect(document.activeElement).toBe(input);
+
+    const event = new KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true });
+    input.dispatchEvent(event);
+    await settle();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(input);
+    expect(goToColumnItem("id", 1).classList).toContain("bg-accent");
+  });
+
+  it.each(["before", "after", "tied"] as const)("keeps the IME confirmation Enter separate from selecting a column (%s)", async (order) => {
+    const { host } = mountGrid({ columns: ["编号", "名称"] });
+    await settle();
+    const root = gridRoot(host);
+    goToColumnEvent(root);
+    await settle();
+    const input = host.querySelector<HTMLInputElement>("[data-column-lookup-search]")!;
+    input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    input.value = "名";
+    const confirm = new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true, cancelable: true });
+    if (order === "before") input.dispatchEvent(confirm);
+    const commit = Object.assign(new Event("compositionend", { bubbles: true }), { data: "名" });
+    input.dispatchEvent(commit);
+    if (order === "after") {
+      Object.defineProperty(confirm, "timeStamp", { value: commit.timeStamp - 1 });
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    } else if (order === "tied") {
+      Object.defineProperty(confirm, "timeStamp", { value: commit.timeStamp });
+    }
+    if (order !== "before") input.dispatchEvent(confirm);
+    await settle();
+
+    expect(confirm.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(input);
+    expect(goToColumnOrder()).toEqual(["名称#2"]);
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await settle();
+    expect(document.activeElement).toBe(root);
+  });
+
+  it.each([0, 1, 70])("selects the matched column on the first new Enter after a mouse IME commit (timestamp delta %i ms)", async (delay) => {
+    const { host } = mountGrid({ columns: ["编号", "名称"] });
+    await settle();
+    const root = gridRoot(host);
+    goToColumnEvent(root);
+    await settle();
+    const input = host.querySelector<HTMLInputElement>("[data-column-lookup-search]")!;
+    input.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    input.value = "名";
+    const commit = Object.assign(new Event("compositionend", { bubbles: true }), { data: "名" });
+    input.dispatchEvent(commit);
+    await settle();
+    expect(goToColumnOrder()).toEqual(["名称#2"]);
+    if (delay === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const enter = new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true, cancelable: true });
+    Object.defineProperty(enter, "timeStamp", { value: commit.timeStamp + delay });
+    input.dispatchEvent(enter);
+    expect(enter.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(root);
+  });
+
+  it.each(["cancel", "blur", "keyup"])("accepts an intentional Enter after IME %s", async (scenario) => {
+    const { host } = mountGrid();
+    await settle();
+    const root = gridRoot(host);
+    goToColumnEvent(root);
+    await settle();
+    const input = host.querySelector<HTMLInputElement>("[data-column-lookup-search]")!;
+    input.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    input.dispatchEvent(Object.assign(new Event("compositionend", { bubbles: true }), { data: scenario === "cancel" ? "" : "字" }));
+    if (scenario === "blur") {
+      root.focus();
+      input.focus();
+    } else if (scenario === "keyup") {
+      input.dispatchEvent(new KeyboardEvent("keyup", { key: " ", bubbles: true }));
+    }
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    input.dispatchEvent(enter);
+    expect(enter.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(root);
+  });
+
+  it("discards active composition when the column lookup is closed", async () => {
+    const { host, grid } = mountGrid();
+    await settle();
+    const root = gridRoot(host);
+    goToColumnEvent(root);
+    await settle();
+    const lookupInput = () => host.querySelector<HTMLInputElement>("[data-column-lookup-search]")!;
+    lookupInput().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    await grid.value!.goToColumnToolbarCapability.onTrigger();
+    await settle();
+    expect(host.querySelector("[data-column-lookup-panel]")).toBeNull();
+    goToColumnEvent(root);
+    await settle();
+    lookupInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    expect(document.activeElement).toBe(root);
   });
 
   it("requires confirmation before persisting table-data column order", async () => {
@@ -514,8 +751,9 @@ describe("DataGrid go-to-column shortcut", () => {
     expect(goToColumnOrder()).toEqual(["id#1", "name#2"]);
   });
 
-  it("does not consume the configured shortcut without a displayable column", async () => {
-    const { host } = mountGrid({ displayableColumns: false });
+  it("does not consume a shared Go to Column and Find shortcut without a displayable column", async () => {
+    const { host, settingsStore } = mountGrid({ displayableColumns: false });
+    settingsStore.updateEditorSettings({ shortcuts: { ...settingsStore.editorSettings.shortcuts, focusSearch: "Mod+G" } });
     await settle();
     const root = gridRoot(host);
     const bubbled = vi.fn();
@@ -564,5 +802,33 @@ describe("DataGrid go-to-column shortcut", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(bubbled).toHaveBeenCalledOnce();
     expect(host.querySelector("[data-column-lookup-panel]")).toBeNull();
+  });
+
+  it("opens Find in the embedded HBase grid with its configured shortcut", async () => {
+    vi.spyOn(api, "hbaseScanRows").mockResolvedValue({ rows: [], truncated: false });
+    const pinia = createPinia();
+    const settingsStore = useSettingsStore(pinia);
+    settingsStore.updateEditorSettings({ shortcuts: { ...settingsStore.editorSettings.shortcuts, focusSearch: "Mod+Shift+J" } });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(() => h(TooltipProvider, {}, () => h(HBaseBrowser, { tabId: "hbase-tab", connectionId: "hbase-connection", namespace: "default", table: "orders" })));
+    app.use(pinia).use(i18n).component("RecycleScroller", RecycleScroller);
+    app.mount(host);
+    mountedApps.push({ app, host });
+    await settle();
+
+    const root = gridRoot(host);
+    root.focus();
+    const oldFind = new KeyboardEvent("keydown", { key: "f", ctrlKey: true, bubbles: true, cancelable: true });
+    root.dispatchEvent(oldFind);
+    await settle();
+    expect(oldFind.defaultPrevented).toBe(false);
+    expect(host.querySelector("[data-grid-search-bar]")).toBeNull();
+
+    const find = new KeyboardEvent("keydown", { key: "J", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true });
+    root.dispatchEvent(find);
+    await settle();
+    expect(find.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(host.querySelector("[data-grid-search-bar] input"));
   });
 });

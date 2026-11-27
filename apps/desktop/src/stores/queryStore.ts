@@ -46,6 +46,7 @@ import {
   allEditableColumnsWriteable,
   allPrimaryKeysPresent,
   analyzeEditableQueryEditability,
+  analyzeQueryDisplayStructure,
   analyzeSelectStructureForDisplay,
   foldUnquotedPostgresMetadataIdentifier,
   flattenSimpleDerivedTablesForDisplay,
@@ -56,6 +57,7 @@ import {
   sourceColumnsForResult,
   type EditableQueryInfo,
   type EditableQuerySource,
+  type QueryDisplayStructure,
 } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
 import { isDetachedTabWindow } from "@/lib/tabs/tabWindowTransfer";
@@ -7504,13 +7506,14 @@ export const useQueryStore = defineStore("query", () => {
    * identifiers keep exact casing. Ambiguous or unresolved columns yield
    * `undefined` (no comment) instead of first-source-wins on a shared name.
    */
-  function resolveResultColumnInfo(dbType: string, analysis: EditableQueryInfo, resultColumns: string[], loadedSources: LoadedEditableSource[]): { comments: Array<string | undefined>; typeLabels: Array<string | undefined>; mapping: Array<QueryResultSourceColumnRef | undefined> } {
-    const refs = resolveSourceColumnsByOrdinal(
-      dbType,
-      analysis,
-      loadedSources.map((loaded) => ({ source: loaded.source, columns: loaded.tableMeta.columns })),
-      resultColumns.length,
-    );
+  function resolveResultColumnInfo(
+    dbType: string,
+    analysis: EditableQueryInfo,
+    resultColumns: string[],
+    loadedSources: LoadedEditableSource[],
+    tableSources?: Array<{ source: EditableQuerySource; columns: readonly { name: string }[] }>,
+  ): { comments: Array<string | undefined>; typeLabels: Array<string | undefined>; mapping: Array<QueryResultSourceColumnRef | undefined> } {
+    const refs = resolveSourceColumnsByOrdinal(dbType, analysis, tableSources ?? loadedSources.map((loaded) => ({ source: loaded.source, columns: loaded.tableMeta.columns })), resultColumns.length);
     const comments: Array<string | undefined> = [];
     const typeLabels: Array<string | undefined> = [];
     const mapping: Array<QueryResultSourceColumnRef | undefined> = [];
@@ -8163,8 +8166,15 @@ export const useQueryStore = defineStore("query", () => {
     const conn = connection ?? useConnectionStore().getConfig(tab.connectionId);
     const dbType = conn?.db_type || "";
     const flattenedSql = flattenSimpleDerivedTablesForDisplay(sql);
-    const analysis = analyzeSelectStructureForDisplay(flattenedSql);
-    if (!analysis) return undefined;
+    let analysis = analyzeSelectStructureForDisplay(flattenedSql);
+    // Derived tables the plain parse cannot handle (e.g. UNION ALL branches
+    // with explicit projections) fall back to the derived-aware display parse.
+    let displayStructure: QueryDisplayStructure | undefined;
+    if (!analysis) {
+      displayStructure = analyzeQueryDisplayStructure(flattenedSql) ?? undefined;
+      if (!displayStructure) return undefined;
+      analysis = displayStructure.analysis;
+    }
     const sources = editableQuerySources(analysis);
     if (!sources.length) return undefined;
     try {
@@ -8174,7 +8184,9 @@ export const useQueryStore = defineStore("query", () => {
       // coordinator deduplicates identical tables across concurrent callers,
       // so this path issues no indexes requests and never loads full editable
       // metadata.
-      const targets = sources.map((source) => resolveEditableSourceMetadataTarget(tab, analysis, source, conn, dbType, executionDatabase));
+      // A derived placeholder has no physical table, so it is never loaded.
+      const metadataSources = displayStructure ? sources.filter((source) => !displayStructure!.derivedOutputColumns.has(source.tableName)) : sources;
+      const targets = metadataSources.map((source) => resolveEditableSourceMetadataTarget(tab, analysis!, source, conn, dbType, executionDatabase));
       const limiterScope = `${GROUPED_DISPLAY_LIMITER_SCOPE_PREFIX}${tab.connectionId}`;
       const loadedSources = await Promise.all(
         targets.map((target) =>
@@ -8187,7 +8199,20 @@ export const useQueryStore = defineStore("query", () => {
           }),
         ),
       );
-      const displayInfo = resolveResultColumnInfo(dbType, analysis, tab.result.columns, loadedSources);
+      // Derived placeholders contribute their static output labels so result
+      // ordinals stay aligned; they carry no physical columns, so nothing
+      // resolves to them and their columns simply show no comment.
+      const loadedByKey = new Map(loadedSources.map((loaded) => [loaded.source.key, loaded]));
+      const tableSources = displayStructure
+        ? sources.map((source) => {
+            const derived = displayStructure!.derivedOutputColumns.get(source.tableName);
+            return {
+              source,
+              columns: derived ? derived.map((name) => ({ name })) : (loadedByKey.get(source.key)?.tableMeta.columns ?? []),
+            };
+          })
+        : undefined;
+      const displayInfo = resolveResultColumnInfo(dbType, analysis!, tab.result.columns, loadedSources, tableSources);
       const readOnlyPatch: QueryMetadataPatch = {
         queryAnalysis: undefined,
         querySourceColumns: undefined,
@@ -8197,6 +8222,9 @@ export const useQueryStore = defineStore("query", () => {
         resultColumnTypeLabels: displayInfo.typeLabels,
         queryDisplaySourceColumns: displayInfo.mapping,
       };
+      // Derived-source structures stay display-only regardless of dialect:
+      // comments resolve through the base tables, never the editing surface.
+      if (displayStructure) return readOnlyPatch;
       // Flattened derived-table queries are display-only: comments resolve
       // through the base tables, but the editing surface must stay unchanged.
       if (!allowMysqlEditing || flattenedSql !== sql || dbType !== "mysql" || (conn?.driver_profile || conn?.db_type) !== "mysql") return readOnlyPatch;
@@ -8278,7 +8306,10 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     queryExecutionLog("info", "metadata:editability:start", { traceId, elapsed: elapsed?.() });
-    if (hasUnparsedQuerySource(flattenSimpleDerivedTablesForDisplay(sql))) {
+    // Sources the display parse cannot account for (neither plain tables nor
+    // structurally parseable derived tables) skip comment loading entirely.
+    const flattenedForGate = flattenSimpleDerivedTablesForDisplay(sql);
+    if (hasUnparsedQuerySource(flattenedForGate) && !analyzeQueryDisplayStructure(flattenedForGate)) {
       return {
         queryAnalysis: undefined,
         querySourceColumns: undefined,
@@ -9725,6 +9756,8 @@ export const useQueryStore = defineStore("query", () => {
           useAgentCursor,
           firstPageUsesActualSql: hiddenPrimaryKeys.length > 0,
           executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined,
+          ...(conn?.database_info?.productVersion ? { serverVersion: conn.database_info.productVersion } : {}),
+          ...(conn?.database_info?.serverComment ? { serverComment: conn.database_info.serverComment } : {}),
         });
         const canPaginateSqlServerUseScript = !!sqlServerUseScript && !!plan.pageSql && typeof plan.pageLimit === "number" && typeof plan.pageOffset === "number";
         if (plan.paginationError) throw new Error(plan.paginationError);
@@ -9749,7 +9782,16 @@ export const useQueryStore = defineStore("query", () => {
         }
         if (!plan.pageSql && !plan.useAgentResultSession && !sqlServerUseScript) {
           batchPagination = await prepareBatchQueryPagination(
-            { sql: sqlBeforePagination, queryBaseSql, databaseType: effectiveDbType, pagination, useAgentCursor, executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined },
+            {
+              sql: sqlBeforePagination,
+              queryBaseSql,
+              databaseType: effectiveDbType,
+              pagination,
+              useAgentCursor,
+              executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined,
+              ...(conn?.database_info?.productVersion ? { serverVersion: conn.database_info.productVersion } : {}),
+              ...(conn?.database_info?.serverComment ? { serverComment: conn.database_info.serverComment } : {}),
+            },
             api.prepareQueryPaginationExecutionPlan,
             sqlStatementParameterOptions,
             () => tab.executionId !== executionId || tab.isCancelling === true,
@@ -9800,6 +9842,8 @@ export const useQueryStore = defineStore("query", () => {
               databaseType: effectiveDbType,
               pagination,
               useAgentCursor: false,
+              ...(conn?.database_info?.productVersion ? { serverVersion: conn.database_info.productVersion } : {}),
+              ...(conn?.database_info?.serverComment ? { serverComment: conn.database_info.serverComment } : {}),
             });
             if (plan.pageProbeSql) {
               sqlToExecute = plan.pageProbeSql;
@@ -12061,6 +12105,8 @@ export const useQueryStore = defineStore("query", () => {
           useAgentCursor,
           firstPageUsesActualSql: true,
           executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined,
+          ...(conn?.database_info?.productVersion ? { serverVersion: conn.database_info.productVersion } : {}),
+          ...(conn?.database_info?.serverComment ? { serverComment: conn.database_info.serverComment } : {}),
         });
         if ((probeRowLimit || capture) && plan.paginationError) throw new Error(plan.paginationError);
         if (typeof plan.pageLimit !== "number" || typeof plan.pageOffset !== "number") return cachedResultForExport();

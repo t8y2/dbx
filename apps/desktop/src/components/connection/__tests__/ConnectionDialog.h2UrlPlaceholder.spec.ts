@@ -233,4 +233,34 @@ describe("ConnectionDialog H2 URL placeholder", () => {
 
     expect(input?.getAttribute("placeholder")).toBe("jdbc:h2:file:/path/to/database");
   });
+
+  it("keeps H2 file URL options when testing and saving an edited path", async () => {
+    const options = "MODE=MySQL;DATABASE_TO_LOWER=TRUE;NON_KEYWORDS=AUTHORIZATION";
+    backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "h2", installed: true }]);
+    backend.testConnectionWithInfo.mockResolvedValue({ message: "Connected" });
+    await mountDialog(h2Connection({ connection_string: `jdbc:h2:file:/data/sample;${options}` }));
+
+    const pathInput = [...document.querySelectorAll("input")].find((input) => input.value === "/data/sample");
+    if (!pathInput) throw new Error("H2 file path input was not rendered");
+    pathInput.value = "/data/renamed.mv.db";
+    pathInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+
+    const expected = expect.objectContaining({
+      id: "h2-conn",
+      host: "/data/renamed.mv.db",
+      port: 0,
+      connection_string: `jdbc:h2:file:/data/renamed;AUTO_SERVER=TRUE;${options}`,
+    });
+    const testButton = buttonByText("Test");
+    expect(testButton).toBeDefined();
+    testButton?.click();
+    await vi.waitFor(() => expect(backend.testConnectionWithInfo).toHaveBeenCalledTimes(1));
+    expect(backend.testConnectionWithInfo).toHaveBeenCalledWith(expected);
+
+    const saveButton = buttonByText("Save");
+    expect(saveButton).toBeDefined();
+    saveButton?.click();
+    await vi.waitFor(() => expect(store.updateConnection).toHaveBeenCalledWith(expected));
+  });
 });

@@ -579,6 +579,9 @@ pub struct AppState {
     /// PostgreSQL TLS cancel context, keyed by pool_key.
     /// Used to reconstruct a TLS connector compatible with the original connection when cancelling.
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
+    /// Probed Greenplum server capabilities, keyed by pool_key and cleared
+    /// alongside the pool so reconnects always re-discover the target server.
+    greenplum_capabilities: Arc<RwLock<HashMap<String, db::greenplum::GreenplumCapabilities>>>,
     /// Pool keys whose tab-scoped MySQL connection holds a transaction the user
     /// opened explicitly and DBX deliberately kept open
     /// (`preserve_explicit_transaction`). Keeping it here — not on the driver
@@ -1086,6 +1089,7 @@ struct PoolRoutingControl {
     connections: Arc<RwLock<ConnectionPoolRegistry>>,
     pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
+    greenplum_capabilities: Arc<RwLock<HashMap<String, db::greenplum::GreenplumCapabilities>>>,
     /// The same set as [`AppState::mysql_preserved_transactions`]. Every detach
     /// path (including `ClientSessionPoolCleanupGuard`'s `Drop`, which never
     /// reaches `AppState`) has to clear the marker together with the pool:
@@ -1249,10 +1253,12 @@ impl PoolRoutingControl {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut greenplum_caps = self.greenplum_capabilities.write().await;
             let mut preserved = self.mysql_preserved_transactions.write().await;
             for (key, _) in &removed {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                greenplum_caps.remove(key);
                 preserved.remove(key);
             }
         }
@@ -1353,9 +1359,16 @@ impl PoolRoutingControl {
     }
 
     async fn close_removed(&self, removed: Vec<(String, PoolKind)>) {
-        for (pool_key, pool) in removed {
-            self.close_pool_with_timeout(pool_key, pool).await;
+        if removed.is_empty() {
+            return;
         }
+        // Close all removed pools concurrently so a slow or hung pool cannot
+        // exhaust the shutdown budget before sibling pools send COM_QUIT /
+        // disconnect (#15612).
+        futures::future::join_all(
+            removed.into_iter().map(|(pool_key, pool)| self.close_pool_with_timeout(pool_key, pool)),
+        )
+        .await;
     }
 
     fn close_removed_in_background(&self, removed: Vec<(String, PoolKind)>) {
@@ -1366,9 +1379,7 @@ impl PoolRoutingControl {
         let routing = self.clone();
         let task_key = format!("pool-close:{}", uuid::Uuid::new_v4());
         if !self.task_supervisor.spawn_once(task_key, move |_| async move {
-            for (pool_key, pool) in removed {
-                routing.close_pool_with_timeout(pool_key, pool).await;
-            }
+            routing.close_removed(removed).await;
         }) {
             log::debug!("Dropped {pool_count} detached pool handle(s) during application shutdown");
         }
@@ -2082,6 +2093,7 @@ impl AppState {
             connections: self.connections.clone(),
             pool_activity: self.pool_activity.clone(),
             postgres_cancel_contexts: self.postgres_cancel_contexts.clone(),
+            greenplum_capabilities: self.greenplum_capabilities.clone(),
             mysql_preserved_transactions: self.mysql_preserved_transactions.clone(),
             task_supervisor: self.task_supervisor.clone(),
         }
@@ -2274,6 +2286,7 @@ impl AppState {
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
             honor_fixed_ssh_local_ports: AtomicBool::new(false),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
+            greenplum_capabilities: Arc::new(RwLock::new(HashMap::new())),
             mysql_preserved_transactions: Arc::new(RwLock::new(HashSet::new())),
             mysql_client_sessions: RwLock::new(HashMap::new()),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -3195,6 +3208,36 @@ impl AppState {
         self.postgres_cancel_contexts.read().await.get(pool_key).cloned()
     }
 
+    /// Resolves cached Greenplum capabilities for a native PostgreSQL pool.
+    /// Plain PostgreSQL, Cloudberry, OpenTenBase, and other PG-protocol engines
+    /// return `None` without altering their existing routing.
+    pub(crate) async fn greenplum_capabilities_for_pool(
+        &self,
+        pool_key: &str,
+        pool: &deadpool_postgres::Pool,
+        config: Option<&ConnectionConfig>,
+    ) -> Option<db::greenplum::GreenplumCapabilities> {
+        if let Some(config) = config {
+            if db::greenplum::is_known_non_greenplum_config(config) {
+                return None;
+            }
+        }
+        if let Some(cached) = self.greenplum_capabilities.read().await.get(pool_key).cloned() {
+            return cached.is_greenplum.then_some(cached);
+        }
+        match db::greenplum::probe_capabilities(pool).await {
+            Ok(caps) => {
+                let matched = caps.is_greenplum.then(|| caps.clone());
+                self.greenplum_capabilities.write().await.insert(pool_key.to_string(), caps);
+                matched
+            }
+            Err(error) => {
+                log::debug!("[greenplum][probe-fallback] pool_key={pool_key} error={error}");
+                None
+            }
+        }
+    }
+
     pub fn pool_activity_touch(&self, pool_key: &str) -> PoolActivityTouch {
         PoolActivityTouch {
             pool_key: pool_key.to_string(),
@@ -3230,13 +3273,13 @@ impl AppState {
                 self.persist_removed_mqtt_history(&mut removed_pools).await;
                 self.transaction_sessions.write().await.clear();
                 let routing = self.pool_routing_control();
-                let protected = async {
-                    if let Err(error) = debug_shutdown.wait().await {
-                        log::warn!("Debugger cleanup could not confirm controlled release during application shutdown: {error}");
-                    }
-                    stop_dependencies(application_deadline.saturating_duration_since(Instant::now())).await;
-                };
-                tokio::join!(routing.close_removed(removed_pools), protected);
+                let (_, debug_result) = tokio::join!(routing.close_removed(removed_pools), debug_shutdown.wait());
+                if let Err(error) = debug_result {
+                    log::warn!(
+                        "Debugger cleanup could not confirm controlled release during application shutdown: {error}"
+                    );
+                }
+                stop_dependencies(application_deadline.saturating_duration_since(Instant::now())).await;
             };
             if tokio::time::timeout_at(application_deadline.into(), shutdown).await.is_err() {
                 debug_shutdown.isolate_remaining();
@@ -3253,9 +3296,15 @@ impl AppState {
 
         let shutdown = async {
             let routing = self.pool_routing_control();
-            let (_, _, _, _, _, _, plugin_shutdown) = tokio::join!(
-                self.task_supervisor.shutdown(deadline),
-                routing.close_removed(removed_pools),
+            // Close pooled database connections and finish in-flight background
+            // pool-close tasks BEFORE stopping SSH/proxy tunnels, agent daemons,
+            // and plugins so COM_QUIT / disconnect reaches the server cleanly (#15612).
+            let pool_close_budget = deadline.saturating_sub(Duration::from_millis(500)).max(deadline / 2);
+            let _ = tokio::time::timeout(pool_close_budget, async {
+                tokio::join!(self.task_supervisor.shutdown(pool_close_budget), routing.close_removed(removed_pools),);
+            })
+            .await;
+            let (_, _, _, _, plugin_shutdown) = tokio::join!(
                 self.tunnels.stop_all_tunnels(),
                 self.proxy_tunnels.stop_all_tunnels(),
                 self.http_tunnels.stop_all_tunnels(),
@@ -6233,6 +6282,7 @@ impl AppState {
         };
 
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.greenplum_capabilities.write().await.remove(pool_key);
         routing.close_pool_with_timeout(pool_key.to_string(), removed).await;
         #[cfg(test)]
         if let Some((ready, resume)) =
@@ -6320,6 +6370,7 @@ impl AppState {
             self.stop_keepalive_task(&pool_key).await;
             self.pool_activity.write().await.remove(&pool_key);
             self.postgres_cancel_contexts.write().await.remove(&pool_key);
+            self.greenplum_capabilities.write().await.remove(&pool_key);
             let removed = self.connections.write().await.remove(&pool_key);
             if let Some(pool) = removed {
                 self.pool_routing_control().close_pool_with_timeout(pool_key.clone(), pool).await;
@@ -6552,6 +6603,7 @@ impl AppState {
         self.stop_keepalive_task(&pool_key).await;
         self.pool_activity.write().await.remove(&pool_key);
         self.postgres_cancel_contexts.write().await.remove(&pool_key);
+        self.greenplum_capabilities.write().await.remove(&pool_key);
         self.mysql_preserved_transactions.write().await.remove(&pool_key);
         self.mysql_client_sessions.write().await.remove(&pool_key);
         let removed = self.update_connection_pools(|connections| connections.remove(&pool_key)).await;
@@ -6705,6 +6757,7 @@ impl AppState {
         self.stop_keepalive_task(pool_key).await;
         self.pool_activity.write().await.remove(pool_key);
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.greenplum_capabilities.write().await.remove(pool_key);
         self.mysql_preserved_transactions.write().await.remove(pool_key);
         let removed = self.connections.write().await.remove(pool_key);
         if let Some(pool) = removed {
@@ -6780,6 +6833,7 @@ impl AppState {
 
         self.pool_activity.write().await.remove(pool_key);
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.greenplum_capabilities.write().await.remove(pool_key);
         match close_reclaimed_agent_pool(pool).await {
             Ok(()) => true,
             Err((PoolKind::Agent(client), error)) if should_replace_agent_runtime(&error) => {
@@ -6918,9 +6972,11 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut greenplum_caps = self.greenplum_capabilities.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                greenplum_caps.remove(key);
             }
         }
         let mut conns = self.connections.write().await;
@@ -7971,14 +8027,13 @@ impl AppState {
                 continue;
             }
 
-            // 5. 复用既有池回收路径：先摘除，再走后台关闭。close_removed_in_background 内部
-            //    经 close_pool_with_timeout，从而继承 Agent 共享 runtime / 手动事务共享 runtime
-            //    的保护逻辑，确保池被真正 close/释放而不只是从 map 移除。
+            // 5. 复用既有池回收路径：先摘除并并发关闭全部池，确保 COM_QUIT / disconnect
+            //    在通知前端触发 disconnect_db（可能重置隧道）之前真正送达服务端 (#15612)。
             let Some(_debug_fence) = self.pl_debug.try_idle_fence(&connection_id) else {
                 continue;
             };
             let removed = self.drain_connection_pools(&connection_id).await;
-            self.pool_routing_control().close_removed_in_background(removed);
+            self.pool_routing_control().close_removed(removed).await;
             log::info!(
                 "[connection][idle_disconnect] connection '{connection_id}' pools closed after {idle_disconnect_secs}s without query activity"
             );
@@ -8057,6 +8112,7 @@ impl AppState {
         self.pool_activity.write().await.clear();
         self.session_credentials.clear_pool_owners();
         self.postgres_cancel_contexts.write().await.clear();
+        self.greenplum_capabilities.write().await.clear();
         self.draining_pools.lock().unwrap_or_else(|error| error.into_inner()).clear();
         self.metadata_gates.lock().await.clear();
         self.connections.write().await.drain().collect()
@@ -8104,9 +8160,11 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut greenplum_caps = self.greenplum_capabilities.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                greenplum_caps.remove(key);
             }
         }
         self.session_credentials.remove_pool_owners(&keys_to_remove);
@@ -8138,9 +8196,11 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut greenplum_caps = self.greenplum_capabilities.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                greenplum_caps.remove(key);
             }
         }
         let mut conns = self.connections.write().await;
@@ -8944,6 +9004,8 @@ pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionCo
     // A default browser filter does not change the established Redis session.
     a.redis_key_filter = None;
     b.redis_key_filter = None;
+    a.watermark = None;
+    b.watermark = None;
     if !a.save_password && !b.save_password {
         a.password.clear();
         b.password.clear();
@@ -8974,6 +9036,7 @@ pub fn connection_configs_session_credentials_compatible(a: &ConnectionConfig, b
         config.show_native_jobs = None;
         config.show_user_admin = None;
         config.color = None;
+        config.watermark = None;
         config.docs_notes_path = None;
         config.connect_timeout_secs = 0;
         config.query_timeout_secs = 0;
@@ -9861,6 +9924,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }
@@ -13874,6 +13938,7 @@ sleep 30
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
@@ -14731,6 +14796,129 @@ for line in sys.stdin:
         let payload = serde_json::to_value(&event).unwrap();
         assert_eq!(payload["connectionId"], "conn");
         assert!(payload["closedAtMs"].as_u64().is_some_and(|value| value > 0));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sweep_idle_connections_and_shutdown_send_com_quit_to_all_mysql_pools() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn write_mysql_packet(socket: &mut tokio::net::TcpStream, seq: u8, payload: &[u8]) {
+            let len = payload.len();
+            let header = [(len & 0xff) as u8, ((len >> 8) & 0xff) as u8, ((len >> 16) & 0xff) as u8, seq];
+            let _ = socket.write_all(&header).await;
+            let _ = socket.write_all(payload).await;
+        }
+
+        fn build_handshake_v10() -> Vec<u8> {
+            use mysql_async::consts::CapabilityFlags as Caps;
+            let caps = (Caps::CLIENT_PROTOCOL_41
+                | Caps::CLIENT_SECURE_CONNECTION
+                | Caps::CLIENT_PLUGIN_AUTH
+                | Caps::CLIENT_DEPRECATE_EOF)
+                .bits();
+            let mut buf = Vec::new();
+            buf.push(10); // protocol version
+            buf.extend_from_slice(b"8.0.19\0");
+            buf.extend_from_slice(&1u32.to_le_bytes()); // conn id
+            buf.extend_from_slice(b"12345678"); // auth-plugin-data-part-1
+            buf.push(0); // filler
+            buf.extend_from_slice(&(caps as u16).to_le_bytes()); // lower caps
+            buf.push(45); // charset utf8mb4
+            buf.extend_from_slice(&2u16.to_le_bytes()); // SERVER_STATUS_AUTOCOMMIT
+            buf.extend_from_slice(&((caps >> 16) as u16).to_le_bytes()); // upper caps
+            buf.push(21); // auth plugin data len
+            buf.extend_from_slice(&[0u8; 10]); // reserved
+            buf.extend_from_slice(b"abcdefghijkl\0"); // auth-plugin-data-part-2 (13 bytes)
+            buf.extend_from_slice(b"mysql_native_password\0");
+            buf
+        }
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let com_quit = Arc::new(AtomicUsize::new(0));
+        let abrupt_eof = Arc::new(AtomicUsize::new(0));
+        let com_quit_s = Arc::clone(&com_quit);
+        let abrupt_eof_s = Arc::clone(&abrupt_eof);
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let com_quit_h = Arc::clone(&com_quit_s);
+                let abrupt_eof_h = Arc::clone(&abrupt_eof_s);
+                tokio::spawn(async move {
+                    write_mysql_packet(&mut socket, 0, &build_handshake_v10()).await;
+                    let mut hdr = [0u8; 4];
+                    if socket.read_exact(&mut hdr).await.is_err() {
+                        return;
+                    }
+                    let len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], 0]) as usize;
+                    let mut req = vec![0u8; len];
+                    if socket.read_exact(&mut req).await.is_err() {
+                        return;
+                    }
+                    write_mysql_packet(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    loop {
+                        let mut cmd_hdr = [0u8; 4];
+                        if socket.read_exact(&mut cmd_hdr).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        let cmd_len = u32::from_le_bytes([cmd_hdr[0], cmd_hdr[1], cmd_hdr[2], 0]) as usize;
+                        let mut cmd = vec![0u8; cmd_len];
+                        if socket.read_exact(&mut cmd).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        if cmd.first() == Some(&0x01) {
+                            com_quit_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        write_mysql_packet(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    }
+                });
+            }
+        });
+
+        let url = format!(
+            "mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled&max_allowed_packet=65536&wait_timeout=60&sessionVariables=group_concat_max_len%3D1024"
+        );
+
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "conn".to_string();
+        config.idle_disconnect_secs = 30;
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        // 1) Idle sweep closes every pool and sends COM_QUIT before returning.
+        for (key, max_conns) in [("conn", 3usize), ("conn:app", 3), ("conn:app:session:tab-1", 1)] {
+            let pool = db::mysql::connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(3), max_conns)
+                .await
+                .unwrap();
+            state.connections.write().await.insert(key.to_string(), PoolKind::Mysql(pool, MysqlMode::Normal));
+            state
+                .pool_activity
+                .write()
+                .await
+                .insert(key.to_string(), super::PoolActivity::idle_for(Duration::from_secs(120)));
+        }
+        assert_eq!(state.sweep_idle_connections().await, vec!["conn".to_string()]);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(com_quit.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(abrupt_eof.load(AtomicOrdering::SeqCst), 0);
+
+        // 2) Application shutdown closes all remaining MySQL pools concurrently with COM_QUIT.
+        for (key, max_conns) in [("conn", 3usize), ("conn:app", 3), ("conn:app:session:tab-1", 1)] {
+            let pool = db::mysql::connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(3), max_conns)
+                .await
+                .unwrap();
+            state.connections.write().await.insert(key.to_string(), PoolKind::Mysql(pool, MysqlMode::Normal));
+        }
+        state.shutdown(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        server.abort();
+        assert_eq!(com_quit.load(AtomicOrdering::SeqCst), 6);
+        assert_eq!(abrupt_eof.load(AtomicOrdering::SeqCst), 0);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -16667,7 +16855,7 @@ for line in sys.stdin:
                 request.extend_from_slice(&byte);
             }
             let request = String::from_utf8(request).unwrap();
-            assert!(request.starts_with("GET /?query=SELECT%201 "));
+            assert!(request.starts_with("POST / "));
             assert!(request.lines().any(|line| line.eq_ignore_ascii_case("host: clickhouse.proxy.invalid:8123")));
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n1\n").await.unwrap();
         });

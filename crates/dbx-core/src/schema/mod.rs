@@ -782,7 +782,7 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
 fn uses_shared_database_comments(config: &ConnectionConfig) -> bool {
     match config.db_type {
         DatabaseType::Postgres => {
-            matches!(config.driver_profile.as_deref(), None | Some("postgres" | "opengauss" | "gaussdb"))
+            matches!(config.driver_profile.as_deref(), None | Some("postgres" | "greenplum" | "opengauss" | "gaussdb"))
         }
         DatabaseType::OpenGauss | DatabaseType::Gaussdb => true,
         _ => false,
@@ -3164,7 +3164,28 @@ async fn list_tables_once(
             }
         }
         PoolKind::Postgres(p) => {
-            if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty) {
+            if let Some(gp_caps) = state.greenplum_capabilities_for_pool(&pool_key, p, db_config.as_ref()).await {
+                if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty)
+                {
+                    if page_table_roots {
+                        db::greenplum::list_table_roots_page_filtered(p, &gp_caps, schema, filter, limit, offset, true)
+                            .await
+                    } else {
+                        db::greenplum::list_tables_filtered(p, &gp_caps, schema, filter, limit, offset, true).await
+                    }
+                } else if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
+                    db::greenplum::list_tables_filtered(p, &gp_caps, schema, filter, None, None, false).await.map(
+                        |tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter),
+                    )
+                } else if page_table_roots {
+                    db::greenplum::list_table_roots_page_filtered(p, &gp_caps, schema, filter, limit, offset, false)
+                        .await
+                } else {
+                    db::greenplum::list_tables_filtered(p, &gp_caps, schema, filter, limit, offset, false).await
+                }
+            } else if requests_table_objects_only(object_types)
+                && table_name_filter.is_none_or(TableNameFilter::is_empty)
+            {
                 if page_table_roots {
                     db::postgres::list_table_roots_page_filtered(p, schema, filter, limit, offset, true).await
                 } else {
@@ -3956,6 +3977,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }
@@ -9275,6 +9297,17 @@ async fn list_objects_once(
                     include_custom_types,
                 )
                 .await?
+            } else if let Some(gp_caps) = state.greenplum_capabilities_for_pool(&pool_key, p, db_config.as_ref()).await
+            {
+                db::greenplum::list_objects(
+                    p,
+                    &gp_caps,
+                    schema,
+                    include_relations,
+                    include_routines,
+                    include_custom_types,
+                )
+                .await?
             } else {
                 db::postgres::list_objects(p, schema, include_relations, include_routines, include_custom_types).await?
             };
@@ -9433,7 +9466,11 @@ async fn list_completion_objects_once(
             Ok(filter_completion_objects_with_packages(objects))
         }
         PoolKind::Postgres(p) => {
-            db::postgres::list_objects(p, schema, true, true, false).await.map(filter_completion_objects)
+            if let Some(gp_caps) = state.greenplum_capabilities_for_pool(&pool_key, p, db_config.as_ref()).await {
+                db::greenplum::list_objects(p, &gp_caps, schema, true, true, false).await.map(filter_completion_objects)
+            } else {
+                db::postgres::list_objects(p, schema, true, true, false).await.map(filter_completion_objects)
+            }
         }
         PoolKind::SqlServer(_) => {
             let outcome = list_objects_once(
@@ -10761,6 +10798,16 @@ pub async fn table_partition_status_core(
         let pool_handle = state.pool_handle(&pool_key).await;
         match pool_handle.as_ref() {
             Some(PoolKind::Postgres(pool)) => {
+                let db_config = connection_config(state, connection_id).await;
+                if let Some(gp_caps) = state.greenplum_capabilities_for_pool(&pool_key, pool, db_config.as_ref()).await
+                {
+                    let status = db::greenplum::get_table_partition_status(pool, &gp_caps, schema, table).await?;
+                    return Ok(TablePartitionStatus {
+                        is_partitioned_parent: status.is_partitioned_parent,
+                        is_partition: status.is_partition,
+                        is_foreign: status.is_foreign,
+                    });
+                }
                 let info = db::postgres::get_table_partition_info(pool, schema, table).await?;
                 Ok(TablePartitionStatus {
                     is_partitioned_parent: info.key.is_some(),
@@ -10813,7 +10860,14 @@ pub async fn get_table_partitioning_core(
         let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let pool_handle = state.pool_handle(&pool_key).await;
         match pool_handle.as_ref() {
-            Some(PoolKind::Postgres(pool)) => db::postgres::get_table_partitioning(pool, schema, table).await,
+            Some(PoolKind::Postgres(pool)) => {
+                let db_config = connection_config(state, connection_id).await;
+                if let Some(gp_caps) = state.greenplum_capabilities_for_pool(&pool_key, pool, db_config.as_ref()).await
+                {
+                    return db::greenplum::get_table_partitioning(pool, &gp_caps, schema, table).await;
+                }
+                db::postgres::get_table_partitioning(pool, schema, table).await
+            }
             Some(PoolKind::Agent(client)) => {
                 // Resolve the config once: it gates the arm and feeds the RPC
                 // timeout.
@@ -11922,12 +11976,16 @@ async fn get_table_ddl_once(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(db::opentenbase::is_config) => {
             opentenbase_ddl(p, schema, table, options.include_partitions).await
         }
-        PoolKind::Postgres(p)
-            if options.include_postgres_access && db_config.as_ref().is_some_and(is_native_postgres_config) =>
-        {
-            pg_display_ddl(p, schema, table).await
+        PoolKind::Postgres(p) => {
+            if let Some(gp_caps) = state.greenplum_capabilities_for_pool(&pool_key, p, db_config.as_ref()).await {
+                greenplum_ddl(p, &gp_caps, schema, table, options.include_partitions, options.include_postgres_access)
+                    .await
+            } else if options.include_postgres_access && db_config.as_ref().is_some_and(is_native_postgres_config) {
+                pg_display_ddl(p, schema, table).await
+            } else {
+                pg_ddl_for_options(p, schema, table, options.include_partitions).await
+            }
         }
-        PoolKind::Postgres(p) => pg_ddl_for_options(p, schema, table, options.include_partitions).await,
         PoolKind::Sqlite(p) => sqlite_ddl(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::table_ddl(client, table).await,
         PoolKind::Turso(client) => db::turso_driver::table_ddl(client, table).await,
@@ -18688,6 +18746,134 @@ pub async fn opentenbase_ddl(
             Ok(ddl)
         }
     }
+}
+
+/// Greenplum DDL renderer supporting both Greenplum 6 (classic `pg_partition` /
+/// `pg_exttable` / `reloptions` / `pg_attribute_encoding`) and Greenplum 7
+/// (declarative partitions + `USING ao_row|ao_column` + `reloptions` +
+/// `DISTRIBUTED BY`). Any Greenplum-specific catalog lookup error degrades
+/// softly to the already-rendered PostgreSQL base DDL instead of failing the
+/// whole DDL view.
+pub async fn greenplum_ddl(
+    pool: &deadpool_postgres::Pool,
+    caps: &db::greenplum::GreenplumCapabilities,
+    schema: &str,
+    table: &str,
+    include_partitions: bool,
+    include_postgres_access: bool,
+) -> Result<String, String> {
+    let (ddl, is_external) = if caps.is_classic_gp6() {
+        let base_ddl = pg_ddl(pool, schema, table).await?;
+        match db::greenplum::table_modifiers(pool, caps, schema, table, include_partitions).await {
+            Ok(modifiers) => {
+                let is_external = modifiers.is_external();
+                let rendered = match db::greenplum::apply_table_modifiers(&base_ddl, &modifiers) {
+                    Ok(rendered) => rendered,
+                    Err(error) => {
+                        log::warn!(
+                            "[schema][greenplum:gp6-ddl-render-fallback] schema={} table={} error={}",
+                            schema,
+                            table,
+                            error
+                        );
+                        base_ddl
+                    }
+                };
+                (rendered, is_external)
+            }
+            Err(error) => {
+                log::warn!(
+                    "[schema][greenplum:gp6-modifiers-fallback] schema={} table={} error={}",
+                    schema,
+                    table,
+                    error
+                );
+                (base_ddl, false)
+            }
+        }
+    } else {
+        let base_ddl = pg_ddl_for_options(pool, schema, table, include_partitions).await?;
+        if include_partitions {
+            let relations: Vec<(String, String)> = db::ddl_scan::top_level_statement_ranges(&base_ddl)
+                .into_iter()
+                .filter_map(|range| db::ddl_scan::parse_create_table_relation(&base_ddl[range]))
+                .collect();
+            match db::greenplum::table_modifiers_for_relations(pool, caps, &relations).await {
+                Ok(modifiers_by_relation) => {
+                    let root_key = (
+                        if schema.trim().is_empty() { "public".to_string() } else { schema.to_string() },
+                        table.to_string(),
+                    );
+                    let is_external = modifiers_by_relation.get(&root_key).is_some_and(|m| m.is_external());
+                    let rendered = match db::greenplum::apply_tree_table_modifiers(&base_ddl, &modifiers_by_relation) {
+                        Ok(rendered) => rendered,
+                        Err(error) => {
+                            log::warn!(
+                                "[schema][greenplum:gp7-tree-render-fallback] schema={} table={} error={}",
+                                schema,
+                                table,
+                                error
+                            );
+                            base_ddl
+                        }
+                    };
+                    (rendered, is_external)
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[schema][greenplum:gp7-tree-modifiers-fallback] schema={} table={} error={}",
+                        schema,
+                        table,
+                        error
+                    );
+                    (base_ddl, false)
+                }
+            }
+        } else {
+            match db::greenplum::table_modifiers(pool, caps, schema, table, false).await {
+                Ok(modifiers) => {
+                    let is_external = modifiers.is_external();
+                    let rendered = match db::greenplum::apply_table_modifiers(&base_ddl, &modifiers) {
+                        Ok(rendered) => rendered,
+                        Err(error) => {
+                            log::warn!(
+                                "[schema][greenplum:gp7-ddl-render-fallback] schema={} table={} error={}",
+                                schema,
+                                table,
+                                error
+                            );
+                            base_ddl
+                        }
+                    };
+                    (rendered, is_external)
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[schema][greenplum:gp7-modifiers-fallback] schema={} table={} error={}",
+                        schema,
+                        table,
+                        error
+                    );
+                    (base_ddl, false)
+                }
+            }
+        }
+    };
+
+    if include_postgres_access && !is_external {
+        match db::postgres::get_table_access(pool, schema, table).await {
+            Ok(access) => return Ok(append_postgres_access_ddl(ddl, schema, table, &access)),
+            Err(error) => {
+                log::warn!(
+                    "[schema][greenplum:table-access-ddl-fallback] schema={} table={} error={}",
+                    schema,
+                    table,
+                    error
+                );
+            }
+        }
+    }
+    Ok(ddl)
 }
 
 /// Whether a `nextval` sequence is the standard `<table>_<column>_seq` serial

@@ -727,26 +727,26 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       }
     }
 
-    if (props.database && mongoCompletionNeedsCollections(completionContext.mode)) {
+    const activeDatabase = completionContext.database ?? props.database;
+    if (activeDatabase && mongoCompletionNeedsCollections(completionContext)) {
       try {
-        collections = await connectionStore.listMongoCompletionCollections(props.connectionId, completionContext.database ?? props.database);
+        collections = await connectionStore.listMongoCompletionCollections(props.connectionId, activeDatabase);
       } catch {
         collections = [];
       }
     }
 
-    if (props.database && mongoCompletionNeedsFields(completionContext.mode) && completionContext.collection) {
+    if (activeDatabase && mongoCompletionNeedsFields(completionContext.mode) && completionContext.collection) {
       try {
-        fields = await connectionStore.listMongoCompletionFields(props.connectionId, completionContext.database ?? props.database, completionContext.collection);
+        fields = await connectionStore.listMongoCompletionFields(props.connectionId, activeDatabase, completionContext.collection);
       } catch {
         fields = [];
       }
     }
 
-    const indexDatabase = completionContext.database ?? props.database;
-    if (indexDatabase && mongoCompletionNeedsIndexes(completionContext.mode) && completionContext.collection) {
+    if (activeDatabase && mongoCompletionNeedsIndexes(completionContext.mode) && completionContext.collection) {
       try {
-        indexes = await connectionStore.listMongoCompletionIndexes(props.connectionId, indexDatabase, completionContext.collection);
+        indexes = await connectionStore.listMongoCompletionIndexes(props.connectionId, activeDatabase, completionContext.collection);
       } catch {
         indexes = [];
       }
@@ -1564,9 +1564,9 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (!localOnlyMetadata && !schemaLookupDatabase && (completionContext.suggestTables || (!!completionContext.qualifier && !isReferencedTableQualifier(completionContext)))) {
       const crossSchemaSearch = searchesAcrossPostgresSchemas(completionContext, scope);
       const globalTableSearch = crossSchemaSearch || (isOracleCompletionDatabase(props.databaseType) && completionContext.suggestTables && !completionContext.qualifier);
-      const qualifiedPostgresTableSearch = tableNameCompletion && !!completionContext.qualifier && !!tableLookupTarget.schema && (props.databaseType === "postgres" || props.databaseType === "gaussdb");
+      const qualifiedSchemaTableSearch = tableNameCompletion && !!completionContext.qualifier && !!tableLookupTarget.schema;
       const localTableKeys =
-        crossSchemaSearch || qualifiedPostgresTableSearch
+        crossSchemaSearch || qualifiedSchemaTableSearch
           ? new Set(connectionStore.lookupLocalCompletionTables(connectionId, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, tableLookupTarget.schema, props.catalog).map((table) => JSON.stringify([table.schema, table.name])))
           : undefined;
       const refreshEpoch = completionEpoch;
@@ -1654,8 +1654,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
         let resolvedRef = refTable;
         if (!usesOracleSessionCompletionColumns(resolvedRef.schema) && !resolvedRef.schema) {
           const cachedTable =
-            completionMetadata.cachedTables.find((table) => table.name.toLowerCase() === resolvedRef.name.toLowerCase()) ??
-            connectionStore.lookupLocalCompletionTables(connectionId, scope.database, resolvedRef.name, 20, undefined, props.catalog).find((table) => table.name.toLowerCase() === resolvedRef.name.toLowerCase());
+            findCachedTableForUnqualifiedRef(completionMetadata.cachedTables, resolvedRef.name, scope.schema) ??
+            findCachedTableForUnqualifiedRef(connectionStore.lookupLocalCompletionTables(connectionId, scope.database, resolvedRef.name, 20, scope.schema, props.catalog), resolvedRef.name, scope.schema);
           if (cachedTable?.schema) {
             resolvedRef = { ...resolvedRef, schema: cachedTable.schema };
           }
@@ -1682,12 +1682,23 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     }
   }
 
+  function findCachedTableForUnqualifiedRef(candidates: SqlCompletionTable[], tableName: string, activeSchema?: string): SqlCompletionTable | undefined {
+    const normalizedName = tableName.toLowerCase();
+    const normalizedActiveSchema = activeSchema?.trim().toLowerCase();
+    if (normalizedActiveSchema) {
+      return candidates.find((table) => table.name.toLowerCase() === normalizedName && table.schema?.trim().toLowerCase() === normalizedActiveSchema);
+    }
+    return candidates.find((table) => table.name.toLowerCase() === normalizedName);
+  }
+
   function shouldLoadCompletionObjects(completionContext: ReturnType<typeof getSqlCompletionContext>): boolean {
     // Doris/StarRocks external catalogs currently expose table and column
     // metadata through catalog-aware APIs. The generic routine/object endpoint
     // is catalogless and would query the internal catalog, aborting completion.
     if (props.catalog) return false;
-    const routineContext = completionContext.suggestRoutines || completionContext.exclusiveRoutineSuggestions || (!!completionContext.qualifier && !completionContext.exclusiveColumnSuggestions);
+    const sqlServerTableValuedFunctionContext = props.databaseType === "sqlserver" && (completionContext.suggestTables || completionContext.exclusiveTableSuggestions);
+    const qualifiedRoutineContext = !!completionContext.qualifier && !completionContext.exclusiveColumnSuggestions && !completionContext.exclusiveTableSuggestions;
+    const routineContext = completionContext.suggestRoutines || completionContext.exclusiveRoutineSuggestions || completionContext.oracleTableFunctionContext || sqlServerTableValuedFunctionContext || qualifiedRoutineContext;
     return routineContext && !isReferencedTableQualifier(completionContext);
   }
 
@@ -1920,7 +1931,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       if (owners.size === 1) resolvedRoutineSchema = owners.values().next().value;
     }
 
-    if (!props.catalog && !isOracleCompletionDatabase(props.databaseType) && !localOnlyMetadata && completionContext.qualifier && completionObjects.length === 0) {
+    if (shouldLoadObjects && !props.catalog && !isOracleCompletionDatabase(props.databaseType) && !localOnlyMetadata && completionContext.qualifier && completionObjects.length === 0) {
       const target = routineCompletionTargetForContext(completionContext, scope);
       const schemaObjects = await connectionStore.listCompletionObjects(props.connectionId!, target.database, target.mask, MAX_COMPLETION_TABLES, target.schema, undefined, false, scope.schema);
       if (schemaObjects.length > 0) {
@@ -1968,7 +1979,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     let refs = completionContext.referencedTables.map((rt) => {
       if (usesOracleSessionCompletionColumns(rt.schema)) return rt;
       if (!rt.schema) {
-        const cached = tables.find((t) => t.name.toLowerCase() === rt.name.toLowerCase());
+        const cached = findCachedTableForUnqualifiedRef(tables, rt.name, scope.schema);
         if (cached && cached.schema) {
           return { ...rt, schema: cached.schema };
         }

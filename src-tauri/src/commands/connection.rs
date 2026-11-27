@@ -544,6 +544,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }
@@ -584,12 +585,8 @@ mod tests {
                 request.extend_from_slice(&byte);
             }
             let request = String::from_utf8(request).unwrap();
-            let target = if proxy_type == ProxyType::Socks5 {
-                "/?query=SELECT%201"
-            } else {
-                "http://clickhouse.desktop.invalid:8123/?query=SELECT%201"
-            };
-            assert!(request.starts_with(&format!("GET {target} HTTP/1.1\r\n")));
+            let target = if proxy_type == ProxyType::Socks5 { "/" } else { "http://clickhouse.desktop.invalid:8123/" };
+            assert!(request.starts_with(&format!("POST {target} HTTP/1.1\r\n")));
             assert!(request.lines().any(|line| line.eq_ignore_ascii_case("host: clickhouse.desktop.invalid:8123")));
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n1\n").await.unwrap();
         });
@@ -2946,7 +2943,7 @@ pub async fn disconnect_db(
     let result = permit
         .after_debug_cleanup(async {
             state.running_queries.cancel_connection(&connection_id);
-            state.remove_connection_pools_detached_checked(&connection_id).await?;
+            state.remove_connection_pools_checked(&connection_id).await?;
             drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
             drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
             state.reset_connection_transport_checked(&connection_id).await?;

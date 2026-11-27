@@ -117,6 +117,7 @@ fn live_connection_config(id: &str, database: &str) -> ConnectionConfig {
         is_production: false,
         production_databases: vec![],
         production_badge_scope: None,
+        watermark: None,
         database_info: None,
     }
 }

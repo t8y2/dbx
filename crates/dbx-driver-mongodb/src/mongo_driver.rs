@@ -1459,7 +1459,7 @@ async fn find_documents_with_total(
         let mut extended_documents = Vec::new();
         while cursor.advance().await.map_err(|e| e.to_string())? {
             let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-            documents.push(bson_to_json(&Bson::Document(doc.clone())));
+            documents.push(bson_document_to_json(&doc));
             extended_documents.push(Bson::Document(doc).into_canonical_extjson());
         }
         Ok::<_, String>((documents, extended_documents))
@@ -1775,7 +1775,7 @@ pub async fn aggregate_documents(
 
     if explain {
         let result = db.run_command(command).await.map_err(|e| e.to_string())?;
-        let document = bson_to_json(&Bson::Document(result.clone()));
+        let document = bson_document_to_json(&result);
         let extended = Bson::Document(result).into_relaxed_extjson();
         return Ok(MongoDocumentResult {
             documents: vec![document],
@@ -1827,7 +1827,7 @@ async fn drain_document_cursor(
     let mut extended_documents = Vec::new();
     while documents.len() < fetch_limit && cursor.advance().await.map_err(|e| e.to_string())? {
         let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        documents.push(bson_to_json(&Bson::Document(doc.clone())));
+        documents.push(bson_document_to_json(&doc));
         extended_documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
     let total = documents.len() as u64;
@@ -2682,7 +2682,7 @@ fn find_and_modify_array_filters(
 fn single_document_result(document: Option<Document>) -> MongoDocumentResult {
     match document {
         Some(document) => MongoDocumentResult {
-            documents: vec![bson_to_json(&Bson::Document(document.clone()))],
+            documents: vec![bson_document_to_json(&document)],
             raw_documents: None,
             extended_documents: Some(vec![Bson::Document(document).into_canonical_extjson()]),
             total: 1,
@@ -3011,15 +3011,15 @@ fn bson_to_json(bson: &Bson) -> serde_json::Value {
             dt.try_to_rfc3339_string().unwrap_or_else(|_| dt.to_string())
         )),
         Bson::Array(arr) => serde_json::Value::Array(arr.iter().map(bson_to_json).collect()),
-        Bson::Document(doc) => {
-            let mut map = serde_json::Map::new();
-            for (k, v) in doc {
-                map.insert(k.clone(), bson_document_field_to_json(k, v));
-            }
-            serde_json::Value::Object(map)
-        }
+        Bson::Document(doc) => bson_document_to_json(doc),
         _ => serde_json::Value::String(format!("{bson}")),
     }
+}
+
+fn bson_document_to_json(document: &Document) -> serde_json::Value {
+    serde_json::Value::Object(
+        document.iter().map(|(key, value)| (key.clone(), bson_document_field_to_json(key, value))).collect(),
+    )
 }
 
 fn bson_document_field_to_json(key: &str, bson: &Bson) -> serde_json::Value {

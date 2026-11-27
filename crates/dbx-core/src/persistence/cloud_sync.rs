@@ -3788,6 +3788,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }
@@ -3933,6 +3934,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }
@@ -4305,6 +4307,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         };
         config.connection_secrets.insert("api_token".to_string(), "plugin-secret".to_string());

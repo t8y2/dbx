@@ -225,9 +225,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          # godror 需要 Go >= 1.21；thin 的 Windows 7 兼容线仍由 build-oracle-native 用 Go 1.20 构建。
+          # godror 需要 Go >= 1.25；thin 的 Windows 7 兼容线使用 go.mod（Go 1.20），OCI 变体使用独立的 go.oci.mod。
           go-version: "1.27.x"
-          cache-dependency-path: agents/drivers/oracle-go/go.sum
+          cache-dependency-path: agents/drivers/oracle-go/go.oci.sum
       - name: Prepare MinGW-w64 and the Oracle Instant Client
         shell: bash
         run: |
@@ -283,16 +283,15 @@ jobs:
       - name: Test Oracle agent with the OCI build tag
         shell: bash
         working-directory: agents/drivers/oracle-go
-        run: go test -mod=mod -tags oci ./...
+        run: go test -mod=readonly -modfile=go.oci.mod -tags oci ./...
       - name: Build Oracle OCI agent (Windows x64)
         shell: bash
         working-directory: agents/drivers/oracle-go
         run: |
           mkdir -p ../../../release-native
           output="../../../release-native/dbx-agent-oracle-oci-windows-x64.exe"
-          # go.mod 的 go 指令保持 1.20（thin 的 Windows 7 兼容线）；OCI 变体要求更高，
-          # 因此允许就地更新 go.mod —— 只影响本任务的检出目录，不会被提交。
-          go build -mod=mod -tags oci -trimpath -ldflags="-s -w" -o "$output" .
+          # OCI 变体使用独立的 go.oci.mod / go.oci.sum，避免将高版本 godror 引入 Go 1.20 的 thin 依赖图。
+          go build -mod=readonly -modfile=go.oci.mod -tags oci -trimpath -ldflags="-s -w" -o "$output" .
           ls -lh ../../../release-native
       - uses: actions/upload-artifact@v4
         with:

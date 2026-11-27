@@ -343,6 +343,16 @@ describe.each([false, true])("Snowflake namespace completion (semantic=%s)", (se
     expect(metadata.cachedTables.map((table) => table.name)).toContain("TIS_ORDER");
   });
 
+  it("prefetches the active schema tables for schema-scoped editors like Dameng (#15630)", async () => {
+    const { metadata, store } = createHarness({ databaseType: "dameng", dialect: "oracle", database: "", schema: "YJ1235" });
+    store.listCompletionTables.mockResolvedValue([{ name: "SYS_USER", schema: "YJ1235", database: "" }]);
+
+    await metadata.prefetchCompletionTables();
+
+    expect(store.listCompletionTables).toHaveBeenCalledWith("connection", "", "", 500, undefined, false, "YJ1235", undefined, { activateConnection: false });
+    expect(metadata.cachedTables.map((table) => table.name)).toContain("SYS_USER");
+  });
+
   it.each([false, true])("preserves the quote-identifiers preference (%s) for mixed-case table insertion", async (quoteIdentifiers) => {
     const { catalogs, provide, currentView, settings } = snowflakeHarness("SELECT * FROM ");
     catalogs.DEFAULT_DB!.PUBLIC = ["DimCustomer"];
@@ -602,6 +612,17 @@ describe("QueryEditor completion provider ownership", () => {
     const result = await provide();
     expect(store.listRedisCompletionKeys).toHaveBeenCalledWith("connection", "3");
     expect(result?.options.map((option) => option.label)).toContain("user:1");
+  });
+
+  it("inserts the selected collection after typing db in a script-selected database", async () => {
+    const doc = "use analytics\ndb";
+    const { store, provide, currentView } = createHarness({ databaseType: "mongodb", database: "", modelValue: doc });
+    const result = await provide();
+    expect(store.listMongoCompletionCollections).toHaveBeenCalledWith("connection", "analytics");
+    const option = result?.options.find((candidate) => candidate.displayLabel === "users");
+    expect(option?.apply).toBeTypeOf("function");
+    (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, doc.length);
+    expect(currentView.state.doc.toString()).toBe("use analytics\ndb.users");
   });
 
   it("rejects stale Mongo collection loads after request invalidation", async () => {
@@ -916,6 +937,94 @@ describe("Oracle SQL column completion case-insensitivity and live refresh (#152
     expect(startCompletion).toHaveBeenCalledWith(currentView);
     const refreshed = await provide(false);
     expect(refreshed?.options.map((option) => option.label)).toContain("CREATED_BY");
+  });
+
+  it("completes Dameng schema-qualified tables without loading routines and refreshes active popup (#15630)", async () => {
+    vi.useRealTimers();
+    const sql = "select * from YJ1235.sys_";
+    const { provide, store, runtime, startCompletion, currentView } = createHarness(
+      {
+        databaseType: "dameng",
+        dialect: "oracle",
+        database: "",
+        schema: "YJ1235",
+        modelValue: sql,
+      },
+      undefined,
+      true,
+    );
+    runtime.codeMirrorCompletionStatus = () => "active";
+    store.listCompletionTables.mockResolvedValue([{ name: "SYS_USER", schema: "YJ1235", type: "table" }]);
+    let resolveRefresh!: (tables: SqlCompletionTable[]) => void;
+    store.refreshCompletionTables.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolveRefresh = done;
+        }),
+    );
+
+    const asyncResult = await provide(true);
+    expect(asyncResult?.options.map((option) => option.label)).toContain("SYS_USER");
+    expect(store.listCompletionObjects).not.toHaveBeenCalled();
+
+    // Also verify background refresh re-triggers active completion on Dameng qualified schema searches.
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "SYS_ROLE", schema: "YJ1235", type: "table" }]);
+    const localResult = await provide(false);
+    expect(localResult?.options.map((option) => option.label)).toContain("SYS_ROLE");
+    await vi.waitFor(() => expect(resolveRefresh).toBeDefined());
+    resolveRefresh([
+      { name: "SYS_ROLE", schema: "YJ1235", type: "table" },
+      { name: "SYS_USER", schema: "YJ1235", type: "table" },
+    ]);
+    await vi.waitFor(() => expect(startCompletion).toHaveBeenCalledWith(currentView));
+  });
+
+  it("prefers the active Dameng schema over another cached schema for unqualified table columns (#15630)", async () => {
+    vi.useRealTimers();
+    const sql = "select * from sys_user where i";
+    const { provide, store, metadata } = createHarness(
+      {
+        databaseType: "dameng",
+        dialect: "oracle",
+        database: "",
+        schema: "YJ1235",
+        modelValue: sql,
+      },
+      undefined,
+      true,
+    );
+    metadata.cachedTables = [{ name: "SYS_USER", schema: "SYSDBA", type: "table" }];
+    store.listCompletionTables.mockResolvedValue([{ name: "SYS_USER", schema: "YJ1235", type: "table" }]);
+    store.listCompletionColumns.mockImplementation(async (_conn, _db, _table, schema) => (schema === "YJ1235" ? [{ name: "id", table: "SYS_USER", schema: "YJ1235", dataType: "VARCHAR(36 CHAR)" }] : []));
+
+    const result = await provide(true);
+    expect(result?.options.map((option) => option.label)).toContain("id");
+    expect(store.listCompletionColumns).toHaveBeenCalledWith("connection", "", "sys_user", "YJ1235", expect.objectContaining({ tableQuoted: false }), undefined);
+  });
+
+  it("does not query routine objects for Dameng table alias qualifiers when completing columns (#15630)", async () => {
+    vi.useRealTimers();
+    const sql = "select * from YJ1235.SYS_USER u where u.i";
+    const { provide, store } = createHarness(
+      {
+        databaseType: "dameng",
+        dialect: "oracle",
+        database: "",
+        schema: "YJ1235",
+        modelValue: sql,
+      },
+      undefined,
+      true,
+    );
+    store.listCompletionColumns.mockResolvedValue([
+      { name: "id", table: "SYS_USER", schema: "YJ1235", dataType: "VARCHAR(36 CHAR)" },
+      { name: "account", table: "SYS_USER", schema: "YJ1235", dataType: "VARCHAR(64 CHAR)" },
+    ]);
+
+    const result = await provide(true);
+    expect(result?.options.map((option) => option.label)).toContain("id");
+    expect(store.listCompletionObjects).not.toHaveBeenCalled();
+    expect(store.listCompletionColumns).toHaveBeenCalledWith("connection", "", "SYS_USER", "YJ1235", expect.objectContaining({ tableQuoted: false, schemaQuoted: false }), undefined);
   });
 });
 

@@ -246,8 +246,18 @@ export interface ConnectionConfig {
   production_databases?: string[];
   /** Sidebar presentation only; absent means database/schema rows plus sticky context. */
   production_badge_scope?: ProductionBadgeScope;
+  watermark?: ConnectionWatermarkConfig;
   /** Metadata captured from the latest successful connection test for the saved config. */
   database_info?: DatabaseConnectionInfo;
+}
+
+export type ConnectionWatermarkMode = "auto" | "custom" | "off";
+
+export interface ConnectionWatermarkConfig {
+  mode: ConnectionWatermarkMode;
+  text?: string;
+  font_size?: number;
+  color?: string;
 }
 
 export type ProductionBadgeScope = "connection" | "database" | "table";

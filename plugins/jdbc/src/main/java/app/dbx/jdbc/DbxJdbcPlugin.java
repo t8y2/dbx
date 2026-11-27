@@ -6529,6 +6529,15 @@ public final class DbxJdbcPlugin {
             if (columnType == Types.BIT && bytes.length == 1 && (bytes[0] == 't' || bytes[0] == 'f')) {
                 return bytes[0] == 't';
             }
+            // 位串列即使没命中 BIT_STRING_JDBC_URL_PREFIXES（自定义/代理 URL、按驱动类推断的连接），
+            // 也不能落到 binaryToHex 变成 0x00/0x01；这里复用同一套位串解码。类型名缺失时保持
+            // 原来的 0x.. 展示：Types.BIT 在部分驱动上也用于数值列，没有位宽就无法安全展开。
+            if (isNamedBitStringColumn(meta, index)) {
+                Object bitValue = bitStringColumnValue(bytes, bitColumnPrecision(meta, index));
+                if (bitValue != BIT_COLUMN_UNSUPPORTED) {
+                    return bitValue;
+                }
+            }
             return binaryToHex(bytes);
         }
         if (value instanceof Clob clob) {
@@ -6687,17 +6696,21 @@ public final class DbxJdbcPlugin {
     private static final Object BIT_COLUMN_UNSUPPORTED = new Object();
 
     private static boolean isBitStringColumn(ResultSetMetaData meta, int index, int columnType) {
-        String typeName = columnTypeName(meta, index);
-        String normalized = typeName.trim().toLowerCase(Locale.ROOT);
+        if (isNamedBitStringColumn(meta, index)) {
+            return true;
+        }
+        return columnType == Types.BIT;
+    }
+
+    /** 类型名（而不是 JDBC 类型码）明确是位串列。`bool`/`boolean` 列同样上报 Types.BIT，必须排除。 */
+    private static boolean isNamedBitStringColumn(ResultSetMetaData meta, int index) {
+        String normalized = columnTypeName(meta, index).trim().toLowerCase(Locale.ROOT);
         if (normalized.equals("bool") || normalized.equals("boolean")) {
             // 金仓/PostgreSQL 的布尔列走 Types.BIT 上报，它们继续保持布尔值。
             return false;
         }
-        if (normalized.equals("bit") || normalized.equals("varbit") || normalized.startsWith("bit ")
-            || normalized.startsWith("bit(") || normalized.startsWith("bit varying")) {
-            return true;
-        }
-        return columnType == Types.BIT;
+        return normalized.equals("bit") || normalized.equals("varbit") || normalized.startsWith("bit ")
+            || normalized.startsWith("bit(") || normalized.startsWith("bit varying");
     }
 
     private static String columnTypeName(ResultSetMetaData meta, int index) {
@@ -6720,7 +6733,15 @@ public final class DbxJdbcPlugin {
             // wasNull() 区分 SQL NULL 与「驱动不支持按字节读取」。
             return rs.wasNull() ? null : BIT_COLUMN_UNSUPPORTED;
         }
-        int precision = bitColumnPrecision(meta, index);
+        return bitStringColumnValue(payload, bitColumnPrecision(meta, index));
+    }
+
+    /**
+     * 位串列载荷的取值规则（readBitStringColumnValue 与 readValue 的通用 byte[] 分支共用）：
+     * 布尔位串保持布尔、数值型 tinyint(1) 保持数值、其余还原成位串文本；
+     * 位宽不可信时返回 BIT_COLUMN_UNSUPPORTED，由调用方保持原来的 `0x..` 展示。
+     */
+    private static Object bitStringColumnValue(byte[] payload, int precision) {
         if (payload.length == 1 && precision <= 1 && (payload[0] == 't' || payload[0] == 'f')) {
             // GaussDB/金仓的布尔位串按 't'/'f' 返回，保持布尔语义；位宽大于 1 的列是位字段而不是布尔。
             return payload[0] == 't';
@@ -6732,7 +6753,6 @@ public final class DbxJdbcPlugin {
             return payload[0];
         }
         String bitString = bitStringFromPayload(payload, precision);
-        // 位宽不可信时 bitStringFromPayload 返回 null（不是 SQL NULL），交给通用分支保持 `0x..` 展示。
         return bitString == null ? BIT_COLUMN_UNSUPPORTED : bitString;
     }
 

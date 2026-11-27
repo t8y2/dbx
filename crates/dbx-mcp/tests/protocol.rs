@@ -975,11 +975,11 @@ async fn dbx_query_advertises_read_only_annotation_and_runs_select() {
         .await
         .expect("call dbx_query");
     assert_ne!(result.is_error, Some(true), "read-only SELECT should reach the backend");
-    let captured = backend.calls.lock().expect("lock captures");
+    // Snapshot the captures so the lock is released before the closing await
+    // (clippy::await_holding_lock does not accept an explicit `drop` here).
+    let captured = backend.calls.lock().expect("lock captures").clone();
     assert_eq!(captured.len(), 1);
     assert_eq!(captured[0]["sql"], json!("SELECT 1"));
-    // Release the capture lock before awaiting (clippy::await_holding_lock).
-    drop(captured);
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();

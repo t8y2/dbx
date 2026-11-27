@@ -134,30 +134,35 @@ pub fn attached_name_from_attach_sql(sql: &str) -> Option<String> {
 /// full parser (`ATTACH E'...'`, an expression, ...).
 ///
 /// DuckDB accepts `ATTACH [DATABASE] [IF NOT EXISTS] '<target>' [AS alias]`;
-/// the target is always a single-quoted literal.
+/// the target is always a single-quoted literal. Comments count as whitespace
+/// between tokens, so `ATTACH/**/'x.duckdb'` is the same statement.
 pub fn attached_target_from_attach_sql(sql: &str) -> Option<String> {
     let trimmed = strip_leading_comments(sql);
     if !is_attach_statement(trimmed) {
         return None;
     }
-    let rest = trimmed["ATTACH".len()..].trim_start();
-    let rest = strip_keyword(rest, "DATABASE").unwrap_or(rest).trim_start();
+    let rest = strip_leading_comments(&trimmed["ATTACH".len()..]);
+    let rest = strip_keyword(rest, "DATABASE").map(strip_leading_comments).unwrap_or(rest);
     let rest = match strip_keyword(rest, "IF") {
         Some(after_if) => {
-            let after_not = strip_keyword(after_if.trim_start(), "NOT")?;
-            strip_keyword(after_not.trim_start(), "EXISTS")?
+            let after_not = strip_keyword(strip_leading_comments(after_if), "NOT")?;
+            strip_keyword(strip_leading_comments(after_not), "EXISTS")?
         }
         None => rest,
     };
-    parse_single_quoted_literal(rest.trim_start())
+    parse_single_quoted_literal(strip_leading_comments(rest))
 }
 
-/// True when the statement's first word is `ATTACH`; leading comments are
+/// True when the statement's first token is `ATTACH`; leading comments are
 /// skipped so `-- note\nATTACH ...` is still recognized.
+///
+/// The keyword is matched as a whole token, not as a whitespace-delimited word:
+/// `ATTACH'db.duckdb'` and `ATTACH/**/'db.duckdb'` are valid DuckDB and must
+/// not slip past a guard that splits on whitespace only.
 pub fn is_attach_statement(sql: &str) -> bool {
     let trimmed = strip_leading_comments(sql);
-    let first_word = trimmed.split(|ch: char| ch.is_whitespace() || ch == ';').next().unwrap_or_default();
-    first_word.eq_ignore_ascii_case("ATTACH")
+    let end = trimmed.find(|ch: char| !(ch.is_alphanumeric() || ch == '_')).unwrap_or(trimmed.len());
+    trimmed[..end].eq_ignore_ascii_case("ATTACH")
 }
 
 fn strip_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
@@ -373,5 +378,24 @@ mod tests {
         assert_eq!(attached_target_from_attach_sql("ATTACH 'unterminated"), None);
         assert!(is_attach_statement("  -- note\nATTACH 'x.db'"));
         assert!(!is_attach_statement("CREATE TABLE attached (id INT)"));
+    }
+
+    #[test]
+    fn attach_keyword_is_matched_as_a_token() {
+        // DuckDB accepts no whitespace between the keyword and the literal, and
+        // comments count as whitespace between tokens.
+        assert!(is_attach_statement("ATTACH'x.duckdb' AS x"));
+        assert!(is_attach_statement("ATTACH/**/'x.duckdb' AS x"));
+        assert!(is_attach_statement("attach/*c*/ 'x.duckdb'"));
+        assert_eq!(attached_target_from_attach_sql("ATTACH/**/'x.duckdb' AS x"), Some("x.duckdb".to_string()));
+        assert_eq!(
+            attached_target_from_attach_sql("ATTACH/*c*/DATABASE/*c*/IF/*c*/NOT/*c*/EXISTS/*c*/'x.duckdb'"),
+            Some("x.duckdb".to_string())
+        );
+        // Words that merely start with ATTACH (or quotes that contain it) are
+        // not statements.
+        assert!(!is_attach_statement("ATTACHED 'x.duckdb' AS x"));
+        assert!(!is_attach_statement("'ATTACH' AS x"));
+        assert!(!is_attach_statement(""));
     }
 }

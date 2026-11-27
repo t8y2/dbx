@@ -80,14 +80,21 @@ pub fn names_a_local_file_target(config: &ConnectionConfig) -> bool {
 ///
 /// UNC/WSL targets are refused as a family instead of being compared: the
 /// sqlite driver opens them through its network path handling
-/// (`dbx_drivers::db::sqlite::is_network_path`), and the loopback members of
-/// that family address this machine's own drives — `\\localhost\c$`, the WSL
+/// (`dbx_drivers::db::sqlite::is_network_path`), which rewrites the host into a
+/// `file:` URI opened with `SQLITE_OPEN_URI`. The loopback members of that
+/// family address this machine's own drives — `\\localhost\c$`, the WSL
 /// `\\wsl.localhost\<distro>\mnt\c` mount, or the machine's own `\\<host>` share.
 /// They canonicalize to `\\?\UNC\...`, which never equals the drive-letter
 /// configuration path, so a comparison cannot catch them; and an unreachable
 /// share canonicalizes to nothing at all, which would silently read as "not the
 /// configuration database". Which remote host is this machine is not decidable
 /// from the path, so the guard fails closed here.
+///
+/// The driver predicate is not gated on Windows, so this rule is not either:
+/// on POSIX any host containing `wsl$`/`wsl.localhost`, or starting with `//`,
+/// is still opened as a URI, and SQLite ignores the query and the fragment —
+/// `<config>?wsl$` opens the real configuration database. Refusing the whole
+/// family keeps the guard from having to reimplement SQLite's URI parser.
 pub fn ensure_mcp_target_allowed(config_db_path: &Path, config: &ConnectionConfig) -> Result<(), String> {
     if !uses_local_file_target(config.db_type) {
         return Ok(());
@@ -130,10 +137,13 @@ pub fn ensure_mcp_target_allowed(config_db_path: &Path, config: &ConnectionConfi
 enum ForbiddenTarget {
     /// The target resolves to the configuration database or one of its sidecars.
     ConfigDb,
-    /// A UNC/WSL form the guard cannot compare against a drive path. Refused as
-    /// a family because its message is different: the target may be a perfectly
-    /// legitimate SMB/WSL database, not the configuration database itself.
+    /// A UNC/WSL or driver-URI form the guard cannot compare against a local
+    /// path. Refused as a family because its message is different: the target
+    /// may be a perfectly legitimate SMB/WSL database, not the configuration
+    /// database itself.
     NetworkShare,
+    /// A path-shaped target that has no canonical form in this process.
+    Unresolved,
 }
 
 /// Whether a connection target/reference names the configuration database.
@@ -144,6 +154,7 @@ fn host_targets_config_db(config_db_path: &Path, host: &str) -> Option<Forbidden
     match resolve_local_target(host) {
         LocalTarget::NetworkShare => Some(ForbiddenTarget::NetworkShare),
         LocalTarget::File(target) => is_config_db_path(config_db_path, &target).then_some(ForbiddenTarget::ConfigDb),
+        LocalTarget::Unresolved => Some(ForbiddenTarget::Unresolved),
         LocalTarget::NotAPath => None,
     }
 }
@@ -155,12 +166,17 @@ fn config_db_forbidden(reason: ForbiddenTarget) -> String {
         ForbiddenTarget::ConfigDb => format!(
             "{CONFIG_DB_PATH_FORBIDDEN}: MCP connections cannot target DBX's own configuration database, which stores DBX's settings and credentials."
         ),
-        // Windows only: the sqlite driver opens `//host/share` as a UNC URI, so
-        // a loopback share aliases this machine's drives. Say that instead of
-        // pretending the target was the configuration database — the refusal is
-        // about an unverifiable path family, not about this specific file.
+        // The sqlite driver opens these through its URI branch, so they can
+        // alias this machine's drives. Say that instead of pretending the
+        // target was the configuration database — the refusal is about an
+        // unverifiable path family, not about this specific file.
         ForbiddenTarget::NetworkShare => format!(
-            "{CONFIG_DB_PATH_FORBIDDEN}: MCP does not allow network (UNC/WSL) database paths on Windows. They may alias this machine's own drives and cannot be verified against the local configuration database."
+            "{CONFIG_DB_PATH_FORBIDDEN}: MCP does not allow network (UNC), WSL or double-slash database paths. They are opened through SQLite's URI handling and cannot be verified against the local configuration database."
+        ),
+        // Fail closed: an unresolvable path cannot be proven harmless, and this
+        // connection is only reachable through MCP.
+        ForbiddenTarget::Unresolved => format!(
+            "{CONFIG_DB_PATH_FORBIDDEN}: MCP cannot resolve this local database path in the MCP process, so it cannot rule out DBX's own configuration database. Use an absolute path whose parent directory exists."
         ),
     }
 }
@@ -179,17 +195,23 @@ fn is_config_db_path(config_db_path: &Path, target: &Path) -> bool {
     };
     let target_name = target_name.to_string_lossy();
     let prefix = format!("{}-", db_name.to_string_lossy());
-    // Windows file systems are case-insensitive; elsewhere the exact bytes are
-    // what the driver will open.
-    if cfg!(windows) {
+    if case_insensitive_paths() {
         target_name.to_lowercase().starts_with(&prefix.to_lowercase())
     } else {
         target_name.starts_with(&prefix)
     }
 }
 
+/// Windows file systems and macOS's default volume format compare file names
+/// case-insensitively, so `DBX.DB-WAL` can be the same file as `dbx.db-wal`
+/// there. Linux file systems do not, and the guard must not refuse an unrelated
+/// file that merely differs in case.
+fn case_insensitive_paths() -> bool {
+    cfg!(any(windows, target_os = "macos"))
+}
+
 fn same_path(left: &Path, right: &Path) -> bool {
-    if cfg!(windows) {
+    if case_insensitive_paths() {
         left.to_string_lossy().eq_ignore_ascii_case(&right.to_string_lossy())
     } else {
         left == right
@@ -197,34 +219,45 @@ fn same_path(left: &Path, right: &Path) -> bool {
 }
 
 /// How a connection `host` (or saved attachment / `ATTACH` target) resolves.
+#[derive(Debug, PartialEq, Eq)]
 enum LocalTarget {
     /// A local file the embedded driver opens directly, canonicalized.
     File(PathBuf),
     /// Not a path this guard can compare: JDBC URLs, `file://` URIs and socket
-    /// names are not files the embedded drivers open through the URI flags, and
-    /// a path whose existing ancestors cannot be resolved (an offline drive, a
-    /// missing cwd) has no canonical form to compare against.
+    /// names are not files the embedded drivers open through the URI flags.
     NotAPath,
     /// A UNC/WSL share form that can alias one of this machine's own drives.
     /// Refused by the caller.
     NetworkShare,
+    /// A host that reads as a file system path but has no canonical form in
+    /// this process (a missing ancestor for the whole chain, an unavailable
+    /// cwd). Refused by the caller: the guard cannot prove it is not the
+    /// configuration database.
+    Unresolved,
 }
 
-/// Whether `host` is a UNC/WSL form that can alias a local drive
-/// (`\\localhost\c$`, `\\wsl.localhost\<distro>\mnt\c`, `\\<hostname>\c$`).
+/// Whether `host` is a form the sqlite driver opens through its network-path
+/// branch (`dbx_drivers::db::sqlite::is_network_path`), which rewrites it into
+/// a `file:` URI opened with `SQLITE_OPEN_URI`.
 ///
-/// Decided on the raw string, before canonicalization: an unreachable share
-/// canonicalizes to nothing, and that must not read as "not the config DB".
-/// The predicate is the driver's own, so the two cannot drift apart. POSIX
-/// needs no such rule — `//server/share` is an ordinary path there and
-/// `canonicalize` collapses it to a normal absolute path.
-fn is_local_drive_alias(host: &str) -> bool {
-    cfg!(windows) && crate::db::sqlite::is_network_path(host)
+/// Decided on the raw string, before canonicalization, on every platform: the
+/// driver predicate has no OS gate, so a POSIX host such as `<config>?wsl$` is
+/// opened as `file:<config>?…`, and SQLite ignores unknown query parameters and
+/// the fragment — the literal string names no file, yet the real one is opened.
+/// The predicate is the driver's own, so the two cannot drift apart.
+fn is_driver_network_path(host: &str) -> bool {
+    crate::db::sqlite::is_network_path(host)
 }
 
 /// Resolves a connection `host` the same way the drivers do (tilde expansion,
 /// relative to the process cwd) and canonicalizes it.
 fn resolve_local_target(host: &str) -> LocalTarget {
+    resolve_local_target_with_cwd(host, std::env::current_dir().ok().as_deref())
+}
+
+/// [`resolve_local_target`] with an explicit cwd, so the fail-closed behaviour
+/// for an unavailable cwd is testable on every platform.
+fn resolve_local_target_with_cwd(host: &str, cwd: Option<&Path>) -> LocalTarget {
     let host = host.trim();
     // `file:` URIs stay unresolvable here on purpose: the sqlite driver only
     // sets `SQLITE_OPEN_URI` for `is_network_path` hosts, so a `file:///...`
@@ -233,19 +266,22 @@ fn resolve_local_target(host: &str) -> LocalTarget {
     if host.is_empty() || host.contains("://") || host.starts_with("jdbc:") {
         return LocalTarget::NotAPath;
     }
-    if is_local_drive_alias(host) {
+    if is_driver_network_path(host) {
         return LocalTarget::NetworkShare;
     }
     let path = PathBuf::from(expand_tilde(host));
     let absolute = if path.is_absolute() {
         path
     } else {
-        let Ok(cwd) = std::env::current_dir() else {
-            return LocalTarget::NotAPath;
+        let Some(cwd) = cwd else {
+            // Fail closed: a relative path with no cwd cannot be compared.
+            return LocalTarget::Unresolved;
         };
         cwd.join(path)
     };
-    canonicalize_allow_missing(&absolute).map_or(LocalTarget::NotAPath, LocalTarget::File)
+    // Fail closed as well: without a canonical form the guard cannot prove the
+    // target differs from the configuration database.
+    canonicalize_allow_missing(&absolute).map_or(LocalTarget::Unresolved, LocalTarget::File)
 }
 
 /// Canonicalizes `path`, tolerating a final component that does not exist yet.
@@ -466,7 +502,6 @@ mod tests {
         assert!(error.starts_with(CONFIG_DB_PATH_FORBIDDEN), "{error}");
     }
 
-    #[cfg(windows)]
     #[test]
     fn refuses_network_shares_with_a_network_path_message() {
         // The refusal is about an unverifiable path family, not about having
@@ -477,12 +512,82 @@ mod tests {
         let error =
             ensure_mcp_target_allowed(&config_db, &sqlite_connection(r"\\fileserver\share\dbx.db")).unwrap_err();
         assert!(error.starts_with(CONFIG_DB_PATH_FORBIDDEN), "{error}");
-        assert!(error.contains("network (UNC/WSL)"), "{error}");
+        assert!(error.contains("network (UNC)"), "{error}");
 
         // A real configuration-database target keeps the original message.
         let target = config_db.to_string_lossy().into_owned();
         let error = ensure_mcp_target_allowed(&config_db, &sqlite_connection(&target)).unwrap_err();
         assert!(error.contains("own configuration database"), "{error}");
+    }
+
+    #[test]
+    fn classifies_driver_network_paths_on_every_platform() {
+        // The sqlite driver predicate is not gated on Windows, so the guard
+        // must not be either; this runs in Linux CI where the Windows-only
+        // guard tests would otherwise be skipped.
+        for host in [
+            r"\\fileserver\share\dbx.db",
+            "//localhost/c$/Users/me/dbx.db",
+            r"\\?\UNC\server\share\dbx.db",
+            "/data/config.db?wsl$",
+            "/data/config.db#wsl.localhost",
+            r"\\wsl$\Ubuntu\mnt\c\dbx.db",
+        ] {
+            assert!(is_driver_network_path(host), "{host}");
+        }
+        for host in ["/data/app.db", "reporting.db", "jdbc:h2:file:/data/example", "file:///data/example", ""] {
+            assert!(!is_driver_network_path(host), "{host}");
+        }
+    }
+
+    #[test]
+    fn rejects_uri_suffixes_that_sqlite_ignores() {
+        // Regression: the driver rewrites any host containing `wsl$` or
+        // `wsl.localhost` into a `file:` URI and SQLite ignores the query and
+        // the fragment, so `<config>?wsl$` opens the configuration database
+        // while the literal string names nothing. This must be refused on
+        // POSIX too, where the Windows-only gate used to let it through.
+        let directory = temp_dir();
+        let config_db = directory.path().join("dbx.db");
+        let config = config_db.to_string_lossy();
+        for host in [
+            format!("{config}?wsl$"),
+            format!("{config}#wsl.localhost"),
+            format!("{config}?wsl$#wsl.localhost"),
+            format!("{config}-wal?wsl$"),
+        ] {
+            let error = ensure_mcp_target_allowed(&config_db, &sqlite_connection(&host)).unwrap_err();
+            assert!(error.starts_with(CONFIG_DB_PATH_FORBIDDEN), "{host}: {error}");
+        }
+    }
+
+    #[test]
+    fn fails_closed_without_a_resolvable_cwd() {
+        // An unavailable cwd leaves a relative target with no canonical form;
+        // the guard must refuse rather than read it as "not the config DB".
+        assert_eq!(resolve_local_target_with_cwd("app.db", None), LocalTarget::Unresolved);
+        let directory = temp_dir();
+        assert!(matches!(resolve_local_target_with_cwd("app.db", Some(directory.path())), LocalTarget::File(_)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fails_closed_on_a_missing_drive() {
+        // A path on a drive that does not exist has no ancestor to canonicalize,
+        // so it cannot be compared with the configuration path.
+        let directory = temp_dir();
+        let config_db = directory.path().join("dbx.db");
+        let Some(root) = ["Q:", "R:", "S:", "T:", "U:", "V:", "W:", "X:", "Y:", "Z:"]
+            .map(PathBuf::from)
+            .into_iter()
+            .find(|root| !root.exists())
+        else {
+            return;
+        };
+        let host = root.join("dbx").join("app.db");
+        let error = ensure_mcp_target_allowed(&config_db, &sqlite_connection(&host.to_string_lossy())).unwrap_err();
+        assert!(error.starts_with(CONFIG_DB_PATH_FORBIDDEN), "{error}");
+        assert!(error.contains("cannot resolve"), "{error}");
     }
 
     #[test]
@@ -502,7 +607,6 @@ mod tests {
         assert!(!names_a_local_file_target(&duck));
     }
 
-    #[cfg(windows)]
     #[test]
     fn rejects_unc_aliases_of_this_machine() {
         let directory = temp_dir();
@@ -526,7 +630,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
     #[test]
     fn rejects_unc_aliases_in_saved_attachments_and_init_scripts() {
         let directory = temp_dir();
@@ -548,13 +651,16 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn allows_double_slash_paths_on_posix() {
-        // Outside Windows `//x` is an ordinary path with no drive aliasing, so
-        // the UNC rule must not reject it. `display()` already yields an
-        // absolute path on POSIX, so prefixing one slash gives `//tmp/...`.
+    fn refuses_double_slash_paths_on_posix() {
+        // The sqlite driver's network-path predicate has no OS gate, so a
+        // `//`-prefixed host is opened through its URI branch on POSIX as well
+        // and the literal string is not what gets opened. `display()` already
+        // yields an absolute path on POSIX, so prefixing one slash gives
+        // `//tmp/...`.
         let directory = temp_dir();
         let config_db = directory.path().join("dbx.db");
         let host = format!("/{}/app.db", directory.path().display());
-        assert!(ensure_mcp_target_allowed(&config_db, &sqlite_connection(&host)).is_ok(), "{host}");
+        let error = ensure_mcp_target_allowed(&config_db, &sqlite_connection(&host)).unwrap_err();
+        assert!(error.starts_with(CONFIG_DB_PATH_FORBIDDEN), "{host}: {error}");
     }
 }

@@ -47,9 +47,13 @@ async fn saved_connections_cannot_reach_the_config_database() {
 
     let storage = Storage::open(&config_db).await.unwrap();
     // Saved through the desktop path, so the MCP mutation guard never sees them.
+    // `config-uri` is the same file reached through a URI suffix the sqlite
+    // driver ignores (`file:<path>?wsl$`), so it must be refused as well.
+    let uri_target = std::path::PathBuf::from(format!("{}?wsl$", config_db.display()));
     storage
         .save_connections(&[
             connection("protected", &config_db, None),
+            connection("config-uri", &uri_target, None),
             connection("attached", &sibling, Some(&config_db)),
             connection("allowed", &sibling, None),
         ])
@@ -77,9 +81,10 @@ async fn saved_connections_cannot_reach_the_config_database() {
     let listed_text = result_text(&listed);
     assert!(listed_text.contains("allowed"), "{listed_text}");
     assert!(!listed_text.contains("protected"), "{listed_text}");
+    assert!(!listed_text.contains("config-uri"), "{listed_text}");
     assert!(!listed_text.contains("attached"), "{listed_text}");
 
-    for id in ["protected", "attached"] {
+    for id in ["protected", "config-uri", "attached"] {
         let denied = client
             .peer()
             .call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(

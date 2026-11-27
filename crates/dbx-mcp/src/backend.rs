@@ -352,13 +352,6 @@ pub trait DbxBackend: Send + Sync {
         false
     }
 
-    /// Absolute path of DBX's configuration database when the backend can
-    /// resolve it. MCP refuses connections (and listings) that target this file:
-    /// it stores `mcp_global_policy`, so letting an agent reach it would let the
-    /// agent rewrite the policy that constrains it (#9108).
-    fn config_db_path(&self) -> Option<std::path::PathBuf> {
-        None
-    }
     async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
         let _ = entry;
         Err("Query history is not supported by this backend.".to_string())
@@ -1990,18 +1983,15 @@ impl DbxBackend for WebBackend {
             .map_err(|error| format!("Invalid connection list response: {error}"))
     }
 
-    /// The DBX Web process owns the real data directory, but it normally
-    /// resolves to the same per-user location this process sees. Use that path
-    /// when it is available so listings and resolution are filtered here too.
-    /// When it is not (portable/`DBX_DATA_DIR` installs), the boundary is
-    /// [`ConfigDbBoundary::Remote`]: every MCP-marked route on the Web server
-    /// re-checks the target against the database it actually owns, so an
-    /// unresolvable local path never weakens the guarantee.
+    /// The Web server owns the configuration database, so this process never
+    /// trusts its own path resolution for the boundary: a standalone MCP
+    /// process can compute a different data directory (`DBX_DATA_DIR`, portable
+    /// installs) than the server it talks to. Every MCP-marked Web route
+    /// re-checks the target against the database the server actually owns
+    /// (`/api/connection/connect`, `/api/schema/*`, `/api/query/*`, docs), so
+    /// the boundary is always [`ConfigDbBoundary::Remote`] here.
     fn config_db_boundary(&self) -> ConfigDbBoundary {
-        match crate::paths::storage_db_path() {
-            Ok(path) => ConfigDbBoundary::Local(path),
-            Err(_) => ConfigDbBoundary::Remote,
-        }
+        ConfigDbBoundary::Remote
     }
 
     async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {

@@ -682,6 +682,32 @@ mod tests {
     }
 
     #[test]
+    fn network_path_uri_reaches_the_file_behind_wsl_suffixes() {
+        // Driver-side half of the MCP target guard contract (#9108): a host
+        // containing `wsl$`/`wsl.localhost` is rewritten into a `file:` URI, and
+        // SQLite ignores the query and the fragment. The string names no file,
+        // yet the real database behind it is opened — on POSIX as well, which is
+        // why the guard must classify these forms without an OS gate.
+        let path = std::env::temp_dir().join(format!("dbx-wsl-uri-{}.db", uuid::Uuid::new_v4()));
+        let real = path.to_string_lossy().into_owned();
+        {
+            let conn = open_sqlite_connection(&real, true).expect("create probe database");
+            conn.execute_batch("CREATE TABLE probe (v INTEGER); INSERT INTO probe VALUES (42);")
+                .expect("seed probe database");
+        }
+        for suffix in ["?wsl$", "#wsl.localhost"] {
+            let hostile = format!("{real}{suffix}");
+            assert!(is_network_path(&hostile), "{hostile}");
+            let conn = open_sqlite_connection(&hostile, false).expect("open through the URI branch");
+            let value: i64 = conn.query_row("SELECT v FROM probe", [], |row| row.get(0)).expect("read real file");
+            assert_eq!(value, 42, "{hostile}");
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{real}-wal"));
+        let _ = std::fs::remove_file(format!("{real}-shm"));
+    }
+
+    #[test]
     fn persistent_attachments_require_a_file_backed_plaintext_main_database() {
         assert!(validate_persistent_attachments("/tmp/main.sqlite", "", false).is_ok());
         assert!(validate_persistent_attachments("/tmp/main.sqlite", "", true).is_ok());

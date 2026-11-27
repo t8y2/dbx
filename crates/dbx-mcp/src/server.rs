@@ -4915,9 +4915,11 @@ impl DbxMcpServer {
         let access = self.backend.load_mcp_access_policy().await?;
         let connections = self.backend.load_connections().await?;
         let group_paths = self.load_group_paths_for_policy(&policy).await?;
-        // #9108: never advertise a configuration-database connection, even when a
-        // policy would allow it. Resolution refuses it too; filtering here keeps
-        // the name and id out of listings and resources.
+        // #9108: never advertise a configuration-database connection when this
+        // process can resolve the boundary itself. Resolution refuses it either
+        // way, and the Web server re-checks every MCP-marked route it forwards,
+        // so a `Remote` boundary keeps the server-side guarantee without
+        // trusting a data directory this process may not share.
         let boundary = self.backend.config_db_boundary();
         Ok(connections
             .into_iter()
@@ -5015,8 +5017,8 @@ impl DbxMcpServer {
         &self,
         connection: &dbx_core::models::connection::ConnectionConfig,
     ) -> Result<(), CallToolResult> {
-        // The boundary is re-read per call so a Web backend that loses its local
-        // path resolution does not keep an older, narrower decision.
+        // The boundary is re-read per call so a backend whose data directory
+        // changes does not keep an older decision.
         match self.backend.config_db_boundary() {
             ConfigDbBoundary::Local(config_db_path) => {
                 mcp_target_guard::ensure_mcp_target_allowed(&config_db_path, connection).map_err(guard_refusal_error)
@@ -5093,23 +5095,6 @@ impl DbxMcpServer {
         } else {
             PluginToolsMode::Lazy
         }
-    }
-
-    /// #9108: a saved connection that targets DBX's configuration database (or
-    /// restores it as an attached database) would let any MCP tool read or
-    /// rewrite the policy meant to constrain the agent. The mutation guard only
-    /// sees connections created through MCP, so resolution re-checks every saved
-    /// configuration, including ones created in the desktop UI.
-    #[allow(clippy::result_large_err)]
-    fn ensure_connection_target_allowed(
-        &self,
-        connection: &dbx_core::models::connection::ConnectionConfig,
-    ) -> Result<(), CallToolResult> {
-        let Some(config_db_path) = self.backend.config_db_path() else {
-            return Ok(());
-        };
-        mcp_target_guard::ensure_mcp_target_allowed(&config_db_path, connection)
-            .map_err(|_| config_db_forbidden_error())
     }
 
     /// Both plugin dispatch paths share the resolved resource level. A global

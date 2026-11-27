@@ -6492,6 +6492,9 @@ export default withEnglishFallback({
     packageProcedureAtLine: "Procedimento {name}, linha {line}",
     selectedObjects: "{count} objetos selecionados",
     dropPackageBodyHint: "Ao excluir a especificação do pacote, o corpo do pacote existente também será excluído.",
+    packageProcedureMetadataUnavailable: "Não foi possível validar o procedimento no pacote ou ler os parâmetros. Reabra a caixa de diálogo e tente novamente.",
+    packageProcedureNotCallable: "Não é possível chamar este procedimento de fora do pacote. Verifique se a declaração dele corresponde à especificação do pacote no banco de dados.",
+    packageProcedureOverloaded: "Este procedimento tem várias sobrecargas. Escreva uma chamada PL/SQL no editor SQL, especificando qual sobrecarga executar.",
   },
   postgresForeignTable: {
     tableKind: "Tipo de tabela",

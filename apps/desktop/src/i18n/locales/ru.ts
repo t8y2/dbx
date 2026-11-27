@@ -6964,6 +6964,9 @@ export default withEnglishFallback({
     packageProcedureAtLine: "Процедура {name}, строка {line}",
     selectedObjects: "Выбрано объектов: {count}",
     dropPackageBodyHint: "При удалении спецификации пакета также будет удалено существующее тело пакета.",
+    packageProcedureMetadataUnavailable: "Не удалось проверить процедуру в пакете или прочитать параметры. Пожалуйста, откройте диалоговое окно заново и повторите попытку.",
+    packageProcedureNotCallable: "Невозможно вызвать эту процедуру извне пакета. Убедитесь, что её объявление соответствует спецификации пакета в базе данных.",
+    packageProcedureOverloaded: "Эта процедура имеет несколько перегрузок. Напишите вызов PL/SQL в редакторе SQL, указав перегрузку, которую нужно выполнить.",
   },
   postgresForeignTable: {
     tableKind: "Тип таблицы",

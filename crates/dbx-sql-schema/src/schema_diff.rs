@@ -12856,7 +12856,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn mysql_comment_only_change_keeps_default_null_unquoted() {
         // MariaDB reports `DEFAULT NULL` as the bare token `NULL`. A
         // comment-only sync must keep the keyword, not rewrite it as the
@@ -12878,6 +12877,7 @@ mod tests {
         assert!(!sql.contains("DEFAULT 'NULL'"), "NULL must stay unquoted: {sql}");
     }
 
+    #[test]
     fn default_literal_uses_mysql_extra_to_tell_an_expression_from_a_string() {
         use DialectKind::Mysql;
 

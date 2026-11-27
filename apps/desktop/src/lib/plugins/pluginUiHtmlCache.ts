@@ -8,6 +8,9 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { COMPONENT_PLUGINS_UPDATED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 export interface PluginUiHtml {
+  /** Inlined ui document. Emptied once `sandboxDoc` is built (see
+   * `htmlReleased`): a panel plugin's ui is tens of MB, and keeping both this
+   * and the sandbox document doubles the resident cost of every cached plugin. */
   html: string;
   entryDirectory: string;
   /** Final sandbox document (html + CSP/SDK/theme injection); built lazily once
@@ -17,11 +20,37 @@ export interface PluginUiHtml {
    * `unsafe-eval` grant it was built with: that grant is a user setting that can
    * flip while the html stays valid, and it changes the CSP. */
   sandboxDoc?: { allowUnsafeEval: boolean; doc: string };
+  /** `html` was dropped after the sandbox document was built from it. */
+  htmlReleased?: boolean;
 }
 
 const cache = new Map<string, PluginUiHtml>();
 const LIMIT = 4;
 let cacheGeneration = 0;
+
+/**
+ * The sandbox document for `entry` under the given `unsafe-eval` grant, built
+ * from the inlined html on first use. The html is released right after, so a
+ * cached plugin keeps one multi-megabyte string instead of two.
+ *
+ * Returns `undefined` when the html is already released and the cached document
+ * was built under the other grant (the setting flipped since). The caller must
+ * drop the entry with `invalidatePluginUiHtml` and reload it.
+ */
+export function getSandboxDocument(entry: PluginUiHtml, allowUnsafeEval: boolean, build: (html: string) => string): string | undefined {
+  if (entry.sandboxDoc && entry.sandboxDoc.allowUnsafeEval === allowUnsafeEval) return entry.sandboxDoc.doc;
+  if (entry.htmlReleased) return undefined;
+  const doc = build(entry.html);
+  entry.sandboxDoc = { allowUnsafeEval, doc };
+  entry.html = "";
+  entry.htmlReleased = true;
+  return doc;
+}
+
+/** Drop one cached entry (e.g. its released html can no longer serve a changed grant). */
+export function invalidatePluginUiHtml(key: string): void {
+  cache.delete(key);
+}
 
 export function getCachedPluginUiHtml(key: string): PluginUiHtml | undefined {
   const hit = cache.get(key);

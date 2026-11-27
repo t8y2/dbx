@@ -11457,6 +11457,8 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "补全 FROM 或 JOIN 表名时自动添加别名。",
     batchColumnSelectionIncludeComments: "批量插入字段时包含注释",
     batchColumnSelectionIncludeCommentsDescription: "从补全列表批量插入 SELECT 字段时，附带数据库字段注释。",
+    autoKeywordCase: "输入时自动转换关键字大小写",
+    autoKeywordCaseDescription: "在输入空格、逗号/括号等单个标点或换行时触发：如果光标前刚输入的单词是关键字，就按“SQL 格式化”设置里的关键字大小写（大写/小写）就地转换。不会重新排版，也不会改动标识符、字符串或注释。",
     sqlServerSpaceConfirmsCompletion: "空格确认补全（SQL Server 习惯）",
     sqlServerSpaceConfirmsCompletionDescription: "补全列表打开时，按空格直接采用选中的关键字、表名或列名，并保留空格。Enter 和 Tab 保持原有行为。",
     functionCompletionIncludeParams: "函数补全带参数示例",

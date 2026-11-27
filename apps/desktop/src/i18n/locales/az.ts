@@ -8588,6 +8588,9 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "FROM və ya JOIN daxilində cədvəl tamamlaması seçilərkən order_items AS oi kimi yaradılmış ləqəb daxil et.",
     batchColumnSelectionIncludeComments: "Seçilmiş sütunları daxil edərkən şərhləri əlavə et",
     batchColumnSelectionIncludeCommentsDescription: "Tamamlama siyahısından SELECT sütunlarını toplu şəkildə daxil edərkən verilənlər bazası sütunlarının şərhlərini əlavə et.",
+    autoKeywordCase: "Yazarkən açar söz hərf registrini avtomatik çevir",
+    autoKeywordCaseDescription:
+      "Boşluq, tək durğu işarəsi (vergül, mötərizə və s.) və ya sətir keçidi daxil etdikdə işə düşür: yenicə yazdığınız söz açar sözdürsə, SQL formatlayıcı ayarındakı hərf registrinə uyğun olaraq yerindəcə çevrilir. Bəyanatı yenidən formatlamır, identifikatorlara, sətirlərə və şərhlərə toxunmur.",
     sqlServerSpaceConfirmsCompletion: "Boşluqla tamamlamanı təsdiqlə (SQL Server üslubu)",
     sqlServerSpaceConfirmsCompletionDescription: "Tamamlama siyahısı açıqkən boşluq düyməsini basmaq seçilmiş açar sözü, cədvəli və ya sütunu təsdiqləyir və boşluğu saxlayır. Enter və Tab əvvəlki kimi işləyir.",
     functionCompletionIncludeParams: "Funksiya tamamlamasında parametr nümunələrini daxil et",

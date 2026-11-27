@@ -52,6 +52,10 @@ export interface SqlFormatterEngine {
 
 let enginePromise: Promise<SqlFormatterEngine | null> | null = null;
 
+// Resolved value of `enginePromise`, for callers that must classify tokens
+// synchronously (typing-time keyword casing) and cannot await the first import.
+let loadedEngine: SqlFormatterEngine | null = null;
+
 async function importEngine(): Promise<SqlFormatterEngine | null> {
   try {
     // Literal specifiers only: Vite cannot statically analyse a computed path,
@@ -119,10 +123,23 @@ export function loadEngine(): Promise<SqlFormatterEngine | null> {
     const pending = importEngine().then((engine) => engine ?? importEngine());
     enginePromise = pending;
     void pending.then((engine) => {
-      if (!engine && enginePromise === pending) enginePromise = null;
+      if (engine) loadedEngine = engine;
+      else if (enginePromise === pending) enginePromise = null;
     });
   }
   return enginePromise;
+}
+
+/**
+ * The engine if its dynamic import has already resolved, otherwise `null`.
+ *
+ * Typing-time callers (keyword case conversion on space/punctuation) cannot
+ * await a promise inside a synchronous transaction filter. They call
+ * {@link loadEngine} themselves to warm the cache and skip the current keypress;
+ * every later keypress finds the engine here.
+ */
+export function loadedSqlFormatterEngine(): SqlFormatterEngine | null {
+  return loadedEngine;
 }
 
 /**

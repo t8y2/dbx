@@ -75,7 +75,7 @@ import { statementNavigationTarget, type StatementNavigationDirection } from "@/
 
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 
-import { canFormatSqlForDatabaseType, formatSqlText, compressSqlText, type SqlFormatterDiagnostic } from "@/lib/sql/sqlFormatter";
+import { canFormatSqlForDatabaseType, formatSqlText, compressSqlText, sqlFormatDialectForDbType, type SqlFormatterDiagnostic } from "@/lib/sql/sqlFormatter";
 import { applySqlKeywordCase, loadSqlKeywordSpans } from "@/lib/sql/sqlKeywordCase";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { restoreSqlFromSourcePaste } from "@/lib/sql/sqlSourcePaste";
@@ -142,6 +142,8 @@ import { createQueryEditorMultiCursorMouseSelection } from "@/lib/editor/queryEd
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 
 import { keepQueryEditorPasteCaretOnLastContentLine } from "@/lib/editor/queryEditorClipboardPaste";
+import { createDeferredKeywordCaseQueue, createQueryEditorKeywordCaseOnTypeFilter } from "@/lib/editor/queryEditorKeywordCaseOnType";
+import { loadEngine } from "@/lib/sql/layout/internals";
 import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCaretResync";
 
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
@@ -2209,6 +2211,29 @@ const { editorIndentUnit, handleTab, handleEnter, acceptCompletionOrNextSnippetF
   enterMaxWaitMs: COMPLETION_ENTER_MAX_WAIT_MS,
 });
 
+// Warm the formatter engine as soon as typing-time keyword casing is on —
+// including a mid-session toggle — so the first keyword typed is classified
+// with the formatter's own keyword lists even in large documents, whose
+// StreamLanguage tree the filter's syntax-tree fallback cannot read.
+watch(
+  () => settingsStore.editorSettings.autoKeywordCase,
+  (enabled) => {
+    if (enabled) void loadEngine();
+  },
+  { immediate: true },
+);
+
+// A trigger typed before the engine import resolved could not be classified
+// (no engine yet, no readable syntax tree); the queue applies the authoritative
+// conversion once it resolves. Undo/redo transactions are dispatched with
+// `filter: false`, so the update listener below — not the transaction filter —
+// is what invalidates them; deferredKeywordReplacement re-validates the text.
+const deferredKeywordCases = createDeferredKeywordCaseQueue({
+  isEnabled: () => settingsStore.editorSettings.autoKeywordCase,
+  getState: () => view.value?.state ?? null,
+  dispatch: (replacement) => view.value?.dispatch({ changes: replacement, userEvent: "input.type" }),
+});
+
 function isEditorComposing(currentView: EditorViewType): boolean {
   if (imeCompositionActive) return true;
   // A real key with isComposing=false proves the IME stalled before sending
@@ -2343,6 +2368,22 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         EditorState.transactionFilter.of((transaction) => {
           if (props.hideExecutionControls || settingsStore.editorSettings.executeMode !== "current" || queryEditorSelectionLanguage() !== "sql" || !supportsExecutionTargetPicker(props.databaseType)) return transaction;
           return keepQueryEditorPasteCaretOnLastContentLine(transaction);
+        }),
+        EditorState.transactionFilter.of(
+          createQueryEditorKeywordCaseOnTypeFilter({
+            // Same language gate as the toolbar's a/A toggle: Mongo/ES/Redis
+            // documents can lex as SQL without being SQL.
+            enabled: () => queryEditorSelectionLanguage() === "sql" && settingsStore.editorSettings.autoKeywordCase,
+            keywordCase: () => settingsStore.editorSettings.sqlFormatter.keywordCase,
+            dialect: () => props.formatDialect ?? sqlFormatDialectForDbType(props.databaseType),
+            databaseType: () => props.databaseType,
+            onPending: (pending) => deferredKeywordCases.enqueue(pending),
+          }),
+        ),
+        // Undo/redo skips transaction filters, so deferred conversions are
+        // invalidated here (see deferredKeywordCases above).
+        EditorView.updateListener.of((update) => {
+          if (update.transactions.some((transaction) => transaction.isUserEvent("undo") || transaction.isUserEvent("redo"))) deferredKeywordCases.cancelAll();
         }),
         cmSearch({
           top: true,

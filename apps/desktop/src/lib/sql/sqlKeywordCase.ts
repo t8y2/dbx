@@ -1,4 +1,4 @@
-import { loadEngine } from "@/lib/sql/layout/internals";
+import { loadEngine, loadedSqlFormatterEngine } from "@/lib/sql/layout/internals";
 import { formatterLanguageForDialect, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 
 /**
@@ -114,4 +114,60 @@ export function applySqlKeywordCase(sql: string, range: { from: number; to: numb
   if (!changed) return sql.slice(from, to);
   converted += sql.slice(cursor, to);
   return converted;
+}
+
+export interface SqlKeywordWordReplacement {
+  /** Offset of the word inside the text passed to {@link casedKeywordBefore}. */
+  from: number;
+  to: number;
+  insert: string;
+}
+
+/**
+ * Replacement for the keyword word that ends `text`, or `null` when the trailing
+ * token is not a keyword or already has the requested case.
+ *
+ * Same lexer and token-type set as {@link loadSqlKeywordSpans}, so a keyword
+ * re-cased while typing always agrees with what a later format would produce.
+ * Callers pass a window that ends exactly at the caret (bounded by the current
+ * statement); only the token's last word is re-cased, because a multi-word
+ * phrase such as `GROUP BY` has already had its earlier words converted at
+ * their own boundaries while the user typed them.
+ *
+ * Synchronous by design (typing path). When the formatter engine has not been
+ * imported yet this warms the cache and returns `null`; the typing-path caller
+ * then classifies that one keystroke from the editor's syntax tree instead of
+ * waiting on the import (see queryEditorKeywordCaseOnType.ts).
+ */
+export function casedKeywordBefore(text: string, dialect: SqlFormatDialect, mode: SqlKeywordCaseMode): SqlKeywordWordReplacement | null {
+  if (!text) return null;
+  const language = formatterLanguageForDialect(dialect);
+  if (!language) return null;
+
+  const engine = loadedSqlFormatterEngine();
+  if (!engine) {
+    void loadEngine();
+    return null;
+  }
+
+  const dialectOptions = engine.dialects[language] ?? engine.dialects.sql;
+  if (!dialectOptions) return null;
+
+  const paramTypes = language === "postgresql" ? POSTGRES_BACKTICK_PARAM_TYPES : {};
+  let tokens;
+  try {
+    tokens = engine.createDialect(dialectOptions).tokenizer.tokenize(text, paramTypes);
+  } catch {
+    return null;
+  }
+
+  const last = tokens[tokens.length - 1];
+  if (!last || !KEYWORD_TOKEN_TYPES.has(last.type as string)) return null;
+  if (last.start + last.raw.length !== text.length) return null;
+
+  const word = /[\p{L}\p{N}_$#]+$/u.exec(last.raw)?.[0];
+  if (!word) return null;
+  const cased = mode === "upper" ? word.toUpperCase() : word.toLowerCase();
+  if (cased === word) return null;
+  return { from: text.length - word.length, to: text.length, insert: cased };
 }

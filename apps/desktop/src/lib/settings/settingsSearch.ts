@@ -187,6 +187,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   },
   { id: "editor-completion-spacing", category: "editor", titleKey: "settings.insertSpaceAfterCompletion", descriptionKey: "settings.insertSpaceAfterCompletionDescription", targetId: "editor" },
   { id: "editor-sqlserver-space-completion", category: "editor", titleKey: "settings.sqlServerSpaceConfirmsCompletion", descriptionKey: "settings.sqlServerSpaceConfirmsCompletionDescription", targetId: "editor", visible: sqlServerSpaceCompletionVisible },
+  { id: "editor-auto-keyword-case", category: "editor", titleKey: "settings.autoKeywordCase", descriptionKey: "settings.autoKeywordCaseDescription", targetId: "editor" },
   { id: "editor-function-completion-include-params", category: "editor", titleKey: "settings.functionCompletionIncludeParams", descriptionKey: "settings.functionCompletionIncludeParamsDescription", targetId: "editor" },
   { id: "editor-sequence-completion-enabled", category: "editor", titleKey: "settings.sequenceCompletionEnabled", descriptionKey: "settings.sequenceCompletionEnabledDescription", targetId: "editor" },
   {

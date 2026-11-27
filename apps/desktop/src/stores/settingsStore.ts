@@ -1004,6 +1004,8 @@ export interface EditorSettings {
   tableCompletionSchemaQualification: SqlTableCompletionSchemaQualification;
   insertSpaceAfterCompletion: boolean;
   sqlServerSpaceConfirmsCompletion: boolean;
+  /** Re-case the keyword just typed when a space, punctuation character or line break is entered, using `sqlFormatter.keywordCase`. */
+  autoKeywordCase: boolean;
   functionCompletionIncludeParams: boolean;
   sequenceCompletionEnabled: boolean;
   sortCompletionColumnsAlphabetically: boolean;
@@ -1459,6 +1461,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tableCompletionSchemaQualification: DEFAULT_SQL_TABLE_COMPLETION_SCHEMA_QUALIFICATION,
   insertSpaceAfterCompletion: true,
   sqlServerSpaceConfirmsCompletion: false,
+  autoKeywordCase: false,
   functionCompletionIncludeParams: true,
   sequenceCompletionEnabled: true,
   snippetTriggerKey: "tab",
@@ -2241,6 +2244,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tableCompletionSchemaQualification: normalizeSqlTableCompletionSchemaQualification(settings.tableCompletionSchemaQualification),
     insertSpaceAfterCompletion: typeof settings.insertSpaceAfterCompletion === "boolean" ? settings.insertSpaceAfterCompletion : DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion,
     sqlServerSpaceConfirmsCompletion: typeof settings.sqlServerSpaceConfirmsCompletion === "boolean" ? settings.sqlServerSpaceConfirmsCompletion : DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion,
+    autoKeywordCase: typeof settings.autoKeywordCase === "boolean" ? settings.autoKeywordCase : DEFAULT_EDITOR_SETTINGS.autoKeywordCase,
     functionCompletionIncludeParams: typeof settings.functionCompletionIncludeParams === "boolean" ? settings.functionCompletionIncludeParams : DEFAULT_EDITOR_SETTINGS.functionCompletionIncludeParams,
     sequenceCompletionEnabled: typeof settings.sequenceCompletionEnabled === "boolean" ? settings.sequenceCompletionEnabled : DEFAULT_EDITOR_SETTINGS.sequenceCompletionEnabled,
     snippetTriggerKey: settings.snippetTriggerKey === "space" || settings.snippetTriggerKey === "both" ? settings.snippetTriggerKey : DEFAULT_EDITOR_SETTINGS.snippetTriggerKey,
@@ -3265,6 +3269,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tableCompletionSchemaQualification !== undefined) editorSettings.value.tableCompletionSchemaQualification = normalizeSqlTableCompletionSchemaQualification(partial.tableCompletionSchemaQualification);
     if (partial.insertSpaceAfterCompletion !== undefined) editorSettings.value.insertSpaceAfterCompletion = partial.insertSpaceAfterCompletion === true;
     if (partial.sqlServerSpaceConfirmsCompletion !== undefined) editorSettings.value.sqlServerSpaceConfirmsCompletion = partial.sqlServerSpaceConfirmsCompletion === true;
+    if (partial.autoKeywordCase !== undefined) editorSettings.value.autoKeywordCase = partial.autoKeywordCase === true;
     if (partial.functionCompletionIncludeParams !== undefined) editorSettings.value.functionCompletionIncludeParams = partial.functionCompletionIncludeParams === true;
     if (partial.sequenceCompletionEnabled !== undefined) editorSettings.value.sequenceCompletionEnabled = partial.sequenceCompletionEnabled === true;
     if (partial.snippetTriggerKey !== undefined) editorSettings.value.snippetTriggerKey = partial.snippetTriggerKey === "space" || partial.snippetTriggerKey === "both" ? partial.snippetTriggerKey : "tab";

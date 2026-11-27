@@ -7212,6 +7212,14 @@ function buildJoinConditionItems(
 
 type CompletionCacheTableReference = { name: string; schema?: string | null; nameQuoted?: boolean; schemaQuoted?: boolean };
 
+export function oracleCompletionCacheKey(table: CompletionCacheTableReference, currentSchema?: string | null): string {
+  // The selected schema is a catalog name. Only identifiers written in SQL fold to uppercase.
+  const schema = table.schema ? (table.schemaQuoted ? table.schema : table.schema.toUpperCase()) : currentSchema;
+  const name = table.nameQuoted ? table.name : table.name.toUpperCase();
+  const keyPart = (identifier: string) => (/^[A-Z0-9_$#]+$/.test(identifier) ? identifier : JSON.stringify(identifier));
+  return schema ? `${keyPart(schema)}.${keyPart(name)}` : keyPart(name);
+}
+
 function oceanBaseCompletionReferenceKey(table: CompletionCacheTableReference): string {
   const schema = table.schema ? (table.schemaQuoted ? table.schema : table.schema.toUpperCase()) : null;
   const name = table.nameQuoted ? table.name : table.name.toUpperCase();

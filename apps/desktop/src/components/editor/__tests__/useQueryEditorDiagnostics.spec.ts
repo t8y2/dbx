@@ -189,6 +189,22 @@ describe("QueryEditor diagnostic scheduling ownership", () => {
     expect(buildDiagnostics).not.toHaveBeenCalled();
     expect(metadata.ensureColumnsForTable).not.toHaveBeenCalled();
   });
+  it.each([
+    ["test.Id", "TEST", "ID", false, false],
+    ['"test".Id', "test", "ID", true, false],
+    ['test."Id"', "TEST", "Id", false, true],
+  ] as const)("looks up the catalog spelling of Oracle %s before checking its columns", async (source, schema, name, schemaQuoted, nameQuoted) => {
+    const sql = `SELECT NAME FROM ${source}`;
+    const { diagnostics, metadata } = createHarness({ databaseType: "oracle", dialect: "oracle", modelValue: sql });
+    analyze.mockResolvedValue({ tables: [{ name: "Id", schema: "test", span: { start_line: 1, start_column: 18, end_line: 1, end_column: sql.length } }], columns: [] });
+    metadata.findExactSemanticDiagnosticTable.mockResolvedValue({ name, schema });
+    diagnostics.scheduleSemanticDiagnostics(0);
+    await vi.advanceTimersByTimeAsync(0);
+    const reference = expect.objectContaining({ name, schema, nameQuoted, schemaQuoted });
+    expect(metadata.findExactSemanticDiagnosticTable).toHaveBeenCalledWith(reference, expect.anything());
+    expect(metadata.ensureColumnsForTable).toHaveBeenCalledWith(reference, undefined, expect.anything());
+  });
+
   it("preserves the unqualified quoted OceanBase reference and selected schema through metadata loading", async () => {
     const sql = 'SELECT MISSING FROM "Alias"';
     const { diagnostics, metadata } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP", modelValue: sql });

@@ -1,5 +1,5 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
-import { getSqlCompletionContext, isOraclePseudoColumnName, isOracleSystemValueName, matchesOceanBaseCompletionCacheKey } from "@/lib/sql/sqlCompletion";
+import { getSqlCompletionContext, isOraclePseudoColumnName, isOracleSystemValueName, matchesOceanBaseCompletionCacheKey, oracleCompletionCacheKey } from "@/lib/sql/sqlCompletion";
 import { tokenizeSqlSemantic, tokenIsIdentifier } from "@/lib/sql/semantic/tokens";
 import { executableStatementRanges, keepsOracleStyleBlockTogether, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { DBX_TDENGINE_TBNAME_COLUMN, isTdengineStableTableType } from "@/lib/table/tableEditing";
@@ -267,7 +267,7 @@ function sqlServerStatementNeedsBatchContext(sql: string): boolean {
 
 export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, schema: SqlSemanticDiagnosticSchema): SqlSemanticDiagnostic[] {
   const diagnostics: SqlSemanticDiagnostic[] = [];
-  const tables = analysis.tables.filter((table) => table.name.trim()).map((table) => (schema.databaseType === "oceanbase-oracle" && schema.sql ? oceanBaseDiagnosticTableReference(table, schema.sql) : table));
+  const tables = analysis.tables.filter((table) => table.name.trim()).map((table) => ((schema.databaseType === "oceanbase-oracle" || schema.databaseType === "oracle") && schema.sql ? oracleDiagnosticTableReference(table, schema.sql) : table));
   const knownTables = new Map<string, SqlTableReference>();
   const scopesById = scopesByIdMap(analysis.scopes);
   let tdengineStableTables: Set<string> | undefined;
@@ -305,7 +305,7 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
     if (!table) continue;
     if (schema.missingTables?.has(tableReferenceKey(table))) continue;
 
-    const columns = columnsForTable(table, schema.columnsByTable, schema.loadedColumnTables, schema.currentSchema);
+    const columns = columnsForTable(table, schema);
     if (!columns) continue;
 
     const columnNames = new Set(columns.map((item) => normalizeName(item.name)));
@@ -633,13 +633,15 @@ function statementIndexAt(sql: string, offset: number): number {
   return statementIndex;
 }
 
-export function oceanBaseDiagnosticTableReference(table: SqlTableReference, sql: string) {
+export function oracleDiagnosticTableReference(table: SqlTableReference & { nameQuoted?: boolean; schemaQuoted?: boolean }, sql: string) {
+  if (table.nameQuoted !== undefined) return table;
   const range = sqlTextSpanToOffsetRange(sql, table.span);
   const identifiers = range ? tokenizeSqlSemantic(sql.slice(range.from, range.to), "oracle").filter(tokenIsIdentifier) : [];
   return { ...table, nameQuoted: !!identifiers[table.schema ? 1 : 0]?.quote, schemaQuoted: !!table.schema && !!identifiers[0]?.quote };
 }
 
-function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, SqlCompletionColumn[]>, loadedColumnTables?: Set<string>, currentSchema?: string): SqlCompletionColumn[] | null {
+function columnsForTable(table: SqlTableReference & { nameQuoted?: boolean; schemaQuoted?: boolean }, schema: SqlSemanticDiagnosticSchema): SqlCompletionColumn[] | null {
+  const { columnsByTable, loadedColumnTables, currentSchema } = schema;
   const inlineColumns = (table as SqlTableReference & { columns?: string[] }).columns;
   if (inlineColumns && inlineColumns.length > 0) {
     return inlineColumns.map((name) => ({
@@ -647,6 +649,12 @@ function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, S
       table: table.name,
       schema: table.schema ?? undefined,
     }));
+  }
+  if (schema.databaseType === "oracle") {
+    const columns = columnsByTable.get(oracleCompletionCacheKey(table, currentSchema));
+    if (columns || table.nameQuoted || table.schemaQuoted) return columns ?? null;
+    // Standalone diagnostic callers can supply metadata under the original SQL spelling.
+    return columnsByTable.get(table.schema ? `${table.schema}.${table.name}` : table.name) ?? null;
   }
   const scopedColumns = [...columnsByTable].filter(([key]) => matchesOceanBaseCompletionCacheKey(key, table, currentSchema));
   if (scopedColumns.length > 0) return scopedColumns.length === 1 ? scopedColumns[0]![1] : null;

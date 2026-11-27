@@ -19,3 +19,7 @@ serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_ord
 sqlparser = { version = "0.62.0", features = ["visitor"] }
 unicode-width = "0.2"
 utoipa = { version = "5.5", optional = true }
+
+[dev-dependencies]
+# 内存 SQLite 供往返测试执行真实 SQL（#15448 复审）。
+rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }

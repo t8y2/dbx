@@ -226,6 +226,7 @@ import {
   dataGridRowDetailTsv,
   type DataGridCellDetail,
 } from "@/lib/dataGrid/dataGridDetail";
+import { parseDataGridWhereCondition, structuredImportColumnTypesFor } from "@/lib/dataGrid/dataGridWhereConditionParser";
 import { adjacentDataGridDetailIndex, type DataGridDetailNavigationDelta } from "@/lib/dataGrid/dataGridDetailNavigation";
 import { applyColumnFormatter, DataGridDateTimePatterns, displayTimeZoneOption, formatIoTDBTimestampEditorValue, iotdbTimestampFractionDigits, iotdbTimestampPrecision, parseIoTDBTimestampEditorValue, resolveColumnFormatter, type ColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
@@ -1513,12 +1514,25 @@ async function buildStructuredFilterCondition(rule: StructuredFilterRule): Promi
   );
 }
 
+// 导入的逐列声明类型与 columns 同序（驱动 column_types 与结果列索引对齐），
+// 解析器据此做 LIKE 文本族门控（#15448 复审）。
+function structuredImportColumnTypes(columns: readonly string[]): Array<string | undefined> {
+  return structuredImportColumnTypesFor(columns, props.result.columns, props.result.column_types);
+}
 const filterBuilder = useDataGridFilterBuilder({
   columns: filterBuilderColumnOptions,
   commentByColumn: columnCommentMap,
   createId: uuid,
   isComplete: isStructuredFilterRuleComplete,
   buildCondition: buildStructuredFilterCondition,
+  // #15320: 手输的 WHERE 条件在打开筛选器时反解析进规则行，解析失败维持原状。
+  currentWhere: () => whereFilterInput.value,
+  importFromWhere: (where, columns) =>
+    parseDataGridWhereCondition(where, columns, {
+      createId: uuid,
+      databaseType: resolvedDatabaseType.value,
+      columnTypes: structuredImportColumnTypes(columns),
+    }),
 });
 const conditionalBulkEditFilterBuilder = useDataGridFilterBuilder({
   columns: filterBuilderColumnOptions,

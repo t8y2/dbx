@@ -5268,6 +5268,211 @@ mod tests {
 
     use super::*;
 
+    mod where_import_round_trip {
+        // #15448 复审：手输 WHERE 经前端解析器导入为规则行后，网格用
+        // build_data_grid_context_filter_condition 重建条件再应用。这里在内存
+        // SQLite 上断言「可导入句的重建条件与原句返回同一结果集」；无法无损
+        // 表达的句子（列间比较 a = b、= NULL、带 _ 的 LIKE）由前端解析器整句
+        // 拒绝并保留原始 WHERE。规则的 value 形态契约由前端
+        // apps/desktop/src/lib/dataGrid/__tests__/dataGridWhereConditionParser.spec.ts
+        // 的 "imports only values the rebuilt condition reproduces unchanged"
+        // 锁定（TEXT 列保留 unquoted 字符串、数字列保留原始拼写），本模块用
+        // 同一批形态在真实 SQL 引擎上合龙两端。
+        use rusqlite::Connection;
+
+        use super::*;
+
+        fn seed_grid() -> Connection {
+            let connection = Connection::open_in_memory().expect("open in-memory sqlite");
+            connection
+                .execute_batch(
+                    "CREATE TABLE grid (task_id INTEGER, order_no TEXT, name TEXT, status TEXT);
+                     INSERT INTO grid (task_id, order_no, name, status) VALUES
+                     (100234, 'A-1', 'abc', 'done'),
+                     (1, NULL, 'xabcx', 'open'),
+                     (2, 'B-9', '9', NULL),
+                     (3, 'C-1', 'abcx', 'done'),
+                     (1, 'D-2', 'abc', 'open'),
+                     (7, '7', '7', 'done');",
+                )
+                .expect("seed grid");
+            connection
+        }
+
+        fn round_trip_column(name: &str) -> DataGridColumnInfo {
+            let data_type = match name {
+                "task_id" => "INTEGER",
+                "order_no" | "name" | "status" => "TEXT",
+                other => panic!("unknown round-trip column {other}"),
+            };
+            column(name, data_type, true, None)
+        }
+
+        fn rebuilt_condition(
+            mode: DataGridContextFilterMode,
+            rule_column: &str,
+            value: Value,
+            values: Vec<Value>,
+        ) -> String {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Sqlite),
+                identifier_quote: None,
+                column_name: rule_column.to_string(),
+                mode,
+                value,
+                values,
+                end_value: None,
+                column_info: Some(round_trip_column(rule_column)),
+            })
+            .unwrap_or_else(|| panic!("imported rule {rule_column} {mode:?} must rebuild for sqlite"))
+        }
+
+        fn result_rowids(connection: &Connection, where_clause: &str) -> Vec<i64> {
+            let sql = format!(
+                "SELECT rowid FROM grid{}",
+                if where_clause.is_empty() { String::new() } else { format!(" WHERE {where_clause}") }
+            );
+            let mut statement = connection.prepare(&sql).expect("prepare grid query");
+            let mut rowids: Vec<i64> = statement
+                .query_map([], |row| row.get(0))
+                .expect("query grid")
+                .collect::<Result<_, _>>()
+                .expect("collect grid rows");
+            rowids.sort_unstable();
+            rowids
+        }
+
+        /// 一条导入规则：形态即前端解析器的导入产物（TEXT 列 unquoted 字符串、
+        /// 数字列保留原始拼写）。
+        struct ImportedRule {
+            mode: DataGridContextFilterMode,
+            column: &'static str,
+            value: Value,
+            values: Vec<Value>,
+        }
+
+        #[test]
+        fn imported_where_rules_reproduce_the_original_result_set() {
+            let connection = seed_grid();
+            // (手输原句, 逐条规则)——AND 链与网格应用多规则时一致。
+            let cases: Vec<(&str, Vec<ImportedRule>)> = vec![
+                (
+                    "task_id = 100234",
+                    vec![ImportedRule {
+                        mode: DataGridContextFilterMode::Equals,
+                        column: "task_id",
+                        value: json!("100234"),
+                        values: vec![],
+                    }],
+                ),
+                (
+                    "task_id = 1 AND name NOT LIKE 'abc%'",
+                    vec![
+                        ImportedRule {
+                            mode: DataGridContextFilterMode::Equals,
+                            column: "task_id",
+                            value: json!("1"),
+                            values: vec![],
+                        },
+                        ImportedRule {
+                            mode: DataGridContextFilterMode::NotBeginsWith,
+                            column: "name",
+                            value: json!("abc"),
+                            values: vec![],
+                        },
+                    ],
+                ),
+                (
+                    "name LIKE '%9'",
+                    vec![ImportedRule {
+                        mode: DataGridContextFilterMode::EndsWith,
+                        column: "name",
+                        value: json!("9"),
+                        values: vec![],
+                    }],
+                ),
+                (
+                    "name = 'xabcx'",
+                    vec![ImportedRule {
+                        mode: DataGridContextFilterMode::Equals,
+                        column: "name",
+                        value: json!("xabcx"),
+                        values: vec![],
+                    }],
+                ),
+                (
+                    "status IN ('done', 'open')",
+                    vec![ImportedRule {
+                        mode: DataGridContextFilterMode::In,
+                        column: "status",
+                        value: Value::Null,
+                        values: vec![json!("done"), json!("open")],
+                    }],
+                ),
+                (
+                    "order_no IS NULL",
+                    vec![ImportedRule {
+                        mode: DataGridContextFilterMode::IsNull,
+                        column: "order_no",
+                        value: Value::Null,
+                        values: vec![],
+                    }],
+                ),
+                (
+                    "task_id >= 2",
+                    vec![ImportedRule {
+                        mode: DataGridContextFilterMode::GreaterThanOrEqual,
+                        column: "task_id",
+                        value: json!("2"),
+                        values: vec![],
+                    }],
+                ),
+                (
+                    "name NOT LIKE 'abc%' AND status = 'open'",
+                    vec![
+                        ImportedRule {
+                            mode: DataGridContextFilterMode::NotBeginsWith,
+                            column: "name",
+                            value: json!("abc"),
+                            values: vec![],
+                        },
+                        ImportedRule {
+                            mode: DataGridContextFilterMode::Equals,
+                            column: "status",
+                            value: json!("open"),
+                            values: vec![],
+                        },
+                    ],
+                ),
+            ];
+
+            for (hand_written, rules) in &cases {
+                let rebuilt = rules
+                    .iter()
+                    .map(|rule| rebuilt_condition(rule.mode, rule.column, rule.value.clone(), rule.values.clone()))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                assert_eq!(
+                    result_rowids(&connection, &rebuilt),
+                    result_rowids(&connection, hand_written),
+                    "重建条件应与原句返回同一结果集：{hand_written} -> {rebuilt}"
+                );
+            }
+        }
+
+        #[test]
+        fn column_to_column_comparison_drifts_if_constant_folded() {
+            // zipg 复审的 a = b 落在真实列上（task_id = order_no，种子第 6 行
+            // 7 = '7' 命中）：右值常量化后变成 task_id = 'order_no'，结果集
+            // 漂移——这正是前端解析器必须整句拒绝的动机，锁定防止回退。
+            let connection = seed_grid();
+            let original = result_rowids(&connection, "task_id = order_no");
+            assert!(!original.is_empty(), "种子数据应有一行列间比较命中");
+            let constant_folded = result_rowids(&connection, "task_id = 'order_no'");
+            assert_ne!(constant_folded, original, "常量化右值会改变结果集，因此列间比较必须拒绝导入");
+        }
+    }
+
     fn column(name: &str, data_type: &str, nullable: bool, extra: Option<&str>) -> DataGridColumnInfo {
         DataGridColumnInfo {
             name: name.to_string(),

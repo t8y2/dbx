@@ -2700,6 +2700,7 @@ dependencies = [
  "dbx-sql-core",
  "dbx-sql-dialect",
  "dbx-types",
+ "rusqlite",
  "serde",
  "serde_json",
  "sqlparser",

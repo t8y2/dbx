@@ -20,6 +20,10 @@ export type UseDataGridFilterBuilderOptions = {
   createId?: () => string;
   isComplete: (rule: DataGridStructuredFilterRule) => boolean;
   buildCondition: (rule: DataGridStructuredFilterRule) => Promise<string | undefined>;
+  /** Live WHERE text typed in the quick bar, for the builder-open import (#15320). */
+  currentWhere?: MaybeRefOrGetter<string>;
+  /** Parses the quick-bar WHERE into rules; null keeps the builder untouched. */
+  importFromWhere?: (where: string, columns: readonly string[]) => DataGridStructuredFilterRule[] | null;
 };
 
 export function buildDataGridStructuredWhere(items: Array<{ rule: DataGridStructuredFilterRule; condition: string }>): string {
@@ -129,8 +133,24 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
     return appliedWhereInput.value;
   }
 
+  function rulesArePristine(): boolean {
+    return rules.value.every((rule) => !rule.columnName && !rule.rawValue && !rule.rawEndValue && !rule.disabled);
+  }
+
+  function importTypedWhere() {
+    if (!options.importFromWhere || !rulesArePristine()) return;
+    const where = toValue(options.currentWhere)?.trim() ?? "";
+    if (!where) return;
+    const parsed = options.importFromWhere(where, toValue(options.columns));
+    if (parsed?.length) rules.value = parsed;
+  }
+
   watch(open, (value) => {
-    if (!value) columnSearch.value = "";
+    if (!value) {
+      columnSearch.value = "";
+      return;
+    }
+    importTypedWhere();
   });
   watch(
     () => [...toValue(options.columns)],
@@ -140,5 +160,5 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
     },
   );
 
-  return { rules, open, columnSearch, appliedWhereInput, filteredColumns, activeCount, defaultRule, ensureRule, addRule, removeRule, updateRule, enableOnlyRule, moveRule, reset, buildWhere, apply };
+  return { rules, open, columnSearch, appliedWhereInput, filteredColumns, activeCount, defaultRule, ensureRule, addRule, removeRule, updateRule, enableOnlyRule, moveRule, reset, buildWhere, apply, importTypedWhere };
 }

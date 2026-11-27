@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
+	neo4j "github.com/t8y2/dbx/agents/drivers/neo4j-go/internal/neo4jcompat"
 )
 
 var neo4jTypes = []string{

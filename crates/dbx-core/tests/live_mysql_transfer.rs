@@ -89,6 +89,7 @@ fn transfer_request(
         create_table: false,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -198,6 +199,7 @@ async fn run_live_mysql_cross_version_transfer_completes_on_small_stack() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -356,6 +358,7 @@ async fn live_mysql_transfer_keeps_columns_whose_comment_mentions_foreign_key() 
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -518,6 +521,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -585,6 +589,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
             create_table: true,
             drop_target_before_create: false,
             drop_target_confirmed: false,
+            target_table_names: Default::default(),
             oracle_packages: None,
             content: TransferContent::default(),
             objects: Some(Vec::new()),
@@ -895,6 +900,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -954,6 +960,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
             create_table: true,
             drop_target_before_create: false,
             drop_target_confirmed: false,
+            target_table_names: Default::default(),
             oracle_packages: None,
             content: TransferContent::default(),
             objects: Some(Vec::new()),
@@ -1054,6 +1061,7 @@ async fn live_mysql_transfer_structure_only_rejects_incompatible_target_columns(
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::StructureOnly,
         objects: Some(Vec::new()),
@@ -1156,6 +1164,7 @@ async fn live_mysql_transfer_drop_target_parent_child_foreign_key() {
         create_table: true,
         drop_target_before_create: true,
         drop_target_confirmed: true,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -1352,6 +1361,7 @@ async fn live_mysql_transfer_drop_target_rebuilds_incompatible_structure() {
         create_table: true,
         drop_target_before_create: true,
         drop_target_confirmed: true,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -1543,6 +1553,7 @@ async fn live_mysql_transfer_drop_target_rejects_external_incoming_fk() {
         create_table: true,
         drop_target_before_create: true,
         drop_target_confirmed: true,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -1637,6 +1648,7 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
         create_table: true,
         drop_target_before_create: true,
         drop_target_confirmed: true,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -1869,6 +1881,7 @@ async fn live_mysql_transfer_drop_target_retains_backup_on_failure() {
         create_table: true,
         drop_target_before_create: true,
         drop_target_confirmed: true,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -2050,6 +2063,7 @@ async fn live_mysql_keyset_pagination_copies_every_row() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -2177,6 +2191,7 @@ async fn live_mysql_progress_read_survives_total_duration_beyond_timeout() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -2280,6 +2295,7 @@ async fn live_mysql_transfer_drop_target_inspects_dependent_views_without_the_us
         create_table: true,
         drop_target_before_create: true,
         drop_target_confirmed: true,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -2409,5 +2425,135 @@ async fn live_mysql_transfer_recreates_a_pool_removed_between_statements() {
     let cleanup = mysql::execute_query(&setup_pool, &format!("DROP DATABASE `{database}`"), true).await;
     setup_pool.disconnect().await.unwrap();
     let _ = std::fs::remove_dir_all(dir);
+    cleanup.unwrap();
+}
+
+/// Source rows that hold MySQL zero dates (`'0000-00-00'`, `'0000-00-00 00:00:00'`) must
+/// reach a target whose server runs with the MySQL 5.7+ default `sql_mode`, whose
+/// `NO_ZERO_DATE` / `NO_ZERO_IN_DATE` with strict mode reject the literals the transfer writes.
+#[tokio::test]
+#[ignore = "requires a disposable MySQL 5.7+ endpoint via DBX_LIVE_MYSQL_TRANSFER_* variables"]
+async fn live_mysql_transfer_copies_zero_dates_under_strict_target_sql_mode() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-transfer-zero-date-{suffix}");
+    let source_database = format!("dbx_eval_zd_src_{}", &suffix[..12]);
+    let target_database = format!("dbx_eval_zd_dst_{}", &suffix[..12]);
+    let config = live_mysql_config(&connection_id);
+    let setup_pool = mysql::connect(&mysql_url(&config), Duration::from_secs(10)).await.unwrap();
+
+    let global_sql_mode = query_text(&setup_pool, "SELECT @@GLOBAL.sql_mode").await;
+    assert!(
+        global_sql_mode.contains("NO_ZERO_DATE") && global_sql_mode.contains("STRICT_TRANS_TABLES"),
+        "the endpoint must run with the strict default sql_mode, got: {global_sql_mode}"
+    );
+
+    // Legacy data is written with a relaxed session `sql_mode`, the way such rows usually
+    // got into the source in the first place.
+    let setup = format!(
+        "SET SESSION sql_mode = '';\
+         CREATE DATABASE `{source_database}`;\
+         CREATE DATABASE `{target_database}`;\
+         CREATE TABLE `{source_database}`.`zero_dates` (\
+             id INT PRIMARY KEY, d DATE NULL, dt DATETIME NULL, ts TIMESTAMP NULL DEFAULT NULL, partial_d DATE NULL\
+         );\
+         CREATE TABLE `{target_database}`.`zero_dates` LIKE `{source_database}`.`zero_dates`;\
+         INSERT INTO `{source_database}`.`zero_dates` VALUES \
+             (1, '2026-11-10', '2026-11-10 12:34:56', '2026-11-10 12:34:56', '2026-11-10'),\
+             (2, '0000-00-00', '0000-00-00 00:00:00', '0000-00-00 00:00:00', '2026-00-00'),\
+             (3, NULL, NULL, NULL, NULL);\
+         SET SESSION sql_mode = DEFAULT"
+    );
+    mysql::execute_query(&setup_pool, &setup, true).await.unwrap();
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-mysql-transfer-zero-date-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new(storage));
+    state.configs.write().await.insert(connection_id.clone(), config);
+    let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_database)).await.unwrap();
+    let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_database)).await.unwrap();
+
+    let test_result: Result<(), String> = async {
+        let mut request = transfer_request(
+            format!("live-mysql-transfer-zero-date-{suffix}"),
+            &connection_id,
+            &source_database,
+            &target_database,
+            TransferMode::Append,
+        );
+        request.tables = vec!["zero_dates".to_string()];
+        let copied = transfer_table(
+            &state,
+            &request,
+            "zero_dates",
+            0,
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            &source_pool_key,
+            &target_pool_key,
+            &std::collections::HashMap::new(),
+            &mut Vec::new(),
+            None,
+            |_| {},
+        )
+        .await?;
+        assert_eq!(copied, 3);
+        let copied_values = query_text(
+            &setup_pool,
+            &format!(
+                "SELECT CAST(GROUP_CONCAT(CONCAT_WS('|', id, IFNULL(CAST(d AS CHAR), 'null'), \
+                 IFNULL(CAST(dt AS CHAR), 'null'), IFNULL(CAST(ts AS CHAR), 'null'), \
+                 IFNULL(CAST(partial_d AS CHAR), 'null')) ORDER BY id SEPARATOR ';') AS CHAR) \
+                 FROM `{target_database}`.`zero_dates`"
+            ),
+        )
+        .await;
+        assert_eq!(
+            copied_values,
+            "1|2026-11-10|2026-11-10 12:34:56|2026-11-10 12:34:56|2026-11-10;\
+             2|0000-00-00|0000-00-00 00:00:00|0000-00-00 00:00:00|2026-00-00;\
+             3|null|null|null|null"
+        );
+        // The relaxed mode must not leak into later statements on the target pool.
+        let target_session_mode = execute_on_pool(&state, &target_pool_key, "SELECT @@SESSION.sql_mode").await?;
+        assert_eq!(target_session_mode.rows[0][0].as_str(), Some(global_sql_mode.as_str()));
+
+        // Appending the same rows again fails on the primary key inside the relaxed batch,
+        // so the restoring statement never runs; the pooled connection must still come back
+        // with the original mode.
+        let duplicate = transfer_table(
+            &state,
+            &request,
+            "zero_dates",
+            0,
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            &source_pool_key,
+            &target_pool_key,
+            &std::collections::HashMap::new(),
+            &mut Vec::new(),
+            None,
+            |_| {},
+        )
+        .await
+        .expect_err("re-appending existing primary keys must fail");
+        assert!(duplicate.contains("Duplicate entry"), "unexpected error: {duplicate}");
+        for _ in 0..3 {
+            let mode = execute_on_pool(&state, &target_pool_key, "SELECT @@SESSION.sql_mode").await?;
+            assert_eq!(mode.rows[0][0].as_str(), Some(global_sql_mode.as_str()));
+        }
+        Ok(())
+    }
+    .await;
+
+    let cleanup = mysql::execute_query(
+        &setup_pool,
+        &format!("DROP DATABASE `{source_database}`; DROP DATABASE `{target_database}`"),
+        true,
+    )
+    .await;
+    setup_pool.disconnect().await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    test_result.unwrap();
     cleanup.unwrap();
 }

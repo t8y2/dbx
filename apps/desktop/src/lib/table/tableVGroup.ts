@@ -1,11 +1,12 @@
 import type { ConnectionGroup, TableNameFilter, TableVGroupLayout, TableVGroupOrderEntry, TreeNode } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
+import { markExplicitTreeLayoutOrder } from "@/lib/app/pinnedItems";
 
 export type { TableVGroupLayout, TableVGroupOrderEntry };
 
 /**
  * Table virtual groups (issue #3470): a purely local, per-scope arrangement of
- * table names into nested folders, mirroring the connection sidebar layout
+ * object identities into nested folders, mirroring the connection sidebar layout
  * model (`SidebarLayout`) but keyed by table name instead of connection id.
  * Layouts never touch database metadata — unknown table names are tolerated so
  * groups can reference tables outside the currently loaded sidebar page.
@@ -18,7 +19,7 @@ export type TableVGroupDropPosition = "before" | "after" | "inside";
  * procedures / triggers 对应 #9446 方向一与 #9733；其余容器类别为同一机制的
  * 全量补齐（与 groupDefs 的库级对象容器一一对应）。
  */
-export type TableVGroupObjectKind = "tables" | "views" | "materialized_views" | "procedures" | "functions" | "triggers" | "sequences" | "events" | "synonyms" | "jobs" | "packages" | "types";
+export type TableVGroupObjectKind = "databases" | "tables" | "views" | "materialized_views" | "procedures" | "functions" | "triggers" | "sequences" | "events" | "synonyms" | "jobs" | "packages" | "types";
 
 export interface TableVGroupScope {
   connectionId?: string;
@@ -26,7 +27,7 @@ export interface TableVGroupScope {
   database?: string;
   schema?: string;
   linkedServer?: string;
-  /** 本布局归属的容器类别；缺省视为 tables（历史 scope 均为表分组）。 */
+  /** 本布局归属的容器类别；databases 属于连接/Catalog，其余类别属于库内。缺省为 tables。 */
   objectType?: TableVGroupObjectKind;
 }
 
@@ -91,7 +92,10 @@ export function missingTableVGroupMemberNames(layout: TableVGroupLayout | null |
 }
 
 export function tableVGroupScopeKey(scope: TableVGroupScope): string | null {
-  if (!scope.connectionId || !scope.database) return null;
+  if (!scope.connectionId) return null;
+  // A separate namespace: database folders belong to a connection/catalog, not a database.
+  if (scope.objectType === "databases") return [scope.connectionId, "database-vgroups", scope.linkedServer ?? "", scope.catalog ?? ""].join("\u0000");
+  if (!scope.database) return null;
   const parts = [scope.connectionId, scope.linkedServer ?? "", scope.catalog ?? "", scope.database, scope.schema ?? ""];
   // 仅非表容器在尾部追加类别段：表分组的 key 与历史持久化逐字节一致，零迁移。
   if (scope.objectType && scope.objectType !== "tables") parts.push(scope.objectType);
@@ -157,6 +161,7 @@ export function tableVGroupKindOfContainerNode(node: Pick<TreeNode, "type" | "ta
 
 /** 各类别容器里可被分组的行 type；成员身份仍是容器内的行 label。 */
 const TABLE_VGROUP_KIND_ROW_TYPES: Record<TableVGroupObjectKind, Record<string, true>> = {
+  databases: { database: true, "redis-db": true, "mongo-db": true, "vector-database": true },
   tables: { table: true },
   views: { view: true },
   materialized_views: { materialized_view: true },
@@ -276,6 +281,69 @@ export function moveTableToVGroup(layout: TableVGroupLayout, tableName: string, 
 
   order.push(entry);
   return { ...layout, order };
+}
+
+export interface DatabaseVGroupPlacement {
+  target: TreeNode;
+  position: TableVGroupDropPosition;
+}
+
+/** Insert a real database relative to the indicated row, retaining hidden members. */
+export function moveDatabaseVGroupMember(layout: TableVGroupLayout, source: TreeNode, { target, position }: DatabaseVGroupPlacement, children: readonly TreeNode[]): TableVGroupLayout {
+  if (!tableVGroupsEnabled(layout) || !isDatabaseVGroupMember(source) || source.id === target.id || source.connectionId !== target.connectionId) return layout;
+  const members = databaseVGroupMembers(children);
+  if (!members.some((node) => node.id === source.id && node.type === source.type && node.database === source.database)) return layout;
+  const isGroup = target.type === "table-vgroup" && target.vgroupKind === "databases";
+  const isContainer = isDatabaseVGroupContainer(target);
+  if (!isGroup && !isContainer && (!isDatabaseVGroupMember(target) || !members.some((node) => node.id === target.id && node.type === target.type && node.database === target.database))) return layout;
+
+  // Unassigned rows are implicit in legacy layouts. Materialize their current
+  // order before moving, so a drop next to one has a stable persisted anchor.
+  const order = cloneEntries(layout.order);
+  const exact = new Set<string>();
+  const untyped = new Set<string>();
+  const collect = (entries: TableVGroupOrderEntry[]) => {
+    for (const entry of entries) {
+      if (entry.type === "group") collect(entry.children ?? []);
+      else if (entry.rowType) exact.add(`${entry.rowType}\u0000${entry.name}`);
+      else untyped.add(entry.name);
+    }
+  };
+  collect(order);
+  for (const member of members) {
+    const key = `${member.type}\u0000${member.database}`;
+    if (exact.has(key) || untyped.has(member.database!)) continue;
+    order.push({ type: "table", name: member.database!, rowType: member.type });
+    exact.add(key);
+  }
+  const nextOrder = removeTableFromEntries(order, source.database!, source.type);
+  const entry: TableVGroupOrderEntry = { type: "table", name: source.database!, rowType: source.type };
+  if (isContainer) {
+    // The header's bottom line is the first layout slot under the connection/catalog.
+    nextOrder.unshift(entry);
+    return { ...layout, order: nextOrder };
+  }
+  const locate = (entries: TableVGroupOrderEntry[]): { entries: TableVGroupOrderEntry[]; index: number } | null => {
+    for (let index = 0; index < entries.length; index++) {
+      const candidate = entries[index]!;
+      if (isGroup ? candidate.type === "group" && candidate.id === target.vgroupId : matchesTableEntry(candidate, target.database!, target.type)) return { entries, index };
+      if (candidate.type === "group") {
+        const found = locate(candidate.children ?? []);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  const location = locate(nextOrder);
+  if (!location) return layout;
+  const anchor = location.entries[location.index]!;
+  if (position === "inside" && anchor.type === "group") {
+    anchor.children = [...(anchor.children ?? []), entry];
+    return { ...expandGroup(layout, anchor.id), order: nextOrder };
+  }
+  if (position === "inside") return layout;
+  location.entries.splice(location.index + (position === "after" ? 1 : 0), 0, entry);
+  return { ...layout, order: nextOrder };
 }
 
 export function reorderTableVGroupEntry(layout: TableVGroupLayout, draggedEntryId: string, targetEntryId: string, position: TableVGroupDropPosition): TableVGroupLayout {
@@ -480,6 +548,62 @@ function findRowIn(lookup: TableVGroupRowLookup, name: string, rowType?: string)
 
 const tableRowKey = (type: string, label: string): string => `${type}\u0000${label}`;
 
+/** Display labels (Redis counts/aliases and Spanner short names) are not identities. */
+export function vgroupMemberName(node: TreeNode, kind?: TableVGroupObjectKind): string {
+  return kind === "databases" ? (node.database ?? "") : node.label;
+}
+
+export function isDatabaseVGroupMember(node: TreeNode): boolean {
+  return !!TABLE_VGROUP_KIND_ROW_TYPES.databases[node.type] && typeof node.database === "string" && node.database.length > 0;
+}
+
+export function isDatabaseVGroupContainer(node: TreeNode): boolean {
+  return node.type === "connection" || node.type === "doris-catalog";
+}
+
+/** Only cross virtual folders; never mistake a database's descendants for siblings. */
+export function databaseVGroupMembers(children: readonly TreeNode[]): TreeNode[] {
+  return children.flatMap((node) => (node.type === "table-vgroup" && node.vgroupKind === "databases" ? databaseVGroupMembers(node.children ?? []) : isDatabaseVGroupMember(node) ? [node] : []));
+}
+
+export function resolveDatabaseVGroupScope(nodes: TreeNode[], node: TreeNode, layouts: Readonly<Record<string, TableVGroupLayout>> = {}): TableVGroupScope | null {
+  if (!node.connectionId) return null;
+  if (node.type === "table-vgroup" && node.vgroupKind === "databases") {
+    return { connectionId: node.connectionId, catalog: node.catalog, linkedServer: node.linkedServer, objectType: "databases" };
+  }
+  if (isDatabaseVGroupContainer(node)) {
+    const scope: TableVGroupScope = { connectionId: node.connectionId, catalog: node.type === "doris-catalog" ? node.catalog : undefined, objectType: "databases" };
+    const savedLayout = layouts[tableVGroupScopeKey(scope)!];
+    if (!hasTableVGroupEntries(savedLayout) && !databaseVGroupMembers(node.children ?? []).length && !(node.children ?? []).some((child) => child.type === "table-vgroup" && child.vgroupKind === "databases")) return null;
+    return scope;
+  }
+  if (!isDatabaseVGroupMember(node) || node.linkedServer) return null;
+  // Internal Doris catalogs deliberately omit catalog from their database rows.
+  // Resolve ownership from the tree before falling back for detached menu rows.
+  const findOwner = (items: TreeNode[]): TreeNode | null => {
+    for (const item of items) {
+      if (isDatabaseVGroupContainer(item) && item.connectionId === node.connectionId && databaseVGroupMembers(item.children ?? []).some((member) => member.id === node.id)) return item;
+      const found = item.children ? findOwner(item.children) : null;
+      if (found) return found;
+    }
+    return null;
+  };
+  const owner = findOwner(nodes);
+  const scope: TableVGroupScope = { connectionId: node.connectionId, catalog: owner?.type === "doris-catalog" ? owner.catalog : node.catalog, objectType: "databases" };
+  return findDatabaseVGroupContainer(nodes, scope) ? scope : null;
+}
+
+export function findDatabaseVGroupContainer(nodes: TreeNode[], scope: TableVGroupScope): TreeNode | null {
+  for (const node of nodes) {
+    if (node.connectionId === scope.connectionId && isDatabaseVGroupContainer(node) && (scope.catalog ? node.type === "doris-catalog" && node.catalog === scope.catalog : node.type === "connection")) return node;
+    if (node.children) {
+      const found = findDatabaseVGroupContainer(node.children, scope);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 function buildVGroupChildNodes(entries: TableVGroupOrderEntry[], layout: TableVGroupLayout, lookup: TableVGroupRowLookup, scope: TableVGroupScope): TreeNode[] {
   const nodes: TreeNode[] = [];
   for (const entry of entries) {
@@ -505,7 +629,7 @@ function buildVGroupChildNodes(entries: TableVGroupOrderEntry[], layout: TableVG
       children: buildVGroupChildNodes(entryChildren(entry), layout, lookup, scope),
     });
   }
-  return nodes;
+  return scope.objectType === "databases" ? markExplicitTreeLayoutOrder(nodes, true) : nodes;
 }
 
 /**
@@ -554,7 +678,13 @@ function buildVGroupRootNodes(entries: TableVGroupOrderEntry[], layout: TableVGr
  * simply stay absent (sidebar pagination); stale names are skipped.
  */
 export function applyTableVGroupsToChildren(children: TreeNode[], layout: TableVGroupLayout | null | undefined, scope: TableVGroupScope): TreeNode[] {
-  if (!layout || !tableVGroupsEnabled(layout) || (!children.length && !layout.groups.length)) return children;
+  if (!layout || !tableVGroupsEnabled(layout) || (!children.length && !layout.groups.length)) {
+    if (scope.objectType === "databases") {
+      const flat = stripTableVGroupsFromChildren(children);
+      return markExplicitTreeLayoutOrder(flat, false);
+    }
+    return children;
+  }
   // Idempotence: merge/refresh flows re-feed already-projected children back
   // into setChildren, so always strip existing group containers first —
   // otherwise stale group copies survive alongside the freshly built ones.
@@ -568,12 +698,31 @@ export function applyTableVGroupsToChildren(children: TreeNode[], layout: TableV
   for (let i = 0; i < flatChildren.length; i++) {
     const node = flatChildren[i]!;
     // 键为 (行类型, 名字)：包 spec/body 同名双行可各自独立成组员；同名首行别名供历史条目按名匹配。
-    if (rowTypes[node.type] && !rows.byKey.has(tableRowKey(node.type, node.label))) {
-      rows.byKey.set(tableRowKey(node.type, node.label), { node, flatIndex: i });
-      if (!rows.byLabel.has(node.label)) rows.byLabel.set(node.label, { node, flatIndex: i });
+    const memberName = vgroupMemberName(node, scope.objectType);
+    if (rowTypes[node.type] && memberName && !rows.byKey.has(tableRowKey(node.type, memberName))) {
+      rows.byKey.set(tableRowKey(node.type, memberName), { node, flatIndex: i });
+      if (!rows.byLabel.has(memberName)) rows.byLabel.set(memberName, { node, flatIndex: i });
     } else passthrough.push({ node, sortIndex: i });
   }
   if (!rows.byKey.size && !activeLayout.groups.length) return flatChildren;
+
+  if (scope.objectType === "databases") {
+    // Unlike table folders, databases can be inserted between root folders.
+    // Keep metadata nodes by reference and overlay only their sibling order.
+    const ordered = buildVGroupChildNodes(activeLayout.order, activeLayout, rows, scope);
+    const consumed = new Set(databaseVGroupMembers(ordered));
+    for (const row of rows.byKey.values()) if (!consumed.has(row.node)) ordered.push(row.node);
+    const projected: TreeNode[] = [];
+    let inserted = false;
+    for (const node of flatChildren) {
+      if (isDatabaseVGroupMember(node)) {
+        if (!inserted) projected.push(...ordered);
+        inserted = true;
+      } else projected.push(node);
+    }
+    if (!inserted) projected.unshift(...ordered);
+    return markExplicitTreeLayoutOrder(projected, true);
+  }
 
   const rootBuilt = buildVGroupRootNodes(activeLayout.order, activeLayout, rows, scope);
   // Rows the layout does not reference stay ungrouped at their original slot.
@@ -627,6 +776,7 @@ export function stripTableVGroupsFromChildren(children: TreeNode[]): TreeNode[] 
  * strip the tables grouping out of it.
  */
 export function findTableVGroupContainerNode(nodes: TreeNode[], scope: TableVGroupScope, memberLabel?: string, memberType?: string): TreeNode | null {
+  if (scope.objectType === "databases") return findDatabaseVGroupContainer(nodes, scope);
   const matchesOptional = (nodeValue: string | undefined, scopeValue: string | undefined) => nodeValue === scopeValue || !nodeValue || !scopeValue;
   // 目标类别：memberType（行解析）按成员类型收敛；scope.objectType（重投影）按
   // 类别收敛；tables 作用域（缺省）也必须收敛到 tables——否则其它类别的容器会混入
@@ -802,6 +952,9 @@ function tableVGroupScopeHostOf(nodes: TreeNode[], node: TreeNode): TreeNode {
  */
 export function resolveTableVGroupScopeFromNode(nodes: TreeNode[], node: TreeNode | TableVGroupScope): TableVGroupScope {
   const row = node as Partial<TreeNode> & TableVGroupScope;
+  if (row.objectType === "databases" || (row.type === "table-vgroup" && row.vgroupKind === "databases")) {
+    return { connectionId: row.connectionId, catalog: row.catalog, linkedServer: row.linkedServer, objectType: "databases" };
+  }
   const containerKind = isTableVGroupContainerNode(row as TreeNode) ? tableVGroupKindOfContainerNode(row as TreeNode) : null;
   if (containerKind) return { ...tableVGroupScopeFieldsOf(tableVGroupScopeHostOf(nodes, row as TreeNode)), objectType: containerKind };
   if (row.type === "table-vgroup") {

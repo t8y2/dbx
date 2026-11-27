@@ -5,6 +5,9 @@ export interface MigrationPreflight {
   state: MigrationState;
   needsMigration: boolean;
   keyRecoveryRequired: boolean;
+  encryptedRecordCount?: number;
+  credentialResetAllowed?: boolean;
+  credentialResetBlockedReason?: string | null;
   keyProviderAvailable: boolean;
   keyStatus?: MigrationKeyStatus;
   keyCreationAllowed?: boolean;
@@ -35,4 +38,19 @@ export interface MigrationReport {
   verifiedSecretCount: number;
   errorCode?: string | null;
   errorMessage?: string | null;
+}
+
+export interface CredentialResetPreparation {
+  confirmationToken: string;
+  encryptedRecordCount: number;
+}
+export interface CredentialResetReport {
+  backupPath: string;
+  clearedRecordCount: number;
+  state: MigrationState;
+}
+export interface CredentialResetFailure {
+  code: string;
+  stage: string;
+  backupPath?: string | null;
 }

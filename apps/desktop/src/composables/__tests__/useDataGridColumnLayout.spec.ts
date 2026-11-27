@@ -4,7 +4,7 @@ import { effectScope, nextTick, ref, watch } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dataGridColumnOffsets, dataGridHorizontalColumnWindow, useDataGridColumnLayout, useDataGridColumnLayoutState, type ColumnHeaderReferenceDragController } from "@/composables/useDataGridColumnLayout";
 import { columnHeaderDragAutoScrollDelta, columnHeaderDropTargetIndex } from "@/lib/dataGrid/dataGridColumnHeaderInteraction";
-import { loadDataGridColumnLayout, saveDataGridColumnLayout } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
+import { loadDataGridColumnLayout, loadTableDataGridColumnOrder, saveDataGridColumnLayout } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 
 describe("useDataGridColumnLayout", () => {
   it("combines independent NULL and empty-column toggles without losing manual visibility", async () => {
@@ -294,6 +294,116 @@ describe("useDataGridColumnLayout", () => {
     recreatedScope.stop();
 
     expect(JSON.parse(localStorage.getItem("dbx-data-grid-column-layout:visibility-recreated-layout")!)).toMatchObject({ hiddenKeys: [] });
+  });
+
+  describe("table rebuilt in a new column order", () => {
+    const layoutScopeKey = "rebuilt-table-layout";
+    const tableScopeKey = "oracle-1\u0001APP\u0001APP\u0001REPORT";
+    function mount(databaseOrder: string[], scopeKey = layoutScopeKey) {
+      const scope = effectScope();
+      const state = scope.run(() =>
+        useDataGridColumnLayoutState({
+          columns: ref(databaseOrder),
+          displayableColumnIndexes: ref(databaseOrder.map((_, index) => index)),
+          allNullColumnIndexes: ref([]),
+          columnOrderKeys: ref(databaseOrder),
+          layoutScopeKey: ref(scopeKey),
+          tableScopeKey: ref(tableScopeKey),
+        }),
+      )!;
+      const visibleColumns = () => state.visibleColumnIndexes.value.map((index) => databaseOrder[index]);
+      return { scope, state, visibleColumns };
+    }
+    function arrangeLocally() {
+      const before = mount(["ID", "A", "B", "NOTE"]);
+      before.state.persistColumnOrder([0, 2, 1, 3]);
+      before.state.toggleColumnVisibility(3);
+      expect(before.visibleColumns()).toEqual(["ID", "B", "A"]);
+      before.scope.stop();
+    }
+
+    it("shows the rebuilt database order instead of the layout order saved with the stale table order", () => {
+      arrangeLocally();
+
+      const after = mount(["A", "ID", "B", "NOTE"]);
+      try {
+        expect(after.visibleColumns()).toEqual(["A", "ID", "B"]);
+        expect(after.state.hasCustomColumnOrder.value).toBe(false);
+      } finally {
+        after.scope.stop();
+      }
+      // Hidden columns are not tied to the physical order and survive the rebuild.
+      expect(JSON.parse(localStorage.getItem(`dbx-data-grid-column-layout:${layoutScopeKey}`)!)).toMatchObject({ orderKeys: [], hiddenKeys: ["NOTE"] });
+
+      const reopened = mount(["A", "ID", "B", "NOTE"]);
+      try {
+        expect(reopened.visibleColumns()).toEqual(["A", "ID", "B"]);
+      } finally {
+        reopened.scope.stop();
+      }
+    });
+
+    it("shows the rebuilt database order when the structure editor noticed the rebuild first", () => {
+      arrangeLocally();
+
+      // The structure editor reads the shared table order against the rebuilt database order.
+      expect(loadTableDataGridColumnOrder(tableScopeKey, ["A", "ID", "B", "NOTE"])).toEqual([]);
+
+      const after = mount(["A", "ID", "B", "NOTE"]);
+      try {
+        expect(after.visibleColumns()).toEqual(["A", "ID", "B"]);
+      } finally {
+        after.scope.stop();
+      }
+    });
+
+    it("does not bring the discarded order back when columns frozen before the rebuild are unfrozen", () => {
+      const before = mount(["ID", "A", "B", "NOTE"]);
+      before.state.persistColumnOrder([0, 2, 1, 3]);
+      before.state.freezeSelectedColumns([1]);
+      expect(before.visibleColumns()).toEqual(["B", "ID", "A", "NOTE"]);
+      before.scope.stop();
+
+      const after = mount(["A", "ID", "B", "NOTE"]);
+      try {
+        expect(after.visibleColumns()).toEqual(["A", "ID", "B", "NOTE"]);
+        after.state.unfreezeAllColumns();
+        expect(after.visibleColumns()).toEqual(["A", "ID", "B", "NOTE"]);
+      } finally {
+        after.scope.stop();
+      }
+    });
+
+    it("does not revive the discarded order when the table is rebuilt back to its original order", () => {
+      // Table data grids key their layout by the result column signature, so each physical order gets its own layout.
+      const original = ["ID", "A", "B", "NOTE"];
+      const rebuilt = ["A", "ID", "B", "NOTE"];
+      const before = mount(original, original.join(","));
+      before.state.persistColumnOrder([0, 2, 1, 3]);
+      before.scope.stop();
+
+      const afterRebuild = mount(rebuilt, rebuilt.join(","));
+      expect(afterRebuild.visibleColumns()).toEqual(rebuilt);
+      afterRebuild.scope.stop();
+
+      const rebuiltBack = mount(original, original.join(","));
+      try {
+        expect(rebuiltBack.visibleColumns()).toEqual(original);
+      } finally {
+        rebuiltBack.scope.stop();
+      }
+    });
+
+    it("keeps the local order while the table keeps its database order", () => {
+      arrangeLocally();
+
+      const reopened = mount(["ID", "A", "B", "NOTE"]);
+      try {
+        expect(reopened.visibleColumns()).toEqual(["ID", "B", "A"]);
+      } finally {
+        reopened.scope.stop();
+      }
+    });
   });
 
   it("show all clears hidden keys for fields missing from the current page", () => {

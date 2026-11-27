@@ -210,6 +210,13 @@ pub struct ConnectionConfig {
     pub connect_timeout_secs: u64,
     #[serde(default = "default_query_timeout_secs")]
     pub query_timeout_secs: u64,
+    /// Timeout for data-writing statements (INSERT/UPDATE/DELETE/MERGE/COPY).
+    /// `0` (the default) means no limit. When set, the client stops waiting after
+    /// this long but never cancels the server statement: a write that is cut off
+    /// leaves the caller unable to tell whether the rows landed.
+    /// Schema changes (CREATE/ALTER/DROP/TRUNCATE) are never bounded by it.
+    #[serde(default = "default_write_timeout_secs")]
+    pub write_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
     #[serde(default = "default_manual_transaction_timeout_secs")]
@@ -663,6 +670,12 @@ pub fn default_query_timeout_secs() -> u64 {
     60
 }
 
+/// Writes are unlimited by default: aborting a write transaction is not a
+/// recovery action, it is an extra failure mode (see `query::StatementTimeout`).
+pub fn default_write_timeout_secs() -> u64 {
+    0
+}
+
 pub fn default_idle_timeout_secs() -> u64 {
     60
 }
@@ -813,6 +826,8 @@ struct ConnectionConfigData {
     pub connect_timeout_secs: u64,
     #[serde(default = "default_query_timeout_secs")]
     pub query_timeout_secs: u64,
+    #[serde(default = "default_write_timeout_secs")]
+    pub write_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
     #[serde(default = "default_manual_transaction_timeout_secs")]
@@ -933,6 +948,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             transport_layers: data.transport_layers,
             connect_timeout_secs: data.connect_timeout_secs,
             query_timeout_secs: data.query_timeout_secs,
+            write_timeout_secs: data.write_timeout_secs,
             idle_timeout_secs: data.idle_timeout_secs,
             manual_transaction_timeout_secs: data.manual_transaction_timeout_secs,
             idle_disconnect_secs: data.idle_disconnect_secs,
@@ -1169,6 +1185,12 @@ impl ConnectionConfig {
             self.manual_transaction_timeout_secs
                 .clamp(MIN_MANUAL_TRANSACTION_TIMEOUT_SECS, MAX_MANUAL_TRANSACTION_TIMEOUT_SECS)
         }
+    }
+
+    /// `None` means "no write deadline" (the default). A configured value never
+    /// collapses to zero, so "on" and "off" stay distinguishable.
+    pub fn effective_write_timeout_secs(&self) -> Option<u64> {
+        (self.write_timeout_secs > 0).then(|| self.write_timeout_secs.max(1))
     }
 
     pub fn effective_query_timeout_secs(&self) -> u64 {
@@ -1989,6 +2011,38 @@ fn sqlserver_url_param_parts(params: Option<&str>) -> Vec<(Option<char>, &str)> 
 
     parts.push((separator, &source[start..]));
     parts
+}
+
+/// Returns the value of a SQL Server URL parameter. Keys match case-insensitively and the last
+/// occurrence wins. Brace-quoted values are returned as written; other values are percent-decoded.
+pub fn sqlserver_url_param(params: Option<&str>, key: &str) -> Result<Option<String>, String> {
+    let property = sqlserver_url_param_parts(params)
+        .into_iter()
+        .rev()
+        .filter_map(|(_, part)| part.split_once('='))
+        .find(|(part_key, _)| percent_decode_str(part_key.trim()).decode_utf8_lossy().eq_ignore_ascii_case(key));
+    let Some((_, value)) = property else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if let Some(quoted) = value.strip_prefix('{').and_then(|value| value.strip_suffix('}')) {
+        return Ok(Some(quoted.to_owned()));
+    }
+    percent_decode_str(value)
+        .decode_utf8()
+        .map(|value| Some(value.into_owned()))
+        .map_err(|_| format!("Invalid SQL Server {key} URL parameter"))
+}
+
+pub fn sqlserver_url_instance_name(params: Option<&str>) -> Result<Option<String>, String> {
+    let Some(name) = sqlserver_url_param(params, "instanceName")? else {
+        return Ok(None);
+    };
+    // A name must not be interpreted as part of the host or port.
+    if name.contains(['\\', ',', ':', '{', '}']) || name.chars().any(char::is_control) {
+        return Err("Invalid SQL Server instanceName URL parameter".to_owned());
+    }
+    Ok((!name.is_empty()).then_some(name))
 }
 
 fn sqlserver_legacy_compatibility_part(part: &str) -> bool {
@@ -3515,6 +3569,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: super::default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
+            write_timeout_secs: 0,
             idle_timeout_secs: super::default_idle_timeout_secs(),
             manual_transaction_timeout_secs: super::default_manual_transaction_timeout_secs(),
             idle_disconnect_secs: super::default_idle_disconnect_secs(),

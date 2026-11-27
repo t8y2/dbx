@@ -171,3 +171,55 @@ async fn transfer_keyset_pagination_copies_every_row_across_many_batches() {
     let collected: Vec<i64> = ids.rows.iter().map(|row| row[0].as_i64().unwrap()).collect();
     assert_eq!(collected, (1..=25).collect::<Vec<i64>>(), "keyset pagination must not drop or duplicate rows");
 }
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL URL via DBX_LIVE_PG_TRANSFER_SOURCE_URL"]
+async fn postgres_create_table_race_checks_the_failed_statement_and_relation_kind() {
+    let url = std::env::var("DBX_LIVE_PG_TRANSFER_SOURCE_URL").unwrap();
+    let pool = db::postgres::connect(&url, std::time::Duration::from_secs(5)).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+    let state = AppState::new_with_plugin_dir(storage, dir.path().join("plugins"));
+    let pool_key = "target:postgres";
+    state
+        .update_connection_pools(|pools| {
+            pools.insert(pool_key.into(), PoolKind::Postgres(pool.clone()));
+        })
+        .await;
+    let schema = format!("dbx_create_race_{}", uuid::Uuid::new_v4().simple());
+    let table = qualified_table("api_key", &schema, &DatabaseType::Postgres, None);
+    db::postgres::execute_query(&pool, &format!("CREATE SCHEMA {schema}")).await.unwrap();
+    let ddl = format!("CREATE TABLE {table} (id INT)");
+    assert!(execute_postgres_transfer_create_table(&state, pool_key, &ddl, "api_key", &schema, false).await.unwrap());
+    db::postgres::execute_query(&pool, &format!("DROP TABLE {table}")).await.unwrap();
+    let winner = pool.get().await.unwrap();
+    assert!(winner
+        .query_one("SELECT to_regclass($1)::text", &[&table])
+        .await
+        .unwrap()
+        .get::<_, Option<String>>(0)
+        .is_none());
+    // A separate session creates the table between the transfer's lookup and CREATE.
+    winner.batch_execute(&ddl).await.unwrap();
+    assert!(!execute_postgres_transfer_create_table(&state, pool_key, &ddl, "api_key", &schema, false).await.unwrap());
+    assert!(execute_postgres_transfer_create_table(&state, pool_key, &ddl, "api_key", &schema, true).await.is_err());
+    db::postgres::execute_batch(
+        &pool,
+        &[
+            format!("DROP TABLE {table}"),
+            format!("CREATE TABLE {schema}.unrelated (id INT)"),
+            format!("CREATE INDEX api_key ON {schema}.unrelated (id)"),
+        ],
+    )
+    .await
+    .unwrap();
+    let error =
+        execute_postgres_transfer_create_table(&state, pool_key, &ddl, "api_key", &schema, false).await.unwrap_err();
+    assert!(error.contains("relation \"api_key\" already exists"), "{error}");
+
+    // A later statement can fail with the same name even when CREATE succeeded.
+    db::postgres::execute_query(&pool, &format!("DROP INDEX {schema}.api_key")).await.unwrap();
+    let ddl = format!("{ddl}; CREATE SEQUENCE {table}");
+    assert!(execute_postgres_transfer_create_table(&state, pool_key, &ddl, "api_key", &schema, false).await.is_err());
+    db::postgres::execute_query(&pool, &format!("DROP SCHEMA {schema} CASCADE")).await.unwrap();
+}

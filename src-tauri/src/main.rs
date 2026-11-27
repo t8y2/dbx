@@ -5,5 +5,7 @@ fn main() {
     if dbx_lib::run_backup_worker_if_requested() {
         return;
     }
+    #[cfg(target_os = "linux")]
+    gtk::glib::set_prgname(Some("DBX"));
     dbx_lib::run();
 }

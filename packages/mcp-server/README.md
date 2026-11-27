@@ -323,7 +323,9 @@ Use `DBX_MCP_SCOPE_CONNECTION_ID`, comma-separated `DBX_MCP_SCOPE_CONNECTION_IDS
 
 ## Safety
 
-Choose **Read only**, **Data read/write**, or **Full access** in DBX instead of placing permission flags in client configuration. Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQL` widen the DBX policy. For upgrade compatibility, `DBX_MCP_ALLOW_WRITES=0` (or `false`) keeps MCP read-only until a central policy is saved for the first time; the legacy permission variables are ignored afterward.
+Choose **Read only**, **Data read/write**, or **Full access** in DBX instead of placing permission flags in client configuration. Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQL` widen the DBX policy. `DBX_MCP_ALLOW_WRITES=0` (or `false`) forces the current MCP process to be read-only, even when saved group, connection, or database permissions allow writes. This applies to both local and Web backends without modifying saved settings. A value of `1`, `true`, or an unset variable still requires authorization from the DBX policy.
+
+When `MCP_READ_ONLY` identifies `DBX_MCP_ALLOW_WRITES` as the restriction, check the MCP client's launch configuration; changing DBX permissions cannot override it. Otherwise, follow the error's policy context in **DBX Settings → MCP**.
 
 MongoDB update/delete operations require a verifiably effective filter unless Full access is enabled. Aggregation stages such as `$out` and `$merge` are treated as high-risk writes.
 
@@ -355,7 +357,7 @@ SQL text is not included in normal MCP errors or logged by default. Enable tempo
 | `DBX_MCP_HTTP_ALLOW_REMOTE` | Set to `1` together with `--http-allow-remote` before a non-loopback bind is allowed |
 | `DBX_MCP_HTTP_ALLOWED_HOSTS` | Required Host authority allowlist for a non-loopback native bind |
 | `DBX_MCP_HTTP_ALLOWED_ORIGINS` | Required browser Origin allowlist for a non-loopback native bind |
-| `DBX_MCP_ALLOW_WRITES` | Upgrade compatibility only: `0`/`false` keeps an unconfigured policy read-only |
+| `DBX_MCP_ALLOW_WRITES` | `0`/`false` forces the current run to be read-only; `1`/`true` never widens DBX permissions |
 | `DBX_MCP_SCOPE_CONNECTION_ID` | Compatibility scope for one connection ID |
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | Compatibility scope for multiple connection IDs |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | Restrict tools to one connection name |
@@ -688,7 +690,9 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 
 ### SQL 和命令安全
 
-请在 DBX 中选择 **只读**、**数据读写** 或 **完全访问**，不要在客户端配置中放置权限开关。新版 Server 不允许 `DBX_MCP_ALLOW_WRITES` 或 `DBX_MCP_ALLOW_DANGEROUS_SQL` 放宽 DBX 中央策略。为兼容升级，在中央策略首次保存前，`DBX_MCP_ALLOW_WRITES=0`（或 `false`）仍会保持 MCP 只读；策略保存后旧权限变量即被忽略。
+请在 DBX 中选择 **只读**、**数据读写** 或 **完全访问**，不要在客户端配置中放置权限开关。新版 Server 不允许 `DBX_MCP_ALLOW_WRITES` 或 `DBX_MCP_ALLOW_DANGEROUS_SQL` 放宽 DBX 中央策略。`DBX_MCP_ALLOW_WRITES=0`（或 `false`）会强制当前 MCP 进程只读，即使已保存的分组、连接或单库权限允许写入。此限制同时适用于本地和 Web 后端，不修改已保存的设置。设为 `1`、`true` 或不设置时，仍以 DBX 策略授权为准。
+
+当 `MCP_READ_ONLY` 指明限制来自 `DBX_MCP_ALLOW_WRITES` 时，请检查 MCP 客户端的启动配置；修改 DBX 权限无法覆盖此限制。其他情况请根据错误中的策略上下文检查 **DBX 设置 → MCP**。
 
 MongoDB 更新和删除在未启用完全访问时必须提供可验证有效的 filter；`$out`、`$merge` 聚合阶段按高风险写操作处理。
 
@@ -718,7 +722,7 @@ MongoDB 更新和删除在未启用完全访问时必须提供可验证有效的
 | `DBX_MCP_HTTP_ALLOW_REMOTE` | 与 `--http-allow-remote` 同时设置为允许监听非回环地址 |
 | `DBX_MCP_HTTP_ALLOWED_HOSTS` | 监听非回环地址时必填的 Host authority 白名单 |
 | `DBX_MCP_HTTP_ALLOWED_ORIGINS` | 监听非回环地址时必填的浏览器 Origin 白名单 |
-| `DBX_MCP_ALLOW_WRITES` | 仅用于升级兼容：`0`/`false` 使尚未配置的策略保持只读 |
+| `DBX_MCP_ALLOW_WRITES` | `0`/`false` 强制本次运行只读；`1`/`true` 不会扩大 DBX 权限 |
 | `DBX_MCP_SCOPE_CONNECTION_ID` | 兼容旧配置：限制到指定连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制到多个连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | 限制到指定连接名称 |

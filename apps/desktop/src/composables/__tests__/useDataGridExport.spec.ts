@@ -1199,6 +1199,51 @@ describe("useDataGridExport prepared row statements", () => {
     expect(parseDataGridClipboard("1\tAda")).toEqual([["1", "Ada"]]);
   });
 
+  it("uses the configured extractor for Smart Copy with a multi-row single-column selection", async () => {
+    const rows = [[1], [2]];
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0, 1],
+      columnIndexes: [0],
+      columns: ["id"],
+      rows,
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "1,2", mimeType: "application/sql", fileExtension: "sql", rowCount: 2, columnCount: 1 });
+    const state = createExportState(editableTable, ["id", "name"], matrix, undefined, undefined, rows, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, undefined, undefined, "mysql", undefined, {
+      smartSingleColumnFormat: computed(() => "sql-in-list"),
+    });
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "sql-in-list",
+        selectedColumnIndexes: [0],
+        rows,
+      }),
+    );
+  });
+
+  it("keeps the default TSV Smart Copy for multi-column selections", async () => {
+    const rows = [
+      [1, "Ada"],
+      [2, "Linus"],
+    ];
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0, 1],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows,
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "1\tAda\n2\tLinus", mimeType: "text/tab-separated-values", fileExtension: "tsv", rowCount: 2, columnCount: 2 });
+    const state = createExportState(editableTable, ["id", "name"], matrix, undefined, undefined, rows, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, undefined, undefined, "mysql", undefined, {
+      smartSingleColumnFormat: computed(() => "json"),
+    });
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "tsv" }));
+  });
+
   it("uses TSV (quotes only for separator/newline) for a multi-cell smart copy without relying on clipboard metadata", async () => {
     const rows = [
       [1, '{"msg":"success"}'],

@@ -90,6 +90,10 @@ function toolbarPatch(store: ReturnType<typeof useSettingsStore>, visible: boole
   return { toolbarItems: { ...store.editorSettings.toolbarItems, alwaysOnTop: visible } };
 }
 
+function visibilityCalls() {
+  return vi.mocked(emit).mock.calls.filter(([event]) => event === ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT);
+}
+
 describe("always-on-top toolbar visibility across windows", () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -155,7 +159,7 @@ describe("always-on-top toolbar visibility across windows", () => {
     expect(first.store.editorSettings.toolbarItems.github).toBe(false);
     expect(first.state.alwaysOnTop).toBe(false);
     expect(second.state.alwaysOnTop).toBe(false);
-    expect(vi.mocked(emit).mock.calls).toEqual([
+    expect(visibilityCalls()).toEqual([
       [ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT, true],
       [ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT, false],
     ]);
@@ -169,7 +173,7 @@ describe("always-on-top toolbar visibility across windows", () => {
     const detached = await mountDetached("detached-tab-save");
     await main.updateEditorSettingsAndPersist(toolbarPatch(main, true));
     await detached.store.updateEditorSettingsAndPersist({ fontSize: 23 });
-    expect(emit).toHaveBeenCalledTimes(1);
+    expect(visibilityCalls()).toHaveLength(1);
     expect(api.saveEditorSettings).toHaveBeenCalledTimes(2);
     expect(main.editorSettings.fontSize).not.toBe(23);
   });
@@ -208,8 +212,8 @@ describe("always-on-top toolbar visibility across windows", () => {
     expect(emit).not.toHaveBeenCalled();
     expect(pinButton(detached.host)).toBeNull();
     completeSave();
-    await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(emit).mock.calls.map((call) => call[1])).toEqual([true, false]);
+    await vi.waitFor(() => expect(visibilityCalls()).toHaveLength(2));
+    expect(visibilityCalls().map((call) => call[1])).toEqual([true, false]);
     expect(detached.store.editorSettings.toolbarItems.alwaysOnTop).toBe(false);
     expect(main.editorSettings.toolbarItems.alwaysOnTop).toBe(false);
   });
@@ -226,7 +230,7 @@ describe("always-on-top toolbar visibility across windows", () => {
     expect(emit).not.toHaveBeenCalled();
     await main.persistEditorSettings();
     expect(detached.store.editorSettings.toolbarItems.alwaysOnTop).toBe(true);
-    expect(emit).toHaveBeenCalledExactlyOnceWith(ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT, true);
+    expect(visibilityCalls()).toEqual([[ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT, true]]);
   });
 
   it.each([false, true])("retains atomic rollback and no notification on persistence failure from %s", async (initial) => {
@@ -241,7 +245,7 @@ describe("always-on-top toolbar visibility across windows", () => {
     expect(persistedSettings.toolbarItems.alwaysOnTop).toBe(initial);
     expect(emit).not.toHaveBeenCalled();
     await main.persistEditorSettings();
-    expect(emit).not.toHaveBeenCalled();
+    expect(visibilityCalls()).toEqual([]);
   });
 
   it("does not roll back a successful save when event delivery fails", async () => {
@@ -250,7 +254,15 @@ describe("always-on-top toolbar visibility across windows", () => {
     const detached = await mountDetached("detached-tab-delivery");
     const error = new Error("event unavailable");
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
-    vi.mocked(emit).mockRejectedValueOnce(error);
+    const publish = vi.mocked(emit).getMockImplementation()!;
+    let failVisibility = true;
+    vi.mocked(emit).mockImplementation(async (event, payload) => {
+      if (event === ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT && failVisibility) {
+        failVisibility = false;
+        throw error;
+      }
+      return publish(event, payload);
+    });
     await expect(main.updateEditorSettingsAndPersist(toolbarPatch(main, true))).resolves.toBeUndefined();
     expect(persistedSettings.toolbarItems.alwaysOnTop).toBe(true);
     expect(main.editorSettings.toolbarItems.alwaysOnTop).toBe(true);
@@ -307,7 +319,7 @@ describe("always-on-top toolbar visibility across windows", () => {
     expect(emit).not.toHaveBeenCalled();
     await main.initEditorSettings();
     await vi.waitFor(() => expect(detached.store.editorSettings.toolbarItems.alwaysOnTop).toBe(true));
-    expect(emit).toHaveBeenCalledExactlyOnceWith(ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT, true);
+    expect(visibilityCalls()).toEqual([[ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT, true]]);
   });
 
   it("does not register or emit native events in the browser", async () => {

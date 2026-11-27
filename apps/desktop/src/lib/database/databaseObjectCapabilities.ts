@@ -41,6 +41,32 @@ const DAMENG_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW
 export function supportsSchemaIndexManagement(dbType?: DatabaseType): boolean {
   return dbType === "oracle" || dbType === "oceanbase-oracle" || dbType === "dameng";
 }
+
+// MySQL-family servers keep leading/trailing spaces inside quoted identifiers
+// (`\` orders \`` is a different table from `\`orders\``). Table-like rows from
+// these databases must carry the driver-reported name byte-for-byte, otherwise
+// the sidebar, object browser and later ALTER statements address the wrong
+// table (#14905). Other dialects keep the historical normalized name.
+const EXACT_TABLE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb"]);
+
+export function isTableLikeObjectKind(objectKind?: string | null): boolean {
+  if (!objectKind) return false;
+  const normalized = objectKind
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+  return normalized === "TABLE" || normalized === "VIEW" || normalized === "MATERIALIZED_VIEW";
+}
+
+/**
+ * Whether a table-like object's driver-reported name and schema must be kept
+ * exactly as returned (only emptiness-trimmed) instead of normalized.
+ * `objectKind` must already be a normalized sidebar kind (TABLE/VIEW/
+ * MATERIALIZED_VIEW); callers pass the result of `normalizeSidebarObjectKind`.
+ */
+export function preservesExactTableIdentifier(dbType?: DatabaseType, objectKind?: string | null): boolean {
+  return !!dbType && EXACT_TABLE_IDENTIFIER_DATABASES.has(dbType) && isTableLikeObjectKind(objectKind);
+}
 const XUGU_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
 const FIREBIRD_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION_INTERNAL", "FUNCTION_UDF", "TRIGGER", "SEQUENCE", "INDEX", "PACKAGE"];
 const PACKAGE_MEMBER_EXPANSION_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "xugu"]);
@@ -219,6 +245,15 @@ export function supportsOracleFamilyTypeManagement(dbType?: DatabaseType): boole
 
 export function isOracleFamilyTypeSource(dbType: DatabaseType | undefined, objectType: string | undefined): boolean {
   return supportsOracleFamilyTypeManagement(dbType) && (objectType === "TYPE" || objectType === "TYPE_BODY");
+}
+
+/**
+ * 触发器源码 tab 可以写回数据库的方言：MySQL 系的保存语句由后端生成
+ * DROP+CREATE（MySQL 没有 CREATE OR REPLACE TRIGGER），Oracle 系走专门的
+ * 触发器源码动作；其它方言的保存语义尚未适配，源码 tab 保持只读（#14489）。
+ */
+export function isTriggerSourceSaveSupported(dbType: DatabaseType | undefined): boolean {
+  return dbType === "mysql" || dbType === "goldendb" || dbType === "oracle" || dbType === "oceanbase-oracle" || dbType === "dameng";
 }
 
 export type CustomTypeCapabilities = {

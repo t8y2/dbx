@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.67"
+version = "0.6.74"
 dependencies = [
  "anyhow",
  "axum",
@@ -2178,6 +2178,7 @@ dependencies = [
  "dbx-tauri-consul",
  "dbx-tauri-schema",
  "deadpool-postgres",
+ "dirs",
  "font-kit",
  "futures",
  "grep",
@@ -2188,6 +2189,7 @@ dependencies = [
  "log",
  "minisign-verify",
  "mongodb",
+ "notify",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -2252,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.140"
+version = "0.4.145"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2597,7 +2599,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.140"
+version = "0.4.145"
 dependencies = [
  "async-trait",
  "axum",
@@ -2783,7 +2785,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.67"
+version = "0.6.74"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -5947,7 +5949,7 @@ dependencies = [
 [[package]]
 name = "mysql_async"
 version = "0.37.0"
-source = "git+https://github.com/zipg/mysql_async.git?rev=d45e6e196bb06cf9a4f1f7ed023d98225df2aeeb#d45e6e196bb06cf9a4f1f7ed023d98225df2aeeb"
+source = "git+https://github.com/t8y2/mysql_async.git?rev=4cd84d86bb86b060320ce3459561e8093e4422fa#4cd84d86bb86b060320ce3459561e8093e4422fa"
 dependencies = [
  "bytes",
  "crossbeam-queue",
@@ -7202,7 +7204,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.12"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=ac8ad476de59093d33ab9f294531c956e0c6a724#ac8ad476de59093d33ab9f294531c956e0c6a724"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89#5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89"
 dependencies = [
  "base64 0.23.0",
  "byteorder",
@@ -7221,7 +7223,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.14"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=ac8ad476de59093d33ab9f294531c956e0c6a724#ac8ad476de59093d33ab9f294531c956e0c6a724"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89#5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89"
 dependencies = [
  "bytes",
  "chrono",
@@ -9872,8 +9874,6 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-single-instance"
 version = "2.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3214becf9ef5783c0ae99a3bb25adf5353a7a16ebf53e74b909e29205735c6c"
 dependencies = [
  "serde",
  "serde_json",
@@ -10293,7 +10293,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.18"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=ac8ad476de59093d33ab9f294531c956e0c6a724#ac8ad476de59093d33ab9f294531c956e0c6a724"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89#5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89"
 dependencies = [
  "async-trait",
  "byteorder",

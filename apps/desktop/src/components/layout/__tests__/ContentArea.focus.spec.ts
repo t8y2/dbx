@@ -5,7 +5,7 @@ import { createI18n } from "vue-i18n";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { QueryTab, TabOutputView } from "@/types/database";
 
-const calls = vi.hoisted(() => ({ grid: vi.fn(), editor: vi.fn() }));
+const calls = vi.hoisted(() => ({ grid: vi.fn(), editor: vi.fn(), copy: vi.fn(async (_isValid?: () => boolean) => true) }));
 vi.mock("@/components/grid/DataGrid.vue", async () => {
   const { defineComponent, h, ref } = await import("vue");
   return {
@@ -14,6 +14,7 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
       setup(_, { expose }) {
         const root = ref<HTMLElement>();
         expose({
+          copyActiveResult: (isValid?: () => boolean) => calls.copy(isValid),
           focusGrid: () => {
             calls.grid();
             root.value?.focus();
@@ -144,5 +145,69 @@ describe("query surface focus handoff", () => {
     const resultSurface = await mountSurface();
     expect(resultSurface.surface.focusSqlEditor()).toBe(false);
     expect(calls.editor).toHaveBeenCalledOnce();
+  });
+});
+
+describe("copying the active query result", () => {
+  it("copies after the grid mounts without moving editor focus or selection", async () => {
+    const { surface, state } = await mountSurface({ view: "messages" });
+    const editor = document.createElement("textarea");
+    editor.value = "SELECT id FROM users";
+    document.body.append(editor);
+    editor.focus();
+    editor.setSelectionRange(7, 9);
+
+    expect(surface.copyActiveResult()).toBe(true);
+    await vi.waitFor(() => expect(calls.copy).toHaveBeenCalledOnce());
+    expect(state.view).toBe("result");
+    expect(document.activeElement).toBe(editor);
+    expect([editor.selectionStart, editor.selectionEnd]).toEqual([7, 9]);
+    expect(calls.grid).not.toHaveBeenCalled();
+    expect(calls.editor).not.toHaveBeenCalled();
+  });
+
+  it("does not copy a replacement result while the grid is mounting", async () => {
+    const { surface, tab } = await mountSurface({ view: "messages" });
+    expect(surface.copyActiveResult()).toBe(true);
+    tab.result = { ...tab.result!, rows: [[2]] };
+    await nextTick();
+    await nextTick();
+    expect(calls.copy).not.toHaveBeenCalled();
+  });
+
+  it("invalidates an asynchronous copy when the result or workspace target changes", async () => {
+    const { surface, tab } = await mountSurface();
+    let active = true;
+    surface.copyActiveResult(() => active);
+    await vi.waitFor(() => expect(calls.copy).toHaveBeenCalledOnce());
+    const isValid = calls.copy.mock.calls[0]![0]!;
+    expect(isValid()).toBe(true);
+    active = false;
+    expect(isValid()).toBe(false);
+    active = true;
+    tab.result = { ...tab.result!, rows: [[2]] };
+    expect(isValid()).toBe(false);
+  });
+
+  it("does not copy after leaving the requested result view", async () => {
+    const { surface, state } = await mountSurface();
+    surface.copyActiveResult();
+    await vi.waitFor(() => expect(calls.copy).toHaveBeenCalledOnce());
+    const isValid = calls.copy.mock.calls[0]![0]!;
+    state.view = "messages";
+    await nextTick();
+    expect(isValid()).toBe(false);
+  });
+
+  it.each([
+    { columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 },
+    { columns: ["Message"], rows: [["done"]], affected_rows: 0, execution_time_ms: 1, server_message: true },
+    { columns: ["Error"], rows: [["failed"]], affected_rows: 0, execution_time_ms: 1, execution_error: true },
+  ])("does not copy non-tabular command output", async (result) => {
+    const { surface, state } = await mountSurface({ result, view: "messages" });
+    expect(surface.copyActiveResult()).toBe(false);
+    await nextTick();
+    expect(state.view).toBe("messages");
+    expect(calls.copy).not.toHaveBeenCalled();
   });
 });

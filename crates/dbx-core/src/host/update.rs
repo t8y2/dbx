@@ -1,4 +1,4 @@
-pub use dbx_platform::version::{is_newer_version, normalize_version, parse_version};
+pub use dbx_platform::version::{base_version, is_newer_version, normalize_version, parse_version};
 
 use serde::{Deserialize, Serialize};
 
@@ -225,7 +225,8 @@ async fn fetch_github_release_metadata(
 
 pub fn build_update_info(release: TauriRelease, current_version: &str) -> UpdateInfo {
     let latest_version = normalize_version(&release.version);
-    let update_available = is_channel_update_available(release.channel, &latest_version, current_version);
+    let update_available = is_channel_update_available(release.channel, &latest_version, current_version)
+        && stable_release_advances_installed_build(&release, current_version);
     let github = release.github.as_ref();
     let release_notes = non_empty(release.notes_en.as_deref())
         .map(ToOwned::to_owned)
@@ -257,20 +258,56 @@ pub fn build_update_info(release: TauriRelease, current_version: &str) -> Update
     }
 }
 
-pub fn is_channel_update_available(channel: UpdateChannel, latest_version: &str, current_version: &str) -> bool {
-    // A promoted beta keeps its prerelease version inside the installed binary,
-    // while the stable manifest intentionally exposes the base version. Treat
-    // that pair as the same release so switching back to stable never offers
-    // the already-installed artifact again.
-    if matches!(channel, UpdateChannel::Stable) {
-        let latest = normalize_version(latest_version);
-        let current = normalize_version(current_version);
-        let latest_base = latest.split(['-', '+']).next().unwrap_or_default();
-        let current_base = current.split(['-', '+']).next().unwrap_or_default();
-        if !latest.contains('-') && current.contains('-') && latest_base == current_base {
-            return false;
-        }
+/// Whether downloading this stable release would actually move the user forward.
+///
+/// A promoted stable release is not rebuilt, so the installed binary keeps the
+/// beta version it was published with while the stable manifest exposes the base
+/// version. Downloading it is a no-op for that build and a downgrade for a
+/// *later* beta of the same base. Someone running an older beta build still
+/// needs the stable download (#15341), so the comparison is by version, not by
+/// base version.
+fn stable_release_advances_installed_build(release: &TauriRelease, current_version: &str) -> bool {
+    if !release.is_promoted || release.channel != UpdateChannel::Stable {
+        return true;
     }
+    let Some(shipped) = shipped_beta_build(release) else {
+        return true;
+    };
+    is_newer_version(&shipped, &normalize_version(current_version))
+}
+
+/// The prerelease build a promoted stable manifest says it ships.
+///
+/// Modern manifests name it in `promoted_from`; before a promotion moved to the
+/// stable tag the beta tag sat in `release_tag` while `version` carried the base
+/// version. Entries that belong to another base version cannot describe this
+/// release — `release_tag_for_version` in `src-tauri` rejects that shape when it
+/// creates tags — so they are ignored instead of suppressing an update. That
+/// also means a manifest whose `version` moved to the next base while
+/// `promoted_from` still names the previous one is treated as a fresh artifact:
+/// re-offering it is the safe direction, and the alternative would hide a real
+/// update behind a stale field.
+fn shipped_beta_build(release: &TauriRelease) -> Option<String> {
+    let advertised_base = base_version(&release.version);
+    [release.promoted_from.as_deref(), release.release_tag.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(normalize_version)
+        .find(|candidate| {
+            !candidate.is_empty() && candidate.contains('-') && base_version(candidate) == advertised_base
+        })
+}
+
+/// Whether `latest_version` is worth offering on `channel` compared to `current_version`.
+///
+/// This is pure channel arithmetic, so the Tauri updater's version comparator
+/// can call it with nothing but two version strings. Suppressing the build that
+/// a promoted stable release already ships needs `promoted_from`, so it lives in
+/// [`build_update_info`]; that is also the gate the UI reads before it offers a
+/// download. Ranking a base release above its own prerelease therefore stays
+/// true here - a user on a *different* beta build of the same base version must
+/// still get the stable build (#15341).
+pub fn is_channel_update_available(channel: UpdateChannel, latest_version: &str, current_version: &str) -> bool {
     if is_newer_version(latest_version, current_version) {
         return true;
     }
@@ -489,6 +526,88 @@ mod tests {
     }
 
     #[test]
+    fn stable_channel_reoffers_the_release_to_a_different_beta_build_of_the_same_base() {
+        // #15341: the user runs 0.6.72-beta.20261119.1 while the stable release
+        // was promoted from 0.6.72-beta.20261119.2. Their build is not the
+        // shipped artifact, so "no update" is wrong.
+        let promoted_release = |promoted_from: Option<&str>| TauriRelease {
+            version: "0.6.72".to_string(),
+            channel: UpdateChannel::Stable,
+            release_tag: Some("v0.6.72".to_string()),
+            is_promoted: true,
+            promoted_from: promoted_from.map(ToOwned::to_owned),
+            notes: None,
+            jdbc_plugin: None,
+            github: None,
+            notes_en: None,
+        };
+
+        assert!(
+            build_update_info(promoted_release(Some("0.6.72-beta.20261119.2")), "0.6.72-beta.20261119.1")
+                .update_available
+        );
+        assert!(build_update_info(promoted_release(None), "0.6.72-beta.20261119.1").update_available);
+        assert!(build_update_info(promoted_release(Some("0.6.72-beta.20261119.2")), "0.6.71").update_available);
+        // The promoted build itself already is the stable artifact.
+        assert!(
+            !build_update_info(promoted_release(Some("0.6.72-beta.20261119.2")), "0.6.72-beta.20261119.2")
+                .update_available
+        );
+        assert!(
+            !build_update_info(promoted_release(Some("v0.6.72-beta.20261119.2")), "0.6.72-beta.20261119.2")
+                .update_available
+        );
+        // A later beta of the same base must not be "updated" down to the
+        // promoted build, and build metadata is not a different build.
+        assert!(
+            !build_update_info(promoted_release(Some("0.6.72-beta.20261119.2")), "0.6.72-beta.20261120.1")
+                .update_available
+        );
+        assert!(
+            !build_update_info(promoted_release(Some("0.6.72-beta.20261119.2")), "0.6.72-beta.20261119.2+local.7")
+                .update_available
+        );
+        // An empty `promoted_from` names no build, so the base release is offered.
+        assert!(build_update_info(promoted_release(Some("")), "0.6.72-beta.20261119.1").update_available);
+    }
+
+    #[test]
+    fn a_release_tag_from_another_base_does_not_suppress_the_update() {
+        // #15341 review: a lagging/incorrect tag must not hide a newer stable
+        // release from the build that tag happens to name.
+        let release = TauriRelease {
+            version: "0.6.73".to_string(),
+            channel: UpdateChannel::Stable,
+            release_tag: Some("v0.6.72-beta.20261119.2".to_string()),
+            is_promoted: true,
+            promoted_from: None,
+            notes: None,
+            jdbc_plugin: None,
+            github: None,
+            notes_en: None,
+        };
+
+        assert!(build_update_info(release, "0.6.72-beta.20261119.2").update_available);
+    }
+
+    #[test]
+    fn an_unpromoted_stable_release_still_updates_beta_builds_of_its_base() {
+        let release = TauriRelease {
+            version: "0.6.72".to_string(),
+            channel: UpdateChannel::Stable,
+            release_tag: Some("v0.6.72".to_string()),
+            is_promoted: false,
+            promoted_from: None,
+            notes: None,
+            jdbc_plugin: None,
+            github: None,
+            notes_en: None,
+        };
+
+        assert!(build_update_info(release, "0.6.72-beta.20261119.1").update_available);
+    }
+
+    #[test]
     fn beta_channel_offers_same_base_prerelease_from_stable_build() {
         assert!(super::is_channel_update_available(UpdateChannel::Beta, "0.6.60-beta.20261028.1", "0.6.60"));
         assert!(super::is_channel_update_available(
@@ -496,7 +615,11 @@ mod tests {
             "0.6.60-beta.20261028.2",
             "0.6.60-beta.20261028.1"
         ));
-        assert!(!super::is_channel_update_available(UpdateChannel::Stable, "0.6.60", "0.6.60-beta.20261028.1"));
+        // Channel arithmetic ranks the base release above its prerelease; the
+        // promoted-build suppression belongs to build_update_info, which knows
+        // which build the release actually ships.
+        assert!(super::is_channel_update_available(UpdateChannel::Stable, "0.6.60", "0.6.60-beta.20261028.1"));
+        assert!(!super::is_channel_update_available(UpdateChannel::Stable, "0.6.60", "0.6.60"));
     }
 
     #[test]

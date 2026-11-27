@@ -25,6 +25,8 @@ const props = withDefaults(
     modelValue: string[];
     /** All columns of the table, in table order. */
     columns: CompareKeyColumnOption[];
+    /** Column names that cannot be picked (e.g. match columns in an ignore picker); rendered disabled. */
+    excludedColumns?: string[];
     disabled?: boolean;
     /** Column metadata is still being fetched for this table. */
     loading?: boolean;
@@ -52,6 +54,7 @@ const searchText = ref("");
 const searchInput = ref<InstanceType<typeof Input>>();
 
 const selectedSet = computed(() => new Set(props.modelValue.map((column) => column.toLowerCase())));
+const excludedSet = computed(() => new Set((props.excludedColumns ?? []).map((column) => column.toLowerCase())));
 const columnNames = computed(() => props.columns.map((column) => column.name));
 const filteredColumns = computed(() => {
   const allowed = new Set(filterDatabaseOptions(columnNames.value, searchText.value));
@@ -62,6 +65,10 @@ const selectedCountLabel = computed(() => t("dataCompare.keyColumnsSelectedCount
 
 function isSelected(column: CompareKeyColumnOption): boolean {
   return selectedSet.value.has(column.name.toLowerCase());
+}
+
+function isExcluded(column: CompareKeyColumnOption): boolean {
+  return excludedSet.value.has(column.name.toLowerCase());
 }
 
 function toggleColumn(column: CompareKeyColumnOption): void {
@@ -122,7 +129,8 @@ watch(open, async (value) => {
               type="button"
               :data-column-name="column.name"
               :data-primary-key="column.is_primary_key ? 'true' : 'false'"
-              :disabled="disabled"
+              :disabled="disabled || isExcluded(column)"
+              :title="isExcluded(column) ? t('dataCompare.ignoredColumnKeyExcluded') : undefined"
               class="flex h-7 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
               @click="toggleColumn(column)"
             >

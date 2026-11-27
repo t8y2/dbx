@@ -340,10 +340,31 @@ pub fn oracle_trigger_ddl_sources(source: &str, owner: &str) -> Result<Vec<Oracl
     extract_oracle_triggers(source, owner, None).map(|(_, triggers)| triggers)
 }
 
+/// Same as [`oracle_trigger_ddl_sources`], but unqualified `ON <table>` names
+/// default to `table_owner` instead of the trigger owner: a cross-owner trigger
+/// (OWNER = S2, TABLE_OWNER = S1) declares its table binding in the queried
+/// schema while the trigger name itself belongs to the inventory OWNER.
+pub fn oracle_trigger_ddl_sources_with_table_owner(
+    source: &str,
+    owner: &str,
+    table_owner: &str,
+) -> Result<Vec<OracleTriggerDdlSource>, String> {
+    extract_oracle_triggers_with_table_owner(source, owner, None, table_owner).map(|(_, triggers)| triggers)
+}
+
 fn extract_oracle_triggers(
     source: &str,
     owner: &str,
     table: Option<&str>,
+) -> Result<(String, Vec<OracleTriggerDdlSource>), String> {
+    extract_oracle_triggers_with_table_owner(source, owner, table, owner)
+}
+
+fn extract_oracle_triggers_with_table_owner(
+    source: &str,
+    owner: &str,
+    table: Option<&str>,
+    default_table_owner: &str,
 ) -> Result<(String, Vec<OracleTriggerDdlSource>), String> {
     let mut triggers: Vec<OracleTriggerDdlSource> = Vec::new();
     let mut states = Vec::new();
@@ -387,7 +408,7 @@ fn extract_oracle_triggers(
             if on.len() != 1 {
                 return Err(format!("{trigger_owner}.{name}: trigger table identity is unavailable"));
             }
-            let (table_owner, trigger_table, _) = qualified_name(&ts, on[0] + 1, owner)?;
+            let (table_owner, trigger_table, _) = qualified_name(&ts, on[0] + 1, default_table_owner)?;
             if table.is_some_and(|table| table_owner != owner || trigger_table != table) {
                 return Err(format!("{trigger_owner}.{name}: trigger source does not match the selected table"));
             }
@@ -2483,5 +2504,20 @@ mod tests {
         let mut conflicting = index;
         conflicting.ddl.push_str(" INVISIBLE");
         assert!(separate_oracle_supporting_indexes(&source, "APP", "T", &[conflicting]).is_err());
+    }
+
+    #[test]
+    fn cross_owner_trigger_ddl_defaults_on_table_to_the_table_owner() {
+        // OWNER = S2, TABLE_OWNER = S1: the trigger name defaults to the inventory
+        // OWNER while an unqualified `ON T` binding must default to the queried
+        // schema, not the trigger owner.
+        let source = r#"CREATE TRIGGER "S2"."TR" BEFORE INSERT ON T FOR EACH ROW BEGIN NULL; END;"#;
+        let plain = oracle_trigger_ddl_sources(source, "S1").unwrap();
+        assert_eq!(plain[0].owner, "S2");
+        assert_eq!(plain[0].table_owner, "S1", "unqualified ON table keeps the passed owner");
+        let cross = oracle_trigger_ddl_sources_with_table_owner(source, "S2", "S1").unwrap();
+        assert_eq!(cross[0].owner, "S2");
+        assert_eq!(cross[0].table_owner, "S1", "unqualified ON table defaults to the table owner");
+        assert_eq!(cross[0].table, "T");
     }
 }

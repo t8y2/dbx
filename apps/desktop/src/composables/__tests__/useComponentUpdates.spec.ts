@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useComponentUpdates } from "@/composables/useComponentUpdates";
 import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
+import { pluginRequiresNewerDbxMark, resetPluginRequiresNewerDbxMarks } from "@/lib/plugins/pluginMarketplace";
 import { runPendingComponentUpdatePlan, type PendingComponentUpdates } from "@/lib/updates/componentUpdateOrchestration";
 import { showToolbarUpdateAction } from "@/lib/updates/updateBadges";
 
@@ -436,6 +437,22 @@ describe("useComponentUpdates", () => {
     const result = await updates.installCategory("plugins");
 
     expect(result.blockedPlugins).toEqual([{ pluginName: "Example plugin", reason: "operations" }]);
+  });
+
+  it("remembers an engine rejection so the automatic pass stops re-offering that version", async () => {
+    resetPluginRequiresNewerDbxMarks();
+    mocks.installMarketplacePlugin.mockRejectedValue(new Error("Plugin 'example' is incompatible: Plugin requires DBX >=0.7.0, but 0.6.60 is installed"));
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const result = await updates.installCategory("plugins");
+
+    expect(result.plugins).toBe(0);
+    expect(pluginRequiresNewerDbxMark("official", "example", "1.1.0")).toEqual({ version: "1.1.0", requirement: ">=0.7.0", hostApi: false, upgradeRequired: true });
+    // A catalog release past the rejected version is not blocked by the mark.
+    expect(pluginRequiresNewerDbxMark("official", "example", "1.2.0")).toBeUndefined();
+    // Neither is the same id+version offered by another repository.
+    expect(pluginRequiresNewerDbxMark("team-repo", "example", "1.1.0")).toBeUndefined();
+    resetPluginRequiresNewerDbxMarks();
   });
 
   it("tracks driver install progress and batch counts during driver update", async () => {

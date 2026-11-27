@@ -131,6 +131,7 @@ function normalizeTask(raw: unknown): TransferTask | null {
       batchSize: typeof config.batchSize === "number" && config.batchSize > 0 ? config.batchSize : 1000,
       operationTimeoutSecs: normalizeTransferOperationTimeoutSecs(config.operationTimeoutSecs),
       tableFilters: normalizeTransferTableFilters(config.tableFilters),
+      targetTableNames: normalizeTransferTableFilters(config.targetTableNames),
       dropTargetConfirmed: false,
     },
     createdAt: candidate.createdAt || nowIso(),

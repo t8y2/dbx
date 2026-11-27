@@ -70,6 +70,8 @@ const settingsStore = {
   editorSettings: {
     sidebarActivation: "single" as "single" | "double",
     sidebarBrowseObjectsOnDatabaseActivation: false,
+    sidebarAutoExpandOnDatabaseActivation: false,
+    sidebarTableClickNavigation: false,
     shortcuts: { openDataInNewTab: "" },
   },
 };
@@ -125,6 +127,8 @@ afterEach(() => {
   queryStore.tabs = [];
   settingsStore.editorSettings.sidebarActivation = "single";
   settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = false;
+  settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation = false;
+  settingsStore.editorSettings.sidebarTableClickNavigation = false;
   vi.clearAllMocks();
   connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(true);
   connectionStore.getConfig.mockReturnValue({ db_type: "mysql", name: "connection" });
@@ -240,6 +244,37 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     window.removeEventListener(OBJECT_BROWSER_SEARCH_FOCUS_EVENT, focusRequested);
   });
 
+  it.each([
+    ["single", false],
+    ["single", true],
+    ["double", false],
+    ["double", true],
+  ] as const)("keeps expansion %s/%s while opening objects without loading the tree", async (activation, isExpanded) => {
+    const database: TreeNode = { id: "mysql:inventory", label: "inventory", type: "database", connectionId: "mysql", database: "inventory", isExpanded, children: [] };
+    settingsStore.editorSettings.sidebarActivation = activation;
+    settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = true;
+    settingsStore.editorSettings.sidebarTableClickNavigation = true;
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: database, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    // Exercise the complete browser event sequence in either activation mode.
+    host.value!.handleRowClick(database, 1, true);
+    host.value!.handleRowClick(database, 2, true);
+    host.value!.handleRowDoubleClick(database, new MouseEvent("dblclick"));
+    await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledOnce());
+    expect(database.isExpanded).toBe(isExpanded);
+    expect(connectionStore.loadTables).not.toHaveBeenCalled();
+
+    // The preference must not block explicit arrow expansion/collapse.
+    host.value!.toggleNode(database);
+    await vi.waitFor(() => expect(database.isExpanded).toBe(!isExpanded));
+  });
+
   it("toggles an expanded database closed on double-click in double-click activation mode", async () => {
     const database: TreeNode = {
       id: "mysql:dbx_test",
@@ -252,6 +287,7 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     };
     settingsStore.editorSettings.sidebarActivation = "double";
     settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = true;
+    settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation = true;
 
     const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
     const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: database, depth: 0 }) }));
@@ -279,6 +315,7 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     };
     settingsStore.editorSettings.sidebarActivation = "single";
     settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = true;
+    settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation = true;
 
     const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
     const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: database, depth: 0 }) }));
@@ -371,6 +408,7 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     });
     connectionStore.ensureConnected.mockReturnValue(connection);
     settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = true;
+    settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation = true;
 
     const database: TreeNode = {
       id: "mysql:inventory",
@@ -1546,5 +1584,60 @@ describe("SidebarTreeRuntimeHost expansion", () => {
 
     expect(loaderMock).toHaveBeenCalledWith(connectionId, ...(extraCallArgs ?? []));
     expect(connectionNode.children?.map((node) => node.label)).toEqual([`${dbType} child`]);
+  });
+
+  it.each([
+    ["group-tables", "tables"],
+    ["group-views", "views"],
+    ["group-procedures", "procedures"],
+    ["group-functions", "functions"],
+    ["group-triggers", "triggers"],
+    ["group-events", "events"],
+  ] as const)("double-clicking %s opens the object browser on the %s filter", async (type, expectedFilter) => {
+    const group: TreeNode = {
+      id: `mysql:basic:__${type}`,
+      label: `tree.${type}`,
+      type,
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: false,
+      children: [{ id: `mysql:basic:__${type}:item`, label: "ITEM", type: "table", connectionId: "mysql", database: "basic" }],
+    };
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: group, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value!.handleRowDoubleClick(group, new MouseEvent("dblclick"));
+
+    await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledOnce());
+    expect(queryStore.openObjectBrowser.mock.calls[0].slice(0, 7)).toEqual(["mysql", "basic", undefined, undefined, undefined, false, expectedFilter]);
+  });
+
+  it("single-clicking an object group expands the list without opening the object browser", async () => {
+    const group: TreeNode = {
+      id: "mysql:basic:__events",
+      label: "tree.events",
+      type: "group-events",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: false,
+      children: [{ id: "mysql:basic:__events:item", label: "EV", type: "event", connectionId: "mysql", database: "basic" }],
+    };
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: group, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value!.handleRowClick(group, 1);
+    await vi.waitFor(() => expect(group.isExpanded).toBe(true));
+
+    expect(queryStore.openObjectBrowser).not.toHaveBeenCalled();
   });
 });

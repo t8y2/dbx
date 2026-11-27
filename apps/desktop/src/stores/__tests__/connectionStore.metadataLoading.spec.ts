@@ -853,6 +853,52 @@ describe("connectionStore metadata loading", () => {
     expect(loadSchemaCache.mock.calls.every(([key]) => !legacyKeys.has(key) && key.includes("-jdbc-schema-v1"))).toBe(true);
   });
 
+  it("keeps space-padded MySQL table identifiers when a grouped table node loads", async () => {
+    const connection = mysqlConnection();
+    const listTables = vi.fn().mockResolvedValue([
+      { name: " orders ", table_type: "TABLE", comment: null },
+      { name: "orders", table_type: "TABLE", comment: null },
+    ]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      listObjects: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "grouped";
+    useSettingsStore().desktopSettings.sidebar_table_page_size = 200;
+    const store = useConnectionStore();
+    const tableGroup: TreeNode = { id: "mysql-1:app:__tables", label: "tree.tables", type: "group-tables", connectionId: connection.id, database: "app", isExpanded: true, children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [{ id: "mysql-1:app", label: "app", type: "database", connectionId: connection.id, database: "app", isExpanded: true, children: [tableGroup] }],
+      },
+    ];
+
+    await store.loadObjectGroupChildren(tableGroup);
+
+    const rows = tableGroup.children?.filter((node) => node.type === "table") ?? [];
+    expect(rows.map((node) => [node.label, node.tableName])).toEqual([
+      [" orders ", " orders "],
+      ["orders", "orders"],
+    ]);
+    expect(new Set(rows.map((node) => node.id)).size).toBe(2);
+  });
+
   it("loads inferred Oracle JDBC schemas without requesting empty catalogs", async () => {
     const listDatabases = vi.fn().mockResolvedValue([]);
     const listSchemas = vi.fn().mockResolvedValue(["ANONYMOUS", "DBX_TEST", "SYS", "SYSTEM"]);
@@ -1155,7 +1201,7 @@ describe("connectionStore metadata loading", () => {
       tableListCalls += 1;
       if (tableListCalls === 2) releaseTableLists();
       await bothTableListsStarted;
-      return limit === 2 ? ([{ name: "indexed_table", table_type: "TABLE", comment: null }] satisfies TableInfo[]) : ([{ name: "fresh_table", table_type: "TABLE", comment: null }] satisfies TableInfo[]);
+      return limit === 2 ? ([{ name: "indexed_table", table_type: "TABLE", comment: null, parent_schema: "public", parent_name: "parent_table" }] satisfies TableInfo[]) : ([{ name: "fresh_table", table_type: "TABLE", comment: null }] satisfies TableInfo[]);
     });
     const loadSchemaCache = vi.fn(async (key: string) => {
       const payload = cachedPayloads.get(key) ?? null;
@@ -1234,9 +1280,11 @@ describe("connectionStore metadata loading", () => {
     const treeCache = decodeSchemaTreeCache<TreeNode[]>(cachedPayloads.get(treeCacheKey));
     const indexCache = decodeSchemaTreeCache<TreeNode[]>(cachedPayloads.get(indexCacheKey));
     expect(treeCache?.children.map((node) => node.label)).toEqual(["fresh_table"]);
-    // The local table index preserves comments for regex search matching.
-    expect(indexCache?.tableSearchIndex?.entries).toEqual([{ name: "indexed_table", tableType: "TABLE", comment: null }]);
-    await expect(store.loadSidebarTableSearchIndex(tablesGroup.id)).resolves.toEqual([{ name: "indexed_table", table_type: "TABLE", comment: null }]);
+    // The local table index preserves comments, owning schema, and partition
+    // parent metadata across persistence.
+    expect(indexCache?.tableSearchIndex?.version).toBe(4);
+    expect(indexCache?.tableSearchIndex?.entries).toEqual([{ name: "indexed_table", tableType: "TABLE", comment: null, schema: "public", parentSchema: "public", parentName: "parent_table" }]);
+    await expect(store.loadSidebarTableSearchIndex(tablesGroup.id)).resolves.toEqual([{ name: "indexed_table", table_type: "TABLE", comment: null, schema: "public", parent_schema: "public", parent_name: "parent_table" }]);
     // The refreshed index is served from the in-memory cache; refreshing
     // additionally registers the scope by reading the sidebar index manifest.
     expect(loadSchemaCache).toHaveBeenLastCalledWith("dbx:sidebar-table-search-index-manifest-v1");
@@ -5218,5 +5266,94 @@ describe("connectionStore metadata loading", () => {
     // The saved filter must show without a manual refresh of the connection.
     expect(store.getConfig(connection.id)?.visible_schemas).toEqual({ "": ["APP_USER"] });
     expect(schemaLabels()).toEqual(["APP_USER"]);
+  });
+
+  it("drops the schema picker cache when a forced connection-root reload runs", async () => {
+    const listDatabases = vi.fn().mockResolvedValue([{ name: "app", comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { schemaOptionsByKey } = await import("@/lib/database/schemaOptionsCache");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, isExpanded: true, children: [] }];
+    // Schema-aware single-database engines keep their schemas under the connection
+    // root, so creating or dropping one force-reloads the root instead of calling
+    // loadSchemas; that reload must drop the picker cache too (#14582).
+    schemaOptionsByKey.value = {
+      "pg-1:app:hide-system": ["public"],
+      "pg-1:archive:hide-system": ["x"],
+      "other:app:hide-system": ["y"],
+    };
+
+    await store.loadDatabases(connection.id, { force: true });
+
+    expect(Object.keys(schemaOptionsByKey.value)).toEqual(["other:app:hide-system"]);
+  });
+
+  it("drops the schema picker cache when SQL Server database objects force-reload", async () => {
+    const listSchemas = vi.fn().mockResolvedValue(["dbo", "guest"]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      listSchemas,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { schemaOptionsByKey } = await import("@/lib/database/schemaOptionsCache");
+    const store = useConnectionStore();
+    const connection = {
+      ...postgresConnection(),
+      id: "sqlserver-1",
+      name: "SQL Server",
+      db_type: "sqlserver",
+      port: 1433,
+      database: "master",
+    } as ConnectionConfig;
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [{ id: `${connection.id}:master`, label: "master", type: "database", connectionId: connection.id, database: "master", isExpanded: false, children: [] }],
+      },
+    ];
+    // SQL Server schema sets load through loadSqlServerDatabaseObjects rather than
+    // loadSchemas, so its forced reload is the create/drop signal for that engine.
+    schemaOptionsByKey.value = {
+      "sqlserver-1:master:hide-system": ["dbo"],
+      "sqlserver-1:other:hide-system": ["x"],
+      "keep-1:master:hide-system": ["y"],
+    };
+
+    await store.loadSqlServerDatabaseObjects(connection.id, "master", { force: true });
+
+    // Only the reloaded database's entries drop; other databases of the same
+    // connection and other connections keep theirs.
+    expect(Object.keys(schemaOptionsByKey.value)).toEqual(["sqlserver-1:other:hide-system", "keep-1:master:hide-system"]);
   });
 });

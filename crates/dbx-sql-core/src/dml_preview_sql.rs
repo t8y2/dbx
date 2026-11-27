@@ -7,12 +7,17 @@
 //!     → SELECT *, 123 AS "a (new)" FROM t WHERE id = 1
 //! `SELECT *` 展开受影响行全部当前值，新值列（别名后缀 ` (new)`）追加在末尾；
 //! SET 表达式直接搬运（在行上下文中按旧值求值即得新值，`SET a = a + 1` 也能算对）。
+//! MySQL 单表 UPDATE 按从左到右赋值，后面的 SET 表达式引用前面已赋值的列时拒绝预览。
 //! 注意：SET / VALUES 表达式会在预览 SELECT 中重新求值，带副作用的表达式
 //! （推进序列、volatile 函数）在预览中同样生效，非确定性函数的预览值可能与实际执行不同。
 //!
 //! 无法安全改写的语句返回 Err（错误信息为英文，前端直接以 toast 展示，仍可正常执行原语句）。
 
-use sqlparser::ast::{AssignmentTarget, Expr, Ident, ObjectNamePart, SetExpr, Statement, TableWithJoins};
+use std::ops::ControlFlow;
+
+use sqlparser::ast::{
+    visit_expressions, AssignmentTarget, Expr, Ident, ObjectNamePart, SetExpr, Statement, TableWithJoins,
+};
 use sqlparser::dialect::{
     ClickHouseDialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
     SparkSqlDialect,
@@ -109,6 +114,44 @@ fn unsupported(reason: &str) -> String {
     format!("Preview is not supported: {reason}")
 }
 
+/// 表达式是否引用了目标表的给定列之一（列名不区分大小写）。`a` 与 `t.a`（表名或别名限定）
+/// 都算；其他限定符（如子查询里的 `u.a`）不算。
+fn expr_references_any_column(expr: &Expr, columns: &[String], table_qualifiers: &[String]) -> bool {
+    visit_expressions(expr, |expr| {
+        let column = match expr {
+            Expr::Identifier(ident) => Some(ident),
+            Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {
+                let qualifier = parts[parts.len() - 2].value.to_lowercase();
+                if table_qualifiers.contains(&qualifier) {
+                    parts.last()
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        match column {
+            Some(ident) if columns.contains(&ident.value.to_lowercase()) => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        }
+    })
+    .is_break()
+}
+
+/// 单表 UPDATE 目标表可用的限定名（表名最后一段与别名，小写）。
+fn update_table_qualifiers(update: &sqlparser::ast::Update) -> Vec<String> {
+    let mut qualifiers = Vec::new();
+    if let sqlparser::ast::TableFactor::Table { name, alias, .. } = &update.table.relation {
+        if let Some(ident) = name.0.last().and_then(ObjectNamePart::as_ident) {
+            qualifiers.push(ident.value.to_lowercase());
+        }
+        if let Some(alias) = alias {
+            qualifiers.push(alias.name.value.to_lowercase());
+        }
+    }
+    qualifiers
+}
+
 /// UPDATE → SELECT <列交错展开> FROM … WHERE …
 ///
 /// 提供目标表列清单且为单表时，按「原列, 原列 (new)」逐列交错展开，使新值列紧跟
@@ -127,12 +170,20 @@ fn build_update_preview(
     }
     let mut set_items: Vec<SetItem> = Vec::new();
     let mut set_order: Vec<String> = Vec::new(); // 小写列名 → 顺序
+    let single_table = update.table.joins.is_empty() && update.from.is_none();
+    let mysql_left_to_right = dialect_key == "mysql" && single_table;
+    let table_qualifiers = if mysql_left_to_right { update_table_qualifiers(update) } else { Vec::new() };
     for assignment in &update.assignments {
         let Some(column) = assignment_target_column(&assignment.target) else {
             return Err(unsupported("UPDATE assignment target is not a single column"));
         };
         let column_name = column.value.clone();
         let key = column_name.to_lowercase();
+        // MySQL 单表 UPDATE 按从左到右赋值：`SET a = a + 1, b = a` 中 b 取到的是新 a，
+        // 按旧行求值的预览会给出错误的新值，因此引用了前面已赋值列的语句拒绝预览。
+        if mysql_left_to_right && expr_references_any_column(&assignment.value, &set_order, &table_qualifiers) {
+            return Err(unsupported("MySQL applies SET assignments left to right"));
+        }
         if let Some(position) = set_order.iter().position(|existing| *existing == key) {
             set_order.remove(position);
             set_items.remove(position);
@@ -160,7 +211,6 @@ fn build_update_preview(
     let append_items: Vec<String> = set_items.iter().map(render_new_value).collect();
 
     // 单表 + 提供了列清单 → 交错展开（新值列紧跟原值列）。
-    let single_table = update.table.joins.is_empty() && update.from.is_none();
     let select_items = if single_table {
         match columns {
             Some(column_list) if !column_list.is_empty() => {
@@ -451,6 +501,36 @@ mod tests {
     fn update_deduplicates_same_column_last_wins() {
         let result = preview("UPDATE t SET x = 1, x = 2", "postgres").unwrap();
         assert_eq!(result.sql, "SELECT *, 2 AS \"x (new)\" FROM t");
+    }
+
+    #[test]
+    fn update_mysql_rejects_set_that_reads_an_earlier_assignment() {
+        // MySQL single-table UPDATE assigns left to right, so `b = a` sees the new `a`
+        // and `a = a + 1, a = a + 1` adds 2; a SELECT over the old row cannot show that.
+        for (sql, database_type) in [
+            ("UPDATE t SET a = a + 1, b = a WHERE id = 1", "mysql"),
+            ("UPDATE t SET a = a + 1, a = a + 1 WHERE id = 1", "mysql"),
+            ("UPDATE t SET A = 1, b = t.a + 1", "mariadb"),
+            ("UPDATE t SET a = 1, b = COALESCE(`a`, 0)", "mysql"),
+            ("UPDATE db.t AS x SET a = 1, b = x.a", "mysql"),
+        ] {
+            let error = preview(sql, database_type).unwrap_err();
+            assert_eq!(error, "Preview is not supported: MySQL applies SET assignments left to right", "{sql}");
+        }
+    }
+
+    #[test]
+    fn update_mysql_keeps_preview_when_set_items_are_independent() {
+        let result = preview("UPDATE t SET a = 1, b = c + 1, a = 2 WHERE id = 1", "mysql").unwrap();
+        assert_eq!(result.sql, "SELECT *, c + 1 AS `b (new)`, 2 AS `a (new)` FROM t WHERE id = 1");
+        let result = preview("UPDATE t SET a = a + 1, b = b * 2 WHERE id = 1", "mysql").unwrap();
+        assert_eq!(result.sql, "SELECT *, a + 1 AS `a (new)`, b * 2 AS `b (new)` FROM t WHERE id = 1");
+        // Columns of other tables (here a subquery's `u.a`) are not the earlier assignment.
+        let result = preview("UPDATE t SET a = 1, b = (SELECT max(u.a) FROM u)", "mysql").unwrap();
+        assert_eq!(result.sql, "SELECT *, 1 AS `a (new)`, (SELECT max(u.a) FROM u) AS `b (new)` FROM t");
+        // PostgreSQL evaluates every SET expression against the old row.
+        let result = preview("UPDATE t SET a = a + 1, b = a WHERE id = 1", "postgres").unwrap();
+        assert_eq!(result.sql, "SELECT *, a + 1 AS \"a (new)\", a AS \"b (new)\" FROM t WHERE id = 1");
     }
 
     #[test]

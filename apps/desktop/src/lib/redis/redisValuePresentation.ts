@@ -124,6 +124,15 @@ export function redisBlobDisplayText(blob: RedisBlob): string {
   return sanitizeRedisDisplayText(redisBlobRawText(blob));
 }
 
+export function redisBlobDisplayPreview(blob: RedisBlob): string {
+  // Decode only a base64-aligned prefix for a single-line collection preview.
+  const maxBase64Chars = 512;
+  if (blob.raw_base64.length <= maxBase64Chars) return redisBlobDisplayText(blob);
+  const bytes = base64ToBytes(blob.raw_base64.slice(0, maxBase64Chars));
+  const text = blob.encoding === "binary" ? null : decodeUtf8Bytes(bytes, true);
+  return `${sanitizeRedisDisplayText(text ?? escapeRedisBytes(bytes))}…`;
+}
+
 export function formatRedisMemberDetail(value: unknown, options: RedisMemberDetailOptions = {}): RedisMemberDetail {
   if (isRedisBlob(value)) return formatRedisBlobDetail(value, options);
 
@@ -675,7 +684,7 @@ export function redisValuePreview(value: RedisValue): string {
     }
     case "hash": {
       const first = value.data.items[0];
-      return first ? previewText(`${redisBlobRawText(first.field)} ${redisBlobRawText(first.value)}`) : "";
+      return first ? previewText(`${redisBlobDisplayPreview(first.field)} ${redisBlobDisplayPreview(first.value)}`) : "";
     }
     case "zset": {
       const first = value.data.items[0];
@@ -873,9 +882,9 @@ function escapeRedisBytes(bytes: Uint8Array): string {
   return output;
 }
 
-function decodeUtf8Bytes(bytes: Uint8Array): string | null {
+function decodeUtf8Bytes(bytes: Uint8Array, stream = false): string | null {
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes, { stream });
   } catch {
     return null;
   }

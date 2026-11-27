@@ -14,7 +14,7 @@ use std::future::Future;
 use std::ops::ControlFlow;
 use std::ops::Deref;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -23,7 +23,10 @@ use crate::models::connection::{
     is_mysql_jdbc_tls_param, mysql_jdbc_tls_mode, ConnectionConfig, DatabaseConnectionInfo, DatabaseType,
     MysqlJdbcTlsMode,
 };
-use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database};
+use crate::sql::{
+    contains_ascii_case_insensitive, starts_with_executable_sql_keyword,
+    starts_with_executable_sql_keyword_for_database,
+};
 use crate::types::{
     is_opaque_aggregate_state_type, ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate,
     CompletionAssistantCandidateKind, CompletionAssistantMatchMode, CompletionAssistantObjectKind,
@@ -39,6 +42,92 @@ pub use crate::mysql_data_charset::{
 };
 use crate::mysql_event_sql::MysqlEventInfo;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+enum MySqlStatisticsColumns {
+    /// MySQL 8+: EXPRESSION + INDEX_COMMENT.
+    Full = 0,
+    /// MySQL 5.5–5.7, Doris, StarRocks v5: INDEX_COMMENT without EXPRESSION.
+    WithoutExpression = 1,
+    /// MySQL 5.0/5.1: neither EXPRESSION nor INDEX_COMMENT.
+    Minimal = 2,
+}
+
+impl MySqlStatisticsColumns {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Full,
+            1 => Self::WithoutExpression,
+            _ => Self::Minimal,
+        }
+    }
+
+    fn flags(self) -> (bool, bool) {
+        match self {
+            Self::Full => (true, true),
+            Self::WithoutExpression => (false, true),
+            Self::Minimal => (false, false),
+        }
+    }
+
+    fn downgrade(self) -> Option<Self> {
+        match self {
+            Self::Full => Some(Self::WithoutExpression),
+            Self::WithoutExpression => Some(Self::Minimal),
+            Self::Minimal => None,
+        }
+    }
+}
+
+/// Discovered or engine-known metadata query compatibility flags for a pool.
+///
+/// Storing these beside the pool avoids repeating doomed `Unknown column` or
+/// `ESCAPE` probes on every completion keystroke or index lookup, keeping
+/// Doris/MySQL audit logs clean after discovery (or from the very first call
+/// when pre-seeded for Doris).
+#[derive(Debug, Default)]
+struct MySqlMetadataCapabilities {
+    omit_completion_escape: AtomicBool,
+    routine_use_dtd_identifier: AtomicBool,
+    statistics_columns: AtomicU8,
+}
+
+impl MySqlMetadataCapabilities {
+    fn completion_compatibility(&self) -> MysqlCompletionCompatibility {
+        MysqlCompletionCompatibility {
+            omit_escape: self.omit_completion_escape.load(Ordering::Relaxed),
+            use_dtd_identifier: self.routine_use_dtd_identifier.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record_completion_compatibility(&self, compatibility: MysqlCompletionCompatibility) {
+        if compatibility.omit_escape {
+            self.omit_completion_escape.store(true, Ordering::Relaxed);
+        }
+        if compatibility.use_dtd_identifier {
+            self.routine_use_dtd_identifier.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn statistics_columns(&self) -> MySqlStatisticsColumns {
+        MySqlStatisticsColumns::from_u8(self.statistics_columns.load(Ordering::Relaxed))
+    }
+
+    fn record_statistics_columns(&self, columns: MySqlStatisticsColumns) {
+        self.statistics_columns.fetch_max(columns as u8, Ordering::Relaxed);
+    }
+
+    fn set_doris_defaults(&self) {
+        // Apache Doris 2.x/3.x exposes DTD_IDENTIFIER (not DATA_TYPE) on
+        // information_schema.ROUTINES and omits EXPRESSION on
+        // information_schema.STATISTICS. Keep explicit LIKE ESCAPE enabled
+        // initially because Doris 3.x supports it and older engines that reject
+        // it still discover and cache omit_completion_escape on first use.
+        self.routine_use_dtd_identifier.store(true, Ordering::Relaxed);
+        self.statistics_columns.fetch_max(MySqlStatisticsColumns::WithoutExpression as u8, Ordering::Relaxed);
+    }
+}
+
 /// DBX-owned MySQL pool handle. The driver does not expose its configured
 /// maximum, so retain that value beside the driver pool for checkout phase
 /// classification instead of guessing it from aggregate metrics.
@@ -48,12 +137,14 @@ pub struct MySqlPool {
     max_connections: usize,
     data_charset: Option<MySqlDataCharset>,
     checkout_verifications: std::sync::Arc<MySqlCheckoutVerifications>,
+    metadata_capabilities: std::sync::Arc<MySqlMetadataCapabilities>,
     /// Budget for checking a connection out of this pool.
     ///
     /// The connection-level "connect timeout" setting is threaded down to the
     /// pool at creation time so that metadata, DDL, connection-info, cancel and
     /// streaming paths do not fall back to a compile-time constant (#12908).
     checkout_timeout: Duration,
+    stateless_http_tunnel: bool,
 }
 
 impl MySqlPool {
@@ -77,8 +168,17 @@ impl MySqlPool {
             max_connections: max_connections.max(1),
             data_charset: None,
             checkout_verifications: Default::default(),
+            metadata_capabilities: Default::default(),
             checkout_timeout: checkout_timeout.max(Duration::from_secs(1)),
+            stateless_http_tunnel: false,
         }
+    }
+
+    /// Pre-seed metadata query compatibility for Doris/SelectDB connections so
+    /// the pool avoids doomed `DATA_TYPE` / `EXPRESSION` column probes from the
+    /// very first metadata query.
+    pub fn set_doris_metadata_defaults(&self) {
+        self.metadata_capabilities.set_doris_defaults();
     }
 
     /// How long a checkout may wait for a pooled (or newly created) connection.
@@ -91,7 +191,16 @@ impl MySqlPool {
     /// session state (temporary tables, user variables, selected catalog)
     /// survives across executions in the same tab.
     pub fn is_client_session_pool(&self) -> bool {
-        self.max_connections == 1
+        self.max_connections == 1 && !self.stateless_http_tunnel
+    }
+
+    /// Navicat PHP tunnels open a new MySQL session for every HTTP request.
+    pub fn is_stateless_http_tunnel(&self) -> bool {
+        self.stateless_http_tunnel
+    }
+
+    pub fn set_stateless_http_tunnel(&mut self) {
+        self.stateless_http_tunnel = true;
     }
 
     pub fn data_charset(&self) -> Option<MySqlDataCharset> {
@@ -106,7 +215,6 @@ impl MySqlPool {
     /// generation. Pool options are not an identity: a reconnect creates a new
     /// pool with identical options, and a late health probe for the old pool
     /// must not be allowed to remove that replacement from routing.
-    #[cfg(any(test, feature = "test-support"))]
     pub fn is_same_pool(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.inner.metrics(), &other.inner.metrics())
     }
@@ -2583,6 +2691,13 @@ pub async fn apply_catalog_database_context(
     Ok(())
 }
 
+/// Selects a database without resetting the connection or committing a transaction.
+pub async fn select_session_database(conn: &mut mysql_async::Conn, database: &str) -> Result<(), String> {
+    conn.query_drop(format!("USE {}", quote_identifier(database)))
+        .await
+        .map_err(|error| format!("Failed to select query database: {error}"))
+}
+
 fn should_enable_explicit_timestamp_defaults(sql: &str) -> bool {
     if !starts_with_executable_sql_keyword(sql, &["CREATE", "ALTER"]) {
         return false;
@@ -2695,6 +2810,22 @@ fn mysql_connection_session_variable_assignments(url: &str) -> Vec<String> {
     };
 
     split_mysql_session_variables(&value)
+}
+
+/// Initialize native MySQL sessions in auto-commit mode unless the connection
+/// URL explicitly configures it. Apply this only during connection setup/reset,
+/// never on checkout: changing it on a live session could commit a transaction.
+pub fn default_autocommit_setup_query(url: &str) -> Option<&'static str> {
+    let configured = mysql_connection_session_variable_assignments(url).into_iter().any(|assignment| {
+        let Some((name, _)) = assignment.split_once('=') else {
+            return false;
+        };
+        let name = name.trim().trim_end_matches(':').trim().to_ascii_lowercase();
+        let name = name.strip_prefix("@@").unwrap_or(&name);
+        let name = name.strip_prefix("session.").or_else(|| name.strip_prefix("local.")).unwrap_or(name);
+        name.trim_matches('`') == "autocommit"
+    });
+    (!configured).then_some("SET SESSION autocommit = 1")
 }
 
 /// Detects an explicit `group_concat_max_len` assignment in the connection URL.
@@ -3697,8 +3828,10 @@ pub async fn list_tables_filtered(
     let tables: Vec<TableInfo> = rows
         .iter()
         .filter_map(|row| {
-            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
-            (!name.is_empty()).then_some(TableInfo {
+            // MySQL identifiers may contain leading/trailing spaces inside
+            // backticks; only use trim() to reject blank rows.
+            let name = get_str_by_name(row, "TABLE_NAME");
+            (!name.trim().is_empty()).then_some(TableInfo {
                 name,
                 table_type: normalize_mysql_table_type(&get_str_by_name(row, "TABLE_TYPE")),
                 valid: None,
@@ -3858,16 +3991,19 @@ pub async fn completion_assistant_search(
     let pattern = mysql_completion_like_pattern(&request.mask, request.match_mode.as_ref());
     let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let mut candidates = Vec::new();
-    let mut compatibility = MysqlCompletionCompatibility::default();
+    let mut compatibility = pool.metadata_capabilities.completion_compatibility();
+    let mut used_escape_fallback = false;
+    let mut used_routine_fallback = false;
 
     if kinds
         .iter()
         .any(|kind| matches!(kind, CompletionAssistantObjectKind::Database | CompletionAssistantObjectKind::Schema))
     {
-        let rows = mysql_completion_rows(&mut conn, &mut compatibility, false, |policy| {
+        let rows = mysql_completion_rows(&mut conn, &pool.metadata_capabilities, &mut compatibility, false, |policy| {
             mysql_completion_schemas_sql(&pattern, limit.saturating_sub(candidates.len()), policy)
         })
         .await?;
+        used_escape_fallback |= compatibility.omit_escape;
         for row in rows {
             let schema_name = get_str_by_name(&row, "schema_name");
             candidates.push(CompletionAssistantCandidate {
@@ -3886,10 +4022,11 @@ pub async fn completion_assistant_search(
     }
 
     if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_table_like) {
-        let rows = mysql_completion_rows(&mut conn, &mut compatibility, false, |policy| {
+        let rows = mysql_completion_rows(&mut conn, &pool.metadata_capabilities, &mut compatibility, false, |policy| {
             mysql_completion_tables_sql(database, &pattern, &kinds, limit.saturating_sub(candidates.len()), policy)
         })
         .await?;
+        used_escape_fallback |= compatibility.omit_escape;
         for row in rows {
             let table_type = get_str_by_name(&row, "table_type");
             candidates.push(CompletionAssistantCandidate {
@@ -3915,10 +4052,12 @@ pub async fn completion_assistant_search(
 
     if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_routine_like) {
         let remaining = limit.saturating_sub(candidates.len());
-        let rows = mysql_completion_rows(&mut conn, &mut compatibility, true, |policy| {
+        let rows = mysql_completion_rows(&mut conn, &pool.metadata_capabilities, &mut compatibility, true, |policy| {
             mysql_completion_routines_sql(database, &pattern, &kinds, remaining, policy)
         })
         .await?;
+        used_escape_fallback |= compatibility.omit_escape;
+        used_routine_fallback |= compatibility.use_dtd_identifier;
         for row in rows {
             let routine_type = get_str_by_name(&row, "routine_type");
             candidates.push(CompletionAssistantCandidate {
@@ -3944,10 +4083,18 @@ pub async fn completion_assistant_search(
 
     if candidates.len() < limit && kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Column)) {
         if let Some(table) = request.parent_name.as_deref().filter(|table| !table.trim().is_empty()) {
-            let rows = mysql_completion_rows(&mut conn, &mut compatibility, false, |policy| {
-                mysql_completion_columns_sql(database, table, &pattern, limit.saturating_sub(candidates.len()), policy)
-            })
-            .await?;
+            let rows =
+                mysql_completion_rows(&mut conn, &pool.metadata_capabilities, &mut compatibility, false, |policy| {
+                    mysql_completion_columns_sql(
+                        database,
+                        table,
+                        &pattern,
+                        limit.saturating_sub(candidates.len()),
+                        policy,
+                    )
+                })
+                .await?;
+            used_escape_fallback |= compatibility.omit_escape;
             for row in rows {
                 candidates.push(CompletionAssistantCandidate {
                     name: get_str_by_name(&row, "object_name"),
@@ -3970,7 +4117,7 @@ pub async fn completion_assistant_search(
     Ok(CompletionAssistantResponse {
         incomplete: candidates.len() >= limit,
         candidates,
-        fallback_used: compatibility.omit_escape || compatibility.use_dtd_identifier,
+        fallback_used: used_escape_fallback || used_routine_fallback,
     })
 }
 
@@ -4015,17 +4162,20 @@ fn mysql_completion_escape_is_unsupported(error: &mysql_async::Error) -> bool {
 
 async fn mysql_completion_rows(
     conn: &mut mysql_async::Conn,
+    capabilities: &MySqlMetadataCapabilities,
     compatibility: &mut MysqlCompletionCompatibility,
     routine: bool,
     build_sql: impl Fn(MysqlCompletionCompatibility) -> String,
 ) -> Result<Vec<mysql_async::Row>, String> {
     // Each flag can change only once: at most three attempts for routines,
-    // two for other kinds. Share the discovered ESCAPE policy in this request.
+    // two for other kinds. Persist discovered flags on the pool so later
+    // completion keystrokes do not repeat doomed queries.
     loop {
         let sql = build_sql(*compatibility);
         match conn.query_iter(&sql).await {
             Ok(result) => return result.collect_and_drop().await.map_err(|error| error.to_string()),
             Err(error) if compatibility.retry_after(&error, routine) => {
+                capabilities.record_completion_compatibility(*compatibility);
                 log::debug!("Retrying MySQL completion with compatible catalog syntax: {error}");
             }
             Err(error) => return Err(error.to_string()),
@@ -4312,8 +4462,9 @@ fn table_infos_from_show_rows(rows: &[mysql_async::Row]) -> Vec<TableInfo> {
     let mut tables = rows
         .iter()
         .filter_map(|row| {
-            let name = get_str(row, 0).trim().to_string();
-            if name.is_empty() {
+            // SHOW TABLES returns the exact identifier; keep surrounding spaces.
+            let name = get_str(row, 0);
+            if name.trim().is_empty() {
                 return None;
             }
             let table_type = normalize_mysql_table_type(&get_str(row, 1));
@@ -5123,37 +5274,43 @@ pub async fn list_object_statistics_with_budget(
         let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
         result.collect_and_drop::<mysql_async::Row>().await.map_err(|e| e.to_string())?
     };
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            let mut statistics = ObjectStatistics {
-                name,
-                schema: Some(database.to_string()),
-                estimated_rows: get_opt_i64(row, "TABLE_ROWS"),
-                total_bytes: get_opt_i64(row, "TOTAL_BYTES"),
-                ..Default::default()
-            };
-            if include_mysql_details {
-                statistics.data_length = get_opt_i64(row, "DATA_LENGTH");
-                statistics.engine = get_opt_str(row, "ENGINE");
-                statistics.created_at = get_opt_metadata_string(row, "CREATE_TIME");
-                statistics.updated_at = get_opt_metadata_string(row, "UPDATE_TIME");
-                statistics.collation = get_opt_str(row, "TABLE_COLLATION");
-                statistics.row_format = get_opt_str(row, "ROW_FORMAT");
-                statistics.avg_row_length = get_opt_i64(row, "AVG_ROW_LENGTH");
-                statistics.max_data_length = get_opt_i64(row, "MAX_DATA_LENGTH");
-                statistics.check_time = get_opt_metadata_string(row, "CHECK_TIME");
-                statistics.index_length = get_opt_i64(row, "INDEX_LENGTH");
-                statistics.auto_increment = get_opt_unsigned_metadata_string(row, "AUTO_INCREMENT");
-                statistics.data_free = get_opt_i64(row, "DATA_FREE");
-            }
-            Some(statistics)
-        })
-        .collect())
+    Ok(rows.iter().filter_map(|row| object_statistics_from_row(row, database, include_mysql_details)).collect())
+}
+
+fn object_statistics_from_row(
+    row: &mysql_async::Row,
+    database: &str,
+    include_mysql_details: bool,
+) -> Option<ObjectStatistics> {
+    // MySQL identifiers may contain leading/trailing spaces inside backticks.
+    // Keep TABLE_NAME byte-exact so the statistics can be matched to the object
+    // list; trim() is only an emptiness check.
+    let name = get_str_by_name(row, "TABLE_NAME");
+    if name.trim().is_empty() {
+        return None;
+    }
+    let mut statistics = ObjectStatistics {
+        name,
+        schema: Some(database.to_string()),
+        estimated_rows: get_opt_i64(row, "TABLE_ROWS"),
+        total_bytes: get_opt_i64(row, "TOTAL_BYTES"),
+        ..Default::default()
+    };
+    if include_mysql_details {
+        statistics.data_length = get_opt_i64(row, "DATA_LENGTH");
+        statistics.engine = get_opt_str(row, "ENGINE");
+        statistics.created_at = get_opt_metadata_string(row, "CREATE_TIME");
+        statistics.updated_at = get_opt_metadata_string(row, "UPDATE_TIME");
+        statistics.collation = get_opt_str(row, "TABLE_COLLATION");
+        statistics.row_format = get_opt_str(row, "ROW_FORMAT");
+        statistics.avg_row_length = get_opt_i64(row, "AVG_ROW_LENGTH");
+        statistics.max_data_length = get_opt_i64(row, "MAX_DATA_LENGTH");
+        statistics.check_time = get_opt_metadata_string(row, "CHECK_TIME");
+        statistics.index_length = get_opt_i64(row, "INDEX_LENGTH");
+        statistics.auto_increment = get_opt_unsigned_metadata_string(row, "AUTO_INCREMENT");
+        statistics.data_free = get_opt_i64(row, "DATA_FREE");
+    }
+    Some(statistics)
 }
 
 pub async fn list_table_objects_show(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
@@ -6776,7 +6933,7 @@ pub async fn stream_query_rows(
     mut on_row: impl FnMut(&[serde_json::Value]) -> Result<(), String>,
 ) -> Result<u64, String> {
     let mut conn = get_conn_with_health_check(pool).await?;
-    stream_query_result_on_conn_with_data_charset(
+    let result = stream_query_result_on_conn_with_data_charset(
         &mut conn,
         sql,
         bare,
@@ -6792,7 +6949,33 @@ pub async fn stream_query_rows(
             Ok(())
         },
     )
-    .await
+    .await;
+    if stream_may_leave_unread_rows(&result, max_rows) {
+        // A connection returned to the pool with an unread result set is cleaned up by
+        // reading every remaining row. On a large table over a slow link that outlasts the
+        // budget for closing the export session, so the export fails with an unconfirmed
+        // close instead of its own outcome (#14796). Stop the query on the server and
+        // drop the connection instead of recycling it.
+        if let Err(error) = abandon_streaming_conn(conn, pool.checkout_timeout()).await {
+            log::warn!("[db:stream:abandon] {error}");
+        }
+    }
+    result
+}
+
+/// Whether the server may still be sending rows that the stream did not read: the
+/// stream failed (a row, sink or cancellation error) or stopped at `max_rows`.
+fn stream_may_leave_unread_rows(result: &Result<u64, String>, max_rows: Option<usize>) -> bool {
+    match result {
+        Err(_) => true,
+        Ok(rows) => max_rows.is_some_and(|limit| u64::try_from(limit).is_ok_and(|limit| *rows >= limit)),
+    }
+}
+
+async fn abandon_streaming_conn(conn: mysql_async::Conn, timeout: Duration) -> Result<(), String> {
+    let result = kill_query_with_opts(conn.opts().clone(), conn.id(), timeout).await;
+    let _ = tokio::time::timeout(timeout, conn.disconnect()).await;
+    result
 }
 
 pub async fn stream_query_result_on_conn(
@@ -7782,6 +7965,12 @@ async fn mysql_add_column_if_not_exists_fallback(
 /// Route it through the existing query path; MySQL servers that do not support
 /// the syntax still return their normal SQL syntax error.
 fn mysql_statement_returns_rows(sql: &str) -> bool {
+    // Every non-SELECT statement reaches this check, including multi-megabyte
+    // INSERTs from SQL dumps. Only parse the statements that can contain a
+    // RETURNING clause at all.
+    if !contains_ascii_case_insensitive(sql, "returning") {
+        return false;
+    }
     let Ok(statements) = Parser::parse_sql(&MySqlDialect {}, sql) else {
         return false;
     };
@@ -7915,7 +8104,30 @@ fn mysql_statistics_expression_is_unsupported(error: &mysql_async::Error) -> boo
             let message = server_error.message.to_ascii_lowercase();
             message.contains("column") && message.contains("expression") && message.contains("not found")
         }
+        mysql_async::Error::Server(server_error)
+            if server_error.code == 1105 && server_error.state.eq_ignore_ascii_case("HY000") =>
+        {
+            // Apache Doris / StarRocks report missing information_schema.STATISTICS
+            // columns through generic errCode=2 / MySQL error 1105 (HY000).
+            server_error.message.to_ascii_lowercase().contains("unknown column 'expression' in ")
+        }
         _ => false,
+    }
+}
+
+fn mysql_statistics_column_is_unsupported(error: &mysql_async::Error, columns: MySqlStatisticsColumns) -> bool {
+    match columns {
+        MySqlStatisticsColumns::Full => mysql_statistics_expression_is_unsupported(error),
+        MySqlStatisticsColumns::WithoutExpression => match error {
+            mysql_async::Error::Server(server_error) if server_error.code == 1054 => true,
+            mysql_async::Error::Server(server_error)
+                if server_error.code == 1105 && server_error.state.eq_ignore_ascii_case("HY000") =>
+            {
+                server_error.message.to_ascii_lowercase().contains("unknown column 'index_comment' in ")
+            }
+            _ => false,
+        },
+        MySqlStatisticsColumns::Minimal => false,
     }
 }
 
@@ -7976,23 +8188,27 @@ fn append_mysql_index_row(
 }
 
 pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
+    let mut current = pool.metadata_capabilities.statistics_columns();
     let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     // Column sets shrink in steps: MySQL 8+ carries both EXPRESSION and
-    // INDEX_COMMENT, 5.5–5.7 lost EXPRESSION, and 5.0/5.1 also lack
-    // INDEX_COMMENT — each gap reports ER_BAD_FIELD_ERROR (1054), so the
-    // query walks down the ladder until the server accepts it (#14021).
-    let column_sets = [(true, true), (false, true), (false, false)];
-    let mut last_unsupported_error: Option<mysql_async::Error> = None;
-    for (with_expression, with_comment) in column_sets {
+    // INDEX_COMMENT, 5.5–5.7 / Doris / StarRocks v5 omit EXPRESSION, and
+    // 5.0/5.1 also lack INDEX_COMMENT. Persist downgrades on the pool so later
+    // tables do not repeat doomed probes (#14021, #15528).
+    loop {
+        let (with_expression, with_comment) = current.flags();
         let sql = mysql_list_indexes_sql(database, table, with_expression, with_comment);
         let result = match conn.query_iter(&sql).await {
             Ok(result) => result,
-            Err(error) if mysql_statistics_expression_is_unsupported(&error) => {
-                log::debug!(
-                    "MySQL STATISTICS columns are unavailable (expression={with_expression}, comment={with_comment}), retrying with a smaller column set: {error}"
-                );
-                last_unsupported_error = Some(error);
-                continue;
+            Err(error) if mysql_statistics_column_is_unsupported(&error, current) => {
+                if let Some(next) = current.downgrade() {
+                    pool.metadata_capabilities.record_statistics_columns(next);
+                    log::debug!(
+                        "MySQL STATISTICS columns are unavailable (expression={with_expression}, comment={with_comment}), retrying with a smaller column set: {error}"
+                    );
+                    current = next;
+                    continue;
+                }
+                return Err(error.to_string());
             }
             Err(error) => return Err(error.to_string()),
         };
@@ -8025,10 +8241,6 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
         }
         return Ok(indexes);
     }
-    Err(match last_unsupported_error {
-        Some(error) => error.to_string(),
-        None => "MySQL STATISTICS metadata query failed on every known column set".to_string(),
-    })
 }
 
 pub async fn show_create_table_ddl(pool: &MySqlPool, database: &str, table: &str) -> Result<String, String> {
@@ -8192,6 +8404,17 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stateless_http_pool_does_not_claim_a_persistent_client_session() {
+        let mut pool = super::MySqlPool::new("mysql://root@127.0.0.1:3306", 1);
+        assert!(pool.is_client_session_pool());
+        assert!(!pool.is_stateless_http_tunnel());
+        pool.set_stateless_http_tunnel();
+        assert!(!pool.is_client_session_pool());
+        assert!(pool.clone().is_stateless_http_tunnel());
+        assert!(super::MySqlPool::new("mysql://root@127.0.0.1:3306", 1).is_client_session_pool());
+    }
+
     #[test]
     fn product_version_uses_starrocks_function_only_for_starrocks() {
         assert_eq!(super::database_product_version_query("StarRocks", None), "SELECT current_version()");
@@ -8586,6 +8809,20 @@ mod tests {
         assert!(pool.checkout_verifications().is_some());
         let _ = tokio::time::timeout(Duration::from_secs(1), raw.disconnect()).await;
         let _ = tokio::time::timeout(Duration::from_secs(1), pool.disconnect()).await;
+    }
+
+    #[test]
+    fn stream_abandons_connection_when_rows_may_remain_unread() {
+        assert!(stream_may_leave_unread_rows(&Err("Export cancelled".to_string()), None));
+        assert!(stream_may_leave_unread_rows(&Err("write failed".to_string()), Some(10)));
+        assert!(stream_may_leave_unread_rows(&Ok(10), Some(10)));
+    }
+
+    #[test]
+    fn stream_recycles_connection_after_reading_every_row() {
+        assert!(!stream_may_leave_unread_rows(&Ok(262_144), None));
+        assert!(!stream_may_leave_unread_rows(&Ok(0), None));
+        assert!(!stream_may_leave_unread_rows(&Ok(3), Some(10)));
     }
 
     #[tokio::test]
@@ -9007,7 +9244,11 @@ mod tests {
 
         assert!(is_result_set_query("INSERT INTO users (id) VALUES (1) RETURNING id", dialect));
         assert!(is_result_set_query("DELETE FROM users WHERE id = 1 RETURNING id", dialect));
+        assert!(is_result_set_query("insert into users (id) values (1) returning id", dialect));
+        assert!(is_result_set_query("REPLACE INTO users (id) VALUES (1) Returning id", dialect));
         assert!(!is_result_set_query("UPDATE users SET name = 'Ada'", dialect));
+        assert!(!is_result_set_query("INSERT INTO users (id) VALUES (1)", dialect));
+        assert!(!is_result_set_query("INSERT INTO notes (body) VALUES ('returning soon')", dialect));
     }
 
     #[test]
@@ -9512,6 +9753,54 @@ mod tests {
             vec![("active_users", "VIEW"), ("normal_table", "BASE TABLE"), ("t_order", "BASE TABLE")]
         );
         assert!(tables.iter().all(|table| table.comment.is_none()));
+    }
+
+    #[test]
+    fn show_rows_preserve_space_padded_table_identifiers() {
+        let rows = vec![
+            mysql_test_row(vec![Value::Bytes(b" orders ".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
+            mysql_test_row(vec![Value::Bytes(b"orders".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
+            mysql_test_row(vec![Value::Bytes(b"   ".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
+        ];
+
+        let tables = table_infos_from_show_rows(&rows);
+
+        assert_eq!(tables.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec![" orders ", "orders"]);
+    }
+
+    #[test]
+    fn object_statistics_rows_keep_space_padded_table_identifiers() {
+        let statistics_row = |name: &str, engine: &str, collation: &str| {
+            mysql_test_row_with_columns(
+                vec![
+                    Value::Bytes(name.as_bytes().to_vec()),
+                    Value::Int(7),
+                    Value::Int(4096),
+                    Value::Bytes(engine.as_bytes().to_vec()),
+                    Value::Bytes(collation.as_bytes().to_vec()),
+                ],
+                vec![
+                    Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(b"TABLE_NAME"),
+                    Column::new(ColumnType::MYSQL_TYPE_LONGLONG).with_name(b"TABLE_ROWS"),
+                    Column::new(ColumnType::MYSQL_TYPE_LONGLONG).with_name(b"TOTAL_BYTES"),
+                    Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(b"ENGINE"),
+                    Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(b"TABLE_COLLATION"),
+                ],
+            )
+        };
+        let rows = [
+            statistics_row(" orders ", "InnoDB", "utf8mb4_bin"),
+            statistics_row("orders", "MyISAM", "latin1_swedish_ci"),
+            statistics_row("   ", "InnoDB", "utf8mb4_bin"),
+        ];
+
+        let statistics = rows.iter().filter_map(|row| object_statistics_from_row(row, "app", true)).collect::<Vec<_>>();
+
+        assert_eq!(statistics.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(), vec![" orders ", "orders"]);
+        assert_eq!(statistics[0].estimated_rows, Some(7));
+        assert_eq!(statistics[0].total_bytes, Some(4096));
+        assert_eq!(statistics[0].engine.as_deref(), Some("InnoDB"));
+        assert_eq!(statistics[0].collation.as_deref(), Some("utf8mb4_bin"));
     }
 
     #[test]
@@ -11406,6 +11695,398 @@ mod tests {
     }
 
     #[test]
+    fn mysql_index_metadata_accepts_doris_unknown_expression_and_comment_errors() {
+        let doris_expression = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1105,
+            message: "errCode = 2, detailMessage = Unknown column 'EXPRESSION' in 'table list' in PROJECT clause"
+                .to_string(),
+            state: "HY000".to_string(),
+        });
+        let doris_index_comment = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1105,
+            message: "errCode = 2, detailMessage = Unknown column 'INDEX_COMMENT' in 'table list' in PROJECT clause"
+                .to_string(),
+            state: "HY000".to_string(),
+        });
+        let doris_unrelated = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1105,
+            message: "errCode = 2, detailMessage = Unknown column 'INDEX_NAME' in 'table list' in PROJECT clause"
+                .to_string(),
+            state: "HY000".to_string(),
+        });
+
+        assert!(mysql_statistics_expression_is_unsupported(&doris_expression));
+        assert!(mysql_statistics_column_is_unsupported(&doris_expression, MySqlStatisticsColumns::Full));
+        assert!(!mysql_statistics_column_is_unsupported(&doris_expression, MySqlStatisticsColumns::WithoutExpression));
+        assert!(mysql_statistics_column_is_unsupported(
+            &doris_index_comment,
+            MySqlStatisticsColumns::WithoutExpression
+        ));
+        assert!(!mysql_statistics_column_is_unsupported(&doris_index_comment, MySqlStatisticsColumns::Full));
+        assert!(!mysql_statistics_column_is_unsupported(&doris_index_comment, MySqlStatisticsColumns::Minimal));
+        assert!(!mysql_statistics_expression_is_unsupported(&doris_unrelated));
+        assert!(!mysql_statistics_column_is_unsupported(&doris_unrelated, MySqlStatisticsColumns::Full));
+        assert!(!mysql_statistics_column_is_unsupported(&doris_unrelated, MySqlStatisticsColumns::WithoutExpression));
+    }
+
+    #[test]
+    fn mysql_pool_doris_metadata_defaults_configure_routines_and_statistics() {
+        let pool = MySqlPool::new("mysql://root@127.0.0.1:9030/app", 1);
+        assert!(!pool.metadata_capabilities.completion_compatibility().omit_escape);
+        assert!(!pool.metadata_capabilities.completion_compatibility().use_dtd_identifier);
+        assert_eq!(pool.metadata_capabilities.statistics_columns(), MySqlStatisticsColumns::Full);
+
+        pool.set_doris_metadata_defaults();
+        let cloned = pool.clone();
+        assert!(!cloned.metadata_capabilities.completion_compatibility().omit_escape);
+        assert!(cloned.metadata_capabilities.completion_compatibility().use_dtd_identifier);
+        assert_eq!(cloned.metadata_capabilities.statistics_columns(), MySqlStatisticsColumns::WithoutExpression);
+    }
+
+    fn mysql_test_lenenc_str(buf: &mut Vec<u8>, s: &[u8]) {
+        buf.push(s.len() as u8);
+        buf.extend_from_slice(s);
+    }
+
+    fn mysql_test_column_def(name: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        mysql_test_lenenc_str(&mut buf, b"def");
+        mysql_test_lenenc_str(&mut buf, b"information_schema");
+        mysql_test_lenenc_str(&mut buf, b"t");
+        mysql_test_lenenc_str(&mut buf, b"t");
+        mysql_test_lenenc_str(&mut buf, name.as_bytes());
+        mysql_test_lenenc_str(&mut buf, name.as_bytes());
+        buf.push(0x0c); // length of fixed-length fields
+        buf.extend_from_slice(&33u16.to_le_bytes()); // utf8_general_ci
+        buf.extend_from_slice(&255u32.to_le_bytes()); // column length
+        buf.push(ColumnType::MYSQL_TYPE_VAR_STRING as u8);
+        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+        buf.push(0); // decimals
+        buf.extend_from_slice(&0u16.to_le_bytes()); // filler
+        buf
+    }
+
+    fn mysql_test_err_packet(code: u16, state: &str, message: &str) -> Vec<u8> {
+        let mut err = vec![0xff];
+        err.extend_from_slice(&code.to_le_bytes());
+        err.push(b'#');
+        err.extend_from_slice(state.as_bytes());
+        err.extend_from_slice(message.as_bytes());
+        err
+    }
+
+    async fn mysql_doris_metadata_test_server(listener: tokio::net::TcpListener) -> Vec<String> {
+        use mysql_async::consts::CapabilityFlags as Caps;
+        use mysql_common::proto::MySerialize;
+
+        let mut recorded_queries = Vec::new();
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let greeting = mysql_common::packets::HandshakePacket::new(
+            10,
+            &b"5.7.99-Doris-3.1.1"[..],
+            1,
+            *b"12345678",
+            Some(&b"abcdefghijkl\0"[..]),
+            Caps::CLIENT_PROTOCOL_41
+                | Caps::CLIENT_SECURE_CONNECTION
+                | Caps::CLIENT_PLUGIN_AUTH
+                | Caps::CLIENT_DEPRECATE_EOF,
+            33,
+            StatusFlags::SERVER_STATUS_AUTOCOMMIT,
+            Some(&b"mysql_native_password"[..]),
+        );
+        let mut payload = Vec::new();
+        greeting.serialize(&mut payload);
+        mysql_tls_test_write(&mut socket, 0, &payload).await;
+        let auth = mysql_tls_test_packet(&mut socket).await;
+        let caps = Caps::from_bits_truncate(u32::from_le_bytes(auth[..4].try_into().unwrap()));
+        let deprecate_eof = caps.contains(Caps::CLIENT_DEPRECATE_EOF);
+        mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+
+        loop {
+            let command = mysql_tls_test_packet(&mut socket).await;
+            match command.as_slice().first().copied() {
+                None | Some(0x01) => break, // COM_QUIT
+                Some(0x03) => {
+                    // COM_QUERY
+                    let sql = String::from_utf8_lossy(&command[1..]).to_string();
+                    recorded_queries.push(sql.clone());
+                    let upper = sql.to_ascii_uppercase();
+                    if upper.contains("INFORMATION_SCHEMA.STATISTICS") && upper.contains("EXPRESSION") {
+                        let err = mysql_test_err_packet(
+                            1105,
+                            "HY000",
+                            "errCode = 2, detailMessage = Unknown column 'EXPRESSION' in 'table list' in PROJECT clause",
+                        );
+                        mysql_tls_test_write(&mut socket, 1, &err).await;
+                    } else if upper.contains("INFORMATION_SCHEMA.ROUTINES") && upper.contains("DATA_TYPE AS DATA_TYPE")
+                    {
+                        let err = mysql_test_err_packet(
+                            1105,
+                            "HY000",
+                            "errCode = 2, detailMessage = Unknown column 'DATA_TYPE' in 'table list' in PROJECT clause",
+                        );
+                        mysql_tls_test_write(&mut socket, 1, &err).await;
+                    } else {
+                        // Return a valid empty 1-column result set.
+                        mysql_tls_test_write(&mut socket, 1, &[1]).await;
+                        mysql_tls_test_write(&mut socket, 2, &mysql_test_column_def("dummy")).await;
+                        if deprecate_eof {
+                            mysql_tls_test_write(&mut socket, 3, &[0xfe, 0, 0, 2, 0, 0, 0]).await;
+                        } else {
+                            mysql_tls_test_write(&mut socket, 3, &[0xfe, 0, 0, 2, 0]).await;
+                            mysql_tls_test_write(&mut socket, 4, &[0xfe, 0, 0, 2, 0]).await;
+                        }
+                    }
+                }
+                _ => {
+                    mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                }
+            }
+        }
+        recorded_queries
+    }
+
+    #[tokio::test]
+    async fn doris_seeded_pool_never_sends_expression_or_routine_data_type_columns() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(mysql_doris_metadata_test_server(listener));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+        pool.set_doris_metadata_defaults();
+
+        let indexes = list_indexes(&pool, "boyaa_eagle_10036", "events").await.unwrap();
+        assert!(indexes.is_empty());
+
+        let routine_req: CompletionAssistantRequest = serde_json::from_value(serde_json::json!({
+            "connection_id": "doris-1",
+            "database": "boyaa_eagle_10036",
+            "schema": "boyaa_eagle_10036",
+            "object_kinds": ["function"],
+            "mask": "ev",
+            "max_results": 50,
+            "match_mode": "prefix"
+        }))
+        .unwrap();
+        let routine_res = completion_assistant_search(&pool, &routine_req).await.unwrap();
+        assert!(routine_res.fallback_used);
+
+        let table_req: CompletionAssistantRequest = serde_json::from_value(serde_json::json!({
+            "connection_id": "doris-1",
+            "database": "boyaa_eagle_10036",
+            "schema": "boyaa_eagle_10036",
+            "object_kinds": ["table"],
+            "mask": "ev",
+            "max_results": 50,
+            "match_mode": "prefix"
+        }))
+        .unwrap();
+        let table_res = completion_assistant_search(&pool, &table_req).await.unwrap();
+        assert!(!table_res.fallback_used);
+
+        pool.disconnect().await.unwrap();
+        let queries = server.await.unwrap();
+        assert!(
+            queries.iter().all(|sql| !sql.contains("EXPRESSION")),
+            "Doris-seeded pool must never query STATISTICS.EXPRESSION: {queries:?}"
+        );
+        assert!(
+            queries.iter().all(|sql| !sql.contains("DATA_TYPE AS data_type")),
+            "Doris-seeded pool must never query ROUTINES.DATA_TYPE: {queries:?}"
+        );
+        assert!(
+            queries.iter().any(|sql| sql.contains("DTD_IDENTIFIER AS data_type")),
+            "Doris-seeded pool must query ROUTINES.DTD_IDENTIFIER directly: {queries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_mysql_pool_caches_doris_statistics_and_routine_fallbacks_across_calls() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(mysql_doris_metadata_test_server(listener));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+
+        // First call discovers missing EXPRESSION; second call reuses cached capability.
+        list_indexes(&pool, "boyaa_eagle_10036", "events").await.unwrap();
+        list_indexes(&pool, "boyaa_eagle_10036", "orders").await.unwrap();
+
+        let routine_req: CompletionAssistantRequest = serde_json::from_value(serde_json::json!({
+            "connection_id": "plain-mysql-doris",
+            "database": "boyaa_eagle_10036",
+            "schema": "boyaa_eagle_10036",
+            "object_kinds": ["function"],
+            "mask": "ev",
+            "max_results": 50,
+            "match_mode": "prefix"
+        }))
+        .unwrap();
+        let first_routines = completion_assistant_search(&pool, &routine_req).await.unwrap();
+        assert!(first_routines.fallback_used);
+        let second_routines = completion_assistant_search(&pool, &routine_req).await.unwrap();
+        assert!(second_routines.fallback_used);
+
+        // Table-only lookup after routine fallback must still report fallback_used = false.
+        let table_req: CompletionAssistantRequest = serde_json::from_value(serde_json::json!({
+            "connection_id": "plain-mysql-doris",
+            "database": "boyaa_eagle_10036",
+            "schema": "boyaa_eagle_10036",
+            "object_kinds": ["table"],
+            "mask": "ev",
+            "max_results": 50,
+            "match_mode": "prefix"
+        }))
+        .unwrap();
+        let table_res = completion_assistant_search(&pool, &table_req).await.unwrap();
+        assert!(!table_res.fallback_used);
+
+        pool.disconnect().await.unwrap();
+        let queries = server.await.unwrap();
+        let expression_probes = queries.iter().filter(|sql| sql.contains("EXPRESSION")).count();
+        let routine_data_type_probes = queries.iter().filter(|sql| sql.contains("DATA_TYPE AS data_type")).count();
+        assert_eq!(expression_probes, 1, "STATISTICS.EXPRESSION must be probed at most once per pool: {queries:?}");
+        assert_eq!(routine_data_type_probes, 1, "ROUTINES.DATA_TYPE must be probed at most once per pool: {queries:?}");
+    }
+
+    #[tokio::test]
+    async fn doris_list_indexes_never_queries_statistics_expression_even_without_preseed() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(mysql_doris_metadata_test_server(listener));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+
+        // Call doris::list_indexes directly on an unseeded pool; SHOW CREATE TABLE returns
+        // empty rows in this mock so the call returns a DDL error, while STATISTICS must
+        // still never request EXPRESSION.
+        let _ = crate::doris::list_indexes(&pool, "boyaa_eagle_10036", "events").await;
+
+        pool.disconnect().await.unwrap();
+        let queries = server.await.unwrap();
+        assert!(
+            queries.iter().any(|sql| sql.contains("information_schema.STATISTICS")),
+            "expected STATISTICS query: {queries:?}"
+        );
+        assert!(
+            queries.iter().all(|sql| !sql.contains("EXPRESSION")),
+            "doris::list_indexes must never query STATISTICS.EXPRESSION: {queries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn starrocks_list_indexes_preserves_the_initial_statistics_expression_probe() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(mysql_doris_metadata_test_server(listener));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+
+        // The shared fallback requests expression metadata when the engine is
+        // unseeded, then remembers the missing-column result for later calls.
+        for _ in 0..2 {
+            let _ = crate::starrocks::list_indexes(&pool, "app", "events").await;
+        }
+        pool.disconnect().await.unwrap();
+
+        let queries = server.await.unwrap();
+        let probes: Vec<_> = queries.iter().filter(|sql| sql.contains("information_schema.STATISTICS")).collect();
+        assert_eq!(probes.len(), 3, "expected initial probe and two fallback reads: {queries:?}");
+        assert!(probes[0].contains("EXPRESSION"));
+        assert!(probes[1..].iter().all(|sql| !sql.contains("EXPRESSION")));
+    }
+
+    #[tokio::test]
+    async fn mysql_pool_caches_completion_escape_fallback_across_requests() {
+        use mysql_async::consts::CapabilityFlags as Caps;
+        use mysql_common::proto::MySerialize;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut recorded_queries = Vec::new();
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let greeting = mysql_common::packets::HandshakePacket::new(
+                10,
+                &b"5.7.99-Doris-legacy"[..],
+                1,
+                *b"12345678",
+                Some(&b"abcdefghijkl\0"[..]),
+                Caps::CLIENT_PROTOCOL_41
+                    | Caps::CLIENT_SECURE_CONNECTION
+                    | Caps::CLIENT_PLUGIN_AUTH
+                    | Caps::CLIENT_DEPRECATE_EOF,
+                33,
+                StatusFlags::SERVER_STATUS_AUTOCOMMIT,
+                Some(&b"mysql_native_password"[..]),
+            );
+            let mut payload = Vec::new();
+            greeting.serialize(&mut payload);
+            mysql_tls_test_write(&mut socket, 0, &payload).await;
+            let auth = mysql_tls_test_packet(&mut socket).await;
+            let caps = Caps::from_bits_truncate(u32::from_le_bytes(auth[..4].try_into().unwrap()));
+            let deprecate_eof = caps.contains(Caps::CLIENT_DEPRECATE_EOF);
+            mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+
+            loop {
+                let command = mysql_tls_test_packet(&mut socket).await;
+                match command.as_slice().first().copied() {
+                    None | Some(0x01) => break,
+                    Some(0x03) => {
+                        let sql = String::from_utf8_lossy(&command[1..]).to_string();
+                        recorded_queries.push(sql.clone());
+                        if sql.contains("ESCAPE") {
+                            let err = mysql_test_err_packet(
+                                1105,
+                                "HY000",
+                                "errCode = 2, detailMessage = mismatched input 'ESCAPE' expecting {<EOF>, ';'}",
+                            );
+                            mysql_tls_test_write(&mut socket, 1, &err).await;
+                        } else {
+                            mysql_tls_test_write(&mut socket, 1, &[1]).await;
+                            mysql_tls_test_write(&mut socket, 2, &mysql_test_column_def("dummy")).await;
+                            if deprecate_eof {
+                                mysql_tls_test_write(&mut socket, 3, &[0xfe, 0, 0, 2, 0, 0, 0]).await;
+                            } else {
+                                mysql_tls_test_write(&mut socket, 3, &[0xfe, 0, 0, 2, 0]).await;
+                                mysql_tls_test_write(&mut socket, 4, &[0xfe, 0, 0, 2, 0]).await;
+                            }
+                        }
+                    }
+                    _ => {
+                        mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    }
+                }
+            }
+            recorded_queries
+        });
+
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+        let req: CompletionAssistantRequest = serde_json::from_value(serde_json::json!({
+            "connection_id": "doris-legacy-escape",
+            "database": "app",
+            "schema": "app",
+            "object_kinds": ["table"],
+            "mask": "ev",
+            "max_results": 50,
+            "match_mode": "prefix"
+        }))
+        .unwrap();
+
+        let first = completion_assistant_search(&pool, &req).await.unwrap();
+        assert!(first.fallback_used);
+        let second = completion_assistant_search(&pool, &req).await.unwrap();
+        assert!(second.fallback_used);
+
+        pool.disconnect().await.unwrap();
+        let queries = server.await.unwrap();
+        let escape_probes = queries.iter().filter(|sql| sql.contains("ESCAPE")).count();
+        assert_eq!(escape_probes, 1, "LIKE ESCAPE must be probed at most once per pool: {queries:?}");
+    }
+
+    #[test]
     fn mysql_group_concat_not_supported_error_retries_without_session_variable() {
         let error =
             "MySQL connection failed: Server error: `ERROR 1235 (42000): SET of group_concat_max_len is not supported'";
@@ -12374,6 +13055,37 @@ mod tests {
                 "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)",
             ]
         );
+    }
+
+    #[test]
+    fn mysql_default_autocommit_respects_explicit_session_configuration() {
+        for assignment in [
+            "autocommit=0",
+            "autocommit:=0",
+            "AUTOCOMMIT=OFF",
+            "@@autocommit=0",
+            "@@SESSION.autocommit=0",
+            "@@local.autocommit=0",
+            "`autocommit`=0",
+            "sql_mode='STRICT_ALL_TABLES',autocommit=1",
+        ] {
+            let value = percent_encoding::utf8_percent_encode(assignment, percent_encoding::NON_ALPHANUMERIC);
+            let url = format!("mysql://host/db?sessionVariables={value}");
+            assert_eq!(default_autocommit_setup_query(&url), None, "{assignment}");
+        }
+    }
+
+    #[test]
+    fn mysql_default_autocommit_ignores_user_and_global_variables() {
+        for url in [
+            "mysql://host/db",
+            "mysql://host/db?sessionVariables=",
+            "mysql://host/db?sessionVariables=%40autocommit%3D0",
+            "mysql://host/db?sessionVariables=%40%40global.autocommit%3D0",
+            "mysql://host/db?sessionVariables=sql_mode%3D%27autocommit%3D0%27",
+        ] {
+            assert_eq!(default_autocommit_setup_query(url), Some("SET SESSION autocommit = 1"), "{url}");
+        }
     }
 
     #[test]

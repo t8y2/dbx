@@ -14,11 +14,22 @@ test("queryTimeoutSecsForConnection falls back to the default timeout", () => {
 });
 
 test("frontend query timeout scales with SQL statement count", () => {
-  assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1)", "mysql", 30), 30);
-  assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1); INSERT INTO users VALUES (2);", "mysql", 30), 60);
-  assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1); INSERT INTO users VALUES (2); INSERT INTO users VALUES (3);", "mysql", 10), 30);
-  assert.equal(frontendQueryTimeoutSecsForSql("/* prep */\nINSERT INTO users VALUES (1);\n-- keep batching\nINSERT INTO users VALUES (2);", "mysql", 30), 60);
-  assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1); INSERT INTO users VALUES (2);", "mysql", 0), 0);
+  assert.equal(frontendQueryTimeoutSecsForSql("SELECT 1", "mysql", 30), 30);
+  assert.equal(frontendQueryTimeoutSecsForSql("SELECT 1; SELECT 2;", "mysql", 30), 60);
+  assert.equal(frontendQueryTimeoutSecsForSql("SELECT 1; SELECT 2; SELECT 3;", "mysql", 10), 30);
+  assert.equal(frontendQueryTimeoutSecsForSql("/* prep */\nSELECT 1;\n-- keep batching\nSELECT 2;", "mysql", 30), 60);
+  assert.equal(frontendQueryTimeoutSecsForSql("SELECT 1; SELECT 2;", "mysql", 0), 0);
+});
+
+test("writes and schema changes get no client-side deadline", () => {
+  // Cancelling a write leaves the caller unable to say whether the rows landed,
+  // and cancelling a schema change leaves the server rolling back while holding
+  // metadata locks. Neither is bounded by the read timeout.
+  assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1)", "mysql", 30), 0);
+  assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1); INSERT INTO users VALUES (2);", "mysql", 30), 0);
+  assert.equal(frontendQueryTimeoutSecsForSql("UPDATE users SET active = 1", "mysql", 30), 0);
+  assert.equal(frontendQueryTimeoutSecsForSql("CREATE TABLE users (id INT)", "mysql", 30), 0);
+  assert.equal(frontendQueryTimeoutSecsForSql("ALTER TABLE users ADD PARTITION (PARTITION p1 VALUES LESS THAN (10))", "mysql", 30), 0);
 });
 
 test("query timeout actions target the connection that produced the result", () => {

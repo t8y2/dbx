@@ -20,6 +20,10 @@ const mocks = vi.hoisted(() => ({
   refreshDataTabsForTable: vi.fn(),
 }));
 vi.mock("@/lib/backend/api", () => mocks);
+vi.mock("@/lib/backend/browserAppStateStorage", () => ({
+  loadBrowserAppState: vi.fn(async () => null),
+  saveBrowserAppState: vi.fn(async () => undefined),
+}));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => mocks }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => mocks }));
 

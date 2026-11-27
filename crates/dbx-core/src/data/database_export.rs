@@ -32,6 +32,10 @@ static EXPORT_CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
 
 pub const EXPORT_CANCELLED_ERROR: &str = "Export cancelled";
 const EXPORT_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+// This sentinel is written only to temporary PostgreSQL/openGauss schema files. The NUL
+// bytes keep it distinct from user SQL comments, literals, and DDL text that the phase
+// combiner must preserve.
+const DATABASE_EXPORT_TABLE_BOUNDARY_MARKER: &str = "\0DBX table export boundary\0";
 
 /// MySQL scripts written by the exporter are always UTF-8: values are decoded off the
 /// wire and reformatted into Rust strings before they are written, so the file encoding
@@ -186,6 +190,23 @@ pub struct DatabaseExportRequest {
     /// is its own compressed container.
     #[serde(default)]
     pub split_max_mb: Option<u32>,
+    /// Cap every exported table at this many data rows (#14750). `None` keeps
+    /// the unlimited behavior; zero is rejected before any read starts. The cap
+    /// applies per table and never turns a table short of `N` into an error.
+    #[serde(default)]
+    pub row_limit_per_table: Option<u64>,
+    /// Sort column for the per-table row cap (review on #14799): rows are read in
+    /// `ORDER BY {column} {ASC|DESC}` order, so the cap takes the first/last `N`
+    /// rows by that column (e.g. `updated_at` descending = the latest N rows).
+    /// `None` or blank keeps the default read order; only effective together with
+    /// `row_limit_per_table`. Tables without this column fall back to the default
+    /// read order with a comment in the dump.
+    #[serde(default)]
+    pub row_limit_sort_column: Option<String>,
+    /// Direction for `row_limit_sort_column`: `true` = descending, so the cap
+    /// keeps the newest rows by that column.
+    #[serde(default)]
+    pub row_limit_sort_descending: bool,
 }
 
 /// One object picked in the object browser for "export selected".
@@ -1125,8 +1146,22 @@ fn quote_export_sql_string_for_database(text: &str, database_type: Option<Databa
         Some(DatabaseType::ClickHouse | DatabaseType::Snowflake) => {
             quote_backslash_escaped_export_sql_string(text, SubControlEscape::Hex)
         }
+        // TDengine also interprets `\` escape sequences in string literals
+        // (verified against 3.4.2.8: `SELECT LENGTH('a\\b')` is 3), so `\` must
+        // double for the export→import round trip (#15456). Its escape table is
+        // smaller than MySQL's — `\0`, `\b`, `\f`, `\Z` and `\xhh` are not
+        // spelled there — so other control bytes stay raw instead of borrowing
+        // the MySQL spellings.
+        Some(DatabaseType::Tdengine) => quote_tdengine_export_sql_string(text),
         _ => quote_standard_export_sql_string(text),
     }
+}
+
+/// TDengine string quoting: `\` doubles (TDengine parses backslash escapes in
+/// single-quoted literals) and `'` doubles as usual; every other byte stays
+/// raw (#15456).
+fn quote_tdengine_export_sql_string(text: &str) -> String {
+    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 fn quote_dameng_export_sql_string(text: &str) -> String {
@@ -2403,7 +2438,6 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
             );
             lines.push(format!("-- Structure for {}", table.display_name));
             lines.push(ddl);
-            lines.push(String::new());
         }
 
         lines.push(format!("-- Data for {}", table.display_name));
@@ -2457,14 +2491,20 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
 /// identifiers for every engine that already accepts them (SQL Server, PostgreSQL
 /// family, Oracle, …). It only deviates to the source engine's native quoting for
 /// the backtick family (MySQL, Hive family, Neo4j/Nebula, …) where a double quote
-/// is a string literal and ANSI output cannot be replayed at all (#12158). This
-/// keeps the fix's blast radius on exactly the engines that were broken.
+/// is a string literal and ANSI output cannot be replayed at all (#12158), and for
+/// a PostgreSQL-family connection whose server reports a backtick identifier quote
+/// (GaussDB MySQL-compatible mode): there the double quote is a string literal too,
+/// so the connection's own quote character keeps the exported statements replayable.
+/// This keeps the fix's blast radius on exactly the engines that were broken.
 fn standard_export_identifier(
     database_type: Option<DatabaseType>,
     name: &str,
     identifier_quote: Option<&str>,
 ) -> String {
-    if crate::sql_dialect::uses_backtick_identifier_quoting(database_type) {
+    if crate::sql_dialect::uses_backtick_identifier_quoting(database_type)
+        || (identifier_quote.is_some()
+            && matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres)))
+    {
         crate::sql_dialect::quote_table_data_identifier(database_type, name, identifier_quote)
     } else {
         crate::sql_dialect::quote_table_identifier(None, name)
@@ -3256,6 +3296,36 @@ where
     }
 }
 
+// Catalog visibility alone does not grant access to a schema (#14272).
+// Use the same effective privileges during worker discovery and snapshot
+// discovery, including ownership, role membership, and grants to PUBLIC.
+const POSTGRES_BACKUP_SCHEMAS_SQL: &str = "SELECT n.nspname FROM pg_catalog.pg_namespace n \
+     WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
+     AND n.nspname NOT LIKE 'pg_toast_temp_%' \
+     AND n.nspname NOT LIKE 'pg_temp_%' \
+     AND pg_catalog.has_schema_privilege(n.oid, 'USAGE') ORDER BY n.nspname";
+
+pub(crate) async fn list_database_backup_schemas_core(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    database: &str,
+) -> Result<Vec<String>, String> {
+    let db_type = state
+        .configs
+        .read()
+        .await
+        .get(connection_id)
+        .map(|config| config.db_type)
+        .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+    if !matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) {
+        return Ok(vec![database.to_string()]);
+    }
+    let result =
+        crate::query::execute_sql_statement(state, connection_id, database, POSTGRES_BACKUP_SCHEMAS_SQL, None, None)
+            .await?;
+    Ok(result.rows.into_iter().filter_map(|row| row.into_iter().next()?.as_str().map(str::to_string)).collect())
+}
+
 pub async fn begin_database_backup_snapshot_core(
     state: &crate::connection::AppState,
     connection_id: &str,
@@ -3322,10 +3392,6 @@ pub async fn begin_database_backup_snapshot_core_for_export(
     };
 
     let schemas_result = if matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) {
-        const POSTGRES_BACKUP_SCHEMAS_SQL: &str = "SELECT n.nspname FROM pg_catalog.pg_namespace n \
-             WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
-             AND n.nspname NOT LIKE 'pg_toast_temp_%' \
-             AND n.nspname NOT LIKE 'pg_temp_%' ORDER BY n.nspname";
         let operation = crate::query::execute_in_manual_transaction(
             state,
             &session_id,
@@ -3437,6 +3503,24 @@ fn record_export_error<W: Write>(
     }
 }
 
+fn postgres_view_comments_or_definition<W: Write>(
+    result: Result<String, String>,
+    definition: String,
+    view: &str,
+    file: &mut W,
+    fail_on_error: bool,
+    errors: &mut LenientExportErrors,
+) -> Result<String, String> {
+    match result {
+        Ok(ddl) => Ok(ddl),
+        Err(error) if error == EXPORT_CANCELLED_ERROR => Err(error),
+        Err(error) => {
+            record_export_error(file, fail_on_error, format!("reading comments for view {view}: {error}"), errors)?;
+            Ok(definition)
+        }
+    }
+}
+
 fn mysql_spatial_export_marker_expression(column: &str) -> String {
     let quoted = quote_identifier(column, &DatabaseType::Mysql);
     format!(
@@ -3513,6 +3597,70 @@ fn database_export_select_sql(
     let columns = database_export_select_list(columns, column_types, db_type);
     let table = crate::transfer::qualified_table(table, schema, db_type, None);
     format!("SELECT {columns} FROM {table}")
+}
+
+/// How many of this table's rows the export still owes under the request's
+/// per-table row cap (#14750): `None` keeps the unlimited behavior, `Some(0)`
+/// means the cap is already satisfied and no further read may start.
+///
+/// The budget resets for every table, and every reader (paged loop, snapshot
+/// stream, query `max_rows`) must clamp its own batch against the same value so
+/// the written row count can never exceed the cap, whatever the engine returns.
+fn remaining_rows_under_limit(row_limit: Option<u64>, exported: u64) -> Option<usize> {
+    row_limit.map(|limit| limit.saturating_sub(exported).min(usize::MAX as u64) as usize)
+}
+
+/// Appends an optional sort order and a server-side row cap to the export's
+/// self-generated snapshot SELECT. The statement is always a plain
+/// `SELECT ... FROM ...` built by [`database_export_select_sql`], and the
+/// snapshot path only streams MySQL / PostgreSQL manual transactions (the other
+/// transaction kinds are rejected before any SQL runs), so both clauses are
+/// valid for every engine that reaches it. Combined with the batch-budget guard
+/// this bounds the query result, the written rows, and — with the sort column —
+/// keeps the capped rows in the requested order.
+fn append_snapshot_order_and_limit(sql: &str, order_by: Option<&str>, remaining: usize) -> String {
+    let order = order_by.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
+    format!("{sql}{order} LIMIT {remaining}")
+}
+
+/// Builds the `ORDER BY` expression for a sorted capped read (review on
+/// #14799): the requested sort column first, then primary-key columns that are
+/// not already in the order as ascending tiebreakers. Without the tiebreaker a
+/// tie at the cap boundary lets each run keep different rows, so the primary
+/// key turns the sort into a total order wherever the table has one; a sort
+/// column that is itself the whole key already orders uniquely and needs no
+/// tiebreaker.
+fn sorted_cap_order_expression(
+    sort_column: &str,
+    descending: bool,
+    primary_keys: &[String],
+    db_type: &DatabaseType,
+) -> String {
+    let direction = if descending { "DESC" } else { "ASC" };
+    let mut expression = format!("{} {direction}", quote_identifier(sort_column, db_type));
+    for key in primary_keys {
+        if !key.eq_ignore_ascii_case(sort_column) {
+            expression.push_str(&format!(", {} ASC", quote_identifier(key, db_type)));
+        }
+    }
+    expression
+}
+
+fn write_row_limit_sort_fallback_comment<W: Write>(
+    file: &mut W,
+    request: &DatabaseExportRequest,
+    table: &str,
+    matched_sort_column: Option<&str>,
+) -> Result<(), String> {
+    if request.row_limit_per_table.is_none() || matched_sort_column.is_some() {
+        return Ok(());
+    }
+    let Some(requested) = request.row_limit_sort_column.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    writeln!(file, "-- Table {table}: sort column '{requested}' not found; the row cap follows the default read order")
+        .map_err(|error| format!("Failed to write file: {error}"))
 }
 
 #[cfg(test)]
@@ -3669,7 +3817,7 @@ fn write_database_export_rows_with_mode<W: Write>(
         insert_dialect,
     )?;
     for statement in statements {
-        writeln!(file, "{statement}\n").map_err(|error| format!("Failed to write file: {error}"))?;
+        writeln!(file, "{statement}").map_err(|error| format!("Failed to write file: {error}"))?;
     }
     Ok(())
 }
@@ -4378,6 +4526,12 @@ pub async fn export_database_sql_core(
     if request.selected_objects.as_ref().is_some_and(Vec::is_empty) {
         return Err("No objects are selected for export".to_string());
     }
+    if request.row_limit_per_table == Some(0) {
+        // A zero cap would export nothing while looking like a successful limit;
+        // the dialog never sends it, so refuse it as caller error before opening
+        // the destination file (#14750).
+        return Err("row_limit_per_table must be a positive number of rows".to_string());
+    }
     crate::query::mysql_data_charset_policy::reject_operation(
         state,
         &request.connection_id,
@@ -4772,6 +4926,10 @@ fn copy_postgres_export_phase<W: Write>(
         if source.read_line(&mut chunk).map_err(|e| format!("Failed to read export phase: {e}"))? == 0 {
             break;
         }
+        if chunk.trim() == DATABASE_EXPORT_TABLE_BOUNDARY_MARKER {
+            destination.write_all(b"\n").map_err(|e| format!("Failed to write export phase: {e}"))?;
+            continue;
+        }
         for statement in splitter.push_chunk(&chunk) {
             if is_export_cancelled_now(export_id) {
                 return Err(EXPORT_CANCELLED_ERROR.to_string());
@@ -4812,6 +4970,10 @@ fn combine_schema_sql_export<W: Write>(source: &mut dyn BufRead, destination: &m
         let bytes_read = source.read_line(&mut chunk)?;
         if bytes_read == 0 {
             break;
+        }
+        if chunk.trim() == DATABASE_EXPORT_TABLE_BOUNDARY_MARKER {
+            destination.write_all(b"\n")?;
+            continue;
         }
         for statement in splitter.push_chunk(&chunk) {
             destination.write_all(format!("{statement};\n").as_bytes())?;
@@ -4895,6 +5057,7 @@ async fn export_postgres_all_schemas_sql_core(
                 &schema_request,
                 child_progress,
                 phases.as_mut(),
+                true,
             ))
             .await?;
             let terminal = terminal.lock().expect("export terminal mutex poisoned").clone();
@@ -5085,7 +5248,7 @@ async fn export_database_sql_core_inner(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
-    Box::pin(export_database_sql_core_inner_with_phases(state, request, on_progress, None)).await
+    Box::pin(export_database_sql_core_inner_with_phases(state, request, on_progress, None, false)).await
 }
 
 async fn export_database_sql_core_inner_with_phases(
@@ -5093,6 +5256,7 @@ async fn export_database_sql_core_inner_with_phases(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
     mut phases: Option<&mut PostgresSchemaExportPhases>,
+    preserve_table_boundaries: bool,
 ) -> Result<(), String> {
     let _snapshot_keep_alive = if let Some(snapshot_session_id) = request.snapshot_session_id.as_deref() {
         Some(crate::query::keep_manual_transaction_alive(state, snapshot_session_id).await?)
@@ -5252,6 +5416,14 @@ async fn export_database_sql_core_inner_with_phases(
         .filter(|t| t.table_type.contains("VIEW"))
         .filter(|t| request.include_objects && selection.includes_relation(&t.name))
         .collect();
+    if db_type == DatabaseType::Tdengine {
+        // TDengine child tables are declared with `USING <stable> TAGS (...)`, so the
+        // super table DDL has to be written before the DDL of its children.
+        let (stables, children): (Vec<_>, Vec<_>) = tables.into_iter().partition(|table| {
+            crate::tdengine_export_sql::is_tdengine_stable_table_type(Some(table.table_type.as_str()))
+        });
+        tables = stables.into_iter().chain(children).collect();
+    }
     if request.include_objects && db_type == DatabaseType::Mysql && views.len() > 1 {
         match list_mysql_export_view_dependencies(state, &request.connection_id, &request.database, &client_session_id)
             .await
@@ -5703,6 +5875,14 @@ async fn export_database_sql_core_inner_with_phases(
     }
 
     for (table_index, table_info) in tables.iter().enumerate().filter(|_| exports_database_tables(request)) {
+        if table_index > 0 {
+            if preserve_table_boundaries {
+                writeln!(file, "{DATABASE_EXPORT_TABLE_BOUNDARY_MARKER}")
+                    .map_err(|e| format!("Failed to write file: {e}"))?;
+            }
+            writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
+        }
+
         // Check cancellation
         if is_export_cancelled(&request.export_id).await {
             emit_database_export_cancelled(
@@ -5738,7 +5918,7 @@ async fn export_database_sql_core_inner_with_phases(
         // Export structure
         if request.include_structure {
             if request.drop_table_if_exists {
-                writeln!(file, "{}\n", drop_table_if_exists_sql(table_name, &request.schema, &db_type))
+                writeln!(file, "{}", drop_table_if_exists_sql(table_name, &request.schema, &db_type))
                     .map_err(|e| format!("Failed to write file: {e}"))?;
             }
             for sequence in postgres_sequences.iter().filter(|sequence| {
@@ -5758,7 +5938,7 @@ async fn export_database_sql_core_inner_with_phases(
                     error_summary: None,
                 });
 
-                writeln!(file, "{};\n", generate_postgres_sequence_create_ddl(sequence, &request.schema))
+                writeln!(file, "{};", generate_postgres_sequence_create_ddl(sequence, &request.schema))
                     .map_err(|e| format!("Failed to write file: {e}"))?;
                 object_index += 1;
             }
@@ -5807,7 +5987,7 @@ async fn export_database_sql_core_inner_with_phases(
                         Some(db_type),
                         DdlNormalizeOptions { omit_auto_increment: request.omit_auto_increment },
                     );
-                    writeln!(file, "{ddl}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+                    writeln!(file, "{ddl}").map_err(|e| format!("Failed to write file: {e}"))?;
                     if let Some(phases) = phases.as_deref_mut() {
                         if !ddl.trim().is_empty() {
                             phases.table_structures.push(PostgresExportRelation {
@@ -5829,7 +6009,12 @@ async fn export_database_sql_core_inner_with_phases(
         }
 
         // Export data
-        if request.include_data {
+        // A TDengine super table only carries the shared schema and tags; its rows
+        // belong to the child tables, which are exported individually.
+        if request.include_data
+            && !(db_type == DatabaseType::Tdengine
+                && crate::tdengine_export_sql::is_tdengine_stable_table_type(Some(table_info.table_type.as_str())))
+        {
             // Get columns
             let columns_result = match prefetched_table_metadata
                 .get_mut(table_index)
@@ -5868,9 +6053,30 @@ async fn export_database_sql_core_inner_with_phases(
                     continue;
                 }
             };
-            let col_names = columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
-            let col_types = columns.iter().map(|c| Some(c.data_type.clone())).collect::<Vec<_>>();
-            let col_extras = columns.iter().map(|c| c.extra.clone()).collect::<Vec<_>>();
+            // TDengine keeps tags on the child table and restores them from the
+            // `CREATE TABLE ... USING ... TAGS` DDL, so a tag column must not be part
+            // of the INSERT column list (#14976).
+            let export_columns: Vec<_> = columns
+                .iter()
+                .filter(|column| {
+                    !(db_type == DatabaseType::Tdengine
+                        && crate::tdengine_export_sql::is_tdengine_tag_column(
+                            column.comment.as_deref(),
+                            column.extra.as_deref(),
+                        ))
+                })
+                .collect();
+            let col_names = export_columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+            let col_types = export_columns.iter().map(|c| Some(c.data_type.clone())).collect::<Vec<_>>();
+            let col_extras = export_columns.iter().map(|c| c.extra.clone()).collect::<Vec<_>>();
+            // Primary-key columns that actually appear in the SELECT list: the
+            // sorted capped read (#14799 review) ties its ORDER BY off with them.
+            // Keyset pagination validates its own cursor columns separately below.
+            let primary_keys_in_select = columns
+                .iter()
+                .filter(|column| column.is_primary_key && col_names.iter().any(|name| name == &column.name))
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
 
             if table_ddl_text.is_none()
                 && db_type == DatabaseType::Dameng
@@ -5897,7 +6103,42 @@ async fn export_database_sql_core_inner_with_phases(
 
             if !col_names.is_empty() {
                 if let Some(snapshot_session_id) = request.snapshot_session_id.as_deref() {
-                    let sql = database_export_select_sql(&col_names, &col_types, table_name, &request.schema, &db_type);
+                    // #14750: cap the self-generated snapshot SELECT so the engine stops
+                    // sending rows at the limit instead of streaming the whole table to
+                    // satisfy connection reuse. The batch guard below is the correctness
+                    // backstop; this clause keeps the server-side work bounded too.
+                    let mut table_exported_rows = 0_u64;
+                    // Review on #14799: a sort column orders the capped snapshot read
+                    // the same way the paged path does (latest N rows by `updated_at`,
+                    // ...). MySQL and PostgreSQL manual transactions both take a
+                    // trailing `ORDER BY ... LIMIT n` on this self-generated SELECT.
+                    let snapshot_sort_column = request
+                        .row_limit_sort_column
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .and_then(|name| col_names.iter().find(|column| column.eq_ignore_ascii_case(name)).cloned());
+                    let mut sql =
+                        database_export_select_sql(&col_names, &col_types, table_name, &request.schema, &db_type);
+                    if let Some(remaining) =
+                        remaining_rows_under_limit(request.row_limit_per_table, table_exported_rows)
+                    {
+                        write_row_limit_sort_fallback_comment(
+                            &mut file,
+                            request,
+                            table_name,
+                            snapshot_sort_column.as_deref(),
+                        )?;
+                        let order = snapshot_sort_column.as_ref().map(|column| {
+                            sorted_cap_order_expression(
+                                column,
+                                request.row_limit_sort_descending,
+                                &primary_keys_in_select,
+                                &db_type,
+                            )
+                        });
+                        sql = append_snapshot_order_and_limit(&sql, order.as_deref(), remaining);
+                    }
                     let cancel_token = CancellationToken::new();
                     await_export_stream_operation(
                         &request.export_id,
@@ -5914,9 +6155,19 @@ async fn export_database_sql_core_inner_with_phases(
                                 if snapshot_batch_cancelled(&db_type, &request.export_id) {
                                     return Err(EXPORT_CANCELLED_ERROR.to_string());
                                 }
+                                // #14750: the per-table cap is a normal completion, not an error or a
+                                // cancellation — write only the rows still owed and let the stream end
+                                // naturally, so the snapshot session keeps its transaction/cleanup
+                                // semantics instead of rolling back.
+                                let writable =
+                                    remaining_rows_under_limit(request.row_limit_per_table, table_exported_rows)
+                                        .map_or(rows.len(), |remaining| remaining.min(rows.len()));
+                                if writable == 0 {
+                                    return Ok(());
+                                }
                                 write_database_export_rows_with_mode(
                                     &mut file,
-                                    &rows,
+                                    &rows[..writable],
                                     &col_names,
                                     &col_types,
                                     &col_extras,
@@ -5929,7 +6180,8 @@ async fn export_database_sql_core_inner_with_phases(
                                     table_ddl_text.as_deref(),
                                     request.omit_database_qualifier,
                                 )?;
-                                total_rows_exported += rows.len() as u64;
+                                total_rows_exported += writable as u64;
+                                table_exported_rows += writable as u64;
                                 on_progress(ExportProgress {
                                     export_id: request.export_id.clone(),
                                     current_object: table_name.clone(),
@@ -5962,9 +6214,32 @@ async fn export_database_sql_core_inner_with_phases(
                         .iter()
                         .filter_map(|primary_key| col_names.iter().position(|column| column == primary_key))
                         .collect::<Vec<_>>();
-                    let use_keyset = !primary_keys.is_empty() && primary_key_indices.len() == primary_keys.len();
+                    // Review on #14799: an optional sort column orders the capped read,
+                    // so the cap keeps the first/last N rows by that column (e.g.
+                    // `updated_at` descending = the latest N rows). Keyset pagination
+                    // walks the primary-key cursor, so a sorted read switches to the
+                    // OFFSET paging path with the sorted order expression.
+                    let sort_column = request
+                        .row_limit_sort_column
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .and_then(|name| col_names.iter().find(|column| column.eq_ignore_ascii_case(name)).cloned());
+                    let use_keyset = sort_column.is_none()
+                        && !primary_keys.is_empty()
+                        && primary_key_indices.len() == primary_keys.len();
                     let mut last_primary_key_values = Vec::new();
                     let mut offset = 0_u64;
+                    // #14750: per-table read/write budget under the request's row cap.
+                    // `None` (no limit) keeps the loop byte-identical to before.
+                    let mut table_exported_rows = 0_u64;
+                    // A requested sort column that this table does not have cannot order
+                    // the read; fall back to the default read order and say so in the
+                    // dump instead of silently returning different rows each run.
+                    if table_exported_rows == 0 && remaining_rows_under_limit(request.row_limit_per_table, 0).is_some()
+                    {
+                        write_row_limit_sort_fallback_comment(&mut file, request, table_name, sort_column.as_deref())?;
+                    }
 
                     loop {
                         if is_export_cancelled(&request.export_id).await {
@@ -5978,6 +6253,16 @@ async fn export_database_sql_core_inner_with_phases(
                             );
                             return Ok(());
                         }
+                        // #14750: `None` means no cap — every page keeps the full
+                        // batch size exactly as before. `Some(0)` means the cap is
+                        // already satisfied, which is a normal completion for this
+                        // table (not an error or a cancellation).
+                        let remaining = remaining_rows_under_limit(request.row_limit_per_table, table_exported_rows);
+                        if remaining == Some(0) {
+                            break;
+                        }
+                        // Never ask the engine for more rows than the cap still owes.
+                        let page_size = remaining.map_or(batch_size, |remaining| remaining.min(batch_size));
 
                         let sql = if use_keyset {
                             let sql = keyset_pagination_sql_with_identifier_quote(
@@ -5987,7 +6272,33 @@ async fn export_database_sql_core_inner_with_phases(
                                 &db_type,
                                 &primary_keys,
                                 &last_primary_key_values,
-                                batch_size,
+                                page_size,
+                                None,
+                            );
+                            replace_database_export_select_list(sql, &col_names, &col_types, &db_type)
+                        } else if let Some(column) = &sort_column {
+                            // Sorted read (#14799 review): every dialect gets a real
+                            // ORDER BY through the shared filter/order pagination
+                            // builder (Oracle rownum wrap, SQL Server ROW_NUMBER,
+                            // Dameng OFFSET/FETCH, generic LIMIT/OFFSET ...). The
+                            // primary key ties the order off so page boundaries and
+                            // the cap stay deterministic.
+                            let order = sorted_cap_order_expression(
+                                column,
+                                request.row_limit_sort_descending,
+                                &primary_keys_in_select,
+                                &db_type,
+                            );
+                            let sql = crate::transfer::pagination_sql_with_filter_order_and_identifier_quote(
+                                &col_names,
+                                table_name,
+                                &request.schema,
+                                &db_type,
+                                offset,
+                                page_size,
+                                None,
+                                Some(&order),
+                                &[],
                                 None,
                             );
                             replace_database_export_select_list(sql, &col_names, &col_types, &db_type)
@@ -5998,7 +6309,7 @@ async fn export_database_sql_core_inner_with_phases(
                                 &request.schema,
                                 &db_type,
                                 offset,
-                                batch_size,
+                                page_size,
                             );
                             replace_database_export_select_list(sql, &col_names, &col_types, &db_type)
                         };
@@ -6006,7 +6317,7 @@ async fn export_database_sql_core_inner_with_phases(
                             state,
                             &request.connection_id,
                             &client_session_id,
-                            Some(batch_size),
+                            Some(page_size),
                         )
                         .await;
                         let result = match crate::query::execute_sql_statement_with_options(
@@ -6035,9 +6346,12 @@ async fn export_database_sql_core_inner_with_phases(
                         if row_count == 0 {
                             break;
                         }
+                        // Defensive backstop: the query already asked for `page_size` rows,
+                        // but a driver that ignores the row cap must not push the file past it.
+                        let writable = remaining.map_or(row_count, |remaining| remaining.min(row_count));
                         write_database_export_rows_with_mode(
                             &mut file,
-                            &result.rows,
+                            &result.rows[..writable],
                             &col_names,
                             &col_types,
                             &col_extras,
@@ -6050,8 +6364,14 @@ async fn export_database_sql_core_inner_with_phases(
                             table_ddl_text.as_deref(),
                             request.omit_database_qualifier,
                         )?;
-                        total_rows_exported += row_count as u64;
-                        if use_keyset {
+                        total_rows_exported += writable as u64;
+                        table_exported_rows += writable as u64;
+                        // Stop paging once the page was short or the cap is now
+                        // satisfied; the cursor update below only matters for a
+                        // page that will actually be followed by another read.
+                        let page_is_full = row_count == page_size;
+                        let cap_reached = remaining.is_some_and(|remaining| writable >= remaining);
+                        if page_is_full && !cap_reached && use_keyset {
                             if let Some(last_row) = result.rows.last() {
                                 last_primary_key_values = primary_key_indices
                                     .iter()
@@ -6065,7 +6385,7 @@ async fn export_database_sql_core_inner_with_phases(
                                     })
                                     .collect::<Result<Vec<_>, String>>()?;
                             }
-                        } else {
+                        } else if page_is_full && !cap_reached {
                             offset += row_count as u64;
                         }
                         on_progress(ExportProgress {
@@ -6081,7 +6401,7 @@ async fn export_database_sql_core_inner_with_phases(
                             error_count: 0,
                             error_summary: None,
                         });
-                        if row_count < batch_size {
+                        if !page_is_full || cap_reached {
                             break;
                         }
                     }
@@ -6159,6 +6479,34 @@ async fn export_database_sql_core_inner_with_phases(
                         &request.schema,
                         request.drop_table_if_exists,
                     );
+                    let source = if db_type == DatabaseType::Postgres && !source.is_empty() {
+                        let result = await_export_operation(
+                            &request.export_id,
+                            Box::pin(crate::schema::enrich_postgres_view_ddl_with_comments(
+                                state,
+                                &request.connection_id,
+                                &request.database,
+                                &request.schema,
+                                view_name,
+                                &source,
+                                None,
+                            )),
+                        )
+                        .await;
+                        postgres_view_comments_or_definition(
+                            result,
+                            source,
+                            view_name,
+                            &mut file,
+                            request.fail_on_error,
+                            &mut lenient_errors,
+                        )?
+                    } else {
+                        source
+                    };
+                    if is_export_cancelled(&request.export_id).await {
+                        return Err("Export cancelled".to_string());
+                    }
                     if !source.is_empty() {
                         if let Some(phases) = phases.as_deref_mut() {
                             phases.push_view(&request.schema, view_info, &source)?;
@@ -6521,35 +6869,36 @@ fn strip_agent_sequence_owned_by(source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        append_snapshot_order_and_limit, build_database_export_object_source_sql, build_database_sql_export,
+        build_export_insert_statements, build_export_insert_statements_excluding,
+        build_export_insert_statements_excluding_with_dialect, build_export_object_source_sql, build_export_sql_insert,
+        create_database_export_writer, database_export_query_options_for_timeout, database_export_select_sql,
+        database_export_total_objects, decode_unicode_escapes_for_export, drop_table_if_exists_sql,
+        ensure_export_destination_dir, export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys,
+        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
+        format_mysql_spatial_export_literal, format_postgres_spatial_export_literal_with_srid,
+        format_sqlserver_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_enum_ddl,
+        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
+        generate_postgres_sequence_post_table_ddl, generate_postgres_sequence_setval_sql, is_dameng_auto_increment_ddl,
+        is_postgres_extension_member_routine, linux_f_type_is_network_filesystem, linux_mount_source_from_mountinfo,
+        linux_mount_source_from_proc, linux_network_file_identity_from_mountinfo, mysql_database_export_preamble,
+        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
+        record_export_destination_identity, record_export_error, remaining_rows_under_limit,
+        replace_database_export_select_list, sort_export_views_by_dependencies, sorted_cap_order_expression,
+        split_postgres_export_table_ddl, write_database_export_rows, write_database_export_rows_with_mode,
+        write_row_limit_sort_fallback_comment, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
+        BuildExportSqlInsertOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
+        DdlNormalizeOptions, ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
+        PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
+        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
+        POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
+    };
+    use super::{
         await_export_operation, await_export_stream_operation, clear_export_cancelled, combine_schema_sql_export,
         concurrent_metadata_prefetch_allowed, database_export_metadata_prefetch_concurrency,
         emit_database_export_cancelled, metadata_prefetch_concurrency, metadata_prefetch_pool_capacity,
         postgres_create_schema_sql, postgres_export_schema_names, set_export_cancelled, snapshot_batch_cancelled,
         ExportStatus, EXPORT_CANCELLED_ERROR, EXPORT_DESTINATION_IDENTITY_NETWORK_MOUNT_SOURCE_KIND,
-    };
-    use super::{
-        build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
-        build_export_insert_statements_excluding, build_export_insert_statements_excluding_with_dialect,
-        build_export_object_source_sql, build_export_sql_insert, create_database_export_writer,
-        database_export_query_options_for_timeout, database_export_select_sql, database_export_total_objects,
-        decode_unicode_escapes_for_export, drop_table_if_exists_sql, ensure_export_destination_dir,
-        export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys, filter_export_table_infos,
-        format_export_sql_literal, format_export_table_ddl, format_mysql_spatial_export_literal,
-        format_postgres_spatial_export_literal_with_srid, format_sqlserver_spatial_export_literal,
-        format_xugu_spatial_export_literal, generate_postgres_enum_ddl, generate_postgres_extension_ddl,
-        generate_postgres_sequence_create_ddl, generate_postgres_sequence_post_table_ddl,
-        generate_postgres_sequence_setval_sql, is_dameng_auto_increment_ddl, is_postgres_extension_member_routine,
-        linux_f_type_is_network_filesystem, linux_mount_source_from_mountinfo, linux_mount_source_from_proc,
-        linux_network_file_identity_from_mountinfo, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
-        mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_destination_identity,
-        record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
-        split_postgres_export_table_ddl, write_database_export_rows, write_database_export_rows_with_mode,
-        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
-        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions,
-        ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
-        PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
-        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
-        POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -6564,6 +6913,121 @@ mod tests {
         Arc, Mutex,
     };
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn row_limit_budget_keeps_unlimited_and_rejects_zero_requests() {
+        // No cap: the paged loop and the snapshot stream must behave exactly as before.
+        assert_eq!(remaining_rows_under_limit(None, 0), None);
+        assert_eq!(remaining_rows_under_limit(None, u64::MAX), None);
+        // A satisfied cap owes zero further rows; readers stop instead of paging on.
+        assert_eq!(remaining_rows_under_limit(Some(500), 500), Some(0));
+        assert_eq!(remaining_rows_under_limit(Some(500), 499), Some(1));
+        // Overshoot (a driver that ignored the cap) never grows the budget again.
+        assert_eq!(remaining_rows_under_limit(Some(500), 700), Some(0));
+    }
+
+    #[test]
+    fn snapshot_row_limit_appends_a_trailing_clause() {
+        let sql = database_export_select_sql(
+            &["id".to_string()],
+            &[Some("INT".to_string())],
+            "orders",
+            "sales",
+            &DatabaseType::Mysql,
+        );
+        assert_eq!(append_snapshot_order_and_limit(&sql, None, 100), format!("{sql} LIMIT 100"));
+        // Review on #14799: a sort column orders the capped snapshot read before
+        // the limit, so the cap keeps the first/last N rows by that column.
+        assert_eq!(
+            append_snapshot_order_and_limit(&sql, Some("\"id\" DESC"), 100),
+            format!("{sql} ORDER BY \"id\" DESC LIMIT 100")
+        );
+    }
+
+    #[test]
+    fn missing_row_limit_sort_column_writes_a_fallback_comment() {
+        let mut request = export_request(true, true, true, Vec::new());
+        request.row_limit_per_table = Some(10);
+        request.row_limit_sort_column = Some("created_at".to_string());
+
+        let mut output = Vec::new();
+        write_row_limit_sort_fallback_comment(&mut output, &request, "orders", None).unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "-- Table orders: sort column 'created_at' not found; the row cap follows the default read order\n"
+        );
+
+        let mut output = Vec::new();
+        write_row_limit_sort_fallback_comment(&mut output, &request, "orders", Some("created_at")).unwrap();
+        assert!(output.is_empty(), "a matched sort column must not emit a fallback comment");
+    }
+
+    #[test]
+    fn sorted_cap_order_expression_tiebreaks_with_primary_keys() {
+        // A sort column that is the whole primary key already orders uniquely.
+        assert_eq!(sorted_cap_order_expression("id", true, &["id".to_string()], &DatabaseType::Mysql), "`id` DESC");
+        // A non-key sort column gets the key as an ascending tiebreaker, so a tie
+        // at the cap boundary keeps the same rows on every run.
+        assert_eq!(
+            sorted_cap_order_expression("updated_at", false, &["id".to_string()], &DatabaseType::Mysql),
+            "`updated_at` ASC, `id` ASC"
+        );
+        // Composite keys contribute only the parts the sort column does not cover.
+        assert_eq!(
+            sorted_cap_order_expression("id", true, &["tenant".to_string(), "id".to_string()], &DatabaseType::Mysql),
+            "`id` DESC, `tenant` ASC"
+        );
+        // No key: the sort column alone; ties fall back to the engine order and
+        // the dialog warns about run-to-run differences.
+        assert_eq!(sorted_cap_order_expression("created_at", true, &[], &DatabaseType::Mysql), "`created_at` DESC");
+        // Postgres quotes with double quotes; the tiebreak rule is dialect-agnostic.
+        assert_eq!(
+            sorted_cap_order_expression("updated_at", true, &["id".to_string()], &DatabaseType::Postgres),
+            "\"updated_at\" DESC, \"id\" ASC"
+        );
+    }
+
+    #[tokio::test]
+    async fn row_limit_per_table_zero_is_rejected_without_touching_the_destination() {
+        // Zero would export nothing while looking like a successful "limit";
+        // refuse it up front as caller error (#14750).
+        let scratch_dir = std::env::temp_dir().join(format!("dbx-row-limit-zero-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch_dir).expect("scratch dir");
+        let request = DatabaseExportRequest {
+            export_id: "row-limit-zero".to_string(),
+            connection_id: "missing-connection".to_string(),
+            database: "db".to_string(),
+            schema: String::new(),
+            file_path: scratch_dir.join("should-not-exist.sql").to_string_lossy().into_owned(),
+            selected_tables: Vec::new(),
+            selected_objects: None,
+            excluded_tables: Vec::new(),
+            include_structure: false,
+            include_data: true,
+            include_objects: false,
+            include_create_database: false,
+            drop_table_if_exists: false,
+            omit_database_qualifier: false,
+            omit_auto_increment: false,
+            preserve_original_language: false,
+            fail_on_error: false,
+            prevent_overwrite: false,
+            output_compression: Default::default(),
+            insert_dialect: Default::default(),
+            insert_mode: Default::default(),
+            snapshot_session_id: None,
+            batch_size: 100,
+            split_max_mb: None,
+            row_limit_per_table: Some(0),
+            row_limit_sort_column: None,
+            row_limit_sort_descending: false,
+        };
+        let state = Arc::new(test_app_state(&scratch_dir).await);
+        let error = crate::data::database_export::export_database_sql_core(&state, &request, |_| {}).await;
+        assert!(error.is_err(), "a zero row limit must be rejected");
+        assert!(error.unwrap_err().contains("row_limit_per_table"), "error should name the field");
+        assert!(!std::path::Path::new(&request.file_path).exists(), "no destination file may be created");
+    }
 
     #[test]
     fn database_export_query_options_preserve_connection_timeout() {
@@ -6602,6 +7066,46 @@ mod tests {
             .expect("cancellation task should not panic");
         assert_eq!(result, Err(EXPORT_CANCELLED_ERROR.to_string()));
         clear_export_cancelled(&export_id).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_pending_comment_query_cancel_is_never_a_lenient_error() {
+        for strict in [true, false] {
+            let export_id = format!("cancel-view-comments-{}", uuid::Uuid::new_v4());
+            let task_export_id = export_id.clone();
+            let (started, pending) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let result = await_export_operation(
+                    &task_export_id,
+                    Box::pin(async move {
+                        started.send(()).unwrap();
+                        std::future::pending::<Result<String, String>>().await
+                    }),
+                )
+                .await;
+                let mut file = Vec::new();
+                let mut errors = LenientExportErrors::default();
+                let result = super::postgres_view_comments_or_definition(
+                    result,
+                    "CREATE VIEW v AS SELECT 1;".into(),
+                    "v",
+                    &mut file,
+                    strict,
+                    &mut errors,
+                );
+                (result, file, errors.count)
+            });
+            pending.await.unwrap();
+            set_export_cancelled(&export_id).await;
+            let (result, file, errors) = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .expect("pending comment query must cancel promptly")
+                .unwrap();
+            clear_export_cancelled(&export_id).await;
+            assert_eq!(result, Err(EXPORT_CANCELLED_ERROR.to_string()));
+            assert!(file.is_empty(), "cancellation must not write an ERROR marker or definition");
+            assert_eq!(errors, 0, "cancellation is not an incomplete metadata export");
+        }
     }
 
     #[tokio::test]
@@ -6757,6 +7261,9 @@ mod tests {
             snapshot_session_id: None,
             batch_size: 1000,
             split_max_mb: None,
+            row_limit_per_table: None,
+            row_limit_sort_column: None,
+            row_limit_sort_descending: false,
             preserve_original_language: false,
         }
     }
@@ -8750,6 +9257,42 @@ mod tests {
     }
 
     #[test]
+    fn tdengine_export_escapes_backslashes_and_quotes() {
+        // #15456: TDengine parses `\` escape sequences inside single-quoted
+        // literals, so a stored `\\` exported verbatim round-trips as a single
+        // `\` — silent data corruption. The export must double `\` for
+        // TDengine (identifier quoting is backtick per dialect).
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("gw1".to_string()),
+            qualified_table_name: None,
+            columns: vec!["json_desc".to_string()],
+            column_types: vec![Some("VARCHAR(1000)".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(r#"{"a":"x\\y"}"#)], vec![json!(r"C:\new\it's")], vec![json!("中文\\日文")]],
+            // batch_size 是「每条 INSERT 最多行数」而不是语句条数；置 1 让每行
+            // 独立成句，便于逐字面量断言（多行合并由既有批量路径覆盖）。
+            batch_size: Some(1),
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                r#"INSERT INTO `gw1` (`json_desc`) VALUES ('{"a":"x\\\\y"}');"#,
+                r"INSERT INTO `gw1` (`json_desc`) VALUES ('C:\\new\\it''s');",
+                r"INSERT INTO `gw1` (`json_desc`) VALUES ('中文\\日文');",
+            ],
+            "TDengine must double backslashes so the re-import keeps the stored bytes"
+        );
+    }
+
+    #[test]
     fn clickhouse_and_snowflake_export_spell_the_sub_byte_as_a_hex_escape() {
         // `\Z` is a MySQL-family escape. ClickHouse reads it as a literal
         // backslash followed by `Z` (verified on the ClickHouse playground,
@@ -10247,6 +10790,49 @@ mod tests {
     }
 
     #[test]
+    fn standard_sql_insert_gaussdb_mysql_mode_uses_connection_backtick_quotes() {
+        // GaussDB in M/B/MYSQL compatibility mode reports a backtick identifier
+        // quote through the connection; the Standard SQL exports must use it
+        // instead of double quotes (which are string literals there).
+        let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "gaussdb",
+            "identifierQuote": "`",
+            "insertDialect": "standard",
+            "schema": "app",
+            "tableName": "order items",
+            "columns": ["id", "select", "full`name"],
+            "rows": [
+                [1, "x", "y"],
+                [2, "z", "w"]
+            ],
+            "batchSize": 10
+        }))
+        .expect("deserialize Standard SQL INSERT payload");
+
+        let sql = build_export_sql_insert(options).expect("build Standard SQL INSERT");
+
+        assert_eq!(
+            sql,
+            "INSERT INTO app.`order items` (id, `select`, `full``name`) VALUES\n(1, 'x', 'y'),\n(2, 'z', 'w');"
+        );
+
+        // Without a connection quote the ANSI double quote is kept.
+        let plain: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "gaussdb",
+            "insertDialect": "standard",
+            "schema": "app",
+            "tableName": "order items",
+            "columns": ["id", "select"],
+            "rows": [[1, "x"]],
+            "batchSize": 10
+        }))
+        .expect("deserialize Standard SQL INSERT payload");
+
+        let plain_sql = build_export_sql_insert(plain).expect("build Standard SQL INSERT");
+        assert_eq!(plain_sql, "INSERT INTO \"app\".\"order items\" (\"id\", \"select\") VALUES (1, 'x');");
+    }
+
+    #[test]
     fn standard_sql_insert_keeps_requested_batch_mode_for_oracle_sources() {
         let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
             "databaseType": "oracle",
@@ -10358,7 +10944,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO `orders` (`id`, `quantity`, `created_at`) VALUES (7, 2, '2026-07-30 08:00:00');\n\n"
+            "INSERT INTO `orders` (`id`, `quantity`, `created_at`) VALUES (7, 2, '2026-07-30 08:00:00');\n"
         );
     }
 
@@ -10384,7 +10970,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO \"dbo\".\"event]log\" (\"enabled\", \"path\") VALUES (TRUE, 'C:\\exports\\O''Hara');\n\n"
+            "INSERT INTO \"dbo\".\"event]log\" (\"enabled\", \"path\") VALUES (TRUE, 'C:\\exports\\O''Hara');\n"
         );
     }
 
@@ -10414,12 +11000,7 @@ mod tests {
         .unwrap();
         drop(file);
 
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO `order.items` (`id`) VALUES (1);
-
-"
-        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "INSERT INTO `order.items` (`id`) VALUES (1);\n");
     }
 
     #[test]
@@ -10479,12 +11060,7 @@ mod tests {
         .unwrap();
         drop(file);
 
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO \"app\".\"users\" (\"id\") VALUES (1);
-
-"
-        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "INSERT INTO \"app\".\"users\" (\"id\") VALUES (1);\n");
     }
 
     #[test]
@@ -10513,12 +11089,7 @@ mod tests {
         .unwrap();
         drop(file);
 
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');
-
-"
-        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');\n");
     }
 
     #[test]
@@ -10543,7 +11114,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO `app`.`users` (`id`, `name`) VALUES (1, 'Ada');\n\n"
+            "INSERT INTO `app`.`users` (`id`, `name`) VALUES (1, 'Ada');\n"
         );
     }
 
@@ -10573,7 +11144,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');\n\nINSERT INTO `users` (`id`, `name`) VALUES (2, 'Linus');\n\n"
+            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');\nINSERT INTO `users` (`id`, `name`) VALUES (2, 'Linus');\n"
         );
     }
 
@@ -10597,10 +11168,7 @@ mod tests {
         .unwrap();
         drop(file);
 
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "INSERT INTO \"dbo\".\"sync_state\" (\"id\") VALUES (7);\n\n"
-        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "INSERT INTO \"dbo\".\"sync_state\" (\"id\") VALUES (7);\n");
     }
 
     #[test]
@@ -10740,6 +11308,23 @@ mod tests {
     }
 
     #[test]
+    fn postgres_spool_readers_keep_table_groups_without_leaking_the_boundary_marker() {
+        let first = "CREATE TABLE sales.orders (id int);\nINSERT INTO sales.orders VALUES (1);\n";
+        let second = "CREATE TABLE archive.orders (id int);\nINSERT INTO archive.orders VALUES (2);\n";
+        let spool = format!("{first}{}\n\n{second}", super::DATABASE_EXPORT_TABLE_BOUNDARY_MARKER);
+        let expected = format!("{first}\n{second}");
+
+        let mut output = Vec::new();
+        combine_schema_sql_export(&mut std::io::Cursor::new(&spool), &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), expected);
+
+        let mut output = Vec::new();
+        super::copy_postgres_export_phase(&mut std::io::Cursor::new(&spool), &mut output, "table-boundary-unit")
+            .unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), expected);
+    }
+
+    #[test]
     fn all_schemas_combine_keeps_split_part_boundaries_statement_safe() {
         // Mirror of the per-schema temporary files that
         // `export_postgres_all_schemas_sql_core` combines: whole SQL
@@ -10812,6 +11397,8 @@ mod tests {
         let views = vec![
             "CREATE VIEW z.base AS SELECT id, body FROM z.items;".to_string(),
             "CREATE VIEW a.report AS SELECT id, body FROM z.base WHERE body <> ';';".to_string(),
+            "COMMENT ON VIEW a.report IS E' 中文; O''Reilly \\n \\\\path ';".to_string(),
+            "COMMENT ON COLUMN a.report.body IS E' \\t\\n ';".to_string(),
         ];
         let tail = vec![
             "CREATE FUNCTION a.answer() RETURNS integer AS $body$\nBEGIN\n  PERFORM 1;\n  RETURN 42;\nEND\n$body$ LANGUAGE plpgsql;".to_string(),
@@ -11057,7 +11644,7 @@ mod tests {
 
         let content = std::fs::read_to_string(path).unwrap();
         assert!(!content.contains("IDENTITY_INSERT"));
-        assert_eq!(content, "INSERT INTO \"SYSDBA\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\n\n");
+        assert_eq!(content, "INSERT INTO \"SYSDBA\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\n");
     }
 
     #[test]
@@ -11145,7 +11732,6 @@ mod tests {
                 String::new(),
                 "-- Structure for users".to_string(),
                 "CREATE TABLE `users` (`id` int);".to_string(),
-                String::new(),
                 "-- Data for users".to_string(),
                 format!("-- Exported rows: 1 (truncated at {DATABASE_EXPORT_ROW_LIMIT})"),
                 "INSERT INTO `users` (`id`) VALUES (1);".to_string(),

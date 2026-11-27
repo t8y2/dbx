@@ -455,6 +455,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: Some(format!("-- SQL for {name}")),
         }
     }
@@ -499,6 +500,7 @@ mod tests {
                         target: json!("Bobby"),
                     }],
                 }],
+                ignored_only_count: 0,
             },
             sync_statements: vec![
                 "INSERT INTO \"public\".\"users\" (\"id\", \"name\") VALUES (1, 'Ada');".to_string(),

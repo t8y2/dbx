@@ -55,6 +55,13 @@ interface ConditionalUpdateExecution {
 
 export type DataGridAppendPastedRowsResult = { ok: true; rowCount: number } | { ok: false; reason: "not-editable" | "invalid-target" | "target-not-empty" | "empty-paste" | "readonly-column" | "no-matching-columns" | "capacity-exceeded" | "cancelled" };
 
+// Options for appending pasted rows. `skipUndoSnapshot` lets a caller that has
+// already captured an undo snapshot (e.g. a mixed overwrite + append paste)
+// avoid pushing a second, separate undo entry.
+export interface DataGridPasteAppendOptions {
+  skipUndoSnapshot?: boolean;
+}
+
 type CommitEditResult =
   | {
       changed: false;
@@ -171,6 +178,7 @@ export interface UseDataGridEditorOptions {
   prepareFullReload?: () => void;
   /** The adopted save (started by a previous grid instance that is gone) finished and the host grid refreshed. */
   onAdoptedSaveCompleted?: () => void;
+  hasPendingEditorDraft?: () => boolean;
   emit: (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number) => void;
 }
 
@@ -220,6 +228,24 @@ type PendingChangesHistorySnapshot = Pick<PendingChangesSnapshot, "newRows" | "n
 
 const pendingChangesCache = new Map<string, PendingChangesSnapshot>();
 const closingPendingSnapshotTabs = new Set<string>();
+const livePendingChanges = new Map<object, { cacheKey: () => string | undefined; state: () => "saving" | "pending" | undefined }>();
+
+/** Check the result being replaced, including drafts cached while its grid is hidden. */
+export function dataGridPendingChangesState(cacheKey: string, tabId: string, revision?: string): "saving" | "pending" | undefined {
+  if (adoptablePendingSave(saveRegistryKey(tabId, revision))) return "saving";
+  let pending = false;
+  for (const editor of livePendingChanges.values()) {
+    if (editor.cacheKey() !== cacheKey) continue;
+    const state = editor.state();
+    if (state === "saving") return state;
+    pending ||= state === "pending";
+  }
+  const cached = pendingChangesCache.get(cacheKey);
+  if (pending) return "pending";
+  if (!cached) return undefined;
+  const hasCachedChanges = cached.dirtyRows.size > 0 || cached.newRows.length > 0 || cached.deletedRows.size > 0 || !!cached.editingCell || cached.quickEntryDraftRow?.some((value) => value !== null && String(value).trim() !== "");
+  return hasCachedChanges ? "pending" : undefined;
+}
 
 /**
  * In-flight saves, keyed by tab and result payload.
@@ -937,10 +963,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   let batchMutated = false;
   let batchColumnInfoCache: Map<number, ColumnInfo | undefined> | null = null;
 
-  function beginBatch() {
+  function beginBatch(options: { captureUndo?: boolean } = {}) {
     if (isBatching) return;
     isBatching = true;
-    batchUndoSnapshotPushed = false;
+    // A mixed overwrite + append paste captures one undo snapshot up front so
+    // the subsequent INSERT does not add a second, separate undo entry.
+    batchUndoSnapshotPushed = options.captureUndo === true;
+    if (batchUndoSnapshotPushed) pushUndoSnapshot();
     batchMutated = false;
     batchColumnInfoCache = new Map();
   }
@@ -1514,30 +1543,49 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return row.every((value) => value === null || (typeof value === "string" && value.trim() === ""));
   }
 
-  function appendPastedRowsAsNewRows(pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): DataGridAppendPastedRowsResult {
-    return finishDataGridRowPreparation(preparePastedRows(null, pastedRows, columnIndexes, columnNames));
+  function appendPastedRowsAsNewRows(pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null, options: DataGridPasteAppendOptions = {}): DataGridAppendPastedRowsResult {
+    return finishDataGridRowPreparation(preparePastedRows(null, pastedRows, columnIndexes, columnNames, options));
   }
 
   function appendPastedRowsToNewRow(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): DataGridAppendPastedRowsResult {
     return finishDataGridRowPreparation(preparePastedRows(targetRowId, pastedRows, columnIndexes, columnNames));
   }
 
-  function appendPastedRowsAsNewRowsInBatches(pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null, preparation: DataGridRowPreparationOptions = {}): Promise<DataGridAppendPastedRowsResult> {
-    return appendPastedRowsInBatches(null, pastedRows, columnIndexes, columnNames, preparation);
+  function appendPastedRowsAsNewRowsInBatches(
+    pastedRows: readonly (readonly (string | null)[])[],
+    columnIndexes: readonly number[],
+    columnNames?: readonly string[] | null,
+    preparation: DataGridRowPreparationOptions = {},
+    options: DataGridPasteAppendOptions = {},
+  ): Promise<DataGridAppendPastedRowsResult> {
+    return appendPastedRowsInBatches(null, pastedRows, columnIndexes, columnNames, preparation, options);
   }
 
   function appendPastedRowsToNewRowInBatches(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null, preparation: DataGridRowPreparationOptions = {}): Promise<DataGridAppendPastedRowsResult> {
     return appendPastedRowsInBatches(targetRowId, pastedRows, columnIndexes, columnNames, preparation);
   }
 
-  function appendPastedRowsInBatches(targetRowId: number | null, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames: readonly string[] | null | undefined, preparation: DataGridRowPreparationOptions): Promise<DataGridAppendPastedRowsResult> {
+  function appendPastedRowsInBatches(
+    targetRowId: number | null,
+    pastedRows: readonly (readonly (string | null)[])[],
+    columnIndexes: readonly number[],
+    columnNames: readonly string[] | null | undefined,
+    preparation: DataGridRowPreparationOptions,
+    options: DataGridPasteAppendOptions = {},
+  ): Promise<DataGridAppendPastedRowsResult> {
     const isCurrent = rowPreparationIsCurrent();
-    return runDataGridRowPreparation(preparePastedRows(targetRowId, pastedRows, columnIndexes, columnNames), { ...preparation, isCurrent: () => isCurrent() && preparation.isCurrent?.() !== false }, { ok: false, reason: "cancelled" });
+    return runDataGridRowPreparation(preparePastedRows(targetRowId, pastedRows, columnIndexes, columnNames, options), { ...preparation, isCurrent: () => isCurrent() && preparation.isCurrent?.() !== false }, { ok: false, reason: "cancelled" });
   }
 
   // A null target appends populated rows directly, without a preparatory blank
   // row or a second undo entry. Cell/row paste still validates its blank target.
-  function* preparePastedRows(targetRowId: number | null, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): Generator<DataGridRowPreparationProgress, DataGridAppendPastedRowsResult> {
+  function* preparePastedRows(
+    targetRowId: number | null,
+    pastedRows: readonly (readonly (string | null)[])[],
+    columnIndexes: readonly number[],
+    columnNames?: readonly string[] | null,
+    options: DataGridPasteAppendOptions = {},
+  ): Generator<DataGridRowPreparationProgress, DataGridAppendPastedRowsResult> {
     if (!editable.value) return { ok: false, reason: "not-editable" };
     const batchSize = dataGridPreparationBatchSize(result.value.columns.length);
     if (pastedRows.length > dataGridPendingRowLimit(result.value.columns.length)) {
@@ -1631,7 +1679,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!isCurrent()) return { ok: false, reason: "cancelled" };
     const snapshot = yield* preparePendingChangesSnapshot();
     if (!isCurrent()) return { ok: false, reason: "cancelled" };
-    pushUndoSnapshot(snapshot);
+    if (!options.skipUndoSnapshot) pushUndoSnapshot(snapshot);
     if (targetIsDraft || targetRowId === null) {
       nextRows = sourceRows.concat(mappedRows);
       nextMeta = sourceMeta.concat(mappedMeta);
@@ -2881,6 +2929,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   if (componentInstance) {
+    const pendingChangesOwner = {};
+    livePendingChanges.set(pendingChangesOwner, {
+      cacheKey: () => cacheKey?.value,
+      state: () => {
+        if (isSaving.value) return "saving";
+        return hasPendingChanges.value || options.hasPendingEditorDraft?.() || draftRowHasValue() ? "pending" : undefined;
+      },
+    });
     onMounted(() => {
       componentActive = true;
       mounted = true;
@@ -2906,6 +2962,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     // restored if a new DataGrid instance is created for the same tab
     // (e.g. after result eviction + reload).
     onBeforeUnmount(() => {
+      livePendingChanges.delete(pendingChangesOwner);
       if (currentRecord) releasePendingSaveRecord(currentRecord);
       // Persist even mid-save: the snapshot is marked `saving`, so a grid that
       // returns after a failure still restores changes it can retry.

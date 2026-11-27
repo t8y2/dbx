@@ -15,11 +15,12 @@
 //! DuckDB `init_script` ATTACH statements. MCP-issued SQL is separately limited
 //! to no `ATTACH`/`DETACH` at all (`dbx_sql_core::sql_risk::mcp_sql_has_forbidden_file_attach`).
 //!
-//! Not covered: DuckDB's general file functions (`read_blob`, `read_csv`,
-//! `read_parquet`, `COPY ... TO`, `INSTALL`/`LOAD`, `EXPORT DATABASE`, ...) can
-//! still name an arbitrary path from SQL executed on an allowed connection.
-//! Those surfaces are tracked separately as a follow-up to #9108; this guard is
-//! a connection-target boundary, not a filesystem sandbox for SQL.
+//! Not covered: SQL executed on an allowed connection can still reach files
+//! through DuckDB's general file functions (`read_blob`, `read_csv`,
+//! `read_parquet`, `sqlite_scan`, `COPY ... TO`, `INSTALL`/`LOAD`,
+//! `EXPORT DATABASE`, ...) and SQLite's `readfile`/`load_extension`. Those
+//! surfaces are tracked separately as a follow-up to #9108; this guard is a
+//! connection-target and attachment boundary, not a filesystem sandbox for SQL.
 
 use std::path::{Path, PathBuf};
 
@@ -259,15 +260,20 @@ fn resolve_local_target(host: &str) -> LocalTarget {
 /// for an unavailable cwd is testable on every platform.
 fn resolve_local_target_with_cwd(host: &str, cwd: Option<&Path>) -> LocalTarget {
     let host = host.trim();
-    // `file:` URIs stay unresolvable here on purpose: the sqlite driver only
-    // sets `SQLITE_OPEN_URI` for `is_network_path` hosts, so a `file:///...`
-    // string is opened as a literal file name and cannot address `dbx.db`.
-    // Revisit this branch if that ever changes.
-    if host.is_empty() || host.contains("://") || host.starts_with("jdbc:") {
-        return LocalTarget::NotAPath;
-    }
+    // The driver classification runs first because it overlaps with the generic
+    // non-path checks below: `file://…wsl$` or `jdbc:…?wsl.localhost` satisfy
+    // both, and the driver still opens them through its URI branch. Whatever
+    // the driver treats as a URI/network target must be refused, so the
+    // driver's own predicate decides before anything can read as "not a path".
     if is_driver_network_path(host) {
         return LocalTarget::NetworkShare;
+    }
+    // The remaining URL-shaped targets stay unresolvable on purpose: the sqlite
+    // driver only sets `SQLITE_OPEN_URI` for `is_network_path` hosts, so a
+    // `file:///...` string without a network marker is opened as a literal file
+    // name and cannot address `dbx.db`. Revisit if that ever changes.
+    if host.is_empty() || host.contains("://") || host.starts_with("jdbc:") {
+        return LocalTarget::NotAPath;
     }
     let path = PathBuf::from(expand_tilde(host));
     let absolute = if path.is_absolute() {
@@ -558,6 +564,30 @@ mod tests {
         ] {
             let error = ensure_mcp_target_allowed(&config_db, &sqlite_connection(&host)).unwrap_err();
             assert!(error.starts_with(CONFIG_DB_PATH_FORBIDDEN), "{host}: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_targets_where_non_path_and_driver_uri_classifications_overlap() {
+        // Regression: a target can look like a URL (`://`, `jdbc:`) and still
+        // be opened by the driver through its URI branch. The driver
+        // classification must decide, or these read as "not a path" while the
+        // driver opens the real file.
+        let directory = temp_dir();
+        let config_db = directory.path().join("dbx.db");
+        let config = config_db.to_string_lossy();
+        for host in [
+            format!("file://{config}?wsl$"),
+            format!("file://{config}#wsl.localhost"),
+            format!("jdbc:h2:file:{config}?wsl$"),
+            "https://wsl.localhost/Ubuntu/mnt/c/dbx.db".to_string(),
+        ] {
+            let error = ensure_mcp_target_allowed(&config_db, &sqlite_connection(&host)).unwrap_err();
+            assert!(error.starts_with(CONFIG_DB_PATH_FORBIDDEN), "{host}: {error}");
+        }
+        // Without a driver network marker the URL stays an ordinary non-path.
+        for host in ["file:///data/example", "jdbc:h2:file:/data/example"] {
+            assert!(ensure_mcp_target_allowed(&config_db, &sqlite_connection(host)).is_ok(), "{host}");
         }
     }
 

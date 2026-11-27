@@ -398,4 +398,29 @@ mod tests {
         assert!(!is_attach_statement("'ATTACH' AS x"));
         assert!(!is_attach_statement(""));
     }
+
+    #[test]
+    fn attach_parser_handles_comment_and_statement_boundaries() {
+        // Block comments do not nest (SQL standard): the first `*/` ends the
+        // comment, so the following ATTACH is still recognized.
+        assert_eq!(
+            attached_target_from_attach_sql("/* outer /* inner */ ATTACH 'x.duckdb' AS x"),
+            Some("x.duckdb".to_string())
+        );
+        // A comment that names ATTACH, or an unclosed leading comment that
+        // swallows the script, is not an ATTACH statement.
+        assert!(!is_attach_statement("/* ATTACH 'x.duckdb' AS x */ SELECT 1"));
+        assert!(!is_attach_statement("/* unterminated ATTACH 'x.duckdb'"));
+        assert_eq!(attached_target_from_attach_sql("-- only a comment"), None);
+        // Comments between every keyword still parse; each optional keyword is
+        // matched against the token that follows the comment.
+        assert_eq!(
+            attached_target_from_attach_sql("ATTACH/**/DATABASE/**/IF/**/NOT/**/EXISTS/**/'x.duckdb' AS x"),
+            Some("x.duckdb".to_string())
+        );
+        // A trailing line comment does not change the parsed target.
+        assert_eq!(attached_target_from_attach_sql("ATTACH 'x.duckdb' -- trailing note"), Some("x.duckdb".to_string()));
+        // Semicolons inside a literal or a comment stay inside one statement.
+        assert_eq!(split_sql_statements("ATTACH 'a;b.duckdb' AS a; -- note; still one\nSELECT 1").len(), 2);
+    }
 }

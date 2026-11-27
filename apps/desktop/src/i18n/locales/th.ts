@@ -5161,6 +5161,7 @@ export default withEnglishFallback({
     magpieInvalidConfig: "รูปแบบไฟล์กำหนดค่า providers.json ของ Magpie ไม่ถูกต้อง",
     magpieReadFailed: "ไม่สามารถอ่านไฟล์กำหนดค่า providers.json ของ Magpie ได้",
     magpieConfigDirectoryFailed: "ไม่สามารถระบุตำแหน่งไดเรกทอรีกำหนดค่าของ Magpie ได้",
+    testErrorServer: "เซิร์ฟเวอร์ส่งคืนรหัสสถานะข้อผิดพลาด (ส่วนใหญ่เป็น 5xx) ซึ่งมักเกิดจากเกตเวย์หรือพร็อกซีที่สร้างขึ้นเอง — โปรดตรวจสอบว่าเกตเวย์ส่งต่อได้ตามปกติหรือไม่ มีการส่งคืนหน้าแสดงข้อผิดพลาดหรือไม่ และบริการแบ็กเอนด์พร้อมใช้งานหรือไม่",
   },
   contextMenu: {
     splitTab: "แยก",

@@ -4837,6 +4837,7 @@ export default withEnglishFallback({
     setDatabaseTarget: "대상으로 설정",
     searchDatabases: "데이터베이스 검색…",
     noDatabasesFound: "데이터베이스를 찾을 수 없습니다",
+    testErrorServer: "서버가 오류 상태 코드(대부분 5xx)를 반환했습니다. 이는 주로 자체 게이트웨이 또는 프록시에서 발생합니다—게이트웨이가 정상적으로 전달하는지, 오류 페이지를 반환하는지, 백엔드 서비스가 사용 가능한지 확인하세요.",
   },
   contextMenu: {
     splitTab: "분할",

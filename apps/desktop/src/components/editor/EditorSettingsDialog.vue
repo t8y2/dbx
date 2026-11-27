@@ -154,6 +154,7 @@ import {
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { isAiConnectionTestConfigCurrent } from "@/lib/ai/aiConnectionTest";
+import { aiTestErrorPresentationOf } from "@/lib/ai/aiErrorPresentation";
 import { formatAiInlineMarkdownFragment, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
 import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
 import type { DriverStoreTab } from "@/lib/connection/agentDriverInstallHint";
@@ -7300,24 +7301,7 @@ const aiTestError = ref("");
 const aiTestLatency = ref<number | null>(null);
 const aiTestErrorCopied = ref(false);
 let aiTestRequestId = 0;
-const aiTestErrorCategoryKeys: Record<string, string> = {
-  auth: "ai.testErrorAuth",
-  modelNotFound: "ai.testErrorModelNotFound",
-  rateLimit: "ai.testErrorRateLimit",
-  timeout: "ai.testErrorTimeout",
-  tokenLimit: "ai.testErrorTokenLimit",
-  safety: "ai.testErrorSafety",
-  emptyResponse: "ai.testErrorEmptyResponse",
-  modelDiscoveryUnsupported: "ai.modelListUnsupported",
-  network: "ai.testErrorNetwork",
-  unknown: "ai.testErrorUnknown",
-};
-const aiTestErrorPresentation = computed(() => {
-  const match = aiTestError.value.match(/^\[([^\]]+)]\s*(.*)$/s);
-  if (!match) return { summary: "", detail: aiTestError.value };
-  const key = aiTestErrorCategoryKeys[match[1]];
-  return key ? { summary: t(key), detail: match[2] } : { summary: "", detail: aiTestError.value };
-});
+const aiTestErrorPresentation = computed(() => aiTestErrorPresentationOf(aiTestError.value, (key) => t(key)));
 const aiTestErrorDisplay = computed(() => [aiTestErrorPresentation.value.summary, aiTestErrorPresentation.value.detail].filter(Boolean).join(" "));
 const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
 const aiIsClaudeCodeCli = computed(() => aiEditProvider.value === "claude-code-cli");
@@ -7631,6 +7615,7 @@ function aiEnterEditMode(configId?: string) {
   syncAiEditState();
   aiConfigListMode.value = "edit";
   aiEditConfigId.value = configId || null;
+  // 进入编辑即丢弃该行的列表测试结果：编辑期间结果必然过时，保存后需重测（#15467 评审）。
 
   if (configId) {
     const config = settingsStore.aiConfigs.find((c) => c.id === configId);
@@ -8014,10 +7999,26 @@ async function aiTestConn() {
   } catch (e: any) {
     if (requestId !== aiTestRequestId || !isAiConnectionTestConfigCurrent(config, currentAiEditConfig())) return;
     aiTestResult.value = "error";
-    aiTestError.value = translateBackendError(t, e);
+    aiTestError.value = aiTestErrorText(e);
   } finally {
     if (requestId === aiTestRequestId) aiTesting.value = false;
   }
+}
+
+/**
+ * Renders a failed connection test.
+ *
+ * The provider tags its failures with a `[category]` prefix (auth, rateLimit,
+ * serverError, …) so the user can tell *what to check*; the raw text alone
+ * ("API error (HTTP 500: empty response body)") says nothing about whether the
+ * key, the endpoint or the gateway is at fault (#15393). Structured backend
+ * errors keep their existing translation.
+ */
+function aiTestErrorText(error: unknown): string {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const categorized = aiTestErrorPresentationOf(raw, (key) => t(key));
+  if (categorized.summary) return `${categorized.summary}\n${categorized.detail}`;
+  return translateBackendError(t, error);
 }
 
 async function copyAiTestError() {

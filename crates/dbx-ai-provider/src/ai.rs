@@ -3457,6 +3457,24 @@ fn log_test_connection_result(config: &AiConfig, result: &Result<AiTestConnectio
     }
 }
 
+/// Whether the message mentions an HTTP 5xx status ("HTTP 500", "status 503",
+/// "http 502 bad gateway"). Plain string scanning keeps this crate free of a
+/// regex dependency.
+fn mentions_server_error_status(lower: &str) -> bool {
+    for marker in ["http ", "status ", "code "] {
+        let mut rest = lower;
+        while let Some(position) = rest.find(marker) {
+            let tail = &rest[position + marker.len()..];
+            let bytes = tail.as_bytes();
+            if bytes.len() >= 3 && bytes[0] == b'5' && bytes[1].is_ascii_digit() && bytes[2].is_ascii_digit() {
+                return true;
+            }
+            rest = &rest[position + marker.len()..];
+        }
+    }
+    false
+}
+
 fn classify_error(msg: &str) -> &'static str {
     // An explicit `[category]` tag wins over keyword matching: its producer
     // inspected the underlying error (e.g. `reqwest::Error::is_dns`) instead of
@@ -3504,8 +3522,18 @@ fn classify_error(msg: &str) -> &'static str {
         "tokenLimit"
     } else if lower.contains("safety filter") || lower.contains("prompt was blocked") {
         "safety"
+    } else if mentions_server_error_status(&lower) && !lower.contains("502") && !lower.contains("503") {
+        // A 5xx the network branch does not already claim (502/503 are transport
+        // shapes and stay retryable `network`) says nothing about the key or the
+        // model, so it gets its own category instead of falling through to
+        // `unknown` — #15393: "API error (HTTP 500: empty response body)" told
+        // the user nothing about where the failure came from.
+        "serverError"
     } else if lower.contains("no text")
         || lower.contains("response body was empty")
+        // The provider-side wording is "empty response body" — a different word
+        // order than the stream-side "response body was empty" (#15393).
+        || lower.contains("empty response body")
         || lower.contains("no sse data events")
         || lower.contains("without text")
     {
@@ -6456,6 +6484,21 @@ mod tests {
             measure_first_stream_chunk(stream, std::time::Instant::now(), false, true, false, &[]).await.unwrap();
 
         assert_eq!(text, "OK");
+    }
+
+    #[test]
+    fn classifies_server_errors_and_empty_bodies_for_gateway_failures() {
+        // 自建网关/代理返回 5xx 且 body 为空：应指向服务端，而不是笼统的 unknown
+        assert_eq!(classify_error("API error (HTTP 500: empty response body)"), "serverError");
+        // 502/503 是传输层形态，保持既有 network 分类（可重试），不被 serverError 抢走
+        assert_eq!(classify_error("HTTP 502 Bad Gateway"), "network");
+        assert_eq!(classify_error("status 503 service unavailable"), "network");
+        // 5xx 之前的既有分类优先（429 仍是限流、504 仍是超时）
+        assert_eq!(classify_error("HTTP 429: empty response body"), "rateLimit");
+        assert_eq!(classify_error("HTTP 504: gateway timeout"), "timeout");
+        // HTTP 成功但 body 为空：emptyResponse（两种语序都要命中）
+        assert_eq!(classify_error("AI stream response body was empty after HTTP success"), "emptyResponse");
+        assert_eq!(classify_error("empty response body"), "emptyResponse");
     }
 
     #[test]

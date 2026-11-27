@@ -143,6 +143,7 @@ import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recovera
 
 import { keepQueryEditorPasteCaretOnLastContentLine } from "@/lib/editor/queryEditorClipboardPaste";
 import { createQueryEditorKeywordCaseOnTypeFilter } from "@/lib/editor/queryEditorKeywordCaseOnType";
+import { loadEngine } from "@/lib/sql/layout/internals";
 import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCaretResync";
 
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
@@ -2209,6 +2210,18 @@ const { editorIndentUnit, handleTab, handleEnter, acceptCompletionOrNextSnippetF
   tabMaxWaitMs: COMPLETION_TAB_MAX_WAIT_MS,
   enterMaxWaitMs: COMPLETION_ENTER_MAX_WAIT_MS,
 });
+
+// Warm the formatter engine as soon as typing-time keyword casing is on —
+// including a mid-session toggle — so the first keyword typed is classified
+// with the formatter's own keyword lists even in large documents, whose
+// StreamLanguage tree the filter's syntax-tree fallback cannot read.
+watch(
+  () => settingsStore.editorSettings.autoKeywordCase,
+  (enabled) => {
+    if (enabled) void loadEngine();
+  },
+  { immediate: true },
+);
 
 function isEditorComposing(currentView: EditorViewType): boolean {
   if (imeCompositionActive) return true;

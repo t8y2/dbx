@@ -1,7 +1,7 @@
 import type { ChangeSet, EditorState, Transaction, TransactionSpec } from "@codemirror/state";
 import { StreamLanguage, language, syntaxTree } from "@codemirror/language";
 import { casedKeywordBefore, type SqlKeywordCaseMode } from "@/lib/sql/sqlKeywordCase";
-import { loadedSqlFormatterEngine } from "@/lib/sql/layout/internals";
+import { loadedSqlFormatterEngine, loadEngine } from "@/lib/sql/layout/internals";
 import { isSqlCommentContext, isSqlStringLiteralContext } from "@/lib/sql/sqlCompletion";
 import { resolveLexicalLeafFromSyntaxTree, resolveStatementWindowFromSyntaxTree } from "@/lib/sql/sqlSyntaxTreeWindow";
 import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
@@ -156,6 +156,12 @@ function singleTypedInsert(changes: ChangeSet): TypedInsert | null {
 }
 
 export function createQueryEditorKeywordCaseOnTypeFilter(options: QueryEditorKeywordCaseOnTypeOptions): (transaction: Transaction) => TransactionSpec | readonly TransactionSpec[] {
+  // Warm the formatter engine up front when the feature is on: classification
+  // then uses the same keyword lists as the formatter from the first keystroke.
+  // (The syntax-tree fallback below only covers documents the Lezer grammar can
+  // parse; large documents use the StreamLanguage tokenizer, whose tree the
+  // fallback cannot read.)
+  if (options.enabled()) void loadEngine();
   return (transaction: Transaction): TransactionSpec | readonly TransactionSpec[] => {
     if (!transaction.docChanged || transaction.startState.readOnly) return transaction;
     if (!transaction.isUserEvent("input")) return transaction;

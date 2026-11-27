@@ -33,7 +33,9 @@ describe("typing-time keyword case before the formatter engine loads", () => {
     expect(typeSpace(createColdState("select a from t group by")).doc.toString()).toBe("select a from t group BY ");
   });
 
-  it("keeps the same guards while classifying from the tree", () => {
+  it("keeps the same guards on the first keystrokes", () => {
+    // The first test warms the engine import; these assertions hold on either
+    // classifier because the filter routes both through the same guards.
     expect(typeSpace(createColdState("select mycol")).doc.toString()).toBe("select mycol ");
     expect(typeSpace(createColdState("t.select")).doc.toString()).toBe("t.select ");
     expect(typeSpace(createColdState("select 'select")).doc.toString()).toBe("select 'select ");

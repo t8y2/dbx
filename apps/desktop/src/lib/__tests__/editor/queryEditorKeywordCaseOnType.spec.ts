@@ -2,8 +2,9 @@
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { history, undo } from "@codemirror/commands";
-import { ensureSyntaxTree } from "@codemirror/language";
+import { ensureSyntaxTree, StreamLanguage } from "@codemirror/language";
 import { MySQL, sql } from "@codemirror/lang-sql";
+import { mySQL } from "@codemirror/legacy-modes/mode/sql";
 import { beforeAll, describe, expect, it } from "vitest";
 import { loadEngine } from "@/lib/sql/layout/internals";
 import { casedKeywordFromSyntaxTree, createQueryEditorKeywordCaseOnTypeFilter, type QueryEditorKeywordCaseOnTypeOptions } from "@/lib/editor/queryEditorKeywordCaseOnType";
@@ -119,6 +120,25 @@ describe("queryEditorKeywordCaseOnType", () => {
 
   it("does nothing for a dialect with no SQL grammar", () => {
     expect(typeText(createState("select", { dialect: () => "cypher" }), " ").doc.toString()).toBe("select ");
+  });
+
+  it("classifies from the engine in large documents that use the StreamLanguage tokenizer", () => {
+    const state = EditorState.create({
+      doc: "select a from",
+      selection: { anchor: 13 },
+      extensions: [StreamLanguage.define(mySQL), EditorState.transactionFilter.of(createQueryEditorKeywordCaseOnTypeFilter({ enabled: () => true, keywordCase: () => "upper", dialect: () => "mysql", databaseType: () => "mysql" }))],
+    });
+    expect(typeText(state, " ").doc.toString()).toBe("select a FROM ");
+  });
+
+  it("does not depend on a parsed syntax tree once the engine is loaded", () => {
+    // No ensureSyntaxTree call here: an unparsed tree must not cost the conversion.
+    const state = EditorState.create({
+      doc: "select",
+      selection: { anchor: 6 },
+      extensions: [sql({ dialect: MySQL }), EditorState.transactionFilter.of(createQueryEditorKeywordCaseOnTypeFilter({ enabled: () => true, keywordCase: () => "upper", dialect: () => "mysql", databaseType: () => "mysql" }))],
+    });
+    expect(typeText(state, " ").doc.toString()).toBe("SELECT ");
   });
 
   it("leaves oversized statement windows alone", () => {

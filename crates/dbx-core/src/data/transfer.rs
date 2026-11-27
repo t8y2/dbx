@@ -2568,6 +2568,20 @@ fn transfer_uses_unique_key_model(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Doris | DatabaseType::StarRocks)
 }
 
+/// Doris and StarRocks key columns as seen through the source column metadata.
+/// A `Mysql` connection saved with a Doris/StarRocks driver profile reports the
+/// same model, so the gate follows the profile as well as the database type.
+fn transfer_unique_key_columns(columns: &[db::ColumnInfo], db_type: &DatabaseType, doris_like: bool) -> Vec<String> {
+    if !doris_like {
+        return transfer_key_columns(columns, db_type);
+    }
+    columns
+        .iter()
+        .filter(|column| column.is_primary_key || column.is_unique)
+        .map(|column| column.name.clone())
+        .collect()
+}
+
 /// Picks the columns that give paging a stable order when the source column
 /// metadata does not expose Doris/StarRocks key columns: prefer the primary key
 /// index, then any unique index. Order matters because a composite key only
@@ -2581,39 +2595,178 @@ fn transfer_ordering_columns_from_indexes(indexes: &[db::IndexInfo]) -> Vec<Stri
         .unwrap_or_default()
 }
 
-/// Doris and StarRocks describe a UNIQUE KEY table through its index metadata,
-/// not through `information_schema.COLUMNS.COLUMN_KEY`, so a unique-key table
-/// can look like it has no key at all. Transfer paging keys off those columns:
-/// with none, the read loop falls back to unordered `LIMIT/OFFSET` paging, which
-/// may visit one row on two pages and never read another, silently dropping rows
-/// on the target (#15649). Fill the flags from the index metadata so paging stays
-/// ordered (and keyset-capable) instead.
-async fn fill_unique_key_columns_from_index_metadata(
-    pool: &db::mysql::MySqlPool,
-    columns: &mut [db::ColumnInfo],
+/// DUPLICATE KEY and AGGREGATE KEY tables expose no index at all, so the read
+/// loop needs an order of its own: unordered `LIMIT/OFFSET` paging can visit one
+/// row on two pages and never read another, silently dropping rows (#15649).
+/// Ordering by every sortable column keeps page boundaries deterministic for the
+/// columns it can sort; rows that differ only in a skipped type (blob, bitmap,
+/// json...) can still tie, so this only narrows the window rather than closing it.
+fn transfer_fallback_order_columns(columns: &[db::ColumnInfo]) -> Vec<String> {
+    columns
+        .iter()
+        .filter(|column| transfer_column_is_sortable(&column.data_type))
+        .map(|column| column.name.clone())
+        .collect()
+}
+
+fn transfer_column_is_sortable(data_type: &str) -> bool {
+    if crate::types::is_opaque_aggregate_state_type(data_type) {
+        return false;
+    }
+    let data_type = data_type.trim().to_ascii_lowercase();
+    // Compare the base type so `varbinary` and `binary(16)` both read as binary
+    // and `string` is not mistaken for a `struct`.
+    let base = data_type.split('(').next().unwrap_or("").trim();
+    if base.ends_with("blob") || matches!(base, "binary" | "varbinary") {
+        return false;
+    }
+    ![
+        "bitmap",
+        "hll",
+        "percentile",
+        "quantile_state",
+        "agg_state",
+        "array",
+        "map",
+        "struct",
+        "json",
+        "variant",
+        "geometry",
+        "object",
+    ]
+    .iter()
+    .any(|needle| base.contains(needle))
+}
+
+/// The order a transfer read path pages with, plus whether it is provably
+/// unique. Keyset paging compares against the cursor, so it may only run on a
+/// unique order: a fallback over every sortable column can still tie on the
+/// columns it skipped (bitmap/array/json...), and a keyset seek would drop the
+/// rows that differ only there.
+#[derive(Clone)]
+struct TransferPagingOrder {
+    columns: Vec<String>,
+    unique: bool,
+}
+
+impl TransferPagingOrder {
+    fn none() -> Self {
+        Self { columns: Vec::new(), unique: false }
+    }
+}
+
+/// The order the transfer read path uses for one source table.
+///
+/// `ColumnInfo.is_unique` is shared with the target-side upsert key detection,
+/// so this never fills it: doing that made a Doris/StarRocks upsert target emit
+/// `INSERT ... ON DUPLICATE KEY UPDATE`, which neither engine supports. Index
+/// metadata is a paging-only input and must not leak into column metadata.
+fn transfer_paging_order_columns(
+    columns: &[db::ColumnInfo],
+    db_type: &DatabaseType,
+    doris_like: bool,
+    index_columns: Option<Vec<String>>,
+) -> TransferPagingOrder {
+    let key_columns = transfer_unique_key_columns(columns, db_type, doris_like);
+    if !key_columns.is_empty() {
+        return TransferPagingOrder { columns: key_columns, unique: true };
+    }
+    if !(doris_like || transfer_uses_unique_key_model(db_type)) {
+        return TransferPagingOrder::none();
+    }
+    // A composite unique index only orders rows uniquely as a whole: when the
+    // transfer does not read one of its columns the remaining prefix can tie, so
+    // it stays a usable `ORDER BY` but must not drive a keyset cursor.
+    let index_columns = index_columns.map(|index_columns| {
+        let total = index_columns.len();
+        let kept: Vec<String> =
+            index_columns.into_iter().filter(|name| columns.iter().any(|column| column.name == *name)).collect();
+        (kept, total)
+    });
+    match index_columns {
+        Some((index_columns, total)) if !index_columns.is_empty() => {
+            TransferPagingOrder { unique: index_columns.len() == total, columns: index_columns }
+        }
+        _ => TransferPagingOrder { columns: transfer_fallback_order_columns(columns), unique: false },
+    }
+}
+
+/// Resolves the paging order for one source table. Table-level inputs, so both
+/// read loops call it once per table, never per page.
+async fn transfer_paging_order_for_table(
+    state: &AppState,
+    connection_id: &str,
+    pool_key: &str,
+    catalog: Option<&str>,
     database: &str,
     table: &str,
+    columns: &[db::ColumnInfo],
     db_type: &DatabaseType,
-) {
-    if !transfer_uses_unique_key_model(db_type) || !transfer_key_columns(columns, db_type).is_empty() {
-        return;
+) -> TransferPagingOrder {
+    let key_columns = transfer_unique_key_columns(columns, db_type, false);
+    if !key_columns.is_empty() {
+        return TransferPagingOrder { columns: key_columns, unique: true };
     }
-    let indexes = match db::doris::list_indexes(pool, database, table).await {
-        Ok(indexes) => indexes,
-        Err(error) => {
-            log::debug!(
-                "[transfer] {table}: cannot read the Doris/StarRocks index metadata for ordered paging: {error}"
-            );
-            return;
+    let (doris_like, starrocks) = {
+        let configs = state.configs.read().await;
+        match configs.get(connection_id) {
+            Some(config) => (
+                db::doris::is_profile(&config.db_type, config.driver_profile.as_deref()),
+                db::starrocks::is_profile(&config.db_type, config.driver_profile.as_deref()),
+            ),
+            None => (false, false),
         }
     };
-    let key_columns = transfer_ordering_columns_from_indexes(&indexes);
-    if key_columns.is_empty() {
-        return;
+    if !(doris_like || starrocks || transfer_uses_unique_key_model(db_type)) {
+        return TransferPagingOrder::none();
     }
-    for column in columns.iter_mut() {
-        if key_columns.iter().any(|name| name == &column.name) {
-            column.is_unique = true;
+    let starrocks = starrocks || *db_type == DatabaseType::StarRocks;
+    // A built-in catalog name (`internal` / `default_catalog`) still addresses
+    // the internal namespace, so normalise it exactly like every other transfer
+    // entry point before deciding whether this is an external catalog.
+    let catalog = resolve_external_transfer_catalog(catalog, db_type);
+    let index_columns = read_transfer_index_order_columns(state, pool_key, catalog, database, table, starrocks).await;
+    let order = transfer_paging_order_columns(columns, db_type, doris_like || starrocks, index_columns);
+    if !order.unique && !order.columns.is_empty() {
+        log::warn!(
+            "[transfer] {database}.{table}: no unique paging order, ordering by {} sortable column(s); large tables pay a full sort per page and rows that differ only in a skipped column type can still tie",
+            order.columns.len()
+        );
+    }
+    order
+}
+
+/// Reads the Doris/StarRocks index metadata that `transfer_paging_order_columns`
+/// consumes. External catalogs address tables through the catalog, so an
+/// internal index lookup would read a same-named table in the internal
+/// namespace; skip it there and let the caller fall back to a column order.
+async fn read_transfer_index_order_columns(
+    state: &AppState,
+    pool_key: &str,
+    catalog: Option<&str>,
+    database: &str,
+    table: &str,
+    starrocks: bool,
+) -> Option<Vec<String>> {
+    if normalize_external_catalog_name(catalog).is_some() {
+        return None;
+    }
+    let pool_handle = state.pool_handle(pool_key).await;
+    let Some(PoolKind::Mysql(pool, _)) = pool_handle.as_ref() else {
+        return None;
+    };
+    let indexes = if starrocks {
+        db::starrocks::list_indexes(pool, database, table).await
+    } else {
+        db::doris::list_indexes(pool, database, table).await
+    };
+    match indexes {
+        Ok(indexes) => Some(transfer_ordering_columns_from_indexes(&indexes)),
+        Err(error) => {
+            log::warn!(
+                "[transfer] {table}: cannot read the Doris/StarRocks index metadata for ordered paging, falling back to a column order: {error}"
+            );
+            None
         }
     }
 }
@@ -9796,16 +9949,12 @@ pub async fn get_columns_for_transfer(
         PoolKind::Mysql(p, _) => {
             let p = p.clone();
             let catalog = normalize_external_catalog_name(catalog).map(str::to_string);
-            let mut columns = if let Some(catalog) = catalog {
+            if let Some(catalog) = catalog {
                 // Use 3-part qualified column lookup for Doris/StarRocks external catalogs
-                db::doris::get_catalog_columns(&p, &catalog, &schema, &table).await?
+                db::doris::get_catalog_columns(&p, &catalog, &schema, &table).await
             } else {
-                db::mysql::get_columns(&p, &schema, &table).await?
-            };
-            if let Ok(db_type) = get_db_type(state, connection_id).await {
-                fill_unique_key_columns_from_index_metadata(&p, &mut columns, &schema, &table, &db_type).await;
+                db::mysql::get_columns(&p, &schema, &table).await
             }
-            Ok(columns)
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
@@ -12355,6 +12504,8 @@ where
     // every previously read row (quadratic in table size).
     let mut keyset_cursor: Vec<serde_json::Value> = Vec::new();
     let mut keyset_usable = true;
+    // Table-level paging order, resolved on the first page and reused after.
+    let mut paging_order_cache: Option<TransferPagingOrder> = None;
 
     loop {
         if is_cancelled(&request.transfer_id).await {
@@ -12397,8 +12548,26 @@ where
             )
             .await?;
             let col_names = columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>();
-            let primary_key_columns = transfer_key_columns(&columns, source_db_type);
-            let keyset_indexes = if keyset_usable {
+            let paging_order = match paging_order_cache.as_ref() {
+                Some(paging_order) => paging_order.clone(),
+                None => {
+                    let paging_order = transfer_paging_order_for_table(
+                        state,
+                        &request.source_connection_id,
+                        source_pool_key,
+                        request.source_catalog.as_deref(),
+                        &request.source_database,
+                        table,
+                        &columns,
+                        source_db_type,
+                    )
+                    .await;
+                    paging_order_cache = Some(paging_order.clone());
+                    paging_order
+                }
+            };
+            let primary_key_columns = paging_order.columns.clone();
+            let keyset_indexes = if keyset_usable && paging_order.unique {
                 transfer_keyset_column_indexes(&columns, &primary_key_columns, source_db_type)
             } else {
                 None
@@ -13753,7 +13922,23 @@ where
             .map(|column| columns.iter().position(|c| c.name == column.name).map(|index| types[index].clone()))
             .collect();
     }
-    let primary_key_columns = transfer_key_columns(&writable_columns, source_db_type);
+    // Resolved once per table: the index metadata lookup must not run per page.
+    let paging_order = if should_copy_data(&request.content) {
+        transfer_paging_order_for_table(
+            state,
+            &request.source_connection_id,
+            source_pool_key,
+            request.source_catalog.as_deref(),
+            &request.source_database,
+            table,
+            &writable_columns,
+            source_db_type,
+        )
+        .await
+    } else {
+        TransferPagingOrder::none()
+    };
+    let primary_key_columns = paging_order.columns.clone();
     if should_copy_data(&request.content) {
         log::info!("[transfer] {} has {} columns, counting rows...", table, columns.len());
     }
@@ -14203,7 +14388,7 @@ where
     // and discards every previously read row (quadratic in table size). Falls
     // back to OFFSET (keeping the same key ordering) when the key metadata
     // does not hold up mid-table.
-    let mut keyset_indexes = if table_filter.is_some() {
+    let mut keyset_indexes = if table_filter.is_some() || !paging_order.unique {
         None
     } else {
         transfer_keyset_column_indexes(&writable_columns, &primary_key_columns, source_db_type)
@@ -16368,29 +16553,92 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         // A Doris UNIQUE KEY table reports no key flags through
         // information_schema.COLUMNS, so the transfer used to page with
         // `LIMIT/OFFSET` and no ORDER BY and silently drop rows (#15649).
-        let key_columns = transfer_ordering_columns_from_indexes(&[unique_key_index(&["info_date", "info_time"])]);
-        assert_eq!(key_columns, vec!["info_date".to_string(), "info_time".to_string()]);
+        let index_keys = transfer_ordering_columns_from_indexes(&[unique_key_index(&["info_date", "info_time"])]);
+        assert_eq!(index_keys, vec!["info_date".to_string(), "info_time".to_string()]);
 
-        let mut columns = vec![
+        let columns = vec![
             test_column("info_date", "date"),
             test_column("info_time", "datetime"),
             test_column("payload", "varchar"),
         ];
+        // Target-side upsert key detection still sees no key: filling
+        // `ColumnInfo.is_unique` here would make a Doris upsert target emit
+        // INSERT ... ON DUPLICATE KEY UPDATE, which Doris rejects.
         assert!(transfer_key_columns(&columns, &DatabaseType::Doris).is_empty());
-        for column in columns.iter_mut() {
-            if key_columns.iter().any(|name| name == &column.name) {
-                column.is_unique = true;
-            }
-        }
-        let keys = transfer_key_columns(&columns, &DatabaseType::Doris);
-        assert_eq!(keys, vec!["info_date".to_string(), "info_time".to_string()]);
+
+        let order = transfer_paging_order_columns(&columns, &DatabaseType::Doris, false, Some(index_keys));
+        assert_eq!(order.columns, vec!["info_date".to_string(), "info_time".to_string()]);
+        assert!(order.unique, "a unique index is a keyset-safe order");
+        assert!(columns.iter().all(|column| !column.is_unique), "paging must not mutate the column metadata");
 
         let names = vec!["info_date".to_string(), "info_time".to_string(), "payload".to_string()];
-        let ordered = pagination_sql_with_order(&names, "t", "db", &DatabaseType::Doris, 10000, 10000, &keys, None);
+        let ordered =
+            pagination_sql_with_order(&names, "t", "db", &DatabaseType::Doris, 10000, 10000, &order.columns, None);
         assert!(ordered.contains("ORDER BY"), "expected ORDER BY in {ordered}");
         let unordered = pagination_sql_with_order(&names, "t", "db", &DatabaseType::Doris, 10000, 10000, &[], None);
         assert!(!unordered.contains("ORDER BY"), "unexpected ORDER BY in {unordered}");
         assert_eq!(transfer_ordering_columns_from_indexes(&[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn doris_transfer_paging_falls_back_to_every_sortable_column_without_an_index() {
+        // DUPLICATE KEY / AGGREGATE KEY tables have no index, so paging keeps a
+        // deterministic order over the sortable columns instead of dropping rows.
+        let columns = vec![
+            test_column("id", "bigint"),
+            test_column("value", "decimal(10,2)"),
+            test_column("raw", "bitmap"),
+            test_column("tags", "array<varchar>"),
+        ];
+        let order = transfer_paging_order_columns(&columns, &DatabaseType::Doris, false, None);
+        assert_eq!(order.columns, vec!["id".to_string(), "value".to_string()]);
+        assert!(!order.unique, "an all-column order cannot drive a keyset cursor");
+    }
+
+    #[test]
+    fn doris_paging_order_covers_a_mysql_connection_with_the_doris_profile() {
+        let columns = vec![test_column("id", "bigint"), test_column("name", "varchar(32)")];
+        let order = transfer_paging_order_columns(&columns, &DatabaseType::Mysql, true, None);
+        assert_eq!(order.columns, vec!["id".to_string(), "name".to_string()]);
+        assert!(!order.unique);
+        // Plain MySQL keeps the previous behaviour: no ORDER BY is forced.
+        let plain = transfer_paging_order_columns(&columns, &DatabaseType::Mysql, false, None);
+        assert!(plain.columns.is_empty());
+        assert!(!plain.unique);
+    }
+
+    #[test]
+    fn transfer_sortable_columns_skip_opaque_aggregate_states() {
+        assert!(!transfer_column_is_sortable("agg_state<sum(int)>"));
+        for excluded in ["blob", "tinyblob", "mediumblob", "longblob", "binary", "binary(16)", "varbinary(16)"] {
+            assert!(!transfer_column_is_sortable(excluded), "{excluded} must not be sorted");
+        }
+        for sortable in ["bigint", "varchar(64)", "datetime", "decimal(12, 2)"] {
+            assert!(transfer_column_is_sortable(sortable), "{sortable} should be sorted");
+        }
+        assert!(!transfer_column_is_sortable(" QUANTILE_STATE "));
+        assert!(!transfer_column_is_sortable("bitmap"));
+        assert!(!transfer_column_is_sortable("array<varchar>"));
+        assert!(!transfer_column_is_sortable("percentile_union(0.5)"));
+        assert!(!transfer_column_is_sortable("AGG_STATE"));
+        assert!(!transfer_column_is_sortable("binary(16)"));
+        assert!(transfer_column_is_sortable("varchar(32)"));
+        assert!(transfer_column_is_sortable("decimal(10,2)"));
+    }
+
+    #[test]
+    fn doris_paging_order_drops_index_columns_the_transfer_does_not_read() {
+        let columns = vec![test_column("id", "bigint")];
+        let order = transfer_paging_order_columns(
+            &columns,
+            &DatabaseType::Doris,
+            false,
+            Some(vec!["id".to_string(), "not_read".to_string()]),
+        );
+        assert_eq!(order.columns, vec!["id".to_string()]);
+        // The unique index lost a column: the remaining prefix can tie, so the
+        // order may still sort but must not drive a keyset cursor.
+        assert!(!order.unique);
     }
 
     fn test_table(name: &str) -> db::TableInfo {
@@ -22024,6 +22272,25 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             sql,
             "SELECT TOP (100) [tenant_id], [id], [name] FROM [dbo].[users] WHERE ([tenant_id] > 10 OR ([tenant_id] = 10 AND [id] > 25)) ORDER BY [tenant_id] ASC, [id] ASC"
         );
+    }
+
+    #[test]
+    fn doris_keyset_pagination_expands_a_composite_key_instead_of_a_row_value() {
+        let sql = keyset_pagination_sql(
+            &[String::from("info_date"), String::from("info_time"), String::from("amount")],
+            "orders",
+            "demo",
+            &DatabaseType::Doris,
+            &[String::from("info_date"), String::from("info_time")],
+            &[json!("2026-01-01"), json!("00:00:00")],
+            500,
+        );
+
+        assert!(sql.contains("info_date") && sql.contains("info_time"), "{sql}");
+        // Doris rejects row-value comparisons, so the predicate must stay expanded.
+        assert!(sql.contains(" OR ("), "{sql}");
+        assert!(sql.contains("ORDER BY"), "{sql}");
+        assert!(!sql.contains(") > ("), "{sql}");
     }
 
     #[test]

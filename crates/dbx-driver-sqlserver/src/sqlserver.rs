@@ -3073,12 +3073,34 @@ fn sqlserver_schema_name_predicate(schema: &str, schema_name_expression: &str) -
     format!("{schema_name_expression} = N'{}'", schema.replace('\'', "''"))
 }
 
-pub fn sqlserver_object_id_expression(schema: &str, table: &str) -> String {
+/// Resolves an unqualified object by name through `sys.objects`.
+///
+/// `OBJECT_SCHEMA_NAME` only exists from SQL Server 2008 on, so the blank-schema
+/// metadata used by DBX's SQL Server object tree failed on SQL Server 2005 with
+/// error 195 ("'OBJECT_SCHEMA_NAME' is not a recognized built-in function
+/// name") right after a table was created. The catalog lookup below keeps the
+/// same "find the object the caller means" semantics on every supported
+/// version: prefer the caller's default schema, then `dbo`, then any other
+/// schema.
+fn sqlserver_unqualified_object_lookup(table: &str, projection: &str) -> String {
     let table = table.replace('\'', "''");
+    format!(
+        "(SELECT TOP 1 {projection} FROM sys.objects dbx_object \
+         WHERE dbx_object.name = N'{table}' AND dbx_object.type IN ('U', 'V') \
+         ORDER BY CASE \
+             WHEN dbx_object.schema_id = SCHEMA_ID(SCHEMA_NAME()) THEN 0 \
+             WHEN dbx_object.schema_id = SCHEMA_ID(N'dbo') THEN 1 \
+             ELSE 2 END, \
+             dbx_object.schema_id)"
+    )
+}
+
+pub fn sqlserver_object_id_expression(schema: &str, table: &str) -> String {
     if schema.trim().is_empty() {
-        return format!("OBJECT_ID(QUOTENAME(N'{table}'))");
+        return sqlserver_unqualified_object_lookup(table, "dbx_object.object_id");
     }
 
+    let table = table.replace('\'', "''");
     let schema = schema.replace('\'', "''");
     format!("OBJECT_ID(QUOTENAME(N'{schema}') + N'.' + QUOTENAME(N'{table}'))")
 }
@@ -3086,8 +3108,8 @@ pub fn sqlserver_object_id_expression(schema: &str, table: &str) -> String {
 fn sqlserver_object_schema_name_predicate(schema: &str, table: &str, schema_name_expression: &str) -> String {
     if schema.trim().is_empty() {
         return format!(
-            "{schema_name_expression} = OBJECT_SCHEMA_NAME({})",
-            sqlserver_object_id_expression(schema, table)
+            "{schema_name_expression} = (SELECT dbx_schema.name FROM sys.schemas dbx_schema WHERE dbx_schema.schema_id = {})",
+            sqlserver_unqualified_object_lookup(table, "dbx_object.schema_id")
         );
     }
 
@@ -3241,7 +3263,7 @@ pub struct SqlServerSynonymTarget {
 fn sqlserver_synonym_target_sql() -> &'static str {
     // Only a base object in the current database can be read with the local catalog
     // views, so synonyms that name another database or a linked server resolve to nothing.
-    "SELECT OBJECT_SCHEMA_NAME(o.object_id) AS target_schema, o.name AS target_name, o.type AS target_type \
+    "SELECT SCHEMA_NAME(o.schema_id) AS target_schema, o.name AS target_name, o.type AS target_type \
      FROM sys.synonyms sn \
      JOIN sys.schemas s ON s.schema_id = sn.schema_id \
      JOIN sys.objects o ON o.object_id = OBJECT_ID(sn.base_object_name) \
@@ -6419,9 +6441,37 @@ mod tests {
             "s.name = COALESCE((SELECT default_schema.name FROM sys.schemas default_schema WHERE default_schema.name = SCHEMA_NAME()), N'dbo')"
         );
         assert!(sqlserver_list_tables_sql("", None, None, None).contains(&predicate));
-        assert!(sqlserver_columns_sql("\t", "orders")
-            .contains("s.name = OBJECT_SCHEMA_NAME(OBJECT_ID(QUOTENAME(N'orders')))"),);
-        assert!(sqlserver_indexes_sql("", "orders").contains("OBJECT_ID(QUOTENAME(N'orders'))"));
+        let columns_sql = sqlserver_columns_sql("\t", "orders");
+        assert!(columns_sql.contains(
+            "s.name = (SELECT dbx_schema.name FROM sys.schemas dbx_schema WHERE dbx_schema.schema_id = (SELECT TOP 1 dbx_object.schema_id FROM sys.objects dbx_object"
+        ));
+        assert!(sqlserver_indexes_sql("", "orders")
+            .contains("(SELECT TOP 1 dbx_object.object_id FROM sys.objects dbx_object"));
+    }
+
+    #[test]
+    fn sqlserver_blank_schema_metadata_avoids_sql_server_2008_builtins() {
+        // OBJECT_SCHEMA_NAME is 2008+; SQL Server 2005 answers error 195, which broke
+        // column/index loads (including the refresh right after CREATE TABLE) there.
+        for sql in [
+            sqlserver_columns_sql("", "orders"),
+            sqlserver_indexes_sql("", "orders"),
+            sqlserver_indexes_sql("dbo", "orders"),
+            sqlserver_list_tables_sql("", None, None, None),
+            sqlserver_triggers_sql("", "orders"),
+            sqlserver_table_comment_sql("", "orders"),
+            sqlserver_synonym_target_sql().to_string(),
+        ] {
+            assert!(
+                !sql.to_ascii_uppercase().contains("OBJECT_SCHEMA_NAME"),
+                "SQL must stay SQL Server 2005 compatible: {sql}"
+            );
+        }
+
+        let columns_sql = sqlserver_columns_sql("", "orders");
+        assert!(columns_sql.contains("SCHEMA_ID(SCHEMA_NAME())"));
+        assert!(columns_sql.contains("SCHEMA_ID(N'dbo')"));
+        assert!(columns_sql.contains("dbx_object.name = N'orders'"));
     }
 
     #[test]

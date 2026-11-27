@@ -259,6 +259,8 @@ The save dialog can search or create folders. Quick Open indexes both SQL Librar
 
 On Desktop, the **Locate current file** button in the SQL Files panel expands parent directories, selects the current file, and scrolls it into view. If its directory is not open yet, it is added to the file tree first. Unsaved queries cannot be located. File filters remain in effect; hidden or missing files show a notification.
 
+To open several local SQL files against the same connection, select at least two visible `.sql` files with `Cmd/Ctrl`-click or `Shift`-click, right-click one of them, and choose **Set data source (N files)**. Pick a connection that supports SQL file execution; its default database and configured default schema are recorded for each file. Close any selected files that are already open first. The association is stored locally and applies the next time each file opens; it does not change the files on disk or run them. If the batch would exceed the 200-file association limit, nothing is saved and the dialog reports it.
+
 ## Safety and Boundaries
 
 - Read-only connections reject recognizable writes in the core execution path

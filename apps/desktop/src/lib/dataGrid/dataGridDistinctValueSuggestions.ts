@@ -34,7 +34,7 @@ export function dataGridDistinctValueKey(value: CellValue, columnInfo?: Pick<Col
  * The `satisfies` clause breaks compilation when the union gains a mode that the
  * list and the comment above were not reconsidered for (#14365 review).
  */
-const NEGATED_DATA_GRID_FILTER_MODES = ["not-equals", "not-like", "not-between", "not-begins-with", "not-ends-with"] as const satisfies readonly DataGridContextFilterMode[];
+const NEGATED_DATA_GRID_FILTER_MODES = ["not-equals", "not-like", "not-ilike", "not-between", "not-begins-with", "not-ends-with"] as const satisfies readonly DataGridContextFilterMode[];
 
 export function dataGridNullSuggestionFilterMode(mode: DataGridContextFilterMode): "is-null" | "is-not-null" {
   return (NEGATED_DATA_GRID_FILTER_MODES as readonly DataGridContextFilterMode[]).includes(mode) ? "is-not-null" : "is-null";

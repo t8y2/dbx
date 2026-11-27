@@ -152,6 +152,16 @@ pub struct NacosConfigKeyRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosConfigHistoryRequest {
+    #[serde(flatten)]
+    pub key: NacosConfigKeyRequest,
+    #[schemars(
+        description = "History ID from a list item. Omit to list revisions, or pass it to read one revision's content."
+    )]
+    pub history_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NacosPublishConfigRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
@@ -1737,20 +1747,31 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_nacos_config_history",
-        description = "List the publish history of one Nacos configuration.",
+        description = "List the publish history of a Nacos configuration, or read one historical version by history_id.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
-    async fn nacos_config_history(&self, Parameters(request): Parameters<NacosConfigKeyRequest>) -> CallToolResult {
+    async fn nacos_config_history(&self, Parameters(request): Parameters<NacosConfigHistoryRequest>) -> CallToolResult {
         use crate::products::Product::Nacos;
         use dbx_core::mcp_access::McpAccessLevel::Read;
-        let args = json!({ "namespace": request.namespace, "dataId": request.data_id, "group": request.group });
+        let key = request.key;
+        let mut args = json!({ "namespace": key.namespace, "dataId": key.data_id, "group": key.group });
+        let operation = if let Some(history_id) = request.history_id {
+            let history_id = history_id.trim();
+            if history_id.is_empty() {
+                return tool_error("INVALID_ARGUMENTS", "history_id cannot be empty.");
+            }
+            args["historyId"] = json!(history_id);
+            "get_config_history"
+        } else {
+            "config_history"
+        };
         self.run_product_tool(
             "dbx_nacos_config_history",
-            &request.selector,
+            &key.selector,
             Nacos,
-            "config_history",
+            operation,
             Read,
-            request.namespace.as_deref(),
+            key.namespace.as_deref(),
             args,
         )
         .await

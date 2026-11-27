@@ -17,11 +17,13 @@ fn cancelled_imports() -> &'static RwLock<HashSet<String>> {
     CANCELLED_IMPORTS.get_or_init(|| RwLock::new(HashSet::new()))
 }
 
-fn emit_import_progress(app: &AppHandle, progress: MongoImportProgress) {
+fn emit_import_progress(app: &AppHandle, state: &AppState, progress: MongoImportProgress) {
+    crate::commands::observability::publish_transfer_progress(state, "mongo-import", &progress.import_id, &progress);
     let _ = app.emit("mongo-import-progress", progress);
 }
 
-fn emit_export_progress(app: &AppHandle, progress: MongoExportProgress) {
+fn emit_export_progress(app: &AppHandle, state: &AppState, progress: MongoExportProgress) {
+    crate::commands::observability::publish_transfer_progress(state, "mongo-export", &progress.export_id, &progress);
     let _ = app.emit("mongo-export-progress", progress);
 }
 
@@ -53,7 +55,7 @@ pub async fn import_mongodb_file(
             let import_id = import_id.to_string();
             Box::pin(async move { is_cancelled(&import_id).await })
         },
-        |progress| emit_import_progress(&app, progress),
+        |progress| emit_import_progress(&app, &state, progress),
     )
     .await
     .map_err(|error| error.display_message());
@@ -82,7 +84,7 @@ pub async fn export_mongodb_query(
                 let export_id = export_id.to_string();
                 Box::pin(async move { dbx_core::transfer::is_cancelled(&export_id).await })
             },
-            |progress| emit_export_progress(&app, progress),
+            |progress| emit_export_progress(&app, &state, progress),
         )
         .await;
         return serde_json::to_value(outcome).map_err(|error| error.to_string());
@@ -94,7 +96,7 @@ pub async fn export_mongodb_query(
             let export_id = export_id.to_string();
             Box::pin(async move { dbx_core::transfer::is_cancelled(&export_id).await })
         },
-        |progress| emit_export_progress(&app, progress),
+        |progress| emit_export_progress(&app, &state, progress),
     )
     .await
     .and_then(|summary| serde_json::to_value(summary).map_err(|error| error.to_string()))

@@ -158,6 +158,7 @@ async function loadSchemas() {
                     c.name,
                     {
                       dataType: c.data_type,
+                      isPrimaryKey: c.is_primary_key,
                       isAutoIncrement: isAI,
                       columnDefault: c.column_default,
                       numericPrecision: c.numeric_precision,
@@ -273,6 +274,7 @@ async function loadColumns(schema: string, table: string) {
           c.name,
           {
             dataType: c.data_type,
+            isPrimaryKey: c.is_primary_key,
             isAutoIncrement: isAI,
             columnDefault: c.column_default,
             numericPrecision: c.numeric_precision,

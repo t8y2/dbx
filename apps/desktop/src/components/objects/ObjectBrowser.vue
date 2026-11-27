@@ -6884,11 +6884,11 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button v-if="effectiveDatabaseType === 'firebird'" variant="outline" size="sm" @click="firebirdManagerOpen = true">{{ t("tree.firebirdObjectManager") }}</Button>
       <Button v-if="canCreateSchemaIndex" data-create-schema-index variant="outline" size="sm" class="h-7 shrink-0 gap-1 px-2 text-xs" @click="createSchemaIndex"> <CopyPlus class="h-3.5 w-3.5" />{{ t("structureEditor.addIndex") }} </Button>
       <Button v-if="oracleInvalidObjectsSupported" variant="ghost" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="setOracleInvalidObjectsOpen(true)">{{ t("processList.oracleInvalidObjects.title") }}</Button>
-      <div class="flex min-w-12 items-center gap-2">
-        <span class="inline-flex max-w-[14rem] min-w-0 items-center rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium truncate" :title="selectedSchema || props.database">
+      <div class="flex min-w-12 items-center gap-2" :class="{ 'shrink-0': showDatabaseChip }">
+        <span class="max-w-[14rem] min-w-0 truncate rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium" :title="selectedSchema || props.database">
           {{ selectedSchema || props.database }}
         </span>
-        <span v-if="selectedSchema && showDatabaseChip" class="inline-flex max-w-[14rem] min-w-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground truncate" :title="props.database">
+        <span v-if="selectedSchema && showDatabaseChip" class="max-w-[14rem] min-w-0 truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground" :title="props.database">
           {{ props.database }}
         </span>
         <DatabaseActionsMenu :connection="connection" :database="database" :catalog="catalog" />

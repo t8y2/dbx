@@ -12,6 +12,13 @@ use crate::ai::{self, AiCompletionRequest, AiConfig, AiMessage, AiProvider, AiSt
 use crate::ai_cli_agent::CliAgentCommandSpec;
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
+use crate::models::observability::{
+    KIND_AI_AGENT_FINISHED, KIND_AI_APPROVAL_REQUIRED, KIND_AI_APPROVAL_RESOLVED, KIND_AI_CONTEXT_COMPACTED,
+    KIND_AI_ERROR, KIND_AI_OUTPUT_TRUNCATED, KIND_AI_PRODUCTION_WRITE_BLOCKED, KIND_AI_REASONING_DELTA,
+    KIND_AI_RESPONSE_COMPLETE, KIND_AI_TEXT_DELTA, KIND_AI_TOOL_CALL_FINISHED, KIND_AI_TOOL_CALL_STARTED,
+    KIND_AI_TURN_ENDED, KIND_AI_TURN_STARTED, KIND_AI_WRITE_SQL_CONFIRMATION_REQUIRED,
+};
+use crate::observability::cap_observation_fields;
 use crate::plugin_tools::{self, PluginToolSet, PreparedPluginToolCall};
 use crate::skill_tools;
 use crate::token_usage::TokenUsage;
@@ -91,6 +98,10 @@ pub struct AgentLoopContext {
     pub connection_id: String,
     pub database: String,
     pub selected_databases: Vec<String>,
+    /// Plugin connections the user attached to this conversation. Plugin tools
+    /// are limited to these (plus the target connection when it is itself a
+    /// plugin connection); open-but-unattached connections contribute nothing.
+    pub plugin_connection_ids: Vec<String>,
     /// Selected schema that scopes Agent metadata and SQL execution.
     pub schema: Option<String>,
     pub db_type: DatabaseType,
@@ -146,6 +157,189 @@ async fn provider_function_calling_support(config: &AiConfig) -> FunctionCalling
     }
 }
 
+/// Map an [`AgentEvent`] onto the host observation kind for plugins.
+/// Keep in sync with the frontend mirror in
+/// apps/desktop/src/lib/plugins/pluginObservation.ts.
+fn agent_event_observation_kind(event: &AgentEvent) -> Option<&'static str> {
+    Some(match event {
+        AgentEvent::TurnStart { .. } => KIND_AI_TURN_STARTED,
+        AgentEvent::TurnEnd { .. } => KIND_AI_TURN_ENDED,
+        AgentEvent::TextDelta { .. } => KIND_AI_TEXT_DELTA,
+        AgentEvent::ReasoningDelta { .. } => KIND_AI_REASONING_DELTA,
+        AgentEvent::WriteSqlConfirmationRequired { .. } => KIND_AI_WRITE_SQL_CONFIRMATION_REQUIRED,
+        AgentEvent::ProductionWriteBlocked { .. } => KIND_AI_PRODUCTION_WRITE_BLOCKED,
+        AgentEvent::ToolCallStart { .. } => KIND_AI_TOOL_CALL_STARTED,
+        AgentEvent::ToolCallEnd { .. } => KIND_AI_TOOL_CALL_FINISHED,
+        AgentEvent::ToolApprovalRequired { .. } => KIND_AI_APPROVAL_REQUIRED,
+        AgentEvent::ToolApprovalResolved { .. } => KIND_AI_APPROVAL_RESOLVED,
+        AgentEvent::ResponseComplete => KIND_AI_RESPONSE_COMPLETE,
+        AgentEvent::OutputTruncated { .. } => KIND_AI_OUTPUT_TRUNCATED,
+        AgentEvent::AgentEnd { .. } => KIND_AI_AGENT_FINISHED,
+        AgentEvent::ContextCompacted { .. } => KIND_AI_CONTEXT_COMPACTED,
+        AgentEvent::Error { .. } => KIND_AI_ERROR,
+    })
+}
+
+/// Publishes host observations for one agent run.
+///
+/// Kept as a standalone type so the event sequence is testable without a live
+/// provider.
+///
+/// `ai.agent_finished` is deferred until the loop returns: the
+/// repair-exhaustion path re-emits the whole answer as a single text delta, so
+/// accumulating deltas would duplicate the text. The terminal observation
+/// carries the loop's authoritative final text instead.
+///
+/// A run that returns an error without emitting `AgentEnd` (a text-only
+/// provider failure, a cancelled CLI agent) is closed from here as well, so
+/// observers never keep it open.
+struct AgentObservationTap {
+    observations: crate::observability::HostObservationBus,
+    connection_id: String,
+    database: String,
+    session_id: Option<String>,
+    provider: serde_json::Value,
+    model: String,
+    pending_agent_end: Mutex<Option<serde_json::Value>>,
+    error_emitted: AtomicBool,
+}
+
+impl AgentObservationTap {
+    /// Whether any plugin observes AI events. Gates work that exists only for
+    /// observation, so an unobserved run behaves exactly as before.
+    fn is_enabled(&self) -> bool {
+        self.observations.is_enabled(KIND_AI_ERROR)
+    }
+
+    fn observe(&self, event: &AgentEvent) {
+        // Fast path: every token delta lands here, so skip all payload work
+        // unless a plugin actually observes AI events.
+        let Some(kind) = agent_event_observation_kind(event) else {
+            return;
+        };
+        if !self.observations.is_enabled(kind) {
+            return;
+        }
+        let mut payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+        self.insert_context(&mut payload);
+        // `delta` and `message` are capped too: a delta is not guaranteed to be
+        // small (the repair-exhaustion path re-emits the whole answer as one
+        // text delta) and error messages quote provider output.
+        cap_observation_fields(&mut payload, &["sql", "args", "result", "summary", "text", "delta", "message"]);
+        if matches!(event, AgentEvent::Error { .. }) {
+            // `finish` must not publish a second one for the same run.
+            self.error_emitted.store(true, Ordering::Relaxed);
+        }
+        if matches!(event, AgentEvent::AgentEnd { .. }) {
+            // Published by `finish` once the loop's final text is known.
+            *self.pending_agent_end.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(payload);
+            return;
+        }
+        self.observations.publish(kind, Some(self.connection_id.clone()), Some(self.database.clone()), payload);
+    }
+
+    /// Publishes the run's terminal observation.
+    ///
+    /// Success: exactly one `ai.agent_finished`, carrying the authoritative
+    /// final text. Failure: the pending `ai.agent_finished` (if the loop had
+    /// already emitted one) plus one `ai.error`, unless the loop emitted an
+    /// error event itself. Some paths return an error without ever emitting
+    /// `AgentEnd` (a text-only provider failure, a cancelled CLI agent), so
+    /// observers would otherwise keep the run open forever.
+    fn finish(&self, outcome: Result<&str, &str>, cancelled: bool) {
+        match outcome {
+            Ok(text) => {
+                let content = self.text_payload(text);
+                let mut payload = self.take_pending_or_agent_end();
+                // The fallback payload (no `AgentEnd` ever arrived) is built
+                // from scratch, and merging the final text must not drop the
+                // run context either: observers correlate terminal events by
+                // `sessionId`/`provider`/`model`.
+                self.insert_context(&mut payload);
+                if let Some(object) = payload.as_object_mut() {
+                    object.extend(content);
+                }
+                self.observations.publish(
+                    KIND_AI_AGENT_FINISHED,
+                    Some(self.connection_id.clone()),
+                    Some(self.database.clone()),
+                    payload,
+                );
+            }
+            Err(error) => {
+                if let Some(payload) =
+                    self.pending_agent_end.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+                {
+                    self.observations.publish(
+                        KIND_AI_AGENT_FINISHED,
+                        Some(self.connection_id.clone()),
+                        Some(self.database.clone()),
+                        payload,
+                    );
+                }
+                if self.error_emitted.swap(true, Ordering::Relaxed) {
+                    return;
+                }
+                let mut payload = serde_json::json!({
+                    "type": "error",
+                    "cancelled": cancelled,
+                });
+                let (message, message_truncated) = dbx_types::models::observability::cap_observation_text(error);
+                if let Some(object) = payload.as_object_mut() {
+                    object.insert("message".to_string(), serde_json::Value::String(message));
+                    object.insert("messageTruncated".to_string(), serde_json::Value::Bool(message_truncated));
+                }
+                self.insert_context(&mut payload);
+                self.observations.publish(
+                    KIND_AI_ERROR,
+                    Some(self.connection_id.clone()),
+                    Some(self.database.clone()),
+                    payload,
+                );
+            }
+        }
+    }
+
+    fn take_pending_or_agent_end(&self) -> serde_json::Value {
+        self.pending_agent_end
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .unwrap_or_else(|| serde_json::json!({ "type": "agent_end" }))
+    }
+
+    fn text_payload(&self, text: &str) -> serde_json::Map<String, serde_json::Value> {
+        let (text, text_truncated) = dbx_types::models::observability::cap_observation_text(text);
+        let mut payload = serde_json::Map::new();
+        payload.insert("text".to_string(), serde_json::Value::String(text));
+        payload.insert("textTruncated".to_string(), serde_json::Value::Bool(text_truncated));
+        payload
+    }
+
+    fn insert_context(&self, payload: &mut serde_json::Value) {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "sessionId".to_string(),
+                serde_json::to_value(&self.session_id).unwrap_or(serde_json::Value::Null),
+            );
+            object.insert("provider".to_string(), self.provider.clone());
+            object.insert("model".to_string(), serde_json::Value::String(self.model.clone()));
+        }
+    }
+}
+
+/// Whether a finished run was cancelled by the user rather than failing.
+///
+/// `Notify` stores at most one permit, and the runner consumes it while it is
+/// waiting (the CLI agent selects on `cancelled.notified()`), so probing the
+/// token after the run usually reports "not cancelled". The provider layer's
+/// explicit cancellation error is the durable signal: every runner returns
+/// [`ai::AGENT_CANCELLED_ERROR`] instead of a plain failure when the user
+/// stops the run.
+fn outcome_was_cancelled(outcome: Result<&str, &str>, cancel_probe: bool) -> bool {
+    cancel_probe || outcome.err() == Some(ai::AGENT_CANCELLED_ERROR)
+}
+
 /// Run the agent loop: call LLM with tools, execute tool calls, feed results back, repeat.
 ///
 /// The `on_event` callback receives streaming events for the frontend.
@@ -166,19 +360,50 @@ pub async fn run_agent_loop(
     task_contract: Option<&AiTaskContract>,
     is_agent_mode: bool,
 ) -> Result<String, String> {
-    run_agent_loop_inner(
+    // Observation tap. `on_event` is the loop's only event exit, so wrapping
+    // it here captures every variant (turns, tool calls, approvals, context
+    // compaction, token usage) without touching the 20+ emit sites inside or
+    // the two shell callers.
+    let observation_tap = Arc::new(AgentObservationTap {
+        observations: agent_ctx.state.host_observations.clone(),
+        connection_id: agent_ctx.connection_id.clone(),
+        database: agent_ctx.database.clone(),
+        session_id: agent_ctx.session_id.clone(),
+        provider: serde_json::to_value(&config.provider).unwrap_or(serde_json::Value::Null),
+        model: config.model.clone(),
+        pending_agent_end: Mutex::new(None),
+        error_emitted: AtomicBool::new(false),
+    });
+    let tap_for_events = observation_tap.clone();
+    let observed_on_event = {
+        let original = on_event.clone();
+        move |event: AgentEvent| {
+            tap_for_events.observe(&event);
+            original(event);
+        }
+    };
+    let result = run_agent_loop_inner(
         config,
         system_prompt,
         messages,
         agent_ctx,
-        on_event,
+        observed_on_event,
         cancelled,
         max_tokens,
         task_contract,
         is_agent_mode,
     )
     .boxed()
-    .await
+    .await;
+    // The terminal observation carries the loop's authoritative final text, so
+    // a repair-exhaustion re-emission cannot duplicate the answer. Cancellation
+    // is read from the run's explicit error, not only from the token: the
+    // runner usually consumed the single `Notify` permit while waiting. The
+    // probe consumes a stored permit, so it only runs when someone observes.
+    let cancel_probe = observation_tap.is_enabled() && cancelled.notified().now_or_never().is_some();
+    let outcome = result.as_deref().map_err(|error| error.as_str());
+    observation_tap.finish(outcome, outcome_was_cancelled(outcome, cancel_probe));
+    result
 }
 
 /// The built-in provider's tool table for one run.
@@ -204,6 +429,36 @@ fn run_tools(
         tools.extend(skill_tools::tool_definitions());
     }
     tools
+}
+
+/// Connection scope for plugin tools.
+///
+/// The target's saved config is the server's source of truth for its type: the
+/// request's own `db_type` comes from the client, so trusting it would let a
+/// request declare a database type while targeting a plugin connection and widen
+/// the scope to attachments by claiming a database target. An empty or unknown
+/// target fails closed (no plugin tools) for the same reason — a request can
+/// supply any attachment list, so nothing it names may become a scope on its
+/// own. A plugin-connection target is authoritative: only that connection may
+/// contribute tools, no matter what the attachment list says. The attachment
+/// list only widens a database-target run. Keeping this decision on the server
+/// means the boundary never depends on the client constructing the request
+/// correctly.
+async fn plugin_tool_connection_scope(
+    state: &AppState,
+    connection_id: &str,
+    attached_connection_ids: &[String],
+) -> Vec<String> {
+    if connection_id.is_empty() {
+        return Vec::new();
+    }
+    match state.configs.read().await.get(connection_id).map(|config| config.db_type) {
+        Some(DatabaseType::Plugin) => vec![connection_id.to_string()],
+        Some(_) => attached_connection_ids.to_vec(),
+        // Unknown target: the run cannot execute against a connection that does
+        // not exist, and its attachments must never stand in for one.
+        None => Vec::new(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -334,11 +589,17 @@ async fn run_agent_loop_inner(
     let mut sql_permissions = agent_ctx.sql_permissions.clone();
     let mut tools = run_tools(agent_ctx.db_type, &sql_permissions, is_agent_mode, agent_ctx.allow_skills);
     // Plugin tools join agent runs only; ask mode keeps its database-only
-    // read tools.
+    // read tools. The conversation target is authoritative: opening a plugin
+    // connection does not authorize the agent, so only explicitly attached
+    // connections are visible.
     let plugin_tool_set = if is_agent_mode {
-        let bound_plugin_connection =
-            (agent_ctx.db_type == DatabaseType::Plugin).then_some(agent_ctx.connection_id.as_str());
-        plugin_tools::discover_plugin_tools(&agent_ctx.state, agent_ctx.host_runtime.as_ref(), bound_plugin_connection)
+        let allowed_connections = plugin_tool_connection_scope(
+            agent_ctx.state.as_ref(),
+            &agent_ctx.connection_id,
+            &agent_ctx.plugin_connection_ids,
+        )
+        .await;
+        plugin_tools::discover_plugin_tools(&agent_ctx.state, agent_ctx.host_runtime.as_ref(), &allowed_connections)
             .await
     } else {
         PluginToolSet::default()
@@ -1747,6 +2008,282 @@ mod tests {
         )
     }
 
+    /// The observation bus must see every agent event variant; this table is
+    /// exhaustive on purpose so adding an `AgentEvent` variant without a kind
+    /// fails to compile here instead of silently disappearing from the stream.
+    #[test]
+    fn agent_event_observation_kinds_cover_every_variant() {
+        let events = vec![
+            (AgentEvent::TurnStart { turn: 1 }, KIND_AI_TURN_STARTED),
+            (AgentEvent::TurnEnd { turn: 1 }, KIND_AI_TURN_ENDED),
+            (AgentEvent::TextDelta { delta: "x".into() }, KIND_AI_TEXT_DELTA),
+            (AgentEvent::ReasoningDelta { delta: "x".into() }, KIND_AI_REASONING_DELTA),
+            (
+                AgentEvent::WriteSqlConfirmationRequired { sql: "update t".into() },
+                KIND_AI_WRITE_SQL_CONFIRMATION_REQUIRED,
+            ),
+            (AgentEvent::ProductionWriteBlocked { sql: "update t".into() }, KIND_AI_PRODUCTION_WRITE_BLOCKED),
+            (
+                AgentEvent::ToolCallStart {
+                    tool_call_id: "c1".into(),
+                    tool_name: "list_tables".into(),
+                    args: json!({}),
+                },
+                KIND_AI_TOOL_CALL_STARTED,
+            ),
+            (
+                AgentEvent::ToolCallEnd {
+                    tool_call_id: "c1".into(),
+                    tool_name: "list_tables".into(),
+                    result: json!({}),
+                    is_error: false,
+                },
+                KIND_AI_TOOL_CALL_FINISHED,
+            ),
+            (
+                AgentEvent::ToolApprovalRequired {
+                    approval_id: "a1".into(),
+                    tool_call_id: "c1".into(),
+                    tool_name: "kafka__delete".into(),
+                    plugin_id: "io.dbx.kafka".into(),
+                    plugin_name: "Kafka".into(),
+                    plugin_tool: "delete".into(),
+                    connection_id: "k1".into(),
+                    connection_name: "prod".into(),
+                    args: json!({}),
+                    timeout_secs: 60,
+                },
+                KIND_AI_APPROVAL_REQUIRED,
+            ),
+            (
+                AgentEvent::ToolApprovalResolved {
+                    approval_id: "a1".into(),
+                    tool_call_id: "c1".into(),
+                    outcome: ToolApprovalOutcome::Approved,
+                },
+                KIND_AI_APPROVAL_RESOLVED,
+            ),
+            (AgentEvent::ResponseComplete, KIND_AI_RESPONSE_COMPLETE),
+            (AgentEvent::OutputTruncated { finish_reason: "length".into() }, KIND_AI_OUTPUT_TRUNCATED),
+            (AgentEvent::AgentEnd { input_tokens: Some(1), output_tokens: Some(2) }, KIND_AI_AGENT_FINISHED),
+            (
+                AgentEvent::ContextCompacted {
+                    summary: "s".into(),
+                    summary_tokens: 1,
+                    compacted_messages: 2,
+                    estimated_before: 3,
+                    estimated_after: 4,
+                },
+                KIND_AI_CONTEXT_COMPACTED,
+            ),
+            (AgentEvent::Error { message: "boom".into() }, KIND_AI_ERROR),
+        ];
+        for (event, expected) in events {
+            assert_eq!(agent_event_observation_kind(&event), Some(expected), "{event:?}");
+        }
+    }
+
+    fn observation_tap(bus: crate::observability::HostObservationBus) -> AgentObservationTap {
+        bus.interest().acquire("test", &[dbx_types::models::observability::OBSERVE_AI_PERMISSION.to_string()]);
+        AgentObservationTap {
+            observations: bus,
+            connection_id: "conn-1".into(),
+            database: "app".into(),
+            session_id: Some("session-1".into()),
+            provider: serde_json::json!("openai"),
+            model: "gpt-test".into(),
+            pending_agent_end: Mutex::new(None),
+            error_emitted: AtomicBool::new(false),
+        }
+    }
+
+    /// Regular providers and the text fallback end with `TextDelta` →
+    /// `AgentEnd` and never emit `ResponseComplete`, so the final text must
+    /// ride `ai.agent_finished` or a sidecar (which skips deltas) gets nothing.
+    #[tokio::test]
+    async fn text_fallback_sequence_carries_the_answer_on_agent_finished() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.observe(&AgentEvent::TextDelta { delta: "The answer".into() });
+        tap.observe(&AgentEvent::TextDelta { delta: " is 42.".into() });
+        tap.observe(&AgentEvent::AgentEnd { input_tokens: Some(3), output_tokens: Some(4) });
+
+        assert_eq!(receiver.recv().await.unwrap().kind, KIND_AI_TEXT_DELTA);
+        assert_eq!(receiver.recv().await.unwrap().kind, KIND_AI_TEXT_DELTA);
+        // The terminal is deferred until the loop returns its final text.
+        tap.finish(Ok("The answer is 42."), false);
+        let terminal = receiver.recv().await.unwrap();
+        assert_eq!(terminal.kind, KIND_AI_AGENT_FINISHED);
+        assert_eq!(terminal.payload["text"], "The answer is 42.");
+        assert_eq!(terminal.payload["textTruncated"], false);
+        assert_eq!(terminal.payload["output_tokens"], 4);
+    }
+
+    /// The CLI adapter also emits `ResponseComplete`; it is non-terminal and
+    /// must not consume the text before `AgentEnd` arrives.
+    #[tokio::test]
+    async fn cli_sequence_keeps_the_text_until_agent_finished() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.observe(&AgentEvent::TextDelta { delta: "cli answer".into() });
+        tap.observe(&AgentEvent::ResponseComplete);
+        tap.observe(&AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+
+        let _delta = receiver.recv().await.unwrap();
+        let response_complete = receiver.recv().await.unwrap();
+        assert_eq!(response_complete.kind, KIND_AI_RESPONSE_COMPLETE);
+        assert!(response_complete.payload.get("text").is_none());
+        tap.finish(Ok("cli answer"), false);
+        let terminal = receiver.recv().await.unwrap();
+        assert_eq!(terminal.kind, KIND_AI_AGENT_FINISHED);
+        assert_eq!(terminal.payload["text"], "cli answer");
+    }
+
+    /// Answer-repair exhaustion re-emits the whole answer plus the warning as
+    /// one delta. The terminal must carry the loop's authoritative text, not a
+    /// duplicated accumulation of the deltas.
+    #[tokio::test]
+    async fn repair_exhaustion_does_not_duplicate_the_answer() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.observe(&AgentEvent::TextDelta { delta: "answer".into() });
+        tap.observe(&AgentEvent::TextDelta {
+            delta: "answer\n\nTask contract warning: missing SQL deliverable".into(),
+        });
+        tap.observe(&AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+        tap.finish(Ok("answer\n\nTask contract warning: missing SQL deliverable"), false);
+
+        let mut terminal = receiver.recv().await.unwrap();
+        while terminal.kind != KIND_AI_AGENT_FINISHED {
+            terminal = receiver.recv().await.unwrap();
+        }
+        assert_eq!(terminal.payload["text"], "answer\n\nTask contract warning: missing SQL deliverable");
+    }
+
+    /// A text-only provider failure returns an error without emitting
+    /// `AgentEnd`; the boundary must still close the run for observers.
+    #[tokio::test]
+    async fn direct_error_without_agent_end_publishes_ai_error() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.finish(Err("provider down"), false);
+
+        let terminal = receiver.recv().await.unwrap();
+        assert_eq!(terminal.kind, KIND_AI_ERROR);
+        assert_eq!(terminal.payload["type"], "error");
+        assert_eq!(terminal.payload["message"], "provider down");
+        assert_eq!(terminal.payload["cancelled"], false);
+        assert_eq!(terminal.payload["sessionId"], "session-1");
+    }
+
+    /// A cancelled CLI/Pi agent returns the explicit cancellation error and the
+    /// runner has already consumed the `Notify` permit, so the boundary must
+    /// classify from the error rather than from a post-run token probe.
+    #[tokio::test]
+    async fn cancelled_direct_error_is_marked_cancelled() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        let outcome = Err(ai::AGENT_CANCELLED_ERROR);
+        tap.finish(outcome, outcome_was_cancelled(outcome, false));
+
+        let terminal = receiver.recv().await.unwrap();
+        assert_eq!(terminal.kind, KIND_AI_ERROR);
+        assert_eq!(terminal.payload["cancelled"], true);
+    }
+
+    #[test]
+    fn cancellation_comes_from_the_error_not_the_consumed_permit() {
+        assert!(outcome_was_cancelled(Err(ai::AGENT_CANCELLED_ERROR), false));
+        // A token probe still counts when it is the only evidence.
+        assert!(outcome_was_cancelled(Err("boom"), true));
+        assert!(!outcome_was_cancelled(Err("boom"), false));
+        assert!(!outcome_was_cancelled(Ok("text"), false));
+    }
+
+    /// Documents the Tokio behavior the helper works around: `notify_one`
+    /// wakes the runner's waiter, which consumes the only permit, so a later
+    /// `notified()` probe sees nothing.
+    #[tokio::test]
+    async fn consumed_cancel_permit_is_invisible_to_a_later_probe() {
+        let notify = Notify::new();
+        let waiter = notify.notified();
+        tokio::join!(waiter, async { notify.notify_one() });
+        assert!(notify.notified().now_or_never().is_none());
+    }
+
+    /// When the loop already emitted `ai.agent_finished` and then failed, the
+    /// boundary must not publish a second one, and the observed error must not
+    /// be duplicated either.
+    #[tokio::test]
+    async fn existing_terminals_are_not_duplicated_on_error() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.observe(&AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+        tap.observe(&AgentEvent::Error { message: "boom".into() });
+        tap.finish(Err("boom"), false);
+
+        // The loop's own `ai.error` publishes immediately; the deferred
+        // terminal follows it.
+        let error = receiver.recv().await.unwrap();
+        assert_eq!(error.kind, KIND_AI_ERROR);
+        assert_eq!(error.payload["message"], "boom");
+        let finished = receiver.recv().await.unwrap();
+        assert_eq!(finished.kind, KIND_AI_AGENT_FINISHED);
+        assert!(finished.payload.get("text").is_none());
+        // No third event: `finish` saw the test's `ai.error` and stayed quiet.
+        assert!(receiver.try_recv().is_err());
+    }
+
+    /// A success path that never emitted `AgentEnd` (defensive) still closes
+    /// the run with the authoritative text.
+    #[tokio::test]
+    async fn success_without_agent_end_still_publishes_the_terminal() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.finish(Ok("answer"), false);
+
+        let terminal = receiver.recv().await.unwrap();
+        assert_eq!(terminal.kind, KIND_AI_AGENT_FINISHED);
+        assert_eq!(terminal.payload["text"], "answer");
+        // The fallback payload is not an `AgentEnd` echo, so the run context
+        // must be attached here or concurrent runs cannot be correlated.
+        assert_eq!(terminal.payload["sessionId"], "session-1");
+        assert_eq!(terminal.payload["provider"], "openai");
+        assert_eq!(terminal.payload["model"], "gpt-test");
+    }
+
+    /// Deltas and error text are not guaranteed to be small (the repair path
+    /// re-emits the whole answer as one delta; provider errors quote output),
+    /// so the tap caps them like the other text fields.
+    #[tokio::test]
+    async fn oversized_deltas_and_errors_are_capped() {
+        use dbx_types::models::observability::MAX_OBSERVATION_TEXT_BYTES;
+
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        let huge = "x".repeat(MAX_OBSERVATION_TEXT_BYTES * 2);
+
+        tap.observe(&AgentEvent::TextDelta { delta: huge.clone() });
+        let delta = receiver.recv().await.unwrap();
+        assert_eq!(delta.kind, KIND_AI_TEXT_DELTA);
+        assert_eq!(delta.payload["deltaTruncated"], true);
+        assert!(delta.payload["delta"].as_str().unwrap().len() <= MAX_OBSERVATION_TEXT_BYTES);
+
+        tap.observe(&AgentEvent::Error { message: huge.clone() });
+        let error = receiver.recv().await.unwrap();
+        assert_eq!(error.kind, KIND_AI_ERROR);
+        assert_eq!(error.payload["messageTruncated"], true);
+        assert!(error.payload["message"].as_str().unwrap().len() <= MAX_OBSERVATION_TEXT_BYTES);
+    }
+
     fn plugin_tool_call(id: &str, name: &str) -> ToolCall {
         ToolCall {
             id: id.to_string(),
@@ -1754,6 +2291,79 @@ mod tests {
             arguments: json!({ "topics": ["orders"] }),
             provider_payload: None,
         }
+    }
+
+    /// AppState whose saved configs are exactly `connections`, so a scope test
+    /// can tell "saved as a plugin connection" from "unknown id".
+    async fn state_with_connections(connections: &[(&str, &str)]) -> (tempfile::TempDir, Arc<AppState>) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let mut configs = state.configs.write().await;
+        for (id, db_type) in connections {
+            let config = serde_json::from_value(json!({
+                "id": id,
+                "name": id,
+                "db_type": db_type,
+                "host": "",
+                "port": 0,
+                "username": "",
+                "password": "",
+                "database": null,
+            }))
+            .unwrap();
+            configs.insert(id.to_string(), config);
+        }
+        drop(configs);
+        (temp_dir, state)
+    }
+
+    #[tokio::test]
+    async fn a_plugin_target_scopes_tools_to_its_own_connection() {
+        let attached = vec!["ssh-1".to_string(), "kafka-1".to_string()];
+        let (_dir, state) =
+            state_with_connections(&[("ssh-1", "plugin"), ("ssh-9", "plugin"), ("db-1", "postgres")]).await;
+        // A plugin target ignores every other attachment, even when a client
+        // sends extras: the boundary is decided here, not by the request shape.
+        assert_eq!(plugin_tool_connection_scope(&state, "ssh-1", &attached).await, ["ssh-1"]);
+        assert_eq!(plugin_tool_connection_scope(&state, "ssh-9", &attached).await, ["ssh-9"]);
+        // Database targets keep the explicit attachment list.
+        assert_eq!(plugin_tool_connection_scope(&state, "db-1", &attached).await, attached);
+        // No target means no plugin scope: an empty connection id must never be
+        // widened to attachments a client supplied directly.
+        assert!(plugin_tool_connection_scope(&state, "", &attached).await.is_empty());
+        // #13978 review P1: an id no saved config names fails closed. Otherwise a
+        // request could invent a target and still receive every attachment's tools.
+        assert!(plugin_tool_connection_scope(&state, "missing", &attached).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_declared_db_type_never_widens_a_plugin_target_scope() {
+        let attached = vec!["ssh-1".to_string(), "kafka-1".to_string()];
+        let (_dir, state) = state_with_connections(&[("ssh-1", "plugin"), ("db-1", "postgres")]).await;
+        // #13978 review P1: the run's declared type is client data. A request
+        // that names a plugin connection while declaring a database type used to
+        // get the whole attachment list; the saved config must win instead.
+        let ctx = AgentLoopContext {
+            state: state.clone(),
+            connection_id: "ssh-1".to_string(),
+            database: String::new(),
+            selected_databases: Vec::new(),
+            plugin_connection_ids: attached.clone(),
+            schema: None,
+            db_type: DatabaseType::Postgres,
+            cli_mcp_server_command: None,
+            sql_permissions: agent_tools::AgentSqlPermissions::default(),
+            max_agent_turns: DEFAULT_MAX_AGENT_TURNS,
+            prompt_cache_key: None,
+            session_id: None,
+            host_runtime: None,
+            allow_skills: false,
+        };
+        let scope =
+            plugin_tool_connection_scope(ctx.state.as_ref(), &ctx.connection_id, &ctx.plugin_connection_ids).await;
+        assert_eq!(scope, ["ssh-1"]);
+        assert_ne!(scope, ctx.plugin_connection_ids);
     }
 
     async fn gate_context(session_id: Option<&str>) -> (tempfile::TempDir, AgentLoopContext) {
@@ -1764,6 +2374,7 @@ mod tests {
             connection_id: "db".to_string(),
             database: String::new(),
             selected_databases: Vec::new(),
+            plugin_connection_ids: Vec::new(),
             schema: None,
             db_type: DatabaseType::Postgres,
             cli_mcp_server_command: None,

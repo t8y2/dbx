@@ -1229,17 +1229,15 @@ export interface MongoDocumentsToQueryResultOptions {
 
 export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeMs: number, total: number, copyDocuments?: unknown[], totalIsExact = true, options: MongoDocumentsToQueryResultOptions = {}): QueryResult {
   const documentGridValues = options.documentGridValues !== false;
-  const columns: string[] = [];
-
+  const columnNames = new Set<string>();
   for (const doc of documents) {
     if (isRecord(doc)) {
-      for (const key of Object.keys(doc)) {
-        if (!columns.includes(key)) columns.push(key);
-      }
-    } else if (!columns.includes("value")) {
-      columns.push("value");
+      for (const key of Object.keys(doc)) columnNames.add(key);
+    } else {
+      columnNames.add("value");
     }
   }
+  const columns = Array.from(columnNames);
 
   const rows = documents.map((doc) => {
     if (isRecord(doc)) return columns.map((column) => toCellValue(doc[column], documentGridValues));
@@ -1249,7 +1247,7 @@ export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeM
   const canonicalDocuments = copyDocuments?.length === documents.length ? copyDocuments : undefined;
   // Query cells keep their existing text for editing and export. Only canonical
   // BSON dates provide evidence that the column should use date display settings.
-  const dateColumnTypes = documentGridValues && canonicalDocuments ? mongoDocumentGridColumnTypes(canonicalDocuments.filter(isRecord), columns).map((type) => (type === "datetime" ? type : "")) : [];
+  const dateColumnTypes = documentGridValues && canonicalDocuments ? mongoDocumentGridColumnTypes(canonicalDocuments.filter(isRecord), columns, "datesOnly") : [];
 
   return {
     columns,

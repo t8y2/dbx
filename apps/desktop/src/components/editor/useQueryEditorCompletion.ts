@@ -727,26 +727,26 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       }
     }
 
-    if (props.database && mongoCompletionNeedsCollections(completionContext.mode)) {
+    const activeDatabase = completionContext.database ?? props.database;
+    if (activeDatabase && mongoCompletionNeedsCollections(completionContext)) {
       try {
-        collections = await connectionStore.listMongoCompletionCollections(props.connectionId, completionContext.database ?? props.database);
+        collections = await connectionStore.listMongoCompletionCollections(props.connectionId, activeDatabase);
       } catch {
         collections = [];
       }
     }
 
-    if (props.database && mongoCompletionNeedsFields(completionContext.mode) && completionContext.collection) {
+    if (activeDatabase && mongoCompletionNeedsFields(completionContext.mode) && completionContext.collection) {
       try {
-        fields = await connectionStore.listMongoCompletionFields(props.connectionId, completionContext.database ?? props.database, completionContext.collection);
+        fields = await connectionStore.listMongoCompletionFields(props.connectionId, activeDatabase, completionContext.collection);
       } catch {
         fields = [];
       }
     }
 
-    const indexDatabase = completionContext.database ?? props.database;
-    if (indexDatabase && mongoCompletionNeedsIndexes(completionContext.mode) && completionContext.collection) {
+    if (activeDatabase && mongoCompletionNeedsIndexes(completionContext.mode) && completionContext.collection) {
       try {
-        indexes = await connectionStore.listMongoCompletionIndexes(props.connectionId, indexDatabase, completionContext.collection);
+        indexes = await connectionStore.listMongoCompletionIndexes(props.connectionId, activeDatabase, completionContext.collection);
       } catch {
         indexes = [];
       }

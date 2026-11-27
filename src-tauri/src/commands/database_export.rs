@@ -5,7 +5,8 @@ use crate::commands::connection::AppState;
 
 pub use dbx_core::database_export::{DatabaseBackupSnapshot, DatabaseExportRequest, ExportProgress, ExportStatus};
 
-fn emit_progress(app: &AppHandle, progress: ExportProgress) {
+fn emit_progress(app: &AppHandle, state: &AppState, progress: ExportProgress) {
+    crate::commands::observability::publish_transfer_progress(state, "database-export", &progress.export_id, &progress);
     let _ = app.emit("database-export-progress", progress);
 }
 
@@ -86,7 +87,7 @@ pub async fn export_database_sql(
     dbx_core::export_runtime::spawn_export_task(async move {
         let terminal = Mutex::new(None);
         let result = dbx_core::database_export::export_database_sql_core(&state, &request, |progress| {
-            route_core_progress(progress, &terminal, |progress| emit_progress(&app, progress));
+            route_core_progress(progress, &terminal, |progress| emit_progress(&app, &state, progress));
         })
         .await;
 
@@ -106,17 +107,16 @@ pub async fn export_database_sql(
                     .await
                     .map(|_| ())
             },
-            |progress| emit_progress(&app, progress),
+            |progress| emit_progress(&app, &state, progress),
         )
         .await;
         if let Err(error) = completion {
-            let _ = app.emit(
-                "database-export-progress",
-                serde_json::json!({
-                    "exportId": export_id, "currentObject": "", "objectIndex": 0, "totalObjects": 0,
-                    "rowsExported": 0, "totalRows": null, "status": "Unknown", "error": error,
-                }),
-            );
+            let payload = serde_json::json!({
+                "exportId": export_id, "currentObject": "", "objectIndex": 0, "totalObjects": 0,
+                "rowsExported": 0, "totalRows": null, "status": "Unknown", "error": error,
+            });
+            crate::commands::observability::publish_transfer_progress(&state, "database-export", &export_id, &payload);
+            let _ = app.emit("database-export-progress", payload);
         }
     });
 

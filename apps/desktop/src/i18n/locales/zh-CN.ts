@@ -10737,6 +10737,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "标签双击行为",
     tabDoubleClickActionDefault: "重命名标签",
     tabDoubleClickActionClose: "关闭标签",
+    tabDoubleClickActionNone: "不执行操作",
     tabDoubleClickActionDescription: "重命名标签：查询标签重命名，数据标签切换禅模式。关闭标签：双击关闭标签，也适用于数据标签。",
     tabMaxWidth: "标签最大宽度",
     tabMaxWidthDescription: "限制水平标签页的最大显示宽度，超出时省略显示，悬停显示完整标题。",

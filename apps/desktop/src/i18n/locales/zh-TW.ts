@@ -8450,6 +8450,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "標籤雙擊行為",
     tabDoubleClickActionDefault: "重新命名標籤",
     tabDoubleClickActionClose: "關閉標籤",
+    tabDoubleClickActionNone: "不執行操作",
     tabDoubleClickActionDescription: "重新命名標籤：查詢標籤重新命名，資料標籤切換禪模式。關閉標籤：雙擊關閉標籤，也適用於資料標籤。",
     tabMaxWidth: "標籤最大寬度",
     tabMaxWidthDescription: "限制水平標籤頁的最大顯示寬度，超出時省略顯示，懸停顯示完整標題。",

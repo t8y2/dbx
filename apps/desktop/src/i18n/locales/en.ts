@@ -10774,6 +10774,7 @@ export default {
     tabDoubleClickAction: "Tab double-click action",
     tabDoubleClickActionDefault: "Rename tab",
     tabDoubleClickActionClose: "Close tab",
+    tabDoubleClickActionNone: "Do nothing",
     tabDoubleClickActionDescription: "Rename tab: query tabs are renamed and data tabs toggle Zen mode. Close tab: double-click to close a tab, including data tabs.",
     tabMaxWidth: "Maximum tab width",
     tabMaxWidthDescription: "Limit the maximum width of horizontal tabs, truncating long titles with ellipsis. Hover to view the full title.",

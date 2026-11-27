@@ -1,5 +1,5 @@
 import { normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
-import { normalizeCompletionAutoActivationDelay, type EditorSettings } from "@/stores/settingsStore";
+import { normalizeCompletionAutoActivationDelay, normalizeTabDoubleClickAction, type EditorSettings } from "@/stores/settingsStore";
 import { normalizeBackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
@@ -258,7 +258,7 @@ function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unkn
   if (key === "csvNullMode") return normalizeCsvNullMode(value);
   if (key === "backgroundImage") return normalizeBackgroundImageSettings(value);
   if (key === "snippetTriggerKey") return value === "space" || value === "both" ? value : "tab";
-  if (key === "tabDoubleClickAction") return value === "close" ? "close" : "default";
+  if (key === "tabDoubleClickAction") return normalizeTabDoubleClickAction(value);
   if (key === "webLogoPosition") return value === "right" || value === "hidden" ? value : "left";
   if (key === "aiSqlApplyTargetMode") return normalizeAiSqlApplyTargetMode(value);
   if (key === "colorizeConnectionTabsScope") return value === "active" ? "active" : "all";

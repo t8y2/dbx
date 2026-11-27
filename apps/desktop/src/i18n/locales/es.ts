@@ -9587,6 +9587,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "Acción al hacer doble clic en una pestaña",
     tabDoubleClickActionDefault: "Renombrar pestaña",
     tabDoubleClickActionClose: "Cerrar pestaña",
+    tabDoubleClickActionNone: "No hacer nada",
     tabDoubleClickActionDescription: "Renombrar pestaña: renombrar pestañas de consulta y alternar el modo Zen en pestañas de datos. Cerrar pestaña: cerrar con doble clic, incluidas las pestañas de datos.",
     tabMaxWidth: "Ancho máximo de pestaña",
     tabMaxWidthDescription: "Limita el ancho máximo de las pestañas horizontales, truncando títulos largos. Pase el cursor para ver el título completo.",

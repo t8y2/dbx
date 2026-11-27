@@ -11317,6 +11317,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "การทำงานเมื่อดับเบิลคลิกแท็บ",
     tabDoubleClickActionDefault: "เปลี่ยนชื่อแท็บ",
     tabDoubleClickActionClose: "ปิดแท็บ",
+    tabDoubleClickActionNone: "ไม่ต้องทำอะไร",
     tabDoubleClickActionDescription: "เปลี่ยนชื่อแท็บ: เปลี่ยนชื่อแท็บคิวรีและสลับโหมด Zen สำหรับแท็บข้อมูล ปิดแท็บ: ดับเบิลคลิกเพื่อปิดแท็บ รวมถึงแท็บข้อมูล",
     tabMaxWidth: "ความกว้างแท็บสูงสุด",
     tabMaxWidthDescription: "จำกัดความกว้างสูงสุดของแท็บแนวนอน โดยตัดชื่อยาวด้วยจุดไข่ปลา เลื่อนเมาส์เพื่อดูชื่อเต็ม",

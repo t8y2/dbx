@@ -9737,6 +9737,7 @@ export default withEnglishFallback({
     tabDoubleClickAction: "タブのダブルクリック動作",
     tabDoubleClickActionDefault: "タブの名前を変更",
     tabDoubleClickActionClose: "タブを閉じる",
+    tabDoubleClickActionNone: "何もしない",
     tabDoubleClickActionDescription: "タブの名前を変更: クエリタブの名前を変更し、データタブでは禅モードを切り替えます。「タブを閉じる」では、データタブを含むタブをダブルクリックで閉じます。",
     tabMaxWidth: "タブの最大幅",
     tabMaxWidthDescription: "水平タブの最大表示幅を制限し、長すぎるタイトルは省略してホバー時に完全なタイトルを表示します。",

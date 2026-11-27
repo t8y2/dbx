@@ -3591,6 +3591,8 @@ export default withEnglishFallback({
     cellDetails: "Сведения о ячейке",
     cellDetailLayoutBottom: "Переместить вниз",
     cellDetailLayoutRight: "Переместить вправо",
+    pinCellDetailOnRight: "Закрепить сведения о ячейке справа",
+    cellDetailSelectCell: "Выберите ячейку, чтобы посмотреть её значение.",
     collapseCellDetailMetadata: "Свернуть метаданные ячейки",
     expandCellDetailMetadata: "Развернуть метаданные ячейки",
     openCellDetailsDialog: "Открыть сведения о ячейке",

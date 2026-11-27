@@ -783,7 +783,7 @@ export function isSidebarConnectionIconStyle(value: unknown): value is SidebarCo
 
 const DATA_GRID_COLUMN_WIDTH_MODES = ["fill", "content"] as const;
 export type DataGridColumnWidthMode = (typeof DATA_GRID_COLUMN_WIDTH_MODES)[number];
-const CELL_DETAIL_PANEL_LAYOUTS = ["bottom", "right"] as const;
+const CELL_DETAIL_PANEL_LAYOUTS = ["bottom", "right", "right-pinned"] as const;
 export type CellDetailPanelLayout = (typeof CELL_DETAIL_PANEL_LAYOUTS)[number];
 const TAB_LAYOUT_MODES = ["scroll", "wrap"] as const;
 export type TabLayoutMode = (typeof TAB_LAYOUT_MODES)[number];

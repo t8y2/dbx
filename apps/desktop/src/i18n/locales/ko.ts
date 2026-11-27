@@ -3470,6 +3470,8 @@ export default withEnglishFallback({
     cellDetails: "셀 상세",
     cellDetailLayoutBottom: "아래로 이동",
     cellDetailLayoutRight: "오른쪽으로 이동",
+    pinCellDetailOnRight: "셀 세부 정보를 오른쪽에 고정",
+    cellDetailSelectCell: "값을 보려면 셀을 선택하세요.",
     collapseCellDetailMetadata: "셀 메타데이터 접기",
     expandCellDetailMetadata: "셀 메타데이터 펼치기",
     openCellDetailsDialog: "셀 상세 열기",

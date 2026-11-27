@@ -3733,6 +3733,8 @@ export default withEnglishFallback({
     cellDetails: "รายละเอียดเซลล์",
     cellDetailLayoutBottom: "ย้ายไปด้านล่าง",
     cellDetailLayoutRight: "ย้ายไปด้านขวา",
+    pinCellDetailOnRight: "ปักหมุดรายละเอียดเซลล์ทางขวา",
+    cellDetailSelectCell: "เลือกเซลล์เพื่อดูค่า",
     collapseCellDetailMetadata: "ยุบเมทาดาทาเซลล์",
     expandCellDetailMetadata: "ขยายเมทาดาทาเซลล์",
     openCellDetailsDialog: "เปิดรายละเอียดเซลล์",

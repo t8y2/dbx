@@ -3338,6 +3338,8 @@ export default withEnglishFallback({
     cellDetails: "Dettagli Cella",
     cellDetailLayoutBottom: "Sposta in Basso",
     cellDetailLayoutRight: "Sposta a Destra",
+    pinCellDetailOnRight: "Fissa i dettagli della cella a destra",
+    cellDetailSelectCell: "Seleziona una cella per visualizzarne il valore.",
     collapseCellDetailMetadata: "Comprimi metadati cella",
     expandCellDetailMetadata: "Espandi metadati cella",
     openCellDetailsDialog: "Apri Dettagli Cella",

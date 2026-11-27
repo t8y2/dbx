@@ -3444,6 +3444,8 @@ export default withEnglishFallback({
     cellDetails: "Detalles de celda",
     cellDetailLayoutBottom: "Mover abajo",
     cellDetailLayoutRight: "Mover a la derecha",
+    pinCellDetailOnRight: "Fijar los detalles de celda a la derecha",
+    cellDetailSelectCell: "Selecciona una celda para ver su valor.",
     collapseCellDetailMetadata: "Contraer metadatos de celda",
     expandCellDetailMetadata: "Expandir metadatos de celda",
     openCellDetailsDialog: "Abrir detalles de celda",

@@ -2590,6 +2590,8 @@ export default withEnglishFallback({
     cellDetails: "Xananın təfərrüatları",
     cellDetailLayoutBottom: "Aşağıya köçür",
     cellDetailLayoutRight: "Sağa köçür",
+    pinCellDetailOnRight: "Xana təfərrüatlarını sağa bərkidin",
+    cellDetailSelectCell: "Dəyərinə baxmaq üçün xana seçin.",
     collapseCellDetailMetadata: "Xananın metaverilənlərini yığ",
     expandCellDetailMetadata: "Xananın metaverilənlərini genişləndir",
     openCellDetailsDialog: "Xananın təfərrüatlarını aç",

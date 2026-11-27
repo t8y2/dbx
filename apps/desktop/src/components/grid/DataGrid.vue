@@ -7077,11 +7077,11 @@ function captureColumnTargetForRefresh(columnIndex: number | null): PersistedDat
 
 function captureDetailsForRefresh() {
   const details = {
-    sideCell: showCellDetail.value ? captureCellTargetForRefresh(detailCell.value) : undefined,
+    sideCell: cellDetailPanelActive.value ? captureCellTargetForRefresh(detailCell.value) : undefined,
     // A refresh must not silently discard an unsaved value-editor draft: closing
     // and reopening the panel (even at the "same" cell) would re-derive its text
     // from the freshly fetched row, wiping whatever the user was typing.
-    sideCellHasPendingDraft: showCellDetail.value && hasPendingDetailEditorDraft.value,
+    sideCellHasPendingDraft: cellDetailPanelActive.value && hasPendingDetailEditorDraft.value,
     cellDialog: cellDetailDialogOpen.value ? captureCellTargetForRefresh(cellDetailDialogTarget.value) : undefined,
     rowDialog: rowDetailDialogOpen.value ? captureRowTargetForRefresh(rowDetailDialogRowId.value) : undefined,
     columnDialog: columnDetailDialogOpen.value ? captureColumnTargetForRefresh(columnDetailDialogColumnIndex.value) : undefined,
@@ -7611,7 +7611,7 @@ function handleQuickDownloadMenuOpenChange(open: boolean, rowIndex: number, actu
 
 function cellDetailButtonVisible(rowIndex: number, actualColIdx: number) {
   if (isScrolling.value) return false;
-  return (hoveredDetailCell.value?.rowIndex === rowIndex && hoveredDetailCell.value.col === actualColIdx) || quickDownloadMenuOpenFor(rowIndex, actualColIdx) || (showCellDetail.value && detailCell.value?.rowIndex === rowIndex && detailCell.value.col === actualColIdx);
+  return (hoveredDetailCell.value?.rowIndex === rowIndex && hoveredDetailCell.value.col === actualColIdx) || quickDownloadMenuOpenFor(rowIndex, actualColIdx) || (cellDetailPanelActive.value && detailCell.value?.rowIndex === rowIndex && detailCell.value.col === actualColIdx);
 }
 
 function affectedRowIds(): number[] {
@@ -8004,6 +8004,8 @@ const selectedColumnInfo = computed(() => {
 
 const canShowMongoJsonPreview = computed(() => props.databaseType === "mongodb" && !!props.result.mongo_documents && props.result.mongo_documents.length === props.result.rows.length);
 const mongoJsonPreviewOpen = computed(() => showMongoJsonPreview.value && canShowMongoJsonPreview.value);
+const cellDetailPanelPinned = computed(() => settingsStore.editorSettings.cellDetailPanelLayout === "right-pinned");
+const cellDetailPanelActive = computed(() => showCellDetail.value || (cellDetailPanelPinned.value && !cellDetailDialogDefault.value && !mongoJsonPreviewOpen.value));
 const activeMongoJsonDocument = computed(() => {
   if (!mongoJsonPreviewOpen.value) return undefined;
   const selectedCell = currentSelectedCellPosition();
@@ -8418,6 +8420,11 @@ function closeCellDetails() {
   detailCell.value = null;
 }
 
+function dismissCellDetailPanel() {
+  if (cellDetailPanelPinned.value) settingsStore.updateEditorSettings({ cellDetailPanelLayout: "right" });
+  closeCellDetails();
+}
+
 function escapeCellDetails() {
   // Portalled overlays may keep focus in the grid. Let their own Escape handlers win.
   // Context menus close during capture, but remain mounted until Vue's next update.
@@ -8430,6 +8437,7 @@ function escapeCellDetails() {
     } else cancelDetailEdit();
     return true;
   }
+  if (cellDetailPanelPinned.value) return false;
   closeCellDetails();
   nextTick(() => gridRef.value?.focus({ preventScroll: true }));
   return true;
@@ -9704,7 +9712,7 @@ const canvasReadonlyTextCellStyle = computed(() => {
 
 const canvasDetailButtonCell = computed(() => {
   if (!useCanvasGridRows.value || isScrolling.value) return null;
-  const target = hoveredDetailCell.value ?? quickDownloadMenuCell.value ?? (showCellDetail.value ? detailCell.value : null);
+  const target = hoveredDetailCell.value ?? quickDownloadMenuCell.value ?? (cellDetailPanelActive.value ? detailCell.value : null);
   if (!target || !cellDetailButtonVisible(target.rowIndex, target.col)) return null;
   const editing = editingCell.value;
   if (editing && editing.rowId === displayItems.value[target.rowIndex]?.id && editing.col === target.col) return null;
@@ -10956,11 +10964,11 @@ function onTransposeCellContext(rowIndex: number, actualColIdx: number, event: M
   contextCell.value = item ? { rowId: item.id, rowIndex, col: actualColIdx } : null;
 }
 
-watch([selectedRange, showCellDetail, isEditingDetail, isSelectingCells], () => {
+watch([selectedRange, cellDetailPanelActive, isEditingDetail, isSelectingCells], () => {
   if (isSelectingCells.value) return;
   const selectedCell = currentSelectedCellPosition();
   const target = linkedCellDetailTarget({
-    isOpen: showCellDetail.value,
+    isOpen: cellDetailPanelActive.value,
     isEditing: isEditingDetail.value && activeCellDetailTab.value !== "valueEditor",
     selectedCell: selectedCell
       ? {
@@ -12473,7 +12481,7 @@ async function handleGridActionKeydown(event: KeyboardEvent) {
   }
 
   const target = event.target;
-  if (event.key === "Escape" && !event.isComposing && showCellDetail.value && target instanceof Element && (target === gridRef.value || target.closest("[data-cell-detail-panel]"))) {
+  if (event.key === "Escape" && !event.isComposing && cellDetailPanelActive.value && target instanceof Element && (target === gridRef.value || target.closest("[data-cell-detail-panel]"))) {
     if (escapeCellDetails()) {
       event.preventDefault();
       event.stopPropagation();
@@ -14283,7 +14291,7 @@ watch(cellDetailPanelLayout, (layout) => {
   scheduleActiveCellEditTextareaResize();
 });
 
-watch([showCellDetail, activeCellDetail, cellDetailPanelIsBottom, detailPanelHeight], scheduleActiveCellEditTextareaResize);
+watch([cellDetailPanelActive, activeCellDetail, cellDetailPanelIsBottom, detailPanelHeight], scheduleActiveCellEditTextareaResize);
 
 const ddlDrawerStyle = computed(() => ({
   width: `min(${ddlWidth.value}px, 100%)`,
@@ -14303,7 +14311,7 @@ const mongoJsonPreviewStyle = computed(() => ({
 }));
 
 const contentGridStyle = computed(() => {
-  const hasRightCellDetail = !cellDetailPanelIsBottom.value && showCellDetail.value && activeCellDetail.value;
+  const hasRightCellDetail = !cellDetailPanelIsBottom.value && cellDetailPanelActive.value && (cellDetailPanelPinned.value || !!activeCellDetail.value);
   const rightPanelWidth = hasRightCellDetail ? detailPanelHeight.value : mongoJsonPreviewOpen.value ? mongoJsonPreviewWidth.value : 0;
   const hasRightPanel = hasRightCellDetail || mongoJsonPreviewOpen.value;
   // Keep this track explicit. WebKit can resolve a nested min() track sizing
@@ -14329,11 +14337,20 @@ const contentGridStyle = computed(() => {
 });
 
 function toggleCellDetailPanelLayout() {
-  const nextLayout = cellDetailPanelIsBottom.value ? "right" : "bottom";
+  if (cellDetailPanelPinned.value) showCellDetail.value = !!activeCellDetail.value;
+  setCellDetailPanelLayout(cellDetailPanelIsBottom.value ? "right" : "bottom");
+}
+
+function togglePinnedCellDetailPanel() {
+  if (cellDetailPanelPinned.value) showCellDetail.value = !!activeCellDetail.value;
+  setCellDetailPanelLayout(cellDetailPanelPinned.value ? "right" : "right-pinned");
+}
+
+function setCellDetailPanelLayout(nextLayout: typeof cellDetailPanelLayout.value) {
   const nextSize = clampCellDetailPanelSize(detailPanelHeight.value, nextLayout);
   detailPanelHeight.value = nextSize;
   settingsStore.updateEditorSettings({
-    ...(nextLayout === "right" ? { cellDetailDrawerWidth: nextSize } : {}),
+    ...(nextLayout !== "bottom" ? { cellDetailDrawerWidth: nextSize } : {}),
     cellDetailPanelLayout: nextLayout,
   });
 }
@@ -18176,7 +18193,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           </div>
           <!-- Cell Detail Drawer -->
           <div
-            v-if="showCellDetail && activeCellDetail"
+            v-if="cellDetailPanelActive && (cellDetailPanelPinned || activeCellDetail)"
             data-cell-detail-panel
             class="relative flex flex-col bg-background min-w-0"
             :class="[cellDetailPanelIsBottom ? 'col-start-1 row-start-2 border-t' : 'col-start-4 row-start-1 border-l', { 'detail-drawer-resizing': isResizingDetail }]"
@@ -18189,13 +18206,16 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               <DataGridCellDetailHeader
                 :metadata-collapsed="cellDetailMetadataCollapsed"
                 :panel-is-bottom="cellDetailPanelIsBottom"
+                :panel-pinned="cellDetailPanelPinned"
+                :no-active-cell="!activeCellDetail"
                 :active-tabs="activeCellDetailTabs"
                 @toggle-metadata="toggleCellDetailMetadataCollapsed"
                 @toggle-layout="toggleCellDetailPanelLayout"
+                @toggle-pin="togglePinnedCellDetailPanel"
                 @open-cell-details="openActiveCellDetailDialog"
                 @open-row-details="openActiveRowDetailDialog"
                 @open-column-details="openActiveColumnDetailDialog"
-                @close="closeCellDetails"
+                @close="dismissCellDetailPanel"
               />
 
               <DataGridCellDetailPanel
@@ -18236,6 +18256,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 @copy-column-name="copyDetailColumnName"
                 @copy-sql-condition="copyDetailSqlCondition"
               />
+              <p v-else class="p-3 text-xs text-muted-foreground">{{ t("grid.cellDetailSelectCell") }}</p>
               <DataGridCellDetailHexViewer v-if="activeCellDetailTabs.includes('hexViewer')" :rows="activeBinaryHexRows" :byte-count="activeBinaryHexByteCount" />
               <DataGridCellDetailForeignKey v-if="activeCellDetailTabs.includes('foreignKey') && detailCell" :preview="foreignKeyRowPreview" @open="navigateToForeignKeyCell(detailCell.rowIndex, detailCell.col)" />
 

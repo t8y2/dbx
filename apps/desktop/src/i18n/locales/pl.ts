@@ -2941,6 +2941,8 @@ export default withEnglishFallback({
     cellDetails: "Szczegóły komórki",
     cellDetailLayoutBottom: "Przenieś na dół",
     cellDetailLayoutRight: "Przenieś w prawo",
+    pinCellDetailOnRight: "Przypnij szczegóły komórki po prawej",
+    cellDetailSelectCell: "Wybierz komórkę, aby zobaczyć jej wartość.",
     collapseCellDetailMetadata: "Zwiń metadane komórki",
     expandCellDetailMetadata: "Rozwiń metadane komórki",
     openCellDetailsDialog: "Otwórz szczegóły komórki",

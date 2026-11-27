@@ -390,6 +390,8 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
       caseInsensitiveIdentifiers: true,
       identifierQuotes: "",
       doubleDollarQuotedStrings: false,
+      // SOQL has no nested block comments.
+      nestedComments: false,
     }).configureLanguage({
       props: SQL_DIALECT_LANGUAGE_PROPS,
     });
@@ -433,6 +435,12 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
         }
       : {}),
     ...(isPlsql ? { doubleQuotedStrings: false } : {}),
+    // CodeMirror's SQL tokenizer nests /* */ block comments (the PostgreSQL
+    // rule). Oracle, MySQL, SQL Server and the rest close at the first */, so a
+    // stray `/*` inside a comment otherwise leaks the comment state downward and
+    // paints the rest of the document green (#oracle-package-all-green). Only
+    // PostgreSQL-family dialects genuinely nest.
+    nestedComments: isPostgres,
     doubleDollarQuotedStrings: false,
   }).configureLanguage({
     props: SQL_DIALECT_LANGUAGE_PROPS,

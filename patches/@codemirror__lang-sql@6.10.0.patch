@@ -1,0 +1,78 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 6575f5f1fb60913c691d702ca21d8f58548f8866..fe24bd31ef9589f393cbca130aa2600f3424a0c5 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -169,6 +169,7 @@ const defaults = {
+     treatBitsAsBytes: false,
+     charSetCasts: false,
+     plsqlQuotingMechanism: false,
++    nestedComments: true,
+     operatorChars: "*+\-%<>!=&|~^/",
+     specialVar: "?",
+     identifierQuotes: '"',
+@@ -228,7 +229,7 @@ function tokensFor(d) {
+                     if (!depth)
+                         break;
+                 }
+-                else if (cur == 47 /* Ch.Slash */ && input.next == 42 /* Ch.Star */) {
++                else if (d.nestedComments && cur == 47 /* Ch.Slash */ && input.next == 42 /* Ch.Star */) {
+                     depth++;
+                     input.advance();
+                 }
+diff --git a/dist/index.d.cts b/dist/index.d.cts
+index 9a7b9b34ff226d82b3db38439adedfe0d6adba1c..26a15e9fe0fe0f5c433701174cd1b8508e435a39 100644
+--- a/dist/index.d.cts
++++ b/dist/index.d.cts
+@@ -56,6 +56,13 @@ type SQLDialectSpec = {
+     */
+     plsqlQuotingMechanism?: boolean;
+     /**
++    When true, block comments nest: a `/*` sequence inside a comment opens
++    another level that needs its own close. Defaults to true. Oracle and
++    MySQL do not nest block comments (the first close ends them), so set
++    this to false for those dialects.
++    */
++    nestedComments?: boolean;
++    /**
+     The set of characters that make up operators. Defaults to
+     `"*+\-%<>!=&|~^/"`.
+     */
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 9a7b9b34ff226d82b3db38439adedfe0d6adba1c..26a15e9fe0fe0f5c433701174cd1b8508e435a39 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -56,6 +56,13 @@ type SQLDialectSpec = {
+     */
+     plsqlQuotingMechanism?: boolean;
+     /**
++    When true, block comments nest: a `/*` sequence inside a comment opens
++    another level that needs its own close. Defaults to true. Oracle and
++    MySQL do not nest block comments (the first close ends them), so set
++    this to false for those dialects.
++    */
++    nestedComments?: boolean;
++    /**
+     The set of characters that make up operators. Defaults to
+     `"*+\-%<>!=&|~^/"`.
+     */
+diff --git a/dist/index.js b/dist/index.js
+index 2cf97dab7f078ea917d2f0d2719334bd6e04ed90..f31520633989c649728911843b00460f58118110 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -167,6 +167,7 @@ const defaults = {
+     treatBitsAsBytes: false,
+     charSetCasts: false,
+     plsqlQuotingMechanism: false,
++    nestedComments: true,
+     operatorChars: "*+\-%<>!=&|~^/",
+     specialVar: "?",
+     identifierQuotes: '"',
+@@ -226,7 +227,7 @@ function tokensFor(d) {
+                     if (!depth)
+                         break;
+                 }
+-                else if (cur == 47 /* Ch.Slash */ && input.next == 42 /* Ch.Star */) {
++                else if (d.nestedComments && cur == 47 /* Ch.Slash */ && input.next == 42 /* Ch.Star */) {
+                     depth++;
+                     input.advance();
+                 }

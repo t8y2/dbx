@@ -163,6 +163,9 @@
       "happy-dom": "~20.10.6",
       "@lezer/common": "1.5.5",
       "@codemirror/view": "6.43.0"
+    },
+    "patchedDependencies": {
+      "@codemirror/lang-sql@6.10.0": "patches/@codemirror__lang-sql@6.10.0.patch"
     }
   }
 }

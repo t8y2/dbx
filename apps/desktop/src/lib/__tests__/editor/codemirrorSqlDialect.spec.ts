@@ -155,6 +155,33 @@ describe("codemirrorSqlDialect", () => {
     expect(nodeNameAt(dialect, doubleQuoteStatement, "col")).toBe("Identifier");
   });
 
+  it("does not nest block comments for Oracle/MySQL so a stray inner /* cannot swallow the rest of the document", () => {
+    // Real-world shape from an Oracle package body: a second `/*` appears before
+    // the first `*/`. Oracle, MySQL, SQL Server and SQLite all close the comment
+    // at the first `*/`, so the code after it stays code. CodeMirror's SQL
+    // tokenizer otherwise nests `/* */` (the PostgreSQL rule) and the comment
+    // state leaks downward, painting the rest of a package body green.
+    const source = ["/* outer note /* inner marker */", "SELECT col FROM dual"].join("\n");
+
+    for (const databaseType of ["oracle", "mysql", "sqlserver", "sqlite"] as DatabaseType[]) {
+      const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType);
+      expect(dialect.spec.nestedComments, databaseType).toBe(false);
+      expect(nodeNameAt(dialect, source, "SELECT"), databaseType).toBe("Keyword");
+      expect(nodeNameAt(dialect, source, "FROM"), databaseType).toBe("Keyword");
+    }
+  });
+
+  it("keeps nested block comments for PostgreSQL, which genuinely supports them", () => {
+    const source = ["/* outer /* inner */", "SELECT 1"].join("\n");
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "postgres", "postgres");
+
+    expect(dialect.spec.nestedComments).toBe(true);
+    // The inner `/*` opens a second level, so the first `*/` only drops to depth
+    // one and the trailing SELECT stays inside the comment instead of becoming a
+    // keyword — the behaviour Postgres users expect.
+    expect(nodeNameAt(dialect, source, "SELECT")).not.toBe("Keyword");
+  });
+
   it("tags QuotedIdentifier as tags.name so quoted columns/tables match unquoted identifiers (#12122)", async () => {
     const { highlightTree, tags } = await import("@lezer/highlight");
     const { HighlightStyle } = await import("@codemirror/language");

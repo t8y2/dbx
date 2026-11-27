@@ -7,7 +7,8 @@ use crate::models::connection::ConnectionConfig;
 
 /// Splits a SQL script into statements on `;`, ignoring separators inside
 /// single/double quotes, `--` line comments, and `/* */` block comments.
-/// Statements are trimmed; empty fragments are dropped.
+/// DuckDB nests block comments, so a comment only ends at the `*/` that closes
+/// its outermost depth. Statements are trimmed; empty fragments are dropped.
 pub fn split_sql_statements(script: &str) -> Vec<String> {
     let bytes = script.as_bytes();
     let mut statements = Vec::new();
@@ -51,11 +52,7 @@ pub fn split_sql_statements(script: &str) -> Vec<String> {
                 continue;
             }
             b'/' if !in_single && !in_double && bytes.get(i + 1) == Some(&b'*') => {
-                i += 2;
-                while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
-                    i += 1;
-                }
-                i = (i + 2).min(bytes.len());
+                i = block_comment_end(bytes, i).unwrap_or(bytes.len());
                 continue;
             }
             b'$' if !in_single && !in_double => {
@@ -81,6 +78,34 @@ fn is_escape_string_quote(bytes: &[u8], quote_index: usize) -> bool {
         return false;
     }
     quote_index == 1 || !(bytes[quote_index - 2].is_ascii_alphanumeric() || bytes[quote_index - 2] == b'_')
+}
+
+/// Index right after the block comment that starts at `start` (`start` points
+/// at `/`, `start + 1` at `*`).
+///
+/// DuckDB's lexer nests block comments (`xcdepth` in `scan.l`), so
+/// `/* a /* b */ c */` is one comment ending at the last `*/`. `None` means the
+/// comment is unterminated: the rest of the script stays inside it.
+fn block_comment_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut i = start + 2;
+    while i + 1 < bytes.len() {
+        match (bytes[i], bytes[i + 1]) {
+            (b'/', b'*') => {
+                depth += 1;
+                i += 2;
+            }
+            (b'*', b'/') => {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 fn push_statement(statements: &mut Vec<String>, fragment: &str) {
@@ -121,8 +146,7 @@ fn dollar_quote_end(bytes: &[u8], start: usize) -> Option<usize> {
 /// skipped so `-- note\nATTACH ...` is still recognized.
 pub fn attached_name_from_attach_sql(sql: &str) -> Option<String> {
     let trimmed = strip_leading_comments(sql);
-    let first_word = trimmed.split(|ch: char| ch.is_whitespace() || ch == ';').next().unwrap_or_default();
-    if !first_word.eq_ignore_ascii_case("ATTACH") {
+    if !is_attach_statement(trimmed) {
         return None;
     }
 
@@ -130,13 +154,78 @@ pub fn attached_name_from_attach_sql(sql: &str) -> Option<String> {
     parse_identifier_after_as(&trimmed[as_index + 2..])
 }
 
+/// Returns the file path or URI targeted by an `ATTACH` statement, or `None`
+/// when the statement is not an ATTACH or its target cannot be read without a
+/// full parser (`ATTACH E'...'`, an expression, ...).
+///
+/// DuckDB accepts `ATTACH [DATABASE] [IF NOT EXISTS] '<target>' [AS alias]`;
+/// the target is always a single-quoted literal. Comments count as whitespace
+/// between tokens, so `ATTACH/**/'x.duckdb'` is the same statement.
+pub fn attached_target_from_attach_sql(sql: &str) -> Option<String> {
+    let trimmed = strip_leading_comments(sql);
+    if !is_attach_statement(trimmed) {
+        return None;
+    }
+    let rest = strip_leading_comments(&trimmed["ATTACH".len()..]);
+    let rest = strip_keyword(rest, "DATABASE").map(strip_leading_comments).unwrap_or(rest);
+    let rest = match strip_keyword(rest, "IF") {
+        Some(after_if) => {
+            let after_not = strip_keyword(strip_leading_comments(after_if), "NOT")?;
+            strip_keyword(strip_leading_comments(after_not), "EXISTS")?
+        }
+        None => rest,
+    };
+    parse_single_quoted_literal(strip_leading_comments(rest))
+}
+
+/// True when the statement's first token is `ATTACH`; leading comments are
+/// skipped so `-- note\nATTACH ...` is still recognized.
+///
+/// The keyword is matched as a whole token, not as a whitespace-delimited word:
+/// `ATTACH'db.duckdb'` and `ATTACH/**/'db.duckdb'` are valid DuckDB and must
+/// not slip past a guard that splits on whitespace only.
+pub fn is_attach_statement(sql: &str) -> bool {
+    let trimmed = strip_leading_comments(sql);
+    let end = trimmed.find(|ch: char| !(ch.is_alphanumeric() || ch == '_')).unwrap_or(trimmed.len());
+    trimmed[..end].eq_ignore_ascii_case("ATTACH")
+}
+
+fn strip_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let end = input.find(|ch: char| !ch.is_ascii_alphabetic())?;
+    input[..end].eq_ignore_ascii_case(keyword).then(|| &input[end..])
+}
+
+fn parse_single_quoted_literal(input: &str) -> Option<String> {
+    let mut chars = input.strip_prefix('\'')?.chars();
+    let mut value = String::new();
+    while let Some(ch) = chars.next() {
+        if ch != '\'' {
+            value.push(ch);
+            continue;
+        }
+        if chars.as_str().starts_with('\'') {
+            chars.next();
+            value.push('\'');
+            continue;
+        }
+        return Some(value);
+    }
+    // Unterminated literal: refuse to guess what DuckDB would open.
+    None
+}
+
 pub fn strip_leading_comments(sql: &str) -> &str {
     let mut rest = sql.trim_start();
     loop {
         if let Some(after) = rest.strip_prefix("--") {
             rest = after.split_once('\n').map(|(_, tail)| tail).unwrap_or("").trim_start();
-        } else if let Some(after) = rest.strip_prefix("/*") {
-            rest = after.split_once("*/").map(|(_, tail)| tail).unwrap_or("").trim_start();
+        } else if rest.starts_with("/*") {
+            // Nested like DuckDB's lexer: an unterminated comment swallows the
+            // rest of the script, so there is no executable text left.
+            rest = match block_comment_end(rest.as_bytes(), 0) {
+                Some(end) => rest[end..].trim_start(),
+                None => "",
+            };
         } else {
             return rest;
         }
@@ -289,5 +378,87 @@ mod tests {
     fn init_script_names_collects_attach_aliases() {
         let script = "INSTALL httpfs; LOAD httpfs;\nCREATE SECRET (TYPE s3, KEY_ID 'k', SECRET 's');\nATTACH 'ducklake:postgres:dbname=lake' AS lake;\nATTACH 'sales.duckdb' AS \"sales db\";";
         assert_eq!(init_script_attached_names(script), vec!["lake".to_string(), "sales db".to_string()]);
+    }
+
+    #[test]
+    fn attach_target_parser_reads_file_targets() {
+        assert_eq!(
+            attached_target_from_attach_sql("ATTACH 'D:\\tmp\\sales.duckdb' AS \"sales db\";"),
+            Some("D:\\tmp\\sales.duckdb".to_string())
+        );
+        assert_eq!(
+            attached_target_from_attach_sql("attach database if not exists '/tmp/x.db' as x"),
+            Some("/tmp/x.db".to_string())
+        );
+        assert_eq!(
+            attached_target_from_attach_sql("-- note\n/* block */ ATTACH 'a''b.db' AS x"),
+            Some("a'b.db".to_string())
+        );
+        assert_eq!(
+            attached_target_from_attach_sql("ATTACH 'ducklake:postgres:dbname=lake' (READ_ONLY)"),
+            Some("ducklake:postgres:dbname=lake".to_string())
+        );
+    }
+
+    #[test]
+    fn attach_target_parser_refuses_unreadable_targets() {
+        assert_eq!(attached_target_from_attach_sql("SELECT 'attach'"), None);
+        assert_eq!(attached_target_from_attach_sql("ATTACH E'C:\\x.db' AS x"), None);
+        assert_eq!(attached_target_from_attach_sql("ATTACH"), None);
+        assert_eq!(attached_target_from_attach_sql("ATTACH 'unterminated"), None);
+        assert!(is_attach_statement("  -- note\nATTACH 'x.db'"));
+        assert!(!is_attach_statement("CREATE TABLE attached (id INT)"));
+    }
+
+    #[test]
+    fn attach_keyword_is_matched_as_a_token() {
+        // DuckDB accepts no whitespace between the keyword and the literal, and
+        // comments count as whitespace between tokens.
+        assert!(is_attach_statement("ATTACH'x.duckdb' AS x"));
+        assert!(is_attach_statement("ATTACH/**/'x.duckdb' AS x"));
+        assert!(is_attach_statement("attach/*c*/ 'x.duckdb'"));
+        assert_eq!(attached_target_from_attach_sql("ATTACH/**/'x.duckdb' AS x"), Some("x.duckdb".to_string()));
+        assert_eq!(
+            attached_target_from_attach_sql("ATTACH/*c*/DATABASE/*c*/IF/*c*/NOT/*c*/EXISTS/*c*/'x.duckdb'"),
+            Some("x.duckdb".to_string())
+        );
+        // Words that merely start with ATTACH (or quotes that contain it) are
+        // not statements.
+        assert!(!is_attach_statement("ATTACHED 'x.duckdb' AS x"));
+        assert!(!is_attach_statement("'ATTACH' AS x"));
+        assert!(!is_attach_statement(""));
+    }
+
+    #[test]
+    fn attach_parser_handles_comment_and_statement_boundaries() {
+        // DuckDB's lexer nests block comments (`xcdepth` in scan.l): the outer
+        // comment closes only at the last `*/`, so an ATTACH-like text inside it
+        // is inert and an ATTACH after the matching close is a real statement.
+        assert_eq!(
+            attached_target_from_attach_sql("/* outer /* inner */ still comment */ ATTACH 'x.duckdb' AS x"),
+            Some("x.duckdb".to_string())
+        );
+        // The reviewer's shape: the ATTACH text sits inside the outer comment.
+        assert!(!is_attach_statement("/* outer /* inner */ ATTACH 'x.duckdb' AS x */"));
+        // An unterminated outer comment swallows the rest as well.
+        assert_eq!(attached_target_from_attach_sql("/* outer /* inner */ ATTACH 'x.duckdb' AS x"), None);
+        // A comment that names ATTACH, or an unclosed leading comment that
+        // swallows the script, is not an ATTACH statement.
+        assert!(!is_attach_statement("/* ATTACH 'x.duckdb' AS x */ SELECT 1"));
+        assert!(!is_attach_statement("/* unterminated ATTACH 'x.duckdb'"));
+        assert_eq!(attached_target_from_attach_sql("-- only a comment"), None);
+        // Comments between every keyword still parse; each optional keyword is
+        // matched against the token that follows the comment.
+        assert_eq!(
+            attached_target_from_attach_sql("ATTACH/**/DATABASE/**/IF/**/NOT/**/EXISTS/**/'x.duckdb' AS x"),
+            Some("x.duckdb".to_string())
+        );
+        // A trailing line comment does not change the parsed target.
+        assert_eq!(attached_target_from_attach_sql("ATTACH 'x.duckdb' -- trailing note"), Some("x.duckdb".to_string()));
+        // Semicolons inside a literal or a comment stay inside one statement,
+        // including a semicolon between the inner and outer comment closers.
+        assert_eq!(split_sql_statements("ATTACH 'a;b.duckdb' AS a; -- note; still one\nSELECT 1").len(), 2);
+        assert_eq!(split_sql_statements("/* a /* b */ ; */ SELECT 1").len(), 1);
+        assert_eq!(split_sql_statements("/* a /* b */ ; */ SELECT 1; SELECT 2").len(), 2);
     }
 }

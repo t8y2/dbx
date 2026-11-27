@@ -796,22 +796,51 @@ pub fn mcp_sql_has_forbidden_database_switch(sql: &str, database_type: DatabaseT
     false
 }
 
+/// MCP must not allow SQLite/DuckDB file attachments. Both engines resolve
+/// `ATTACH` targets against the local file system, so any in-scope connection
+/// could otherwise open DBX's own configuration database (`dbx.db`, which stores
+/// `mcp_global_policy`) from unrelated SQL and rewrite the policy that constrains
+/// it (#9108). Attachments belong to a connection's saved configuration in DBX,
+/// not to agent-issued SQL.
+pub fn mcp_sql_has_forbidden_file_attach(sql: &str, database_type: DatabaseType) -> bool {
+    if !matches!(database_type, DatabaseType::Sqlite | DatabaseType::DuckDb) {
+        return false;
+    }
+    let database_type_name = format!("{database_type:?}");
+    let normalized = normalize_dialect(&database_type_name);
+    let dialect = resolve_dialect(normalized);
+    // Fail closed: SQL this tokenizer cannot read at all still reaches SQLite or
+    // DuckDB, so an unreadable script must not read as "no ATTACH here".
+    sql_has_statement_keyword(sql, dialect.as_ref(), &["attach", "detach"]).unwrap_or(true)
+}
+
 fn sql_has_use_statement(sql: &str, dialect: &dyn sqlparser::dialect::Dialect) -> bool {
     if let Ok(statements) = Parser::parse_sql(dialect, sql) {
         return statements.iter().any(|statement| matches!(statement, Statement::Use(_)));
     }
+    // Preserve the historical behaviour here: an unreadable script is not
+    // treated as a database switch by this check on its own.
+    sql_has_statement_keyword(sql, dialect, &["use"]).unwrap_or(false)
+}
 
-    let Ok(tokens) = Tokenizer::new(dialect, sql).tokenize() else {
-        return false;
-    };
+/// True when any statement in `sql` starts with one of `keywords`. Token based so
+/// the check still works when the parser rejects the script, and statement-scoped
+/// so a keyword inside a literal or an identifier never matches. Whitespace
+/// tokens include comments, so a `-- note` before `ATTACH` is skipped.
+///
+/// `None` means the input could not be tokenized at all; callers decide whether
+/// that is safe to ignore (the `USE` check does) or must fail closed (the
+/// file-attach restriction does).
+fn sql_has_statement_keyword(sql: &str, dialect: &dyn sqlparser::dialect::Dialect, keywords: &[&str]) -> Option<bool> {
+    let tokens = Tokenizer::new(dialect, sql).tokenize().ok()?;
     let mut statement_start = true;
     for token in tokens {
         match token {
             Token::Whitespace(_) => {}
             Token::SemiColon => statement_start = true,
             Token::Word(word) if statement_start => {
-                if word.value.eq_ignore_ascii_case("use") {
-                    return true;
+                if keywords.iter().any(|keyword| word.value.eq_ignore_ascii_case(keyword)) {
+                    return Some(true);
                 }
                 statement_start = false;
             }
@@ -820,7 +849,7 @@ fn sql_has_use_statement(sql: &str, dialect: &dyn sqlparser::dialect::Dialect) -
             _ => {}
         }
     }
-    false
+    Some(false)
 }
 
 fn supports_select_into_table_creation(database_type: DatabaseType) -> bool {
@@ -1947,6 +1976,52 @@ mod tests {
             assert!(!mcp_sql_has_forbidden_database_switch(sql, DatabaseType::Mysql), "expected allowed SQL: {sql}");
         }
         assert!(!mcp_sql_has_forbidden_database_switch("/*!50000 USE reporting */", DatabaseType::Postgres));
+    }
+
+    #[test]
+    fn mcp_forbids_sqlite_and_duckdb_file_attachments() {
+        for database_type in [DatabaseType::Sqlite, DatabaseType::DuckDb] {
+            for sql in [
+                "ATTACH DATABASE '/tmp/other.db' AS other",
+                "attach '/tmp/other.db' as other",
+                "-- note\nATTACH 'other.db' AS other",
+                "SELECT 1; DETACH DATABASE other;",
+            ] {
+                assert!(
+                    mcp_sql_has_forbidden_file_attach(sql, database_type),
+                    "expected blocked SQL for {database_type:?}: {sql}"
+                );
+            }
+            for sql in [
+                "SELECT * FROM attached_table",
+                "INSERT INTO notes VALUES ('ATTACH DATABASE x')",
+                "SELECT attach FROM feature_flags",
+            ] {
+                assert!(
+                    !mcp_sql_has_forbidden_file_attach(sql, database_type),
+                    "expected allowed SQL for {database_type:?}: {sql}"
+                );
+            }
+        }
+
+        // File attachments are a SQLite/DuckDB concern; other engines keep their
+        // existing behaviour.
+        for database_type in [DatabaseType::Mysql, DatabaseType::Postgres, DatabaseType::SqlServer] {
+            assert!(!mcp_sql_has_forbidden_file_attach("ATTACH DATABASE '/tmp/other.db' AS other", database_type));
+        }
+    }
+
+    #[test]
+    fn unreadable_sql_is_not_reported_as_safe_for_file_attachments() {
+        let dialect = resolve_dialect(normalize_dialect("Sqlite"));
+        // The tokenizer rejects the unterminated literal; the attach restriction
+        // must treat that as "cannot verify" (`None`), not as "no ATTACH".
+        assert_eq!(sql_has_statement_keyword("SELECT 'unterminated", dialect.as_ref(), &["attach"]), None);
+        assert_eq!(sql_has_statement_keyword("SELECT 1", dialect.as_ref(), &["attach"]), Some(false));
+        assert!(mcp_sql_has_forbidden_file_attach("SELECT 'unterminated", DatabaseType::Sqlite));
+        assert!(mcp_sql_has_forbidden_file_attach("SELECT 'unterminated", DatabaseType::DuckDb));
+        // Non-SQLite/DuckDB engines are unaffected by this restriction.
+        assert!(!mcp_sql_has_forbidden_file_attach("SELECT 'unterminated", DatabaseType::Postgres));
     }
 
     #[test]

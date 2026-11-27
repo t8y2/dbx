@@ -513,6 +513,10 @@ pub async fn connect_db(
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
     let config = state.resolve_connection_credentials(body.config).await?;
+    // #9108: an MCP-forwarded connect creates the pool that introspection and
+    // SQL then reuse, so the configuration-database target check has to run
+    // before the pool exists — the schema routes only re-check their own calls.
+    super::mcp_policy::ensure_connection_target(&state, &headers, &config)?;
     // 演示模式：只允许连接已保存的连接，端点身份以存储为准，防止伪造 body
     // 配置把服务器拨向任意主机（见 demo 模块）。
     if state.demo_mode {
@@ -1205,6 +1209,21 @@ pub async fn load_connections(
             })
             .await?;
         if let ConnectionConfigSyncAttempt::Applied((_, configs)) = attempt {
+            // #9108: the standalone MCP process filters its own listings, but a
+            // Web-forwarded one always reports `ConfigDbBoundary::Remote` because
+            // it may resolve a different data directory. The server owns the
+            // authoritative path, so MCP-marked listings are filtered here.
+            let configs = if super::mcp_policy::is_mcp_request(&headers) {
+                let config_db = state.app.storage.storage_db_path();
+                configs
+                    .into_iter()
+                    .filter(|config| {
+                        dbx_core::persistence::mcp_target_guard::ensure_mcp_target_allowed(config_db, config).is_ok()
+                    })
+                    .collect()
+            } else {
+                configs
+            };
             return Ok(Json(configs.into_iter().map(|config| state.connection_response(config)).collect()));
         }
     }
@@ -2836,6 +2855,35 @@ done
 
         // 既有会话凭据必须保留，下次重连无需重新输入密码。
         assert!(state.app.session_credentials.has("token-a", "conn-a"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn mcp_connection_list_hides_the_config_database() {
+        // #9108: the standalone MCP process always reports `Remote`, so the
+        // server owns listing-level filtering for MCP-forwarded lists.
+        let (state, dir) = test_web_state().await;
+        let config_db = state.app.storage.storage_db_path().to_path_buf();
+        let protected = sqlite_config("protected", &config_db.to_string_lossy());
+        let allowed = sqlite_config("allowed", &dir.join("allowed.db").to_string_lossy());
+        state.app.storage.save_connections(&[protected, allowed]).await.unwrap();
+
+        let mut mcp_headers = HeaderMap::new();
+        mcp_headers.insert("x-dbx-mcp-request", "1".parse().unwrap());
+        let listed = load_connections(State(state.clone()), mcp_headers, Query(super::LoadConnectionsQuery::default()))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = listed.0.iter().map(|response| response.config.id.as_str()).collect();
+        assert!(!ids.contains(&"protected"), "{ids:?}");
+        assert!(ids.contains(&"allowed"), "{ids:?}");
+
+        // The Web UI (no MCP marker) still lists the configuration database.
+        let all =
+            load_connections(State(state.clone()), HeaderMap::new(), Query(super::LoadConnectionsQuery::default()))
+                .await
+                .unwrap();
+        assert!(all.0.iter().any(|response| response.config.id == "protected"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -179,4 +179,22 @@ mod tests {
 
         assert_eq!(value, "it's;ok");
     }
+
+    #[test]
+    fn nested_block_comments_match_the_engine_lexer() {
+        // Engine-level proof of the nested-comment rule our splitter mirrors:
+        // DuckDB's lexer keeps the ATTACH-like text inside the outer comment, so
+        // the script runs as one statement and nothing is attached. If the
+        // engine did not nest, the trailing `*/` would be a syntax error here.
+        let con = connect_path(":memory:").expect("connect in-memory DuckDB");
+        let locked = con.lock().expect("lock connection");
+
+        run_init_script(&locked, "/* outer /* inner */ ATTACH ':memory:' AS hidden */ SELECT 42")
+            .expect("nested comment script runs as one statement");
+        let attached: i64 = locked
+            .query_row("SELECT COUNT(*) FROM duckdb_databases() WHERE database_name = 'hidden'", [], |row| row.get(0))
+            .expect("count databases");
+
+        assert_eq!(attached, 0, "text inside a nested comment must not execute");
+    }
 }

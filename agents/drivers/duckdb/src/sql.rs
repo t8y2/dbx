@@ -39,11 +39,7 @@ pub fn split_sql_statements(script: &str) -> Vec<String> {
                 continue;
             }
             b'/' if !in_single && !in_double && bytes.get(index + 1) == Some(&b'*') => {
-                index += 2;
-                while index < bytes.len() && !(bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/')) {
-                    index += 1;
-                }
-                index = (index + 2).min(bytes.len());
+                index = block_comment_end(bytes, index).unwrap_or(bytes.len());
                 continue;
             }
             b'$' if !in_single && !in_double => {
@@ -69,6 +65,34 @@ fn is_escape_string_quote(bytes: &[u8], quote_index: usize) -> bool {
         return false;
     }
     quote_index == 1 || !(bytes[quote_index - 2].is_ascii_alphanumeric() || bytes[quote_index - 2] == b'_')
+}
+
+/// Index right after the block comment that starts at `start` (`start` points
+/// at `/`, `start + 1` at `*`).
+///
+/// DuckDB's lexer nests block comments (`xcdepth` in `scan.l`), so
+/// `/* a /* b */ c */` is one comment ending at the last `*/`. `None` means the
+/// comment is unterminated: the rest of the script stays inside it.
+fn block_comment_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut index = start + 2;
+    while index + 1 < bytes.len() {
+        match (bytes[index], bytes[index + 1]) {
+            (b'/', b'*') => {
+                depth += 1;
+                index += 2;
+            }
+            (b'*', b'/') => {
+                depth -= 1;
+                index += 2;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 fn push_statement(statements: &mut Vec<String>, fragment: &str) {
@@ -116,8 +140,13 @@ pub fn strip_leading_comments(sql: &str) -> &str {
     loop {
         if let Some(after) = rest.strip_prefix("--") {
             rest = after.split_once('\n').map(|(_, tail)| tail).unwrap_or("").trim_start();
-        } else if let Some(after) = rest.strip_prefix("/*") {
-            rest = after.split_once("*/").map(|(_, tail)| tail).unwrap_or("").trim_start();
+        } else if rest.starts_with("/*") {
+            // Nested like DuckDB's lexer: an unterminated comment swallows the
+            // rest of the script, so there is no executable text left.
+            rest = match block_comment_end(rest.as_bytes(), 0) {
+                Some(end) => rest[end..].trim_start(),
+                None => "",
+            };
         } else {
             return rest;
         }
@@ -236,11 +265,7 @@ pub fn rewrite_duckdb_current_date_literal_arithmetic(sql: &str) -> std::borrow:
                 continue;
             }
             b'/' if !in_single && !in_double && bytes.get(index + 1) == Some(&b'*') => {
-                index += 2;
-                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
-                    index += 1;
-                }
-                index = (index + 2).min(bytes.len());
+                index = block_comment_end(bytes, index).unwrap_or(bytes.len());
                 continue;
             }
             b'$' if !in_single && !in_double => {
@@ -358,11 +383,7 @@ fn contains_unquoted_sql_keyword(sql: &str, keyword: &str) -> bool {
                 }
             }
             b'/' if !in_single && !in_double && bytes.get(index + 1) == Some(&b'*') => {
-                index += 2;
-                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
-                    index += 1;
-                }
-                index = (index + 2).min(bytes.len());
+                index = block_comment_end(bytes, index).unwrap_or(bytes.len());
             }
             byte if !in_single && !in_double && (byte.is_ascii_alphabetic() || byte == b'_') => {
                 let start = index;
@@ -400,11 +421,7 @@ fn first_executable_sql_token(sql: &str) -> Option<&str> {
             continue;
         }
         if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
-            index += 2;
-            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
-                index += 1;
-            }
-            index = (index + 2).min(bytes.len());
+            index = block_comment_end(bytes, index).unwrap_or(bytes.len());
             continue;
         }
         break;
@@ -432,6 +449,18 @@ mod tests {
                 "SELECT $$a;b$$".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn splits_nested_block_comments_like_the_engine() {
+        // DuckDB nests block comments (`xcdepth` in scan.l): a `;` between the
+        // inner and outer closers is comment text, not a statement separator.
+        assert_eq!(split_sql_statements("/* a /* b */ ; */ SELECT 1"), vec!["/* a /* b */ ; */ SELECT 1".to_string()]);
+        assert_eq!(split_sql_statements("/* a /* b */ ; */ SELECT 1; SELECT 2").len(), 2);
+        // An unterminated outer comment leaves nothing executable, and an
+        // ATTACH after the matching close is real.
+        assert_eq!(strip_leading_comments("/* a /* b */ ATTACH 'x'"), "");
+        assert_eq!(strip_leading_comments("/* a /* b */ c */ ATTACH 'x'"), "ATTACH 'x'");
     }
 
     #[test]

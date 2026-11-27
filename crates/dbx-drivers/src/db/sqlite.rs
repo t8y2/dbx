@@ -585,7 +585,14 @@ fn ensure_parent_dir(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn is_network_path(path: &str) -> bool {
+/// Whether SQLite will be asked to open `path` as a network (UNC/WSL) file.
+///
+/// Public because the MCP target guard (`dbx_core::persistence::mcp_target_guard`)
+/// must refuse exactly the host forms this driver opens through the URI path:
+/// they can alias this machine's own drives (`\\localhost\c$`,
+/// `\\wsl.localhost\<distro>\mnt\c`, `\\<hostname>\c$`) while canonicalizing to
+/// a `\\?\UNC\...` form that never equals a drive-letter path.
+pub fn is_network_path(path: &str) -> bool {
     let normalized = path.replace('/', "\\");
     let is_verbatim_unc = normalized.get(..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case("\\\\?\\UNC\\"));
     is_verbatim_unc
@@ -672,6 +679,32 @@ mod tests {
 
         assert_eq!(sqlite_schema_name("main"), "main");
         assert_eq!(sqlite_schema_name("analytics"), "analytics");
+    }
+
+    #[test]
+    fn network_path_uri_reaches_the_file_behind_wsl_suffixes() {
+        // Driver-side half of the MCP target guard contract (#9108): a host
+        // containing `wsl$`/`wsl.localhost` is rewritten into a `file:` URI, and
+        // SQLite ignores the query and the fragment. The string names no file,
+        // yet the real database behind it is opened — on POSIX as well, which is
+        // why the guard must classify these forms without an OS gate.
+        let path = std::env::temp_dir().join(format!("dbx-wsl-uri-{}.db", uuid::Uuid::new_v4()));
+        let real = path.to_string_lossy().into_owned();
+        {
+            let conn = open_sqlite_connection(&real, true).expect("create probe database");
+            conn.execute_batch("CREATE TABLE probe (v INTEGER); INSERT INTO probe VALUES (42);")
+                .expect("seed probe database");
+        }
+        for suffix in ["?wsl$", "#wsl.localhost"] {
+            let hostile = format!("{real}{suffix}");
+            assert!(is_network_path(&hostile), "{hostile}");
+            let conn = open_sqlite_connection(&hostile, false).expect("open through the URI branch");
+            let value: i64 = conn.query_row("SELECT v FROM probe", [], |row| row.get(0)).expect("read real file");
+            assert_eq!(value, 42, "{hostile}");
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{real}-wal"));
+        let _ = std::fs::remove_file(format!("{real}-shm"));
     }
 
     #[test]

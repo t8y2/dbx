@@ -300,6 +300,26 @@ impl DbxBackend for UnavailableBackend {
     }
 }
 
+/// How a backend enforces DBX's configuration-database boundary (#9108).
+///
+/// The three states are deliberately distinct: an unresolvable boundary must
+/// fail closed, and it must not be reportable with the same value that means
+/// "a trusted remote party enforces this".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigDbBoundary {
+    /// This backend owns the configuration database at this path; the MCP
+    /// process enforces the guard itself.
+    Local(std::path::PathBuf),
+    /// A trusted remote backend (DBX Web) owns the configuration database and
+    /// enforces the same guard on every MCP-forwarded route. This process may
+    /// not be able to resolve the remote path at all.
+    Remote,
+    /// No boundary could be resolved. Local-file connections must be refused:
+    /// an unverifiable target must never read as "not the configuration
+    /// database".
+    Unresolved,
+}
+
 #[async_trait]
 pub trait DbxBackend: Send + Sync {
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String>;
@@ -311,6 +331,17 @@ pub trait DbxBackend: Send + Sync {
     }
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String>;
+
+    /// How this backend enforces DBX's configuration-database boundary.
+    ///
+    /// MCP refuses connections (and listings) that target `dbx.db`: it stores
+    /// `mcp_global_policy`, so letting an agent reach it would let the agent
+    /// rewrite the policy that constrains it (#9108). Backends that do not
+    /// resolve the path at all inherit [`ConfigDbBoundary::Unresolved`], which
+    /// refuses local-file connections rather than assuming they are safe.
+    fn config_db_boundary(&self) -> ConfigDbBoundary {
+        ConfigDbBoundary::Unresolved
+    }
 
     /// Whether the user has saved any MCP policy. Fresh installs have none,
     /// in which case writable plugin connections fall back to their own
@@ -1423,6 +1454,10 @@ impl DbxBackend for LocalBackend {
         Ok(configs)
     }
 
+    fn config_db_boundary(&self) -> ConfigDbBoundary {
+        ConfigDbBoundary::Local(self.state.storage.storage_db_path().to_path_buf())
+    }
+
     async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
         self.state.storage.save_history_entry(entry).await
     }
@@ -1946,6 +1981,17 @@ impl DbxBackend for WebBackend {
             .json()
             .await
             .map_err(|error| format!("Invalid connection list response: {error}"))
+    }
+
+    /// The Web server owns the configuration database, so this process never
+    /// trusts its own path resolution for the boundary: a standalone MCP
+    /// process can compute a different data directory (`DBX_DATA_DIR`, portable
+    /// installs) than the server it talks to. Every MCP-marked Web route
+    /// re-checks the target against the database the server actually owns
+    /// (`/api/connection/connect`, `/api/schema/*`, `/api/query/*`, docs), so
+    /// the boundary is always [`ConfigDbBoundary::Remote`] here.
+    fn config_db_boundary(&self) -> ConfigDbBoundary {
+        ConfigDbBoundary::Remote
     }
 
     async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {

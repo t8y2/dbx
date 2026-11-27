@@ -62,6 +62,7 @@ export interface SavedOpenTab {
   savedSqlId?: string;
   isDefaultQuery?: boolean;
   externalSqlPath?: string;
+  externalSqlCustomTitle?: boolean;
   externalSqlFileVersion?: QueryTab["externalSqlFileVersion"];
   externalSqlIgnoredFileVersion?: QueryTab["externalSqlIgnoredFileVersion"];
   externalSqlFileMissing?: boolean;
@@ -243,6 +244,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
       savedSqlId: tab.savedSqlId,
       ...(tab.isDefaultQuery ? { isDefaultQuery: true } : {}),
       externalSqlPath: tab.externalSqlPath,
+      ...(tab.externalSqlPath && tab.externalSqlCustomTitle ? { externalSqlCustomTitle: true } : {}),
       ...(tab.externalSqlFileVersion ? { externalSqlFileVersion: tab.externalSqlFileVersion } : {}),
       ...(tab.externalSqlIgnoredFileVersion ? { externalSqlIgnoredFileVersion: tab.externalSqlIgnoredFileVersion } : {}),
       ...(tab.externalSqlFileMissing ? { externalSqlFileMissing: true } : {}),

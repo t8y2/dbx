@@ -54,6 +54,22 @@ export interface QueryEditorKeywordCaseOnTypeOptions {
   keywordCase: () => SqlKeywordCaseMode | "preserve";
   dialect: () => SqlFormatDialect;
   databaseType: () => DatabaseType | undefined;
+  /**
+   * Called when a trigger cannot be classified yet (engine import still pending
+   * and no usable syntax tree). The caller should apply
+   * {@link deferredKeywordReplacement} once `loadEngine()` resolves.
+   */
+  onPending?: (pending: PendingKeywordCase) => void;
+}
+
+/** A trigger captured for later classification (see {@link deferredKeywordReplacement}). */
+export interface PendingKeywordCase {
+  word: string;
+  wordFrom: number;
+  wordEnd: number;
+  dialect: SqlFormatDialect;
+  databaseType: DatabaseType | undefined;
+  mode: SqlKeywordCaseMode;
 }
 
 /**
@@ -83,7 +99,7 @@ function isKeywordCaseTrigger(text: string): boolean {
  * cursor yet, the bounded scanner runs on the full text, which is only
  * affordable for ordinary-sized documents.
  */
-function resolveKeywordCaseWindowStart(state: EditorState, cursor: number, options: QueryEditorKeywordCaseOnTypeOptions): number | null {
+function resolveKeywordCaseWindowStart(state: EditorState, cursor: number, options: { databaseType: () => DatabaseType | undefined }): number | null {
   // The node names the tree helpers read belong to the Lezer SQL grammar; with no
   // language mounted, or the StreamLanguage fallback used for oversized documents,
   // their answers describe a different tree (see sqlSyntaxTreeWindow.ts).
@@ -199,7 +215,12 @@ export function createQueryEditorKeywordCaseOnTypeFilter(options: QueryEditorKey
     // after a cold start still converts (see casedKeywordFromSyntaxTree).
     const engineReplacement = casedKeywordBefore(windowText, options.dialect(), mode);
     let replacement: KeywordReplacement | null = engineReplacement && { from: windowFrom + engineReplacement.from, to: windowFrom + engineReplacement.to, insert: engineReplacement.insert };
-    if (!replacement && loadedSqlFormatterEngine() === null) replacement = casedKeywordFromSyntaxTree(state, wordFrom, wordEnd, mode);
+    if (!replacement && loadedSqlFormatterEngine() === null) {
+      replacement = casedKeywordFromSyntaxTree(state, wordFrom, wordEnd, mode);
+      // Neither classifier can answer yet: remember the word and let the caller
+      // apply the authoritative conversion once the import resolves.
+      if (!replacement) options.onPending?.({ word, wordFrom, wordEnd, dialect: options.dialect(), databaseType: options.databaseType(), mode });
+    }
     if (!replacement) return transaction;
 
     return [
@@ -216,4 +237,30 @@ export function createQueryEditorKeywordCaseOnTypeFilter(options: QueryEditorKey
       },
     ];
   };
+}
+
+/**
+ * The authoritative conversion for a trigger captured via
+ * {@link QueryEditorKeywordCaseOnTypeOptions.onPending}, against the document as
+ * it is *now*.
+ *
+ * Returns `null` — leave the text alone — when the document moved on:
+ * the word was edited or became part of a longer identifier, the position
+ * no longer exists, or the word is (still) not a keyword. The word-boundary
+ * check matters: `select` captured at [0,6) must not turn `selectx` into
+ * `SELECTx` if the user kept typing.
+ */
+export function deferredKeywordReplacement(state: EditorState, pending: PendingKeywordCase): KeywordReplacement | null {
+  if (state.readOnly || pending.wordEnd > state.doc.length) return null;
+  if (state.sliceDoc(pending.wordFrom, pending.wordEnd) !== pending.word) return null;
+  const next = state.sliceDoc(pending.wordEnd, pending.wordEnd + 1);
+  if (next && IDENTIFIER_CHARACTER.test(next)) return null;
+
+  const windowFrom = resolveKeywordCaseWindowStart(state, pending.wordEnd, { databaseType: () => pending.databaseType });
+  if (windowFrom === null) return null;
+  const windowText = state.sliceDoc(windowFrom, pending.wordEnd);
+  if (windowText.length > KEYWORD_CASE_WINDOW_MAX_CHARS) return null;
+
+  const replacement = casedKeywordBefore(windowText, pending.dialect, pending.mode);
+  return replacement && { from: windowFrom + replacement.from, to: windowFrom + replacement.to, insert: replacement.insert };
 }

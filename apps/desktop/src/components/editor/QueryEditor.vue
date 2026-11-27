@@ -142,7 +142,7 @@ import { createQueryEditorMultiCursorMouseSelection } from "@/lib/editor/queryEd
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 
 import { keepQueryEditorPasteCaretOnLastContentLine } from "@/lib/editor/queryEditorClipboardPaste";
-import { createQueryEditorKeywordCaseOnTypeFilter } from "@/lib/editor/queryEditorKeywordCaseOnType";
+import { createQueryEditorKeywordCaseOnTypeFilter, deferredKeywordReplacement, type PendingKeywordCase } from "@/lib/editor/queryEditorKeywordCaseOnType";
 import { loadEngine } from "@/lib/sql/layout/internals";
 import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCaretResync";
 
@@ -2223,6 +2223,20 @@ watch(
   { immediate: true },
 );
 
+// A trigger typed before the engine import resolved could not be classified
+// (no engine yet, no readable syntax tree). Apply the authoritative conversion
+// once it resolves, but only if the word is still the one the user typed.
+function queueDeferredKeywordCase(pending: PendingKeywordCase) {
+  void loadEngine().then((engine) => {
+    if (!engine || !settingsStore.editorSettings.autoKeywordCase) return;
+    const currentView = view.value;
+    if (!currentView) return;
+    const replacement = deferredKeywordReplacement(currentView.state, pending);
+    if (!replacement) return;
+    currentView.dispatch({ changes: replacement, userEvent: "input.type" });
+  });
+}
+
 function isEditorComposing(currentView: EditorViewType): boolean {
   if (imeCompositionActive) return true;
   // A real key with isComposing=false proves the IME stalled before sending
@@ -2366,6 +2380,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
             keywordCase: () => settingsStore.editorSettings.sqlFormatter.keywordCase,
             dialect: () => props.formatDialect ?? sqlFormatDialectForDbType(props.databaseType),
             databaseType: () => props.databaseType,
+            onPending: queueDeferredKeywordCase,
           }),
         ),
         cmSearch({

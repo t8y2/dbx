@@ -4,9 +4,11 @@ use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
 
 use dbx_core::{
     models::connection::{ConnectionConfig, DatabaseType},
-    production_safety::{is_production_database, targets_production_database},
+    production_safety::{
+        is_production_database, mongo_pipeline_targets_production_database, targets_production_database,
+    },
     sql_risk::{classify_sql_risk_for_database, SqlRisk},
-    storage::Storage,
+    storage::{McpDatabaseScope, McpGlobalPolicy, Storage},
     types::{ColumnInfo, QueryMessage, QueryResult, TableInfo},
 };
 use dbx_mcp::{
@@ -350,18 +352,14 @@ async fn run_query(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cl
     }
     if connection.db_type == DatabaseType::MongoDb {
         let command = mongo::parse(&sql).map_err(|message| CliError::new("QUERY_ERROR", message))?;
-        let (allow_writes, allow_dangerous) =
-            if command.is_mutating() || command.is_dangerous() || command.has_effectively_unbounded_filter() {
-                capped_write_permissions(backend, &connection, &database, None, allow_writes, allow_dangerous).await?
-            } else {
-                (allow_writes, allow_dangerous)
-            };
-        if let Err(error) = mongo::validate_safety(
-            &command,
-            allow_writes,
-            allow_dangerous,
-            is_production_database(&connection, &database),
-        ) {
+        // `db.getSiblingDB("other")` executes against `other`, so permission,
+        // scope, and production checks must use that target database rather
+        // than the active one.
+        let target_database = command.target_database().unwrap_or(&database);
+        let (allow_writes, allow_dangerous, production_database) =
+            mongo_write_permissions(backend, &connection, target_database, &command, allow_writes, allow_dangerous)
+                .await?;
+        if let Err(error) = mongo::validate_safety(&command, allow_writes, allow_dangerous, production_database) {
             return Err(match error {
                 MongoSafetyError::WritesDisabled => CliError::new(
                     "SQL_BLOCKED",
@@ -395,11 +393,11 @@ async fn run_query(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cl
     }
     let risk = classify_sql_risk_for_database(&sql, connection.db_type)
         .map_err(|message| CliError::new("SQL_BLOCKED", message))?;
-    let (allow_writes, allow_dangerous) = if matches!(risk, SqlRisk::Write | SqlRisk::Ddl) {
-        capped_write_permissions(backend, &connection, &database, Some(&sql), allow_writes, allow_dangerous).await?
-    } else {
-        (allow_writes, allow_dangerous)
-    };
+    // The database execution scope applies to reads as well as writes, as in
+    // the MCP server: a cross-database `SELECT` must not bypass
+    // database-specific execution rules.
+    let (allow_writes, allow_dangerous) =
+        capped_write_permissions(backend, &connection, &database, &sql, allow_writes, allow_dangerous).await?;
     if risk == SqlRisk::Transaction
         || risk == SqlRisk::Write && !allow_writes
         || risk == SqlRisk::Ddl && !allow_dangerous
@@ -424,15 +422,58 @@ async fn capped_write_permissions(
     backend: &dyn DbxBackend,
     connection: &ConnectionConfig,
     database: &str,
-    sql: Option<&str>,
+    sql: &str,
     allow_writes: bool,
     allow_dangerous: bool,
 ) -> Result<(bool, bool), CliError> {
+    let (policy, group_ids) = load_policy_and_group_ids(backend, connection).await?;
+    dbx_core::mcp_policy::ensure_sql_database_execution_scope(&policy, connection, database, sql)
+        .map_err(|message| CliError::new("SQL_BLOCKED", message))?;
+    Ok(cap_write_flags(&policy, &group_ids, connection, database, allow_writes, allow_dangerous))
+}
+
+/// Cap the per-run write flags for a MongoDB command against the database it
+/// actually targets, and report whether that target (including any `$out` /
+/// `$merge` output database) is production-protected.
+async fn mongo_write_permissions(
+    backend: &dyn DbxBackend,
+    connection: &ConnectionConfig,
+    target_database: &str,
+    command: &mongo::MongoCommand,
+    allow_writes: bool,
+    allow_dangerous: bool,
+) -> Result<(bool, bool, bool), CliError> {
+    let (policy, group_ids) = load_policy_and_group_ids(backend, connection).await?;
+    ensure_database_in_selected_scope(&policy, &connection.id, target_database)?;
+    let command_to_validate = match command {
+        mongo::MongoCommand::InDatabase { command, .. } => command.as_ref(),
+        command => command,
+    };
+    let production_database = if let mongo::MongoCommand::Aggregate { pipeline, .. } = command_to_validate {
+        dbx_core::mcp_policy::ensure_mongo_database_execution_scope(&policy, &connection.id, target_database, pipeline)
+            .map_err(|message| match message.strip_prefix("QUERY_ERROR: ") {
+                Some(message) => CliError::new("QUERY_ERROR", message.to_string()),
+                None => CliError::new("SQL_BLOCKED", message),
+            })?;
+        for output_database in dbx_core::mcp_policy::mongo_pipeline_output_databases(pipeline, target_database)
+            .map_err(|message| CliError::new("QUERY_ERROR", message))?
+        {
+            ensure_database_in_selected_scope(&policy, &connection.id, &output_database)?;
+        }
+        mongo_pipeline_targets_production_database(connection, target_database, pipeline)
+    } else {
+        is_production_database(connection, target_database)
+    };
+    let (allow_writes, allow_dangerous) =
+        cap_write_flags(&policy, &group_ids, connection, target_database, allow_writes, allow_dangerous);
+    Ok((allow_writes, allow_dangerous, production_database))
+}
+
+async fn load_policy_and_group_ids(
+    backend: &dyn DbxBackend,
+    connection: &ConnectionConfig,
+) -> Result<(McpGlobalPolicy, Vec<String>), CliError> {
     let policy = backend.load_mcp_global_policy().await.map_err(store_error)?;
-    if let Some(sql) = sql {
-        dbx_core::mcp_policy::ensure_sql_database_execution_scope(&policy, connection, database, sql)
-            .map_err(|message| CliError::new("SQL_BLOCKED", message))?;
-    }
     let group_ids = backend
         .load_connection_group_details()
         .await
@@ -440,14 +481,47 @@ async fn capped_write_permissions(
         .get(&connection.id)
         .map(|path| path.ids.clone())
         .unwrap_or_default();
+    Ok((policy, group_ids))
+}
+
+fn cap_write_flags(
+    policy: &McpGlobalPolicy,
+    group_ids: &[String],
+    connection: &ConnectionConfig,
+    database: &str,
+    allow_writes: bool,
+    allow_dangerous: bool,
+) -> (bool, bool) {
     let (read_only, policy_allow_dangerous) = dbx_core::mcp_policy::effective_database_execution_policy_with_groups(
-        &policy,
-        &group_ids,
+        policy,
+        group_ids,
         &connection.id,
         database,
     );
     let policy_allow_writes = !read_only && !connection.read_only;
-    Ok((allow_writes && policy_allow_writes, allow_dangerous && policy_allow_writes && policy_allow_dangerous))
+    (allow_writes && policy_allow_writes, allow_dangerous && policy_allow_writes && policy_allow_dangerous)
+}
+
+/// A selected database scope is an allowlist: a MongoDB command (including a
+/// `getSiblingDB()` target and `$out` / `$merge` outputs) may only execute
+/// against a listed database.
+fn ensure_database_in_selected_scope(
+    policy: &McpGlobalPolicy,
+    connection_id: &str,
+    database: &str,
+) -> Result<(), CliError> {
+    let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == connection_id) else {
+        return Ok(());
+    };
+    if matches!(rule.database_scope, McpDatabaseScope::Selected)
+        && !rule.allowed_databases.iter().any(|allowed| allowed == database)
+    {
+        return Err(CliError::new(
+            "SQL_BLOCKED",
+            format!("Database \"{database}\" is not allowed by the connection access policy."),
+        ));
+    }
+    Ok(())
 }
 
 fn truncate_query_result(result: &mut QueryResult, max_rows: Option<usize>) {
@@ -1111,13 +1185,14 @@ mod tests {
     use dbx_core::{
         agent_events::ToolResult,
         agent_tools::AgentSqlPermissions,
-        storage::{McpConnectionPolicy, McpDatabasePolicy, McpGlobalPolicy, Storage},
+        storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy, Storage},
     };
     use dbx_mcp::{backend::new_connection_config, mongo::MongoCommand};
 
     struct MongoBackend {
         connection: ConnectionConfig,
         policy: McpGlobalPolicy,
+        executed_targets: std::sync::Mutex<Vec<String>>,
     }
 
     impl MongoBackend {
@@ -1141,7 +1216,12 @@ mod tests {
                 )
                 .unwrap(),
                 policy,
+                executed_targets: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn executed_targets(&self) -> Vec<String> {
+            self.executed_targets.lock().unwrap().clone()
         }
     }
 
@@ -1169,29 +1249,17 @@ mod tests {
         async fn execute_mongo_command(
             &self,
             _connection: &ConnectionConfig,
-            _database: &str,
+            database: &str,
             command: &MongoCommand,
         ) -> Result<QueryResult, String> {
-            assert!(matches!(command, MongoCommand::Insert { collection, .. } if collection == "products"));
-            Ok(QueryResult {
-                columns: Vec::new(),
-                column_types: Vec::new(),
-                deferred_large_value_cells: Vec::new(),
-                column_sortables: Vec::new(),
-                spatial_columns: vec![],
-                raw_key_cells: Vec::new(),
-                spatial_values: vec![],
-                rows: Vec::new(),
-                affected_rows: 2,
-                execution_time_ms: 0,
-                server_execute_time_us: None,
-                query_timings_ms: None,
-                truncated: false,
-                session_id: None,
-                has_more: false,
-                elasticsearch_raw_body: None,
-                messages: Vec::new(),
-            })
+            self.executed_targets.lock().unwrap().push(command.target_database().unwrap_or(database).to_string());
+            let affected_rows = if matches!(command, MongoCommand::Insert { collection, .. } if collection == "products")
+            {
+                2
+            } else {
+                1
+            };
+            Ok(empty_query_result(affected_rows))
         }
 
         async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
@@ -1646,6 +1714,229 @@ mod tests {
         let error = run_with_backend(&backend, flags).await.unwrap_err();
         assert_eq!(error.code, "SQL_BLOCKED");
         assert!(backend.executed_sql().is_empty());
+    }
+
+    #[tokio::test]
+    async fn database_policy_blocks_cross_database_select() {
+        let backend = SqlBackend::new(database_read_only_policy());
+        let flags = parse_flags(&args(&["query", "local-mysql", "select * from other_db.users", "--json"])).unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+        assert!(backend.executed_sql().is_empty());
+    }
+
+    #[tokio::test]
+    async fn database_policy_allows_same_database_qualified_select() {
+        let backend = SqlBackend::new(database_read_only_policy());
+        let flags = parse_flags(&args(&["query", "local-mysql", "select * from app.users", "--json"])).unwrap();
+        run_with_backend(&backend, flags).await.unwrap();
+        assert_eq!(backend.executed_sql().len(), 1);
+    }
+
+    fn postgres_backend(driver_profile: Option<&str>) -> SqlBackend {
+        let mut connection = new_connection_config(
+            "sql-test".to_string(),
+            "local-postgres".to_string(),
+            DatabaseType::Postgres,
+            "127.0.0.1".to_string(),
+            5432,
+            String::new(),
+            String::new(),
+            Some("app".to_string()),
+            false,
+            None,
+        )
+        .unwrap();
+        connection.driver_profile = driver_profile.map(str::to_string);
+        SqlBackend::with_connection(database_read_only_policy(), connection)
+    }
+
+    #[tokio::test]
+    async fn postgres_schema_qualified_select_stays_allowed() {
+        // `public` is a schema in the active database, not another database.
+        let backend = postgres_backend(None);
+        let flags = parse_flags(&args(&["query", "local-postgres", "select * from public.users", "--json"])).unwrap();
+        run_with_backend(&backend, flags).await.unwrap();
+        assert_eq!(backend.executed_sql().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_cross_database_select_is_blocked() {
+        // Compatible engines resolve three-part names as database.schema.table,
+        // so the qualified read must be rejected under database rules.
+        let backend = postgres_backend(Some("cockroachdb"));
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-postgres",
+            "with c as (select id from app.public.users) select c.id, 2 from c, other.public.secrets s",
+            "--json",
+        ]))
+        .unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+        assert!(backend.executed_sql().is_empty());
+    }
+
+    fn mongo_sibling_policy(
+        allowed_databases: Vec<&str>,
+        other_read_only: bool,
+        other_allow_dangerous: bool,
+    ) -> McpGlobalPolicy {
+        McpGlobalPolicy {
+            connection_policies: vec![McpConnectionPolicy {
+                connection_id: "mongo-test".to_string(),
+                read_only: false,
+                allow_dangerous_sql: true,
+                execution_mode_configured: true,
+                execution_mode_policy_version: Some(dbx_core::mcp_policy::MCP_EXECUTION_POLICY_VERSION),
+                database_scope: McpDatabaseScope::Selected,
+                allowed_databases: allowed_databases.iter().map(|database| (*database).to_string()).collect(),
+                database_policies: vec![
+                    McpDatabasePolicy {
+                        database_name: "test".to_string(),
+                        read_only: false,
+                        allow_dangerous_sql: true,
+                    },
+                    McpDatabasePolicy {
+                        database_name: "other".to_string(),
+                        read_only: other_read_only,
+                        allow_dangerous_sql: other_allow_dangerous,
+                    },
+                ],
+                allow_salesforce_dml: false,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn sibling_write_uses_target_read_only_policy() {
+        let backend = MongoBackend::with_policy(mongo_sibling_policy(vec!["test", "other"], true, false));
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mongo",
+            "db.getSiblingDB(\"other\").users.insertOne({name: 'demo'})",
+            "--allow-writes",
+            "--json",
+        ]))
+        .unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+        assert!(backend.executed_targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sibling_write_allowed_when_target_is_writable() {
+        let backend = MongoBackend::with_policy(mongo_sibling_policy(vec!["test", "other"], false, false));
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mongo",
+            "db.getSiblingDB(\"other\").users.insertOne({name: 'demo'})",
+            "--allow-writes",
+            "--json",
+        ]))
+        .unwrap();
+        run_with_backend(&backend, flags).await.unwrap();
+        assert_eq!(backend.executed_targets(), vec!["other".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn sibling_read_outside_selected_scope_is_blocked() {
+        let backend = MongoBackend::with_policy(mongo_sibling_policy(vec!["test"], true, false));
+        let flags =
+            parse_flags(&args(&["query", "local-mongo", "db.getSiblingDB(\"other\").users.find({})", "--json"]))
+                .unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+        assert!(backend.executed_targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sibling_read_in_scope_allowed_despite_read_only_target() {
+        let backend = MongoBackend::with_policy(mongo_sibling_policy(vec!["test", "other"], true, false));
+        let flags =
+            parse_flags(&args(&["query", "local-mongo", "db.getSiblingDB(\"other\").users.find({})", "--json"]))
+                .unwrap();
+        run_with_backend(&backend, flags).await.unwrap();
+        assert_eq!(backend.executed_targets(), vec!["other".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn sibling_dangerous_command_uses_target_policy() {
+        // The active database allows dangerous commands, but `other` does not.
+        let backend = MongoBackend::with_policy(mongo_sibling_policy(vec!["test", "other"], false, false));
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mongo",
+            "db.getSiblingDB(\"other\").users.drop()",
+            "--allow-writes",
+            "--allow-dangerous-sql",
+            "--json",
+        ]))
+        .unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+        assert!(backend.executed_targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sibling_write_to_production_target_is_blocked() {
+        let mut backend = MongoBackend::new();
+        backend.connection.production_databases = vec!["other".to_string()];
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mongo",
+            "db.getSiblingDB(\"other\").users.insertOne({name: 'demo'})",
+            "--allow-writes",
+            "--json",
+        ]))
+        .unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+        assert!(error.message.contains("production"), "{}", error.message);
+        assert!(backend.executed_targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sibling_aggregate_out_to_production_is_blocked() {
+        let mut backend =
+            MongoBackend::with_policy(McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() });
+        backend.connection.production_databases = vec!["production".to_string()];
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mongo",
+            "db.getSiblingDB(\"staging\").items.aggregate([{\"$out\": {\"db\": \"production\", \"coll\": \"archive\"}}])",
+            "--allow-writes",
+            "--allow-dangerous-sql",
+            "--json",
+        ]))
+        .unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+        assert!(error.message.contains("production"), "{}", error.message);
+        assert!(backend.executed_targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn aggregate_cross_database_outputs_are_blocked_by_execution_scope() {
+        for pipeline in [
+            "[{\"$merge\": {\"into\": {\"db\": \"other\", \"coll\": \"items\"}}}]",
+            "[{\"$out\": {\"db\": \"other\", \"coll\": \"items\"}}]",
+        ] {
+            let backend = MongoBackend::with_policy(mongo_sibling_policy(vec!["test", "other"], false, true));
+            let flags = parse_flags(&args(&[
+                "query",
+                "local-mongo",
+                &format!("db.items.aggregate({pipeline})"),
+                "--allow-writes",
+                "--allow-dangerous-sql",
+                "--json",
+            ]))
+            .unwrap();
+            let error = run_with_backend(&backend, flags).await.unwrap_err();
+            assert_eq!(error.code, "SQL_BLOCKED", "{pipeline}");
+            assert!(backend.executed_targets().is_empty(), "{pipeline}");
+        }
     }
 
     #[tokio::test]

@@ -11024,6 +11024,7 @@ export default withEnglishFallback({
     tabWrapMaxRows: "Numero massimo di righe per l'affiancamento delle schede",
     shortcutGoToLastEditLocation: "Vai all'ultima posizione di modifica",
     shortcutToggleLineCommentAndAdvance: "Attiva/disattiva commento riga e passa alla riga successiva",
+    mcpToolQuery: "Esegui query SQL di sola lettura",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

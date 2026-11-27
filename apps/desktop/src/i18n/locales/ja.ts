@@ -11454,6 +11454,7 @@ export default withEnglishFallback({
     tabWrapMaxRows: "タブの最大折り返し行数",
     shortcutGoToLastEditLocation: "前回の編集位置に移動",
     shortcutToggleLineCommentAndAdvance: "行コメントを切り替えて次の行へ移動",
+    mcpToolQuery: "読み取り専用のSQLクエリを実行",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

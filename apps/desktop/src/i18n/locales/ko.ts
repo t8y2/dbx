@@ -11134,6 +11134,7 @@ export default withEnglishFallback({
     tabWrapMaxRows: "탭 최대 타일 행 수",
     shortcutGoToLastEditLocation: "마지막 편집 위치로 이동",
     shortcutToggleLineCommentAndAdvance: "줄 주석 전환 및 다음 줄로 이동",
+    mcpToolQuery: "읽기 전용 SQL 쿼리 실행",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

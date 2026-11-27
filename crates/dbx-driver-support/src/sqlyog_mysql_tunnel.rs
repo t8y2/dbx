@@ -627,9 +627,9 @@ mod tests {
 
     #[test]
     fn parses_empty_cells_and_non_result_statements() {
-        let null = ok_envelope(&format!(
-            "1<f_i c=\"1\"><f><n>c</n><t></t><m>0</m><d></d><ty>varchar</ty></f></f_i>\
-             <r_i c=\"1\"><r><c l=\"0\">(NULL)</c></r></r_i>"
+        let null = ok_envelope(concat!(
+            "1<f_i c=\"1\"><f><n>c</n><t></t><m>0</m><d></d><ty>varchar</ty></f></f_i>",
+            "<r_i c=\"1\"><r><c l=\"0\">(NULL)</c></r></r_i>"
         ));
         assert_eq!(parse_sqlyog_response(null.as_bytes()).unwrap().rows, vec![vec![None]]);
 

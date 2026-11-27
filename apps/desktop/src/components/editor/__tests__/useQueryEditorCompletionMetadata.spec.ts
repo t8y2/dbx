@@ -236,6 +236,38 @@ describe("QueryEditor completion metadata ownership", () => {
     expect(metadata.cachedColumnsByTable.get("public.users")).toBe(columns);
   });
 
+  it("shares Oracle columns cached under dictionary casing with schema-qualified diagnostics", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", dialect: "oracle", schema: "APP" });
+    const orderColumns: SqlCompletionColumn[] = [{ name: "ID", table: "ORDERS", schema: "APP", dataType: "NUMBER" }];
+    metadata.cachedColumnsByTable.set("APP.ORDERS", orderColumns);
+    metadata.loadedColumnsByTable.add("app.orders");
+
+    expect(await metadata.ensureColumnsForTable({ name: "orders", schema: "app" })).toBe(true);
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+    expect(metadata.cachedColumnsByTable.get("app.orders")).toBe(orderColumns);
+
+    const sql = "SELECT o.ID FROM app.orders o";
+    const diagnostics = buildSqlSemanticDiagnostics(
+      {
+        tables: [{ name: "orders", schema: "app", alias: "o", span: { start_line: 1, start_column: 18, end_line: 1, end_column: 27 } }],
+        columns: [{ name: "ID", qualifier: "o", span: { start_line: 1, start_column: 8, end_line: 1, end_column: 12 } }],
+      },
+      { tables: [], columnsByTable: metadata.cachedColumnsByTable, loadedColumnTables: metadata.loadedColumnsByTable, sql, databaseType: "oracle" },
+    );
+    expect(diagnostics).toEqual([]);
+  });
+
+  it("retries an empty Oracle column cache entry stored under dictionary casing", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", dialect: "oracle", schema: "APP" });
+    const orderColumns: SqlCompletionColumn[] = [{ name: "ID", table: "ORDERS", schema: "APP", dataType: "NUMBER" }];
+    metadata.cachedColumnsByTable.set("APP.ORDERS", []);
+    store.listCompletionColumns.mockResolvedValue(orderColumns);
+
+    expect(await metadata.ensureColumnsForTable({ name: "orders", schema: "app" })).toBe(true);
+    expect(store.listCompletionColumns).toHaveBeenCalledOnce();
+    expect(metadata.cachedColumnsByTable.get("app.orders")).toBe(orderColumns);
+  });
+
   it("isolates quoted names and prefix caches by table and schema", () => {
     const { metadata } = createHarness();
     const table = { name: "users", schema: "public" };

@@ -260,6 +260,8 @@ export default withEnglishFallback({
       empty: "ยังไม่มีข้อมูลการติดตาม",
     },
     log: { status: "สถานะ", time: "เวลา", message: "ผลลัพธ์", empty: "ยังไม่มีกิจกรรมดีบัก" },
+    cursorNotOpen: "เมื่อโพรซีเดอร์ส่งคืน เคอร์เซอร์ไม่ได้เปิดอยู่",
+    cursorEmpty: "เคอร์เซอร์ไม่ได้ส่งคืนแถวใดๆ",
     outcome: { title: "พารามิเตอร์ OUT / ค่าที่ส่งคืน", name: "ชื่อ", mode: "โหมด", type: "ชนิด", value: "ค่า", returnLabel: "RETURN", copy: "คัดลอกค่า", copyAll: "คัดลอกทั้งหมด", empty: "พารามิเตอร์ OUT / IN OUT ที่ใช้ได้และค่าที่ส่งคืนจะแสดงหลังการทำงาน" },
   },
   objectDependencies: {

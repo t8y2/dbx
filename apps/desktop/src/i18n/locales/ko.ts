@@ -281,6 +281,8 @@ export default withEnglishFallback({
       empty: "수집된 추적이 없습니다.",
     },
     log: { status: "상태", time: "시간", message: "결과", empty: "디버그 활동이 없습니다" },
+    cursorNotOpen: "프로시저가 반환될 때 커서가 열려 있지 않습니다.",
+    cursorEmpty: "커서가 반환한 행이 없습니다.",
     outcome: { title: "OUT 매개변수 / 반환값", name: "이름", mode: "모드", type: "유형", value: "값", returnLabel: "RETURN", copy: "값 복사", copyAll: "모두 복사", empty: "사용 가능한 OUT / IN OUT 매개변수와 반환값은 실행 후 표시됩니다." },
   },
   objectDependencies: {

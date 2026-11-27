@@ -283,6 +283,8 @@ export default withEnglishFallback({
       empty: "Nenhum rastreamento coletado.",
     },
     log: { status: "Status", time: "Hora", message: "Resultado", empty: "Nenhuma atividade de depuração" },
+    cursorNotOpen: "O cursor não foi aberto quando o procedimento retornou.",
+    cursorEmpty: "O cursor não retornou nenhuma linha.",
     outcome: { title: "Parâmetros OUT / valor de retorno", name: "Nome", mode: "Modo", type: "Tipo", value: "Valor", returnLabel: "RETURN", copy: "Copiar valor", copyAll: "Copiar tudo", empty: "Os parâmetros OUT / IN OUT disponíveis e o valor de retorno aparecem após a execução." },
   },
   objectDependencies: {

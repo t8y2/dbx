@@ -224,6 +224,8 @@ export default withEnglishFallback({
       empty: "Трассировка ещё не собрана.",
     },
     log: { status: "Статус", time: "Время", message: "Результат", empty: "Действий отладки пока нет" },
+    cursorNotOpen: "Курсор не открыт при возврате из процедуры.",
+    cursorEmpty: "Курсор не вернул ни одной строки.",
     outcome: { title: "Параметры OUT / возвращаемое значение", name: "Имя", mode: "Режим", type: "Тип", value: "Значение", returnLabel: "RETURN", copy: "Копировать значение", copyAll: "Копировать всё", empty: "Доступные параметры OUT / IN OUT и возвращаемое значение появятся после выполнения." },
   },
   objectDependencies: {

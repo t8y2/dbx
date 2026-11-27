@@ -457,6 +457,8 @@ export default withEnglishFallback({
       empty: "トレースはまだありません。",
     },
     log: { status: "状態", time: "時刻", message: "結果", empty: "デバッグ操作はまだありません" },
+    cursorNotOpen: "プロシージャの戻り時にカーソルが開かれていません。",
+    cursorEmpty: "カーソルが行を返しませんでした。",
     outcome: { title: "OUT パラメーター / 戻り値", name: "名前", mode: "モード", type: "型", value: "値", returnLabel: "RETURN", copy: "値をコピー", copyAll: "すべてコピー", empty: "利用可能な OUT / IN OUT パラメーターと戻り値は実行後に表示されます。" },
   },
   objectDependencies: {

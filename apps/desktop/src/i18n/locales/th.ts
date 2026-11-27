@@ -7232,6 +7232,9 @@ export default withEnglishFallback({
     packageProcedureAtLine: "โพรซีเดอร์ {name} บรรทัดที่ {line}",
     selectedObjects: "เลือกออบเจ็กต์แล้ว {count} รายการ",
     dropPackageBodyHint: "เมื่อลบ package specification ระบบจะลบ package body ที่มีอยู่ด้วย",
+    packageProcedureMetadataUnavailable: "ไม่สามารถตรวจสอบโพรซีเดอร์ภายในแพ็กเกจหรืออ่านพารามิเตอร์ได้ โปรดเปิดป๊อปอัปใหม่แล้วลองอีกครั้ง",
+    packageProcedureNotCallable: "ไม่สามารถเรียกโพรซีเดอร์นี้จากภายนอกแพ็กเกจได้ โปรดตรวจสอบว่าการประกาศของโพรซีเดอร์สอดคล้องกับข้อกำหนดของแพ็กเกจในฐานข้อมูล",
+    packageProcedureOverloaded: "โพรซีเดอร์นี้มีหลายโอเวอร์โหลด โปรดเขียนการเรียก PL/SQL ในตัวแก้ไข SQL เพื่อระบุโอเวอร์โหลดที่ต้องการดำเนินการ",
   },
   postgresForeignTable: {
     tableKind: "ประเภทตาราง",

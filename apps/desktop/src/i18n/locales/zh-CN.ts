@@ -7119,6 +7119,9 @@ export default withEnglishFallback({
   },
   objects: {
     packageMembers: "包成员",
+    packageProcedureMetadataUnavailable: "未能验证包内过程或读取参数。请重新打开弹窗重试。",
+    packageProcedureNotCallable: "无法从包外调用此过程。请确认它的声明与数据库中的包规范一致。",
+    packageProcedureOverloaded: "此过程有多个重载。请在 SQL 编辑器中编写 PL/SQL 调用，指定要执行的重载。",
     hidePackageMembers: "收起包成员",
     showPackageMembers: "展开包成员",
     packageFunctionAtLine: "函数 {name}，第 {line} 行",

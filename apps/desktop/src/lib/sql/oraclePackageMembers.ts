@@ -10,6 +10,8 @@ import { tokenizeSqlSemantic, tokenIsIdentifier, unquoteSqlSemanticIdentifier } 
 export interface OraclePackageMemberEntry {
   /** 去引号后的子程序名，大小写保持源码原样。 */
   name: string;
+  /** Identifier as stored in the Oracle data dictionary. */
+  databaseName: string;
   isFunction: boolean;
   /** `PROCEDURE` / `FUNCTION` 关键字的字符偏移，直接可用于编辑器定位。 */
   offset: number;
@@ -17,6 +19,7 @@ export interface OraclePackageMemberEntry {
   line: number;
   /** 形参名（大写，按声明顺序）；无参或空参数表为 `[]`。 */
   parameters: string[];
+  databaseParameterNames: string[];
   /** Datatypes without parameter modes, defaults, or precision modifiers. */
   parameterTypes: string[];
   /** 头部后跟 `IS`/`AS`（包体实现）为 true；后跟 `;`（包头声明）为 false。 */
@@ -35,6 +38,11 @@ function unquoteIdentifierText(raw: string): string {
   return text.length > 1 && text.startsWith('"') && text.endsWith('"') ? text.slice(1, -1).replaceAll('""', '"') : text;
 }
 
+function databaseIdentifier(token: SqlSemanticToken): string {
+  const name = unquoteSqlSemanticIdentifier(token);
+  return token.kind === "quoted_identifier" ? name : name.toUpperCase();
+}
+
 const PARAMETER_MODIFIERS = new Set(["in", "out", "nocopy"]);
 const EXTERNAL_BODY_PREFIXES = new Set(["language c", "language java", "language javascript", "external name", "external library", "mle module"]);
 
@@ -50,11 +58,11 @@ function readParameter(tokens: SqlSemanticToken[], start: number, end: number): 
     if (token.text === ":" || token.normalized === "default") break;
     type.push(token.kind === "quoted_identifier" ? token.text : token.text.toUpperCase());
   }
-  return { name: unquoteSqlSemanticIdentifier(name).toUpperCase(), type: type.join(" ").replace(/ \. /g, ".") };
+  return { name: databaseIdentifier(name), type: type.join(" ").replace(/ \. /g, ".") };
 }
 
 function readParameterList(tokens: SqlSemanticToken[], start: number) {
-  const parameters: string[] = [];
+  const databaseParameterNames: string[] = [];
   const parameterTypes: string[] = [];
   let index = start;
   if (tokens[index]?.text === "(") {
@@ -67,7 +75,7 @@ function readParameterList(tokens: SqlSemanticToken[], start: number) {
       if (parameterStart < index) {
         const parameter = readParameter(tokens, parameterStart, index);
         if (parameter) {
-          parameters.push(parameter.name);
+          databaseParameterNames.push(parameter.name);
           parameterTypes.push(parameter.type);
         }
       }
@@ -78,19 +86,19 @@ function readParameterList(tokens: SqlSemanticToken[], start: number) {
       }
     }
   }
-  return { parameters, parameterTypes, index };
+  return { parameters: databaseParameterNames.map((name) => name.toUpperCase()), databaseParameterNames, parameterTypes, index };
 }
 
 function readMemberShape(tokens: SqlSemanticToken[], start: number) {
-  const { parameters, parameterTypes, index: afterParameters } = readParameterList(tokens, start);
+  const { parameters, databaseParameterNames, parameterTypes, index: afterParameters } = readParameterList(tokens, start);
   let index = afterParameters;
   for (; index < tokens.length; index += 1) {
     const token = tokens[index]!;
     if (token.depth !== 0) continue;
-    if (token.kind === "word" && (token.normalized === "is" || token.normalized === "as")) return { parameters, parameterTypes, implemented: true, index };
+    if (token.kind === "word" && (token.normalized === "is" || token.normalized === "as")) return { parameters, databaseParameterNames, parameterTypes, implemented: true, index };
     if (token.text === ";") break;
   }
-  return { parameters, parameterTypes, implemented: false, index };
+  return { parameters, databaseParameterNames, parameterTypes, implemented: false, index };
 }
 
 /**
@@ -146,7 +154,7 @@ export function oraclePackageMemberEntries(source: string): readonly OraclePacka
           line += 1;
           lineEnd = source.indexOf("\n", lineEnd + 1);
         }
-        entries.push({ name: unquoteSqlSemanticIdentifier(name), isFunction, offset, line, ...shape });
+        entries.push({ name: unquoteSqlSemanticIdentifier(name), databaseName: databaseIdentifier(name), isFunction, offset, line, ...shape });
       }
       // External call specifications end at their semicolon and have no BEGIN.
       const bodyPrefix = `${tokens[headerEnd + 1]?.normalized} ${tokens[headerEnd + 2]?.normalized}`;

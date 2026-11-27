@@ -6598,6 +6598,9 @@ export default withEnglishFallback({
     packageProcedureAtLine: "プロシージャ {name}、{line} 行目",
     selectedObjects: "{count} 個のオブジェクトを選択しました",
     dropPackageBodyHint: "パッケージ仕様部を削除すると、既存のパッケージ本体も削除されます。",
+    packageProcedureMetadataUnavailable: "パッケージ内のプロシージャを検証できなかったか、パラメータを読み取れませんでした。ダイアログを再度開いて再試行してください。",
+    packageProcedureNotCallable: "パッケージ外からこのプロシージャを呼び出すことはできません。その宣言がデータベース内のパッケージ仕様と一致していることを確認してください。",
+    packageProcedureOverloaded: "このプロシージャには複数のオーバーロードがあります。SQL エディターで PL/SQL 呼び出しを記述し、実行するオーバーロードを指定してください。",
   },
   postgresForeignTable: {
     tableKind: "テーブルの種類",

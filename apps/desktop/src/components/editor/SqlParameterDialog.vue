@@ -178,8 +178,13 @@ async function copyResolvedSql() {
 </script>
 
 <template>
-  <Dialog v-model:open="open">
-    <DialogContent class="max-h-[86vh] border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[720px]" @open-auto-focus="focusFirstParameterInputOnOpen" @close-auto-focus="onSqlParameterDialogCloseAutoFocus">
+  <!-- Modeless: no overlay/focus trap/aria-hiding, so the SQL editor behind
+       stays interactive — text can be selected and copied while the dialog is
+       open. Reka's DismissableLayer would still close a non-modal dialog on
+       outside pointerdown unless the event is prevented, hence
+       @interact-outside.prevent; Escape/Cancel/Execute still close it. -->
+  <Dialog :modal="false" v-model:open="open">
+    <DialogContent class="max-h-[86vh] border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[720px]" @open-auto-focus="focusFirstParameterInputOnOpen" @close-auto-focus="onSqlParameterDialogCloseAutoFocus" @interact-outside.prevent>
       <!-- Form wrapper so Enter in any field submits (implicit submission → Execute). -->
       <form ref="formRef" class="grid grid-cols-[minmax(0,1fr)] gap-4" @submit.prevent="execute">
         <DialogHeader>
@@ -230,7 +235,18 @@ async function copyResolvedSql() {
                   </SelectContent>
                 </Select>
                 <div class="relative min-w-0">
-                  <Popover :open="activeHistoryName === parameter.key && filteredSqlParameterHistory(parameter.key).length > 0">
+                  <!-- update:open=false routes reka's dismissal (Escape etc.)
+                       back into the controlled open state; without it the
+                       popover would stay the topmost dismissable layer forever
+                       and swallow every Escape before it reaches the dialog. -->
+                  <Popover
+                    :open="activeHistoryName === parameter.key && filteredSqlParameterHistory(parameter.key).length > 0"
+                    @update:open="
+                      (value) => {
+                        if (!value) closeParameterHistory(parameter.key);
+                      }
+                    "
+                  >
                     <PopoverAnchor as-child>
                       <Input
                         :model-value="values[parameter.key]?.value || ''"

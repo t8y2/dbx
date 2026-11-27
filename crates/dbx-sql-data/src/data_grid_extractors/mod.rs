@@ -60,15 +60,28 @@ pub fn extract_data_grid_selection(
             format!("Extractor produced invalid UTF-8: {error}"),
         )
     })?;
+    let (row_count, column_count) = if transposed_markdown_labels(&request).is_some() {
+        (context.selected_columns.len(), request.rows.len() + 1)
+    } else {
+        (request.rows.len(), context.selected_columns.len())
+    };
     Ok(DataGridExtractResult {
         text,
         mime_type: metadata.mime_type.to_owned(),
         file_extension: metadata.file_extension.to_owned(),
-        row_count: request.rows.len(),
-        column_count: context.selected_columns.len(),
+        row_count,
+        column_count,
         omitted_columns: metadata.omitted_columns,
         warnings: metadata.warnings,
     })
+}
+
+fn transposed_markdown_labels(request: &DataGridExtractRequest) -> Option<&DataGridTransposedMarkdownLabels> {
+    if request.extractor == DataGridExtractorId::Markdown && request.selection_kind == DataGridSelectionKind::Rows {
+        request.transposed_markdown.as_ref()
+    } else {
+        None
+    }
 }
 
 struct BoundedOutput {
@@ -180,6 +193,12 @@ fn validate_request_budget(request: &DataGridExtractRequest) -> Result<(), DataG
         .saturating_add(request.options.dbunit.null_value_string.len())
         .saturating_add(request.options.php.variable_name.len())
         .saturating_add(request.options.php.row_delimiter.len())
+        .saturating_add(
+            request
+                .transposed_markdown
+                .as_ref()
+                .map_or(0, |labels| labels.field.len().saturating_add(labels.data.len())),
+        )
         .saturating_add(estimated_table_meta_bytes(request.table_meta.as_ref()));
     if estimated_bytes > DATA_GRID_EXTRACTOR_MAX_INPUT_BYTES {
         return Err(input_too_large_error());

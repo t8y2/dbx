@@ -46,6 +46,12 @@ pub async fn dump_mongodb_database(
                     Box::pin(async move { dbx_core::transfer::is_cancelled(&id).await })
                 },
                 |progress| {
+                    crate::commands::observability::publish_transfer_progress(
+                        &state,
+                        "mongo-dump",
+                        &progress.task_id,
+                        &progress,
+                    );
                     let _ = app.emit("mongo-database-dump-progress", progress);
                 },
             )
@@ -77,6 +83,12 @@ pub async fn restore_mongodb_database(
                     Box::pin(async move { dbx_core::transfer::is_cancelled(&id).await })
                 },
                 |progress| {
+                    crate::commands::observability::publish_transfer_progress(
+                        &state,
+                        "mongo-restore",
+                        &progress.task_id,
+                        &progress,
+                    );
                     let _ = app.emit("mongo-database-dump-progress", progress);
                 },
             )

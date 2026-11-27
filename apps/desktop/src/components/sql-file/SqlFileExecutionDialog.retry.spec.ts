@@ -190,6 +190,25 @@ vi.mock("@/components/ui/select", () => ({
   SelectTrigger: passthrough("div"),
   SelectValue: passthrough("span"),
 }));
+vi.mock("@/components/ui/searchable-select/SearchableSelect.vue", async () => {
+  const { Select, SelectItem } = await import("@/components/ui/select");
+  return {
+    default: defineComponent({
+      props: ["modelValue", "options"],
+      emits: ["update:modelValue"],
+      setup(props, { emit }) {
+        return () =>
+          h(
+            Select,
+            { modelValue: props.modelValue, "onUpdate:modelValue": (value: unknown) => emit("update:modelValue", value) },
+            {
+              default: () => props.options.map((value: string) => h(SelectItem, { value }, { default: () => value })),
+            },
+          );
+      },
+    }),
+  };
+});
 vi.mock("@/components/icons/DatabaseIcon.vue", () => ({ default: passthrough("span") }));
 vi.mock("@/components/connection/ConnectionGroupBadge.vue", () => ({ default: passthrough("span") }));
 

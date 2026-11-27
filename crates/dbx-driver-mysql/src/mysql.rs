@@ -2006,6 +2006,53 @@ enum MySqlTcpKeepaliveMode {
     Disabled,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MySqlResetMode {
+    /// Shared pools (`max_connections > 1`) reset pooled connections via
+    /// `COM_RESET_CONNECTION` (or `COM_CHANGE_USER` on MySQL <= 5.7.2) on
+    /// return; single-connection client-session pools keep reset disabled to
+    /// preserve temporary tables and session variables.
+    Auto,
+    /// Disable `COM_RESET_CONNECTION` / `COM_CHANGE_USER` on pool return for
+    /// MySQL proxies/gateways (such as JumpServer Magnus) that reject reset
+    /// commands. Without this fallback, `mysql_async`'s recycler silently
+    /// drops every returned connection without sending `COM_QUIT` and opens a
+    /// fresh backend connection on the next query (#15612).
+    Disabled,
+}
+
+impl MySqlResetMode {
+    fn reset_connection(self, max_connections: usize) -> bool {
+        match self {
+            Self::Auto => max_connections > 1,
+            Self::Disabled => false,
+        }
+    }
+}
+
+const MYSQL_DISCARD_POOL_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+async fn disconnect_pool_best_effort(pool: MySqlPool) {
+    let _ = tokio::time::timeout(MYSQL_DISCARD_POOL_DISCONNECT_TIMEOUT, pool.disconnect()).await;
+}
+
+async fn disconnect_conn_best_effort(conn: mysql_async::Conn) {
+    let _ = tokio::time::timeout(MYSQL_DISCARD_POOL_DISCONNECT_TIMEOUT, conn.disconnect()).await;
+}
+
+enum MySqlVerifyError {
+    Connect(String),
+    ResetUnsupported(String),
+}
+
+impl MySqlVerifyError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Connect(error) | Self::ResetUnsupported(error) => error,
+        }
+    }
+}
+
 impl MySqlEofMode {
     fn deprecate_eof(self) -> bool {
         self == Self::Deprecate
@@ -2073,7 +2120,7 @@ impl MySqlSetupMode {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn verify_pool_connection_with_setup_fallback(
+async fn verify_or_retry_without_reset(
     pool: MySqlPool,
     timeout: Duration,
     url: &str,
@@ -2086,121 +2133,264 @@ async fn verify_pool_connection_with_setup_fallback(
     eof_mode: MySqlEofMode,
     tcp_keepalive_mode: MySqlTcpKeepaliveMode,
 ) -> Result<MySqlPool, String> {
-    // The retry URL only changes when a fallback was actually applied, so a
-    // connection that works on the first attempt never pays for the extra pool.
-    let mut retry_url = url.to_string();
-    let mut error = match verify_pool_connection(&pool, timeout).await {
-        Ok(()) => return Ok(pool),
-        Err(err) => err,
-    };
+    let probe_reset = MySqlResetMode::Auto.reset_connection(max_connections);
+    match verify_pool_connection_for_mode(&pool, timeout, probe_reset).await {
+        Ok(()) => Ok(pool),
+        Err(MySqlVerifyError::ResetUnsupported(reason)) => {
+            disconnect_pool_best_effort(pool).await;
+            log::info!(
+                "MySQL server/proxy rejected pooled connection reset ({reason}); retrying with COM_RESET_CONNECTION disabled"
+            );
+            let replacement = create_pool_with_reset_mode(
+                url,
+                ca_cert_path,
+                max_connections,
+                idle_timeout_secs,
+                timeout,
+                setup_database,
+                extra_setup_queries,
+                setup_mode,
+                eof_mode,
+                tcp_keepalive_mode,
+                MySqlResetMode::Disabled,
+            )?;
+            match verify_pool_connection_for_mode(&replacement, timeout, false).await {
+                Ok(()) => Ok(replacement),
+                Err(error) => {
+                    disconnect_pool_best_effort(replacement).await;
+                    Err(error.into_message())
+                }
+            }
+        }
+        Err(MySqlVerifyError::Connect(error)) => {
+            disconnect_pool_best_effort(pool).await;
+            Err(error)
+        }
+    }
+}
 
-    if let Some(charset_url) = mysql_legacy_charset_fallback_url(&retry_url, &error) {
-        log::info!("MySQL server does not support the built-in utf8mb4 charset; retrying with charset=utf8");
-        let charset_pool = create_pool(
-            &charset_url,
+#[allow(clippy::too_many_arguments)]
+fn verify_pool_connection_with_setup_fallback<'a>(
+    pool: MySqlPool,
+    timeout: Duration,
+    url: &'a str,
+    ca_cert_path: Option<&'a str>,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    setup_database: Option<&'a str>,
+    extra_setup_queries: &'a [String],
+    setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
+    tcp_keepalive_mode: MySqlTcpKeepaliveMode,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<MySqlPool, String>> + Send + 'a>> {
+    Box::pin(async move {
+        // The retry URL only changes when a fallback was actually applied, so a
+        // connection that works on the first attempt never pays for the extra pool.
+        let mut retry_url = url.to_string();
+        let mut error = match verify_or_retry_without_reset(
+            pool,
+            timeout,
+            &retry_url,
             ca_cert_path,
             max_connections,
             idle_timeout_secs,
-            timeout,
             setup_database,
             extra_setup_queries,
             setup_mode,
             eof_mode,
             tcp_keepalive_mode,
-        )?;
-        match verify_pool_connection(&charset_pool, timeout).await {
-            Ok(()) => return Ok(charset_pool),
-            Err(charset_error) => {
-                retry_url = charset_url;
-                error = charset_error;
-            }
-        }
-    }
-
-    let recognized_mode = mysql_group_concat_setup_fallback_mode(setup_mode, &error);
-    // An unrecognized wording (a server whose rejection text dbx does not know yet) is
-    // retried on the strength of the retry actually connecting. See
-    // [`mysql_setup_probe_fallback_mode`].
-    let probed = recognized_mode.is_none();
-    let fallback = recognized_mode.or_else(|| mysql_setup_probe_fallback_mode(setup_mode, &retry_url, &error));
-    let Some(fallback_mode) = fallback else {
-        return Err(error);
-    };
-    let ladder = mysql_setup_fallback_ladder(fallback_mode, &error);
-    if probed {
-        log::info!(
-            "MySQL connection failed with a server error while the optional group_concat_max_len setup was in place; \
-             retrying with {ladder:?} to check whether that setup caused it"
-        );
-    } else {
-        log::info!("MySQL server rejected optional group_concat_max_len setup; retrying with {ladder:?}");
-    }
-    let mut last_error = None;
-    let mut verified_without_floor = None;
-    let retries_literal_floor = ladder.contains(&MySqlSetupMode::LiteralFloor);
-    for mode in ladder {
-        let ladder_pool = create_pool(
-            &retry_url,
-            ca_cert_path,
-            max_connections,
-            idle_timeout_secs,
-            timeout,
-            setup_database,
-            extra_setup_queries,
-            mode,
-            eof_mode,
-            tcp_keepalive_mode,
-        )?;
-        // The rung without dbx's built-in statement is the reliable one, and it reports the
-        // value the server uses. The literal rung that follows cannot express the standard
-        // `greatest(...)` guard, so it may only be applied when the server *reports* a value
-        // below dbx's floor; a server configured higher keeps its own value (issue #9412),
-        // and a value the server did not report is kept as it is instead of guessed at.
-        let reports_server_value = mode == MySqlSetupMode::Compatible && retries_literal_floor;
-        let verified = if reports_server_value {
-            verify_pool_connection_reporting_group_concat_max_len(&ladder_pool, timeout).await
-        } else {
-            verify_pool_connection(&ladder_pool, timeout).await.map(|()| None)
+        )
+        .await
+        {
+            Ok(verified) => return Ok(verified),
+            Err(err) => err,
         };
-        match verified {
-            // Every rung but the value-reporting one only has to connect.
-            Ok(None) if !reports_server_value => return Ok(ladder_pool),
-            Ok(None) => {
-                log::info!(
-                    "MySQL server did not report group_concat_max_len; keeping the server value rather than \
-                     applying dbx's {} floor",
-                    MYSQL_GROUP_CONCAT_MAX_LEN
-                );
-                return Ok(ladder_pool);
-            }
-            Ok(Some(current)) if !mysql_literal_floor_is_needed(Some(current)) => {
-                log::info!(
-                    "MySQL server reports group_concat_max_len = {current}, which is not below dbx's {} floor; \
-                     keeping the server value",
-                    MYSQL_GROUP_CONCAT_MAX_LEN
-                );
-                return Ok(ladder_pool);
-            }
-            Ok(Some(_)) => verified_without_floor = Some(ladder_pool),
-            Err(ladder_error) => {
-                log::info!("MySQL retry with {mode:?} mode did not connect: {ladder_error}");
-                last_error = Some(ladder_error);
+
+        if let Some(charset_url) = mysql_legacy_charset_fallback_url(&retry_url, &error) {
+            log::info!("MySQL server does not support the built-in utf8mb4 charset; retrying with charset=utf8");
+            let charset_pool = create_pool(
+                &charset_url,
+                ca_cert_path,
+                max_connections,
+                idle_timeout_secs,
+                timeout,
+                setup_database,
+                extra_setup_queries,
+                setup_mode,
+                eof_mode,
+                tcp_keepalive_mode,
+            )?;
+            match verify_or_retry_without_reset(
+                charset_pool,
+                timeout,
+                &charset_url,
+                ca_cert_path,
+                max_connections,
+                idle_timeout_secs,
+                setup_database,
+                extra_setup_queries,
+                setup_mode,
+                eof_mode,
+                tcp_keepalive_mode,
+            )
+            .await
+            {
+                Ok(verified) => return Ok(verified),
+                Err(charset_error) => {
+                    retry_url = charset_url;
+                    error = charset_error;
+                }
             }
         }
-    }
-    // The literal rung did not connect, but the rung that drops the built-in statement was
-    // already verified, so that connection is still the one to keep.
-    if let Some(pool) = verified_without_floor {
-        return Ok(pool);
-    }
-    // The probe only explains the failure when it connects; keep the server's
-    // first answer otherwise so an unrelated failure is not reported as a setup
-    // rejection.
-    match (probed, last_error) {
-        (true, _) => Err(error),
-        (false, Some(ladder_error)) => Err(ladder_error),
-        (false, None) => Err(error),
-    }
+
+        let recognized_mode = mysql_group_concat_setup_fallback_mode(setup_mode, &error);
+        // An unrecognized wording (a server whose rejection text dbx does not know yet) is
+        // retried on the strength of the retry actually connecting. See
+        // [`mysql_setup_probe_fallback_mode`].
+        let probed = recognized_mode.is_none();
+        let fallback = recognized_mode.or_else(|| mysql_setup_probe_fallback_mode(setup_mode, &retry_url, &error));
+        let Some(fallback_mode) = fallback else {
+            return Err(error);
+        };
+        let ladder = mysql_setup_fallback_ladder(fallback_mode, &error);
+        if probed {
+            log::info!(
+                "MySQL connection failed with a server error while the optional group_concat_max_len setup was in place; \
+                 retrying with {ladder:?} to check whether that setup caused it"
+            );
+        } else {
+            log::info!("MySQL server rejected optional group_concat_max_len setup; retrying with {ladder:?}");
+        }
+        let mut last_error = None;
+        let mut verified_without_floor: Option<MySqlPool> = None;
+        let retries_literal_floor = ladder.contains(&MySqlSetupMode::LiteralFloor);
+        let probe_reset = MySqlResetMode::Auto.reset_connection(max_connections);
+        for mode in ladder {
+            let ladder_pool = create_pool(
+                &retry_url,
+                ca_cert_path,
+                max_connections,
+                idle_timeout_secs,
+                timeout,
+                setup_database,
+                extra_setup_queries,
+                mode,
+                eof_mode,
+                tcp_keepalive_mode,
+            )?;
+            // The rung without dbx's built-in statement is the reliable one, and it reports the
+            // value the server uses. The literal rung that follows cannot express the standard
+            // `greatest(...)` guard, so it may only be applied when the server *reports* a value
+            // below dbx's floor; a server configured higher keeps its own value (issue #9412),
+            // and a value the server did not report is kept as it is instead of guessed at.
+            let reports_server_value = mode == MySqlSetupMode::Compatible && retries_literal_floor;
+            let verified = if reports_server_value {
+                match verify_pool_connection_reporting_group_concat_max_len(&ladder_pool, timeout, probe_reset).await {
+                    Ok(value) => Ok((ladder_pool, value)),
+                    Err(MySqlVerifyError::ResetUnsupported(reason)) => {
+                        disconnect_pool_best_effort(ladder_pool).await;
+                        log::info!(
+                            "MySQL server/proxy rejected pooled connection reset ({reason}); retrying with COM_RESET_CONNECTION disabled"
+                        );
+                        let replacement = create_pool_with_reset_mode(
+                            &retry_url,
+                            ca_cert_path,
+                            max_connections,
+                            idle_timeout_secs,
+                            timeout,
+                            setup_database,
+                            extra_setup_queries,
+                            mode,
+                            eof_mode,
+                            tcp_keepalive_mode,
+                            MySqlResetMode::Disabled,
+                        )?;
+                        match verify_pool_connection_reporting_group_concat_max_len(&replacement, timeout, false).await
+                        {
+                            Ok(value) => Ok((replacement, value)),
+                            Err(err) => {
+                                disconnect_pool_best_effort(replacement).await;
+                                Err(err.into_message())
+                            }
+                        }
+                    }
+                    Err(MySqlVerifyError::Connect(err)) => {
+                        disconnect_pool_best_effort(ladder_pool).await;
+                        Err(err)
+                    }
+                }
+            } else {
+                verify_or_retry_without_reset(
+                    ladder_pool,
+                    timeout,
+                    &retry_url,
+                    ca_cert_path,
+                    max_connections,
+                    idle_timeout_secs,
+                    setup_database,
+                    extra_setup_queries,
+                    mode,
+                    eof_mode,
+                    tcp_keepalive_mode,
+                )
+                .await
+                .map(|pool| (pool, None))
+            };
+            match verified {
+                // Every rung but the value-reporting one only has to connect.
+                Ok((verified_pool, None)) if !reports_server_value => {
+                    if let Some(previous) = verified_without_floor.take() {
+                        disconnect_pool_best_effort(previous).await;
+                    }
+                    return Ok(verified_pool);
+                }
+                Ok((verified_pool, None)) => {
+                    log::info!(
+                        "MySQL server did not report group_concat_max_len; keeping the server value rather than \
+                         applying dbx's {} floor",
+                        MYSQL_GROUP_CONCAT_MAX_LEN
+                    );
+                    if let Some(previous) = verified_without_floor.take() {
+                        disconnect_pool_best_effort(previous).await;
+                    }
+                    return Ok(verified_pool);
+                }
+                Ok((verified_pool, Some(current))) if !mysql_literal_floor_is_needed(Some(current)) => {
+                    log::info!(
+                        "MySQL server reports group_concat_max_len = {current}, which is not below dbx's {} floor; \
+                         keeping the server value",
+                        MYSQL_GROUP_CONCAT_MAX_LEN
+                    );
+                    if let Some(previous) = verified_without_floor.take() {
+                        disconnect_pool_best_effort(previous).await;
+                    }
+                    return Ok(verified_pool);
+                }
+                Ok((verified_pool, Some(_))) => {
+                    if let Some(previous) = verified_without_floor.replace(verified_pool) {
+                        disconnect_pool_best_effort(previous).await;
+                    }
+                }
+                Err(ladder_error) => {
+                    log::info!("MySQL retry with {mode:?} mode did not connect: {ladder_error}");
+                    last_error = Some(ladder_error);
+                }
+            }
+        }
+        // The literal rung did not connect, but the rung that drops the built-in statement was
+        // already verified, so that connection is still the one to keep.
+        if let Some(pool) = verified_without_floor {
+            return Ok(pool);
+        }
+        // The probe only explains the failure when it connects; keep the server's
+        // first answer otherwise so an unrelated failure is not reported as a setup
+        // rejection.
+        match (probed, last_error) {
+            (true, _) => Err(error),
+            (false, Some(ladder_error)) => Err(ladder_error),
+            (false, None) => Err(error),
+        }
+    })
 }
 
 /// Whether dbx's literal floor still raises the value the server reports.
@@ -2222,13 +2412,33 @@ fn mysql_literal_floor_is_needed(current: Option<u64>) -> bool {
 async fn verify_pool_connection_reporting_group_concat_max_len(
     pool: &MySqlPool,
     timeout: Duration,
-) -> Result<Option<u64>, String> {
-    super::with_connection_timeout("MySQL", timeout, async {
-        let mut conn = pool.get_conn().await.map_err(|error| format!("MySQL connection failed: {error}"))?;
-        conn.ping().await.map_err(|error| format!("MySQL ping failed: {error}"))?;
-        Ok(query_first_column::<u64>(&mut conn, "SELECT @@session.group_concat_max_len").await.ok().flatten())
+    probe_reset: bool,
+) -> Result<Option<u64>, MySqlVerifyError> {
+    match tokio::time::timeout(timeout, async {
+        let mut conn = pool
+            .get_conn()
+            .await
+            .map_err(|error| MySqlVerifyError::Connect(format!("MySQL connection failed: {error}")))?;
+        if let Err(error) = conn.ping().await {
+            disconnect_conn_best_effort(conn).await;
+            return Err(MySqlVerifyError::Connect(format!("MySQL ping failed: {error}")));
+        }
+        let value = query_first_column::<u64>(&mut conn, "SELECT @@session.group_concat_max_len").await.ok().flatten();
+        if probe_reset {
+            if let Err(error) = probe_pool_connection_reset(&mut conn).await {
+                disconnect_conn_best_effort(conn).await;
+                return Err(MySqlVerifyError::ResetUnsupported(error.to_string()));
+            }
+        }
+        Ok(value)
     })
     .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            Err(MySqlVerifyError::Connect(format!("MySQL connection timed out after {} seconds", timeout.as_secs())))
+        }
+    }
 }
 
 /// Modes to retry with, in order, after the built-in `group_concat_max_len` setup was
@@ -2429,6 +2639,7 @@ fn mysql_setup_probe_fallback_mode(setup_mode: MySqlSetupMode, url: &str, error:
     error.to_ascii_lowercase().contains("server error").then_some(MySqlSetupMode::Compatible)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_pool(
     url: &str,
     ca_cert_path: Option<&str>,
@@ -2441,6 +2652,35 @@ fn create_pool(
     eof_mode: MySqlEofMode,
     tcp_keepalive_mode: MySqlTcpKeepaliveMode,
 ) -> Result<MySqlPool, String> {
+    create_pool_with_reset_mode(
+        url,
+        ca_cert_path,
+        max_connections,
+        idle_timeout_secs,
+        checkout_timeout,
+        setup_database,
+        extra_setup_queries,
+        setup_mode,
+        eof_mode,
+        tcp_keepalive_mode,
+        MySqlResetMode::Auto,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_pool_with_reset_mode(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    checkout_timeout: Duration,
+    setup_database: Option<&str>,
+    extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
+    tcp_keepalive_mode: MySqlTcpKeepaliveMode,
+    reset_mode: MySqlResetMode,
+) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
     let data_charset = data_charset_from_url(url)?;
     let local_infile_paths = mysql_local_infile_paths(&tls_url.url);
@@ -2451,13 +2691,13 @@ fn create_pool(
     let max_connections = max_connections.max(1);
     // Single-connection pools (max_connections == 1) are client session pools that
     // must preserve session state (e.g. TEMPORARY TABLEs) across queries.
-    // Disable COM_RESET_CONNECTION for these pools to avoid clearing that state.
+    // Disable COM_RESET_CONNECTION for these pools (and for proxies that reject it).
     let inactive_ttl =
         idle_timeout_secs.filter(|&s| s >= 30).map(Duration::from_secs).unwrap_or(Duration::from_secs(300));
     let pool_opts = mysql_async::PoolOpts::new()
         .with_constraints(mysql_async::PoolConstraints::new(1, max_connections).unwrap())
         .with_inactive_connection_ttl(inactive_ttl)
-        .with_reset_connection(max_connections > 1);
+        .with_reset_connection(reset_mode.reset_connection(max_connections));
     let setup_queries = match (setup_database, setup_mode) {
         (Some(database), MySqlSetupMode::Standard) => {
             mysql_setup_queries_for_database(url, Some(database), extra_setup_queries)
@@ -3078,14 +3318,52 @@ fn is_safe_mysql_time_zone_name(value: &str) -> bool {
         && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'+' | b':'))
 }
 
-async fn verify_pool_connection(pool: &MySqlPool, timeout: Duration) -> Result<(), String> {
-    super::with_connection_timeout("MySQL", timeout, async {
-        let mut conn = pool.get_conn().await.map_err(|e| format!("MySQL connection failed: {e}"))?;
-        conn.ping().await.map_err(|e| format!("MySQL ping failed: {e}"))?;
-        conn.query_drop("SELECT 1").await.map_err(|e| format!("MySQL connection verification query failed: {e}"))?;
+async fn probe_pool_connection_reset(conn: &mut mysql_async::Conn) -> Result<(), mysql_async::Error> {
+    if !conn.reset().await? {
+        conn.change_user(Default::default()).await?;
+    }
+    // The connection was just reset above, so skip a redundant reset when this
+    // verification checkout returns to the pool.
+    conn.reset_connection(false);
+    Ok(())
+}
+
+async fn verify_pool_connection_for_mode(
+    pool: &MySqlPool,
+    timeout: Duration,
+    probe_reset: bool,
+) -> Result<(), MySqlVerifyError> {
+    match tokio::time::timeout(timeout, async {
+        let mut conn =
+            pool.get_conn().await.map_err(|e| MySqlVerifyError::Connect(format!("MySQL connection failed: {e}")))?;
+        if let Err(e) = conn.ping().await {
+            disconnect_conn_best_effort(conn).await;
+            return Err(MySqlVerifyError::Connect(format!("MySQL ping failed: {e}")));
+        }
+        if let Err(e) = conn.query_drop("SELECT 1").await {
+            disconnect_conn_best_effort(conn).await;
+            return Err(MySqlVerifyError::Connect(format!("MySQL connection verification query failed: {e}")));
+        }
+        if probe_reset {
+            if let Err(e) = probe_pool_connection_reset(&mut conn).await {
+                disconnect_conn_best_effort(conn).await;
+                return Err(MySqlVerifyError::ResetUnsupported(e.to_string()));
+            }
+        }
         Ok(())
     })
     .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            Err(MySqlVerifyError::Connect(format!("MySQL connection timed out after {} seconds", timeout.as_secs())))
+        }
+    }
+}
+
+#[cfg(test)]
+async fn verify_pool_connection(pool: &MySqlPool, timeout: Duration) -> Result<(), String> {
+    verify_pool_connection_for_mode(pool, timeout, false).await.map_err(MySqlVerifyError::into_message)
 }
 
 fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
@@ -7220,8 +7498,9 @@ pub async fn kill_query_with_opts(
             "MySQL kill connection timed out".to_string()
         })?
         .map_err(|e| e.to_string())?;
-    tokio::time::timeout(timeout, conn.query_drop(format!("KILL QUERY {connection_id}")))
-        .await
+    let kill_result = tokio::time::timeout(timeout, conn.query_drop(format!("KILL QUERY {connection_id}"))).await;
+    disconnect_conn_best_effort(conn).await;
+    kill_result
         .map_err(|_| {
             log::warn!(
                 "[db:cancel:error] elapsed_ms={} timeout_ms={} error=MySQL KILL QUERY execution timed out",
@@ -11208,6 +11487,227 @@ mod tests {
         let attempts = servers.join_next().await.unwrap().unwrap();
         assert_eq!(attempts.len(), 3);
         assert!(!attempts[2].contains(mysql_async::consts::CapabilityFlags::CLIENT_DEPRECATE_EOF));
+    }
+
+    #[tokio::test]
+    async fn mysql_proxy_rejecting_com_reset_connection_reuses_connections_and_sends_com_quit() {
+        use mysql_async::consts::CapabilityFlags as Caps;
+        use mysql_common::proto::MySerialize;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let com_quit = Arc::new(AtomicUsize::new(0));
+        let abrupt_eof = Arc::new(AtomicUsize::new(0));
+        let reset_cmds = Arc::new(AtomicUsize::new(0));
+
+        let accepted_c = Arc::clone(&accepted);
+        let com_quit_c = Arc::clone(&com_quit);
+        let abrupt_eof_c = Arc::clone(&abrupt_eof);
+        let reset_cmds_c = Arc::clone(&reset_cmds);
+        let server = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                accepted_c.fetch_add(1, AtomicOrdering::SeqCst);
+                let com_quit_h = Arc::clone(&com_quit_c);
+                let abrupt_eof_h = Arc::clone(&abrupt_eof_c);
+                let reset_cmds_h = Arc::clone(&reset_cmds_c);
+                handlers.spawn(async move {
+                    let greeting = mysql_common::packets::HandshakePacket::new(
+                        10,
+                        &b"8.0.19-magnus-proxy"[..],
+                        1,
+                        *b"12345678",
+                        Some(&b"abcdefghijkl\0"[..]),
+                        Caps::CLIENT_PROTOCOL_41
+                            | Caps::CLIENT_SECURE_CONNECTION
+                            | Caps::CLIENT_PLUGIN_AUTH
+                            | Caps::CLIENT_DEPRECATE_EOF,
+                        45,
+                        StatusFlags::SERVER_STATUS_AUTOCOMMIT,
+                        Some(&b"mysql_native_password"[..]),
+                    );
+                    let mut payload = Vec::new();
+                    greeting.serialize(&mut payload);
+                    mysql_tls_test_write(&mut socket, 0, &payload).await;
+                    let _handshake = mysql_tls_test_packet(&mut socket).await;
+                    mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+
+                    loop {
+                        let mut header = [0u8; 4];
+                        if socket.read_exact(&mut header).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        let len = u32::from_le_bytes([header[0], header[1], header[2], 0]) as usize;
+                        let mut body = vec![0u8; len];
+                        if socket.read_exact(&mut body).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        match body[0] {
+                            // COM_QUIT
+                            0x01 => {
+                                com_quit_h.fetch_add(1, AtomicOrdering::SeqCst);
+                                break;
+                            }
+                            // COM_RESET_CONNECTION: simulate JumpServer Magnus / go-mysql rejection.
+                            0x1f => {
+                                reset_cmds_h.fetch_add(1, AtomicOrdering::SeqCst);
+                                let mut err = vec![0xff, 0x51, 0x04]; // 1105 (0x0451)
+                                err.extend_from_slice(b"#HY000command 31 is not supported now");
+                                mysql_tls_test_write(&mut socket, 1, &err).await;
+                            }
+                            _ => {
+                                mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                            }
+                        }
+                    }
+                });
+            }
+            while handlers.join_next().await.is_some() {}
+        });
+
+        let url = format!(
+            "mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled&max_allowed_packet=65536&wait_timeout=60&sessionVariables=group_concat_max_len%3D1024"
+        );
+        let pool = connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(3), 3)
+            .await
+            .expect("shared pool should fall back when COM_RESET_CONNECTION is rejected");
+
+        for _ in 0..5 {
+            // Wait for the background Recycler to place the returned connection back
+            // into `available` so sequential queries deterministically reuse it.
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while pool.metrics().connections_in_pool.load(AtomicOrdering::Relaxed) == 0 && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let mut conn = pool.get_conn().await.expect("checkout pooled connection");
+            conn.query_drop("DO 1").await.expect("query succeeds on reused connection");
+            drop(conn);
+        }
+        pool.disconnect().await.expect("pool disconnect succeeds");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        server.abort();
+
+        // 1 probe connection (rejected COM_RESET_CONNECTION and closed with COM_QUIT)
+        // + 1 reused pool connection (no COM_RESET_CONNECTION, closed with COM_QUIT).
+        assert_eq!(reset_cmds.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(accepted.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(com_quit.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(abrupt_eof.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn mysql_server_supporting_com_reset_connection_keeps_reset_enabled() {
+        use mysql_async::consts::CapabilityFlags as Caps;
+        use mysql_common::proto::MySerialize;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let com_quit = Arc::new(AtomicUsize::new(0));
+        let abrupt_eof = Arc::new(AtomicUsize::new(0));
+        let reset_cmds = Arc::new(AtomicUsize::new(0));
+
+        let accepted_c = Arc::clone(&accepted);
+        let com_quit_c = Arc::clone(&com_quit);
+        let abrupt_eof_c = Arc::clone(&abrupt_eof);
+        let reset_cmds_c = Arc::clone(&reset_cmds);
+        let server = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                accepted_c.fetch_add(1, AtomicOrdering::SeqCst);
+                let com_quit_h = Arc::clone(&com_quit_c);
+                let abrupt_eof_h = Arc::clone(&abrupt_eof_c);
+                let reset_cmds_h = Arc::clone(&reset_cmds_c);
+                handlers.spawn(async move {
+                    let greeting = mysql_common::packets::HandshakePacket::new(
+                        10,
+                        &b"8.0.19"[..],
+                        1,
+                        *b"12345678",
+                        Some(&b"abcdefghijkl\0"[..]),
+                        Caps::CLIENT_PROTOCOL_41
+                            | Caps::CLIENT_SECURE_CONNECTION
+                            | Caps::CLIENT_PLUGIN_AUTH
+                            | Caps::CLIENT_DEPRECATE_EOF,
+                        45,
+                        StatusFlags::SERVER_STATUS_AUTOCOMMIT,
+                        Some(&b"mysql_native_password"[..]),
+                    );
+                    let mut payload = Vec::new();
+                    greeting.serialize(&mut payload);
+                    mysql_tls_test_write(&mut socket, 0, &payload).await;
+                    let _handshake = mysql_tls_test_packet(&mut socket).await;
+                    mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+
+                    loop {
+                        let mut header = [0u8; 4];
+                        if socket.read_exact(&mut header).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        let len = u32::from_le_bytes([header[0], header[1], header[2], 0]) as usize;
+                        let mut body = vec![0u8; len];
+                        if socket.read_exact(&mut body).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        match body[0] {
+                            0x01 => {
+                                com_quit_h.fetch_add(1, AtomicOrdering::SeqCst);
+                                break;
+                            }
+                            0x1f => {
+                                reset_cmds_h.fetch_add(1, AtomicOrdering::SeqCst);
+                                mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                            }
+                            _ => {
+                                mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                            }
+                        }
+                    }
+                });
+            }
+            while handlers.join_next().await.is_some() {}
+        });
+
+        let url = format!(
+            "mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled&max_allowed_packet=65536&wait_timeout=60&sessionVariables=group_concat_max_len%3D1024"
+        );
+        let pool = connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(3), 3)
+            .await
+            .expect("shared pool connects");
+
+        for _ in 0..2 {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while pool.metrics().connections_in_pool.load(AtomicOrdering::Relaxed) == 0 && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let mut conn = pool.get_conn().await.expect("checkout pooled connection");
+            conn.query_drop("DO 1").await.expect("query succeeds");
+            drop(conn);
+        }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while pool.metrics().connections_in_pool.load(AtomicOrdering::Relaxed) == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        pool.disconnect().await.expect("pool disconnect succeeds");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        server.abort();
+
+        assert_eq!(accepted.load(AtomicOrdering::SeqCst), 1);
+        // 1 probe reset during connect + 1 reset per query return (2 queries).
+        assert_eq!(reset_cmds.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(com_quit.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(abrupt_eof.load(AtomicOrdering::SeqCst), 0);
     }
 
     #[tokio::test]

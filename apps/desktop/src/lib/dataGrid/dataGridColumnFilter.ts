@@ -183,8 +183,12 @@ export function filterModeUsesRange(mode: DataGridContextFilterMode): boolean {
   return mode === "between" || mode === "not-between";
 }
 
+// Mirrors `is_postgres_like_pattern_database` in the Rust SQL builder.
+const ILIKE_DATABASE_TYPES: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "gbase8c", "opengauss"]);
+
 export function filterModeIsSupportedForDatabase(mode: DataGridContextFilterMode, databaseType?: DatabaseType): boolean {
   if (databaseType === "victoriametrics") return false;
+  if (mode === "ilike" || mode === "not-ilike") return !!databaseType && ILIKE_DATABASE_TYPES.has(databaseType);
   if (!filterModeUsesList(mode) && !filterModeUsesRange(mode)) return true;
   // These targets do not support all four new SQL predicates reliably.
   return databaseType !== "cassandra" && databaseType !== "influxdb" && databaseType !== "jdbc";

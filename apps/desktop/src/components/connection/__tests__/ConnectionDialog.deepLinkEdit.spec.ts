@@ -8,6 +8,7 @@ import type { ConnectionConfig } from "@/types/database";
 import { CONNECTION_PROFILES } from "@/types/generated/connectionProfiles";
 import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkPluginProvider } from "@/lib/connection/connectionDeepLink";
 import type { ConnectionEditPrefill } from "@/lib/connection/connectionEditPrefill";
+import { CONNECTION_PICKER_VIEW_STORAGE_KEY } from "@/lib/connection/connectionPickerViewPreference";
 
 const visibleTab = vi.hoisted(() => ({ value: "connection" }));
 
@@ -250,6 +251,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();
   document.body.innerHTML = "";
+  localStorage.removeItem(CONNECTION_PICKER_VIEW_STORAGE_KEY);
   (actualStoreHolder.value as { $dispose?: () => void } | null)?.$dispose?.();
   actualStoreHolder.value = null;
 });
@@ -295,6 +297,83 @@ describe.each([
     );
     expect(config).toEqual(expect.objectContaining({ ...expected, name: originalName }));
     expect(store.addConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("ConnectionDialog PolarDB preset", () => {
+  it("explains both choices as soon as a search for Polar shows them", async () => {
+    await mountNewDialog();
+    const search = document.querySelector<HTMLInputElement>("[data-connection-db-search]")!;
+    search.value = "Polar";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+
+    const labels = [...document.querySelectorAll(".connection-db-picker-option")].map((option) => option.textContent?.trim());
+    expect(labels).toEqual(expect.arrayContaining([expect.stringContaining("PolarDB (MySQL)"), expect.stringContaining("PostgreSQL")]));
+    expect(document.body.textContent).toContain(i18n.global.t("connection.polarDbPostgresPickerHint"));
+  });
+
+  it.each(["iconView", "listView"])("distinguishes the two PolarDB editions in %s", async (view) => {
+    await mountNewDialog();
+    document.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t(`connection.${view}`)}"]`)!.click();
+    const search = document.querySelector<HTMLInputElement>("[data-connection-db-search]")!;
+    search.value = "PolarDB";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+
+    const options = [...document.querySelectorAll<HTMLButtonElement>(".connection-db-picker-option")];
+    const mysql = options.find((option) => option.textContent?.includes("PolarDB (MySQL)"));
+    const postgres = options.find((option) => option.textContent?.includes("PostgreSQL"));
+    expect(mysql).toBeTruthy();
+    expect(postgres).toBeTruthy();
+    const hint = i18n.global.t("connection.polarDbPostgresPickerHint");
+    expect(document.body.textContent).toContain(hint);
+    mysql!.click();
+    await settle();
+    expect(document.body.textContent).toContain(`${i18n.global.t("connection.selectedDatabase")}: PolarDB (MySQL)`);
+
+    search.value = "";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    expect(document.body.textContent).toContain(hint);
+    search.value = "PolarDB unmatched edition";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    expect(document.body.textContent).not.toContain(hint);
+    search.value = "Polar DB";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const spacedOptions = [...document.querySelectorAll<HTMLButtonElement>(".connection-db-picker-option")];
+    expect(spacedOptions.map((option) => option.textContent?.trim()).join(" ")).toContain("PostgreSQL");
+    expect(document.body.textContent).toContain(hint);
+    const mysqlOption = spacedOptions.find((option) => option.textContent?.includes("PolarDB (MySQL)"));
+    expect(mysqlOption).toBeTruthy();
+    mysqlOption!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await settle();
+    expect(document.querySelector<HTMLInputElement>('input[type="number"].col-span-1')?.value).toBe("3306");
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === i18n.global.t("connection.saveAndConnect"));
+    save!.click();
+    await settle();
+    expect(store.addConnection).toHaveBeenCalledWith(expect.objectContaining({ db_type: "mysql", driver_profile: "polardb", driver_label: "PolarDB", port: 3306, username: "root" }), null);
+  });
+
+  it.each(["PolarDB for PostgreSQL", "PolarDB PostgreSQL", "PolarDB postgres", "PolarDB PG"])("opens the PostgreSQL configuration when searching for %s", async (keyword) => {
+    await mountNewDialog();
+    const search = document.querySelector<HTMLInputElement>("[data-connection-db-search]")!;
+    search.value = keyword;
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+
+    const options = [...document.querySelectorAll<HTMLButtonElement>(".connection-db-picker-option")];
+    expect(options).toHaveLength(1);
+    expect(options[0]?.textContent).toContain("PostgreSQL");
+    options[0].dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await settle();
+    expect(document.querySelector<HTMLInputElement>('input[type="number"].col-span-1')?.value).toBe("5432");
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === i18n.global.t("connection.saveAndConnect"));
+    save!.click();
+    await settle();
+    expect(store.addConnection).toHaveBeenCalledWith(expect.objectContaining({ db_type: "postgres", driver_profile: "postgres", driver_label: "PostgreSQL", port: 5432, username: "postgres" }), null);
   });
 });
 

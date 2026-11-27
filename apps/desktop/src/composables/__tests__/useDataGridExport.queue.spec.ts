@@ -974,6 +974,54 @@ describe("data grid queued table export", () => {
     expect(snapshots).toHaveLength(0);
   });
 
+  it("keeps a queued selected-record Markdown export transposed after materializing its captured LOB", async () => {
+    const { useDataGridExport } = await import("../useDataGridExport");
+    await useDataGridExport(fixture().options).exportCsv();
+    const lob = lobFixture(true);
+    lob.snapshot.value = {
+      ...lob.snapshot.value,
+      columns: ["ID", "BODY"],
+      column_types: ["NUMBER", "CLOB"],
+      rows: [
+        [7, "preview"],
+        [8, "unselected preview"],
+      ],
+      large_value_cells: [
+        { row_index: 0, column_index: 1, original_bytes: 10, value_ref: "original-lob" },
+        { row_index: 1, column_index: 1, original_bytes: 20, value_ref: "unselected-lob" },
+      ],
+    };
+    const items = ref([
+      { id: 42, sourceIndex: 0, data: [7, "preview"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "normal" },
+      { id: 99, sourceIndex: 1, data: [8, "unselected preview"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "normal" },
+    ]);
+    lob.options.columns = computed(() => lob.snapshot.value.columns);
+    lob.options.columnTypes = computed(() => lob.snapshot.value.column_types);
+    lob.options.displayItems = computed(() => items.value);
+    lob.options.hasColumnFormatter = (index) => index === 1;
+    const target = { rowIds: [42], columnIndexes: [1, 0], transposeRecords: true };
+    await useDataGridExport(lob.options).exportMarkdown(target);
+    expect(lob.progress.value.status).toBe("Queued");
+    expect(reads).toHaveLength(0);
+    expect(mocks.memoryWrite).not.toHaveBeenCalled();
+
+    target.rowIds[0] = 99;
+    target.columnIndexes.reverse();
+    target.transposeRecords = false;
+    items.value[0]!.data[0] = 999;
+    lob.formatter.value = "changed";
+    finish(0);
+    await vi.waitFor(() => expect(reads).toHaveLength(1));
+    expect(mocks.readChunk).toHaveBeenCalledWith(expect.objectContaining({ valueRef: "original-lob" }), true);
+    reads[0]!.resolve({ status: "ok", data: "complete", next_offset: 8, eof: true, value_kind: "text" });
+    await vi.waitFor(() => expect(mocks.memoryWrite).toHaveBeenCalledOnce());
+    expect(mocks.memoryWrite).toHaveBeenCalledWith(expect.any(String), ["BODY", "ID"], [["original:complete", 7]], { field: "common.column", data: "settings.dataTab" });
+    expect(mocks.readChunk).toHaveBeenCalledOnce();
+    expect(snapshots).toHaveLength(0);
+    expect(mocks.start).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(lob.progress.value.status).toBe("Done"));
+  });
+
   it("retains an unformatted XLSX LOB read after cancellation until the original response returns", async () => {
     const { useDataGridExport } = await import("../useDataGridExport");
     const { useExportTracker } = await import("../useExportTracker");

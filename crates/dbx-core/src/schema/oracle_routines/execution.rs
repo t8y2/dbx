@@ -373,14 +373,27 @@ impl RoutineWriteIo for LiveWriter<'_> {
             sql,
             Some(&self.catalog.endpoint.schema),
             Some(self.cancellation.clone()),
-            QueryExecutionOptions {
-                timeout_secs: Some(0),
-                await_cancel_completion: true,
-                execution_id: Some(self.execution_id.into()),
-                ..Default::default()
-            },
+            routine_write_options(self.execution_id),
         )
         .await
+    }
+}
+
+/// Options for dispatching one routine definition (CREATE [OR REPLACE] PROCEDURE,
+/// FUNCTION, PACKAGE [BODY], TRIGGER or TYPE [BODY]).
+///
+/// `skip_server_output` lets the Oracle agent leave DBMS_OUTPUT alone around the DDL:
+/// compiling a unit runs no PL/SQL, and `run_write` only inspects ERROR messages while
+/// DBMS_OUTPUT lines are INFO, so the capture cost round trips without changing any
+/// outcome. The agent still switches CURRENT_SCHEMA for the statement and reads its
+/// compilation errors back on the same session; the readback reads ALL_ERRORS as before.
+fn routine_write_options(execution_id: &str) -> QueryExecutionOptions {
+    QueryExecutionOptions {
+        timeout_secs: Some(0),
+        await_cancel_completion: true,
+        execution_id: Some(execution_id.into()),
+        skip_server_output: true,
+        ..Default::default()
     }
 }
 

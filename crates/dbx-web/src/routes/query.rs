@@ -741,6 +741,8 @@ pub async fn execute_multi(
                 execution_mode: req.execution_mode.unwrap_or_default(),
                 preserve_explicit_transaction: req.preserve_explicit_transaction,
                 report_compilation_errors: req.report_compilation_errors,
+                // User statements always capture DBMS_OUTPUT and switch schema.
+                skip_server_output: false,
             },
         )
         .await;

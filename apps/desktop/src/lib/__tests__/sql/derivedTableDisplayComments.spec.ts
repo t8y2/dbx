@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeSelectStructureForDisplay, flattenSimpleDerivedTablesForDisplay } from "@/lib/sql/sqlAnalysis";
+import { analyzeQueryDisplayStructure, analyzeSelectStructureForDisplay, flattenSimpleDerivedTablesForDisplay, resolveSourceColumnsByOrdinal } from "@/lib/sql/sqlAnalysis";
 
 describe("flattenSimpleDerivedTablesForDisplay", () => {
   it("flattens joined star derived tables into base tables", () => {
@@ -56,5 +56,82 @@ describe("analyzeSelectStructureForDisplay via flattening", () => {
   it("still returns null for unflattenable derived tables", () => {
     const sql = "SELECT * FROM (SELECT fundcode FROM DDS.T) A";
     expect(analyzeSelectStructureForDisplay(flattenSimpleDerivedTablesForDisplay(sql))).toBeNull();
+  });
+});
+
+const USER_UNION_SQL = `SELECT * FROM (
+  SELECT * FROM NRCBREPORT_WT.YXYTH_2026_CARD_DSF_INSERT --WHERE TB_DATE BETWEEN LEFT('20261125',8)||'01' AND '20261125'
+  WHERE STAF_NO ='8866231'
+) A
+LEFT JOIN (
+  SELECT * FROM NFCP.T_CCL_BOOK WHERE EFF_DT<='20261125' AND END_DT>'20261125' AND CON_TYPE='06020001' AND CON_STAT='1'
+) B ON A.CH_NL_REAL=B.CHN_ID AND A.ID_CARD=B.ACCT_NO
+LEFT JOIN (
+  SELECT * FROM NRCBREPORT_WT.YXYTH_2026_CARD_DSF_RUN WHERE DATE_ID='20261125'
+) C ON A.CH_NL_REAL=C.CHAN_ID_NL AND A.ID_CARD=C.DBTR_ACCT_ID
+LEFT JOIN (
+  SELECT CDNOAC19,SUBSTR(CSNOCSID,4) CSNOCSID FROM CORE.BWFMDCIM WHERE EFF_DT<='20261125' AND END_DT>'20261125'
+  UNION ALL
+  SELECT CARD_NBR,CUSTR_NBR FROM CCRD.CARD WHERE EFF_DT<='20261125' AND END_DT>'20261125'
+) D ON A.ID_CARD=D.CDNOAC19`;
+
+function fakeColumns(names: string[]): Array<{ name: string }> {
+  return names.map((name) => ({ name }));
+}
+
+describe("analyzeQueryDisplayStructure", () => {
+  it("parses the user's UNION ALL derived table through a placeholder source", () => {
+    const structure = analyzeQueryDisplayStructure(flattenSimpleDerivedTablesForDisplay(USER_UNION_SQL));
+    expect(structure).not.toBeNull();
+    expect(structure!.analysis.sources!.map((source) => `${source.schema ? `${source.schema}.` : ""}${source.tableName}:${source.alias}`)).toEqual(["NRCBREPORT_WT.YXYTH_2026_CARD_DSF_INSERT:A", "NFCP.T_CCL_BOOK:B", "NRCBREPORT_WT.YXYTH_2026_CARD_DSF_RUN:C", "__dbx_derived_0__:D"]);
+    // Output labels come from the derived table's first SELECT only.
+    expect([...structure!.derivedOutputColumns.values()]).toEqual([["CDNOAC19", "CSNOCSID"]]);
+    // The plain parse still bails, so the store only reaches this as a fallback.
+    expect(analyzeSelectStructureForDisplay(flattenSimpleDerivedTablesForDisplay(USER_UNION_SQL))).toBeNull();
+  });
+
+  it("keeps result ordinals aligned across the user's derived source", () => {
+    const structure = analyzeQueryDisplayStructure(flattenSimpleDerivedTablesForDisplay(USER_UNION_SQL))!;
+    const sources = structure.analysis.sources!;
+    const tableSources = [
+      { source: sources[0]!, columns: fakeColumns(["id", "name"]) },
+      { source: sources[1]!, columns: fakeColumns(["id"]) },
+      { source: sources[2]!, columns: fakeColumns(["x"]) },
+      { source: sources[3]!, columns: fakeColumns(structure.derivedOutputColumns.get(sources[3]!.tableName)!) },
+    ];
+    const refs = resolveSourceColumnsByOrdinal("db2", structure.analysis, tableSources, 6);
+    expect(refs).toEqual([
+      { sourceKey: "A:0", sourceColumn: "id" },
+      { sourceKey: "A:0", sourceColumn: "name" },
+      { sourceKey: "B:1", sourceColumn: "id" },
+      { sourceKey: "C:2", sourceColumn: "x" },
+      { sourceKey: "D:3", sourceColumn: "CDNOAC19" },
+      { sourceKey: "D:3", sourceColumn: "CSNOCSID" },
+    ]);
+  });
+
+  it("keeps ordinals after a mid-FROM derived source aligned", () => {
+    const sql = "SELECT * FROM (SELECT a1, a2 FROM s.ta) A JOIN (SELECT b1 FROM s.tb UNION ALL SELECT b2 FROM s.tc) B ON A.a1 = B.b1 JOIN s.td D ON D.d1 = A.a1";
+    const structure = analyzeQueryDisplayStructure(sql)!;
+    const sources = structure.analysis.sources!;
+    const tableSources = [
+      { source: sources[0]!, columns: fakeColumns(["a1", "a2"]) },
+      { source: sources[1]!, columns: fakeColumns(["b1"]) },
+      { source: sources[2]!, columns: fakeColumns(["d1"]) },
+    ];
+    const refs = resolveSourceColumnsByOrdinal("db2", structure.analysis, tableSources, 4);
+    expect(refs).toEqual([
+      { sourceKey: "A:0", sourceColumn: "a1" },
+      { sourceKey: "A:0", sourceColumn: "a2" },
+      { sourceKey: "B:1", sourceColumn: "b1" },
+      { sourceKey: "D:2", sourceColumn: "d1" },
+    ]);
+  });
+
+  it("bails on derived shapes whose column count it cannot know", () => {
+    expect(analyzeQueryDisplayStructure("SELECT * FROM (SELECT * FROM t) A")).toBeNull();
+    expect(analyzeQueryDisplayStructure("SELECT * FROM (SELECT DISTINCT id FROM t) A")).toBeNull();
+    expect(analyzeQueryDisplayStructure("SELECT id FROM t1 UNION ALL SELECT id FROM t2")).toBeNull();
+    expect(analyzeQueryDisplayStructure("WITH c AS (SELECT id FROM t) SELECT * FROM c")).toBeNull();
   });
 });

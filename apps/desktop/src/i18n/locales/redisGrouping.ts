@@ -111,6 +111,35 @@ export const redisGroupingEs = {
   selectLoaded: "Seleccionar coincidencias cargadas",
 };
 
+export const redisGroupingPtBR = {
+  preparingLegacy: "Preparando a visualização anterior; os grupos personalizados continuam disponíveis…",
+  fuzzyTreeUnavailable: "Esta pesquisa excede o limite de recursos da árvore atual. Escolha Lista para navegar pelas correspondências carregadas ou refine a pesquisa para usar a Árvore.",
+  useList: "Usar lista",
+  settings: "Regras de agrupamento",
+  toggle: "Grupos personalizados",
+  list: "Lista",
+  tree: "Árvore",
+  help: "Regras válidas para toda a conexão; vale a primeira correspondência. Um glob do Redis por linha, diferenciando maiúsculas de minúsculas (*, ?, [a-z], barra invertida para escapar). As inclusões são combinadas com OU; as exclusões têm prioridade. Sem inclusões, tudo corresponde. As contagens consideram apenas as chaves carregadas. Os grupos não delimitam exclusões.",
+  enabled: "Ativar regra",
+  name: "Nome do grupo",
+  up: "Mover para cima",
+  down: "Mover para baixo",
+  remove: "Remover",
+  includes: "Padrões de inclusão",
+  excludes: "Padrões de exclusão",
+  add: "Adicionar regra",
+  example: "Adicionar exemplo do Redisson",
+  invalid: "Informe IDs de regra únicos, um nome e pelo menos um padrão por regra (máximo de 64 regras, 64 padrões por lista e 1024 bytes por padrão).",
+  cancel: "Cancelar",
+  save: "Salvar",
+  unmatched: "Sem correspondência",
+  preparing: "Atualizando os grupos carregados…",
+  loadedOnly: "Os grupos mostram apenas as correspondências carregadas; expandir não faz varredura no Redis.",
+  count: "({count} carregadas)",
+  emptyKey: "(chave vazia)",
+  selectLoaded: "Selecionar correspondências carregadas",
+};
+
 // Polish interface overrides; retains all keys from the canonical English object.
 export const redisGroupingPl = {
   ...redisGroupingEn,

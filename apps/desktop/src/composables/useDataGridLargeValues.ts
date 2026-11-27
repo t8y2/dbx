@@ -384,13 +384,15 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
         !postgresTupleLocatorUnsupportedEngine(useConnectionStore().getConfig(options.connectionId.value)),
     );
     if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || options.result.value !== sourceResult) return;
-    const connection = options.getConnectionConfig(options.connectionId.value!);
+    const connectionId = options.connectionId.value;
+    if (!connectionId) return;
+    const connection = options.getConnectionConfig(connectionId);
     const executionId = options.uuid();
     visibleLargeValuePreviewExecutionIds.set(generation, executionId);
     let results: QueryResult[];
     try {
       const executePreview = (previewSql: string) =>
-        api.executeMulti(options.connectionId.value, options.executionDatabase.value, previewSql, undefined, executionId, {
+        api.executeMulti(connectionId, options.executionDatabase.value, previewSql, undefined, executionId, {
           maxRows: requests.size,
           fetchSize: requests.size,
           resultKeyColumns: tableMeta.primaryKeys,

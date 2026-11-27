@@ -217,7 +217,7 @@ async function copyResolvedSql() {
                 <div>{{ t("sqlParameters.value") }}</div>
               </div>
               <div v-for="parameter in activeParameters" :key="parameter.key" class="grid grid-cols-[minmax(140px,1fr)_104px_132px_minmax(180px,1.5fr)] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0">
-                <div class="min-w-0 truncate font-mono text-xs">{{ parameter.name }}</div>
+                <TruncatedTextTooltip :text="parameter.name" class="min-w-0 font-mono text-xs" tooltip-class="break-all font-mono" :delay="150" />
                 <div class="min-w-0 truncate font-mono text-[11px] text-muted-foreground">{{ syntaxLabel(parameter) }}</div>
                 <Select :model-value="values[parameter.key]?.kind || 'string'" @update:model-value="(value) => updateKind(parameter.key, value as SqlParameterValueKind)">
                   <SelectTrigger class="h-8 bg-background text-xs">

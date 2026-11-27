@@ -265,6 +265,8 @@ export default withEnglishFallback({
       empty: "尚未收集追蹤資料。",
     },
     log: { status: "狀態", time: "時間", message: "結果", empty: "尚無偵錯活動" },
+    cursorNotOpen: "程序傳回時游標未開啟。",
+    cursorEmpty: "游標未傳回任何資料列。",
     outcome: { title: "OUT 參數 / 傳回值", name: "名稱", mode: "模式", type: "類型", value: "值", returnLabel: "RETURN", copy: "複製值", copyAll: "全部複製", empty: "執行後會顯示可用的 OUT / IN OUT 參數與傳回值。" },
   },
   objectDependencies: {

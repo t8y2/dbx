@@ -281,6 +281,8 @@ export default withEnglishFallback({
       empty: "Nessuna traccia raccolta.",
     },
     log: { status: "Stato", time: "Ora", message: "Risultato", empty: "Nessuna attività di debug" },
+    cursorNotOpen: "Il cursore non era aperto al ritorno della procedura.",
+    cursorEmpty: "Il cursore non ha restituito alcuna riga.",
     outcome: { title: "Parametri OUT / valore restituito", name: "Nome", mode: "Modalità", type: "Tipo", value: "Valore", returnLabel: "RETURN", copy: "Copia valore", copyAll: "Copia tutto", empty: "I parametri OUT / IN OUT disponibili e il valore restituito appaiono al termine dell'esecuzione." },
   },
   objectDependencies: {

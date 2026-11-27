@@ -279,6 +279,8 @@ export default withEnglishFallback({
       type: "类型",
       value: "值",
       returnLabel: "RETURN",
+      cursorNotOpen: "过程返回时游标未打开。",
+      cursorEmpty: "游标未返回任何行。",
       copy: "复制值",
       copyAll: "全部复制",
       empty: "执行完成后显示可用的 OUT／IN OUT 参数与返回值。",

@@ -2662,6 +2662,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "Seret header kolom untuk mengurutkan ulang",
     invertColumnVisibility: "Balikkan",
     resetColumnOrder: "Atur ulang urutan",
+    confirmColumnHeaderReorder: "Konfirmasi setelah menyeret judul kolom",
+    saveColumnOrder: "Simpan urutan kolom",
     showAllColumns: "Tampilkan semua",
     showSelectedColumns: "Tampilkan yang dipilih",
     showSelectedColumnsHint: "Tampilkan hanya bidang yang cocok dengan pencarian saat ini.",

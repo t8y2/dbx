@@ -2727,6 +2727,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "Przeciągnij nagłówek kolumny, aby zmienić kolejność",
     invertColumnVisibility: "Odwróć widoczność",
     resetColumnOrder: "Przywróć kolejność",
+    confirmColumnHeaderReorder: "Potwierdzaj po przeciągnięciu nagłówka",
+    saveColumnOrder: "Zapisz kolejność kolumn",
     showAllColumns: "Pokaż wszystko",
     showSelectedColumns: "Pokaż wybrane",
     showSelectedColumnsHint: "Pokaż tylko pola pasujące do bieżącego wyszukiwania.",

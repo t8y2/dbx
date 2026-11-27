@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test, vi } from "vitest";
-import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, generateValue, supportsGeneratedMultiRowValues } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
+import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, generateValue, nextIntegerSequenceStart, supportsGeneratedMultiRowValues } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
 
 test("recognizes Oracle-compatible NUMBER column types as numeric", () => {
   assert.equal(findGeneratorKey("value", "NUMBER"), "number");
@@ -27,6 +27,13 @@ test("generates exact twenty-digit integer sequences without rounding", () => {
   assert.deepEqual(result.rows, [[12345678901234567890n], [12345678901234567891n], [12345678901234567892n]]);
   assert.match(result.sql, /\(12345678901234567890\),\n\(12345678901234567891\),\n\(12345678901234567892\)/);
   assert.equal(displayGeneratedValue(result.rows[0][0]), start);
+});
+
+test("derives exact sequence starts from string-encoded large integer query results", () => {
+  assert.equal(nextIntegerSequenceStart("12345678901234567890"), "12345678901234567891");
+  assert.equal(nextIntegerSequenceStart("9007199254740991"), "9007199254740992");
+  assert.equal(nextIntegerSequenceStart(41), 42);
+  assert.equal(nextIntegerSequenceStart("not-an-integer"), 1);
 });
 
 test("generates exact integers within twenty-digit random bounds", () => {

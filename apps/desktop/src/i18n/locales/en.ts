@@ -333,6 +333,8 @@ export default {
       type: "Type",
       value: "Value",
       returnLabel: "RETURN",
+      cursorNotOpen: "The cursor was not open when the procedure returned.",
+      cursorEmpty: "The cursor returned no rows.",
       copy: "Copy value",
       copyAll: "Copy all",
       empty: "Available OUT / IN OUT parameters and the return value appear after execution.",

@@ -7644,6 +7644,33 @@ impl Drop for ManualTransactionKeepAlive {
     }
 }
 
+/// Refresh cadence for a kept-alive session. It must stay well inside the
+/// session's own idle window for every configurable timeout: the minimum
+/// window is 30s, so a fixed 30s tick races the idle watcher and the session
+/// can expire while the guard is held.
+fn manual_transaction_keepalive_interval(idle_timeout: Duration) -> Duration {
+    (idle_timeout / 3).clamp(Duration::from_millis(10), Duration::from_secs(30))
+}
+
+/// Best-effort warm-up for a kept-alive session's held connection. Refreshing
+/// `last_activity` only convinces DBX's own idle watcher; a remote server or
+/// middlebox can still drop the idle physical connection while an export
+/// spends minutes on metadata, and the next stream then fails on a dead
+/// connection. A ping keeps the connection warm without touching the
+/// transaction snapshot. Failures are ignored: the next real operation
+/// surfaces the connection error itself.
+async fn ping_manual_txn_connection(conn: &mut TxnConnection) {
+    match conn {
+        TxnConnection::Mysql(Some(conn)) => {
+            let _ = conn.ping().await;
+        }
+        TxnConnection::Postgres(conn) => {
+            let _ = conn.execute_typed("SELECT 1", &[]).await;
+        }
+        _ => {}
+    }
+}
+
 /// Keep an existing transaction session alive while a caller prepares work for
 /// that session. The caller must retain the returned guard for the full period;
 /// dropping it restores the normal five-minute idle rollback behavior.
@@ -7651,36 +7678,44 @@ pub async fn keep_manual_transaction_alive(
     state: &AppState,
     txn_session_id: &str,
 ) -> Result<ManualTransactionKeepAlive, String> {
-    {
+    let idle_timeout = {
         let mut sessions = state.transaction_sessions.write().await;
         let session =
             sessions.get_mut(txn_session_id).ok_or_else(|| MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string())?;
         if !session.busy {
             session.last_activity = std::time::Instant::now();
         }
-    }
+        session.idle_timeout
+    };
 
     let sessions = Arc::clone(&state.transaction_sessions);
     let keep_alive_sessions = Arc::clone(&sessions);
     let txn_session_id = txn_session_id.to_string();
     let keep_alive_txn_session_id = txn_session_id.clone();
+    let interval = manual_transaction_keepalive_interval(idle_timeout);
     let task = tokio::spawn(async move {
-        const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
         loop {
-            tokio::time::sleep(KEEPALIVE_INTERVAL).await;
-            let should_continue = {
+            tokio::time::sleep(interval).await;
+            let ping_connection = {
                 let mut guard = sessions.write().await;
                 if let Some(session) = guard.get_mut(&keep_alive_txn_session_id) {
-                    if !session.busy {
+                    if session.busy {
+                        None
+                    } else {
                         session.last_activity = std::time::Instant::now();
+                        Some(Arc::clone(&session.connection))
                     }
-                    true
                 } else {
-                    false
+                    break;
                 }
             };
-            if !should_continue {
-                break;
+            if let Some(connection) = ping_connection {
+                // `try_lock`: a stream that claimed the session after the
+                // busy check owns the connection; skip this tick instead of
+                // queueing behind the whole stream.
+                if let Ok(mut conn) = connection.try_lock() {
+                    let _ = tokio::time::timeout(Duration::from_secs(5), ping_manual_txn_connection(&mut conn)).await;
+                }
             }
         }
     });
@@ -10275,6 +10310,44 @@ for line in sys.stdin:
         let guard = sessions.read().await;
         assert!(!guard.contains_key("short"), "a 50ms session must be reaped long before the 300s default");
         assert!(guard.contains_key("long"), "a session with a longer window must survive the same wait");
+    }
+
+    #[test]
+    fn keepalive_interval_stays_inside_the_idle_window() {
+        // The minimum configurable window is 30s; the tick must land well
+        // before it instead of racing the idle watcher at the same instant.
+        assert_eq!(manual_transaction_keepalive_interval(Duration::from_secs(30)), Duration::from_secs(10));
+        assert_eq!(manual_transaction_keepalive_interval(Duration::from_secs(300)), Duration::from_secs(30));
+        assert!(manual_transaction_keepalive_interval(Duration::from_millis(60)) < Duration::from_millis(60));
+    }
+
+    #[tokio::test]
+    async fn keep_alive_holds_a_short_window_session_until_the_guard_drops() {
+        let dir = std::env::temp_dir().join(format!("dbx-txn-keepalive-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        state
+            .transaction_sessions
+            .write()
+            .await
+            .insert("snapshot".to_string(), idle_test_session(Duration::from_millis(60)));
+        spawn_txn_idle_watcher(&state, "snapshot".to_string());
+
+        let guard = keep_manual_transaction_alive(&state, "snapshot").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            state.transaction_sessions.read().await.contains_key("snapshot"),
+            "a kept-alive session must survive well past its own idle window"
+        );
+
+        drop(guard);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !state.transaction_sessions.read().await.contains_key("snapshot"),
+            "dropping the guard restores the normal idle rollback"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

@@ -168,7 +168,9 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
                 ))
             }
         }
-        StructureDialect::SapHana => statements.extend(build_saphana_existing_column_sql(&table, &options.column)),
+        StructureDialect::SapHana => {
+            statements.extend(build_saphana_existing_column_sql(&table, &options.column, false))
+        }
         StructureDialect::Dameng => {
             statements.extend(build_dameng_existing_column_sql(&table, &options.column, true, &mut warnings))
         }
@@ -803,7 +805,11 @@ pub(super) fn build_oracle_like_existing_column_sql(
     statements
 }
 
-pub(super) fn build_saphana_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+pub(super) fn build_saphana_existing_column_sql(
+    table: &str,
+    column: &EditableStructureColumn,
+    defer_primary_key_nullability: bool,
+) -> Vec<String> {
     let Some(original) = &column.original else {
         return Vec::new();
     };
@@ -819,7 +825,11 @@ pub(super) fn build_saphana_existing_column_sql(table: &str, column: &EditableSt
     }
 
     let type_changed = column.data_type.trim() != original.data_type.trim();
-    let nullable_changed = column.is_nullable != original.is_nullable;
+    // ADD PRIMARY KEY enforces NOT NULL on success. A separate ALTER could
+    // leave the column changed if the key fails validation on existing rows.
+    let primary_key_sets_not_null =
+        defer_primary_key_nullability && column.is_primary_key && !original.is_primary_key && !column.is_nullable;
+    let nullable_changed = column.is_nullable != original.is_nullable && !primary_key_sets_not_null;
     let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
     let comment_changed = clean(&column.comment) != original_comment(column);
     if type_changed || nullable_changed || default_changed {

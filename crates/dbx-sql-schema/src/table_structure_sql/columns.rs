@@ -382,7 +382,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             #[cfg(feature = "duckdb-sidecar")]
             StructureDialect::DuckDb => statements.extend(build_duckdb_existing_column_sql(&table, column)),
             StructureDialect::Questdb => statements.extend(build_questdb_existing_column_sql(&table, column)),
-            StructureDialect::SapHana => statements.extend(build_saphana_existing_column_sql(&table, column)),
+            StructureDialect::SapHana => statements.extend(build_saphana_existing_column_sql(&table, column, true)),
             _ => warnings.push(format!("Editing existing columns is not supported for {database_label} yet.")),
         }
         if has_position_change {

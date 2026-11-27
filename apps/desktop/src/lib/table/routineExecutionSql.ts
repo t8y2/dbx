@@ -6,6 +6,7 @@ export interface BuildRoutineExecutionSqlOptions {
   databaseType?: DatabaseType;
   schema?: string;
   routineName: string;
+  packageName?: string;
 }
 
 export type RoutineParameterMode = "IN" | "OUT" | "INOUT" | "RETURN" | "UNKNOWN";
@@ -27,12 +28,11 @@ export interface RoutineParameterValue extends RoutineParameter {
 }
 
 export function qualifiedRoutineName(options: BuildRoutineExecutionSqlOptions): string {
-  const { databaseType, schema, routineName } = options;
+  const { databaseType, schema, packageName, routineName } = options;
   if (databaseType === "databend") return routineName;
-  if (isSchemaAware(databaseType) && schema) {
-    return `${quoteTableIdentifier(databaseType, schema)}.${quoteTableIdentifier(databaseType, routineName)}`;
-  }
-  return quoteTableIdentifier(databaseType, routineName);
+  const parts = [isSchemaAware(databaseType) ? schema : undefined, packageName].filter((part): part is string => !!part);
+  parts.push(routineName);
+  return parts.map((part) => quoteTableIdentifier(databaseType, part)).join(".");
 }
 
 export function buildProcedureExecutionSql(options: BuildRoutineExecutionSqlOptions): string {

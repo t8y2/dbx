@@ -12547,7 +12547,7 @@ export default withEnglishFallback({
     logEndOffset: "Offset finale del log",
     lag: "Ritardo",
     deleteGroup: "Elimina gruppo di consumatori",
-    confirmDelete: "Eliminare il gruppo di consumatori \"{name}\"? Gli offset confermati da questo gruppo in tutti gli argomenti verranno eliminati.",
+    confirmDelete: 'Eliminare il gruppo di consumatori "{name}"? Gli offset confermati da questo gruppo in tutti gli argomenti verranno eliminati.',
   },
   mqClients: {
     unloadTopicUnsupportedKafka: "Kafka non supporta lo scaricamento dei topic",

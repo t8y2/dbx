@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { formatError } from "@/lib/backend/errorUtils";
 import { mqDeleteSubscription, mqGetKafkaConsumerGroupSnapshot } from "@/lib/backend/api";
@@ -91,7 +91,7 @@ async function deleteGroup() {
     if (!approved || props.readOnly || props.connectionId !== connectionId || deleteTarget.value !== groupId) return;
     // The Kafka adapter deletes by group ID and ignores the topic reference.
     await mqDeleteSubscription(connectionId, { tenant: "", namespace: "", topic: "", persistent: true }, groupId, false);
-    if (props.connectionId !== connectionId) return;
+    if (props.connectionId !== connectionId || deleteTarget.value !== groupId) return;
     deleteTarget.value = undefined;
     await loadGroups();
   } catch (error: unknown) {
@@ -121,6 +121,10 @@ watch(
   },
   { immediate: true },
 );
+
+onBeforeUnmount(() => {
+  deleteTarget.value = undefined;
+});
 </script>
 
 <template>

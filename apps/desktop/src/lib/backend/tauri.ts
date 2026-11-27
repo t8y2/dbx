@@ -3355,22 +3355,27 @@ export async function closePluginLocalFile(pluginId: string, handleId: string): 
   return invoke("plugin_file_close", { pluginId, handleId });
 }
 
-export async function pickPluginLocalFolder(pluginId: string, readOnly?: boolean, defaultPath?: string): Promise<{ folderHandleId: string; name: string; path?: string } | null> {
+export async function pickPluginLocalFolder(pluginId: string, readOnly?: boolean, defaultRef?: string): Promise<{ folderHandleId: string; name: string; id?: string; label: string } | null> {
   return invoke("plugin_file_pick_folder", {
     pluginId,
     readOnly: readOnly === true,
-    defaultPath: defaultPath || null,
+    defaultRef: defaultRef || null,
   });
 }
 
-/** Recently granted project folders (absolute paths included) for the plugin's own UI. */
-export async function recentPluginLocalFolders(pluginId: string): Promise<Array<{ name: string; path: string }>> {
+/** Recently granted project folders as opaque ids plus masked labels; paths stay in the host. */
+export async function recentPluginLocalFolders(pluginId: string): Promise<Array<{ id: string; name: string; label: string }>> {
   return invoke("plugin_file_recent_folders", { pluginId });
 }
 
-/** Reopen a previously granted folder by path without a dialog; the host re-validates the grant. */
-export async function openPluginLocalFolderByPath(pluginId: string, path: string): Promise<{ folderHandleId: string; name: string; path?: string } | null> {
-  return invoke("plugin_file_open_folder_path", { pluginId, path });
+/** Reopen a previously granted folder by opaque id without a dialog; the host re-validates the grant. */
+export async function openPluginLocalFolderByRef(pluginId: string, reference: string): Promise<{ folderHandleId: string; name: string; id?: string; label: string } | null> {
+  return invoke("plugin_file_open_folder_ref", { pluginId, reference });
+}
+
+/** Release every folder grant held by a plugin (workbench close / uninstall). */
+export async function closeAllPluginLocalFolders(pluginId: string): Promise<number> {
+  return invoke("plugin_file_folder_close_all", { pluginId });
 }
 
 export async function listPluginLocalFolder(pluginId: string, folderHandleId: string, options?: { subPath?: string; extensions?: string[] }): Promise<{ entries: Array<{ name: string; relativePath: string; kind: "file" | "directory"; size?: number; modifiedAt?: number }>; truncated: boolean }> {

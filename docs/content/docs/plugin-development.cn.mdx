@@ -702,28 +702,36 @@ const ft = window.dbxPlugin.fileTransfer;
 // 在 Web 宿主上 folder 能力为 false，必须先探测（在 init/ready 之后读取）。
 if (!window.dbxPlugin.capabilities?.fileTransfer?.folder) return;
 
-const picked = await ft.pickFolder();          // { folderHandleId, name }，用户取消时为 null
+const picked = await ft.pickFolder();          // { folderHandleId, name, id }，用户取消时为 null
 if (!picked) return;                            // 用户关闭了对话框
-const { folderHandleId } = picked;
+const { folderHandleId, id } = picked;
 const { entries, truncated } = await ft.folderList(folderHandleId, { extensions: ["erm"] });
 const text = await ft.folderReadText(folderHandleId, "db/core.erm");
 await ft.folderWriteText(folderHandleId, "db/core.erm", edited); // 原子替换——失败时原文件完好
 await ft.folderWriteText(folderHandleId, "db/core.sql", ddl);    // 自动创建父目录
+
+// 之后（甚至重启后）：列出历史授权并免对话框重开。
+const recents = await ft.recentFolders();      // [{ id, name, label }]，label 为脱敏路径，不含绝对路径
+const reopened = recents.length ? await ft.openFolderRef(recents[0].id) : null; // 目录不存在时为 null
 await ft.closeFolderHandle(folderHandleId);
 ```
 
 | API                                                | 用途                                                                                                                                                                        |
 | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pickFolder({ readOnly? })`                        | 原生目录对话框；返回 `{ folderHandleId, name }`，用户取消时为 `null`。授权在当前会话内有效，插件卸载时清扫残留；`readOnly: true` 会拒绝后续写入。                          |
+| `pickFolder({ readOnly?, defaultRef? })`           | 原生目录对话框；返回 `{ folderHandleId, name, id, label }`，用户取消时为 `null`。`id` 是历史授权的不透明引用，`label` 是脱敏展示路径，`defaultRef` 让对话框定位到该目录；`readOnly: true` 会拒绝后续写入。 |
 | `folderList(folderHandleId, { subPath?, extensions? })` | 递归列出条目 `{ name, relativePath, kind, size?, modifiedAt? }` 及 `truncated`。跳过点开头条目、符号链接与特殊文件；`extensions` 大小写不敏感；上限 2000 条、深度 8 层。      |
 | `folderReadText(folderHandleId, relativePath)`     | 以 UTF-8 文本读取文件。超过 10 MiB 时会先弹出原生确认框，用户拒绝则调用失败。                                                                                                  |
 | `folderReadBinary(folderHandleId, relativePath)`   | 以 base64 读取文件原始字节（图片、XLSX），沿用相同的包含性校验与 10 MiB 确认阈值。                                                                                          |
 | `openFolderFile(folderHandleId, relativePath, target)` | 在插件之外打开条目：`"app"` 把 SQL/脚本文件以编辑器标签打开，`"system"` 交给系统默认程序。不返回值；绝对路径只保留在宿主内部。                                            |
-| `folderWriteText(folderHandleId, relativePath, content, { create? })` | 通过 temp+fsync+rename 原子替换文件内容，失败时原文件保持完好。自动创建缺失的父目录。不返回值；渲染层永远不会获知绝对路径。                                 |
-| `folderWriteBinary(folderHandleId, relativePath, dataBase64, { create? })` | 以同样的原子方式写入 base64 原始字节（PNG/XLSX 导出）。与流式文件写入共享 8 MiB base64 载荷上限。                                              |
-| `closeFolderHandle(folderHandleId)`                | 释放授权。插件卸载时宿主会清扫残留句柄。                                                                                                                                     |
+| `folderWriteText(folderHandleId, relativePath, content, { create? })` | 通过 temp+fsync+rename 原子替换文件内容，失败时原文件保持完好。自动创建缺失的父目录。不返回值；渲染层永远不会获知绝对路径。对同一文件的并发保存由 rename 串行化：最后完成的写入生效，读方不会看到写了一半的文件。 |
+| `folderWriteBinary(folderHandleId, relativePath, dataBase64, { create?, offset? })` | 以包含性校验写入 base64 原始字节（PNG/XLSX 导出）。单请求上限 8 MiB base64（约 6 MiB 原始字节）；传入 `offset` 可分块追加，`offset: 0` 先截断、后续块顺序追加；不传 `offset` 时整文件原子替换。 |
+| `recentFolders()`                                  | 返回 `[{ id, name, label }]`，最新的在前，去重且最多 10 条；目录被删除或移动的条目会被剔除。`label` 是脱敏路径（主目录内显示 `~/Projects/demo`，主目录外显示 `…/` 加最后 6 级），绝对路径不会离开宿主。 |
+| `openFolderRef(id)`                                | 免对话框重开此前授权过的目录；返回 `{ folderHandleId, name, id, label }`，目录已不存在时为 `null`。只接受本插件拿到过的 id，无法用它访问任意目录。                        |
+| `closeFolderHandle(folderHandleId)`                | 释放授权。插件卸载、工作台关闭时宿主会清扫残留句柄。                                                                                                                        |
 
-绝对路径不会进入插件沙箱：句柄操作一律使用相对路径，`openFolderFile` 仅在宿主内部解析目标路径。授权根目录在 pick 时一次性 canonicalize 并 **冻结**，每次调用前重新校验——如果用户从外面把授权目录换成了符号链接，后续所有读写都会被拒绝。每个相对路径先做词法校验（禁止绝对路径与 `..` 组件），再通过最近已存在祖先进行规范化，确保符号链接无法逃出冻结的根目录。写入使用原子 temp+fsync+rename，失败时原工程文件完好无损。这是单文件句柄模型的增量扩展：`pick` / `beginSave` / `onDrop` 保持原有的一次性语义。
+绝对路径不会进入插件沙箱：句柄与历史条目都是不透明 id，句柄操作一律使用相对路径，`openFolderFile` 仅在宿主内部解析目标路径。授权根目录在 pick 时一次性 canonicalize 并 **冻结**，每次调用前重新校验——如果用户从外面把授权目录换成了符号链接，后续所有读写都会被拒绝。每个相对路径先做词法校验（禁止绝对路径与 `..` 组件），再通过最近已存在祖先进行规范化，确保符号链接无法逃出冻结的根目录。写入使用原子 temp+fsync+rename，失败时原工程文件完好无损；句柄被撤销后，后续读、写、列举与取大小都会失败。这是单文件句柄模型的增量扩展：`pick` / `beginSave` / `onDrop` 保持原有的一次性语义。
+
+授权生命周期：活动句柄由 `closeFolderHandle` 释放，也会在工作台关闭、插件卸载或应用退出时释放。历史列表本身会持久化，因此重启后可凭 `openFolderRef` 免对话框重新授权同一目录——它只回放用户此前对该目录已给出的同意。
 
 ### 持久化 UI 状态
 

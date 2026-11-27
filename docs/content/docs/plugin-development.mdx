@@ -705,28 +705,36 @@ const ft = window.dbxPlugin.fileTransfer;
 // Gate on the additive flag (after init/ready); the web host does not support folder handles.
 if (!window.dbxPlugin.capabilities?.fileTransfer?.folder) return;
 
-const picked = await ft.pickFolder();          // { folderHandleId, name }, or null when cancelled
+const picked = await ft.pickFolder();          // { folderHandleId, name, id }, or null when cancelled
 if (!picked) return;                           // user dismissed the dialog
-const { folderHandleId } = picked;
+const { folderHandleId, id } = picked;
 const { entries, truncated } = await ft.folderList(folderHandleId, { extensions: ["erm"] });
 const text = await ft.folderReadText(folderHandleId, "db/core.erm");
 await ft.folderWriteText(folderHandleId, "db/core.erm", edited); // atomic replace — original intact on failure
 await ft.folderWriteText(folderHandleId, "db/core.sql", ddl);    // parent dirs auto-created
+
+// Later (even after a restart): list grants and reopen one without a dialog.
+const recents = await ft.recentFolders();      // [{ id, name, label }] — label is masked, no absolute paths
+const reopened = recents.length ? await ft.openFolderRef(recents[0].id) : null; // null when the folder is gone
 await ft.closeFolderHandle(folderHandleId);
 ```
 
 | API                                                | Purpose                                                                                                                                                                                                                                                   |
 | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pickFolder({ readOnly? })`                        | Native folder dialog; resolves `{ folderHandleId, name }`, or `null` when the user cancels. The grant lasts for the session and is swept on plugin uninstall. `readOnly: true` rejects later writes.                                                       |
+| `pickFolder({ readOnly?, defaultRef? })`           | Native folder dialog; resolves `{ folderHandleId, name, id, label }`, or `null` when the user cancels. `id` is the opaque recent-grant reference, `label` the masked display path; `defaultRef` starts the dialog in that folder. `readOnly: true` rejects later writes. |
 | `folderList(folderHandleId, { subPath?, extensions? })` | Recursively lists entries as `{ name, relativePath, kind, size?, modifiedAt? }` plus `truncated`. Dot-entries, symlinks and special files are skipped; `extensions` matches case-insensitively; listings cap at 2000 entries and depth 8.                  |
 | `folderReadText(folderHandleId, relativePath)`     | Reads a file as UTF-8 text. Reads above 10 MiB first show a native confirmation dialog; declining fails the call.                                                                                     |
 | `folderReadBinary(folderHandleId, relativePath)`   | Reads a file as base64 bytes (images, XLSX) under the same containment rules and the same 10 MiB confirmation threshold.                                                                               |
 | `openFolderFile(folderHandleId, relativePath, target)` | Opens an entry outside the plugin: `"app"` routes SQL/script files into an editor tab, `"system"` hands any file to the OS default app. Resolves with no value; the absolute path stays in the host. |
-| `folderWriteText(folderHandleId, relativePath, content, { create? })` | Atomically replaces a file's contents via temp+fsync+rename, preserving the previous contents on failure. Creates missing parent directories. Resolves with no value; the renderer never learns the absolute path.                                 |
-| `folderWriteBinary(folderHandleId, relativePath, dataBase64, { create? })` | Atomically writes raw base64 bytes (PNG/XLSX exports) under the same containment rules. Same 8 MiB base64 payload cap as streamed file writes.                                                                                 |
-| `closeFolderHandle(folderHandleId)`                | Releases the grant. Uninstalling the plugin sweeps any remaining handles.                                                                                                                                                                                 |
+| `folderWriteText(folderHandleId, relativePath, content, { create? })` | Atomically replaces a file's contents via temp+fsync+rename, preserving the previous contents on failure. Creates missing parent directories. Resolves with no value; the renderer never learns the absolute path. Overlapping saves to the same file are serialized by the OS rename: the last completed write wins, and readers never observe a half-written file. |
+| `folderWriteBinary(folderHandleId, relativePath, dataBase64, { create?, offset? })` | Writes raw base64 bytes (PNG/XLSX exports) under the same containment rules. Each request is capped at 8 MiB of base64 (~6 MiB of bytes); pass `offset` to append chunks — `offset: 0` truncates first, later chunks append. Without `offset` the whole file is replaced atomically. |
+| `recentFolders()`                                  | Resolves `[{ id, name, label }]`, newest first, deduplicated and capped at 10; folders that were deleted or moved are dropped. `label` is a display-only masked path (`~/Projects/demo` under the home directory, otherwise `…/` plus the last six segments) — the absolute path never leaves the host. |
+| `openFolderRef(id)`                                | Reopens a folder granted earlier without a dialog; resolves `{ folderHandleId, name, id, label }` or `null` when the directory is gone. Only ids this plugin received are accepted, so an id cannot address arbitrary directories. |
+| `closeFolderHandle(folderHandleId)`                | Releases the grant. Uninstalling the plugin and closing the workbench sweep any remaining handles.                                                                                                                                                        |
 
-Absolute paths never reach the plugin sandbox: every handle operation takes a relative path, and `openFolderFile` resolves the target inside the host only. The grant root is **frozen** at pick time (canonicalized once in Rust) and re-validated on every call — if the user swaps the directory with a symlink from outside, every subsequent read/write is refused. Every relative path is validated lexically (no absolute paths, no `..` components), canonicalized through its nearest existing ancestor, and must stay under the frozen root. Writes use atomic temp+fsync+rename so a failed autosave never truncates the project file. This is additive to the single-file handle model: `pick` / `beginSave` / `onDrop` keep their existing one-shot semantics.
+Absolute paths never reach the plugin sandbox: handles and recent entries are opaque ids, every operation takes a relative path, and `openFolderFile` resolves the target inside the host only. The grant root is **frozen** at pick time (canonicalized once in Rust) and re-validated on every call — if the user swaps the directory with a symlink from outside, every subsequent read/write is refused. Every relative path is validated lexically (no absolute paths, no `..` components), canonicalized through its nearest existing ancestor, and must stay under the frozen root. Writes use atomic temp+fsync+rename so a failed autosave never truncates the project file, and a revoked handle fails every later read, write, listing and size check. This is additive to the single-file handle model: `pick` / `beginSave` / `onDrop` keep their existing one-shot semantics.
+
+Grant lifetime: a live handle is released by `closeFolderHandle`, when the workbench closes, when the plugin is uninstalled, or when the app exits. The recent list itself persists, so `openFolderRef` re-grants the same directory after a restart without a dialog — it only replays a consent the user already gave for that exact folder.
 
 ### Persistent UI State
 

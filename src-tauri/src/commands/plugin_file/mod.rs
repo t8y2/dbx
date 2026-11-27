@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -436,22 +436,29 @@ pub async fn plugin_file_close(app: tauri::AppHandle, plugin_id: String, handle_
 
 /// Opens the native folder picker and returns a directory handle for exactly
 /// the folder the user selected. The renderer provides nothing beyond its
-/// plugin id; the consent is anchored inside this Rust-side dialog.
+/// plugin id (and optionally an opaque recent-grant id to start in); the
+/// consent is anchored inside this Rust-side dialog.
 #[tauri::command]
 pub async fn plugin_file_pick_folder(
     app: tauri::AppHandle,
     plugin_id: String,
     read_only: Option<bool>,
-    default_path: Option<String>,
+    default_ref: Option<String>,
 ) -> Result<Option<FolderHandleMeta>, String> {
     if plugin_id.trim().is_empty() {
         return Err("plugin id is required".to_string());
     }
+    let data_dir = app.state::<Arc<AppState>>().inner().plugins.plugin_data_dir(&plugin_id);
     let mut dialog = app.dialog().file();
-    // Start the native picker in the supplied directory (usually a recent
-    // project); missing or non-directory paths fall back to the OS default.
-    if let Some(directory) = default_path.as_deref().map(Path::new).filter(|path| path.is_dir()) {
-        dialog = dialog.set_directory(directory);
+    // Start the native picker in the folder behind the supplied recent id;
+    // unknown ids or missing directories fall back to the OS default.
+    if let Some(reference) = default_ref.as_deref() {
+        if let Some(record) = folder::find_recent_folder(&data_dir, reference) {
+            let directory = PathBuf::from(&record.path);
+            if directory.is_dir() {
+                dialog = dialog.set_directory(&directory);
+            }
+        }
     }
     let (sender, receiver) = tokio::sync::oneshot::channel();
     dialog.pick_folder(move |path| {
@@ -461,13 +468,13 @@ pub async fn plugin_file_pick_folder(
         return Ok(None);
     };
     let path = chosen.into_path().map_err(|error| error.to_string())?;
-    // Persist the canonical path so the folder shows up in recent projects.
-    let canonical = path.canonicalize().map_err(|error| format!("cannot resolve folder path: {error}"))?;
-    let data_dir = app.state::<Arc<AppState>>().inner().plugins.plugin_data_dir(&plugin_id);
+    let read_only = read_only == Some(true);
     tauri::async_runtime::spawn_blocking(move || {
+        let canonical = path.canonicalize().map_err(|error| format!("cannot resolve folder path: {error}"))?;
         let state = app.state::<PluginFileState>();
-        let meta = open_folder(state.inner(), &plugin_id, &path, read_only == Some(true))?;
-        folder::remember_recent_folder(&data_dir, &canonical);
+        let mut meta = open_folder(state.inner(), &plugin_id, &canonical, read_only)?;
+        // Persist the consent and hand back only the opaque id.
+        meta.id = Some(folder::remember_recent_folder(&data_dir, &canonical, read_only));
         Ok(meta)
     })
     .await
@@ -476,7 +483,8 @@ pub async fn plugin_file_pick_folder(
 }
 
 /// Lists the project folders this plugin was previously granted, newest first.
-/// Paths are included so the plugin can label and re-target the native picker.
+/// Entries carry an opaque id and display name; the absolute path never leaves
+/// the host.
 #[tauri::command]
 pub async fn plugin_file_recent_folders(
     state: State<'_, Arc<AppState>>,
@@ -488,33 +496,49 @@ pub async fn plugin_file_recent_folders(
         .map_err(|error| error.to_string())
 }
 
-/// Reopens a previously granted folder by absolute path without a dialog.
-/// Only paths recorded for this plugin are accepted, so a renderer cannot use
-/// it to reach arbitrary directories.
+/// Reopens a previously granted folder by opaque id without a dialog. Only ids
+/// recorded for this plugin are accepted, so a renderer cannot use it to reach
+/// arbitrary directories, and no path is ever part of the request.
 #[tauri::command]
-pub async fn plugin_file_open_folder_path(
+pub async fn plugin_file_open_folder_ref(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     plugin_id: String,
-    path: String,
+    reference: String,
 ) -> Result<Option<folder::FolderHandleMeta>, String> {
     if plugin_id.trim().is_empty() {
         return Err("plugin id is required".to_string());
     }
     let data_dir = state.plugins.plugin_data_dir(&plugin_id);
     tauri::async_runtime::spawn_blocking(move || {
-        let canonical =
-            Path::new(&path).canonicalize().map_err(|error| format!("cannot resolve folder path: {error}"))?;
-        if !folder::is_recent_folder(&data_dir, &canonical) {
+        let Some(record) = folder::find_recent_folder(&data_dir, &reference) else {
             return Err("folder is not in this plugin's recent grants".to_string());
+        };
+        let path = PathBuf::from(&record.path);
+        if !path.is_dir() {
+            return Err("granted folder is no longer accessible".to_string());
         }
         // Reopening counts as recent use, so move it back to the front.
-        folder::remember_recent_folder(&data_dir, &canonical);
+        folder::remember_recent_folder(&data_dir, &path, record.read_only);
         let state = app.state::<PluginFileState>();
-        open_folder(state.inner(), &plugin_id, &canonical, false).map(Some)
+        let mut meta = open_folder(state.inner(), &plugin_id, &path, record.read_only)?;
+        meta.id = Some(reference.clone());
+        Ok(Some(meta))
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// Releases every folder grant owned by one plugin. Called when its workbench
+/// closes and when the plugin is uninstalled, so a grant never outlives the
+/// surface that asked for it.
+#[tauri::command]
+pub async fn plugin_file_folder_close_all(app: tauri::AppHandle, plugin_id: String) -> Result<usize, String> {
+    if plugin_id.trim().is_empty() {
+        return Err("plugin id is required".to_string());
+    }
+    let state = app.state::<PluginFileState>();
+    Ok(folder::close_all_plugin_folders(state.inner(), &plugin_id))
 }
 
 #[tauri::command]

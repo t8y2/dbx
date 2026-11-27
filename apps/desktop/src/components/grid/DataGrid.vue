@@ -2651,6 +2651,8 @@ const {
   invertColumnVisibility,
   showColumn,
   persistColumnOrder,
+  previewColumnOrder,
+  hasTemporaryColumnOrder,
   resetColumnOrder: resetColumnOrderInLayout,
   toggleAllNullColumns,
   resetColumnVisibility,
@@ -3159,6 +3161,24 @@ function requestColumnOrderPersistence(indexes: number[]) {
   pendingColumnOrder.value = { scope: tableColumnOrderScopeKey.value, keys: [...columnOrderKeys.value], current: [...current], next: indexes };
 }
 
+function applyColumnHeaderOrder(indexes: number[]) {
+  if (props.context === "table-data" && !settingsStore.editorSettings.dataGridConfirmColumnHeaderReorder) {
+    applyColumnOrderChange(() => previewColumnOrder(indexes));
+    return;
+  }
+  requestColumnOrderPersistence(indexes);
+}
+
+const confirmColumnHeaderReorder = computed(() => (props.context === "table-data" ? settingsStore.editorSettings.dataGridConfirmColumnHeaderReorder : undefined));
+
+function setConfirmColumnHeaderReorder(value: boolean) {
+  settingsStore.updateEditorSettings({ dataGridConfirmColumnHeaderReorder: value });
+}
+
+function savePreviewColumnOrder() {
+  if (hasTemporaryColumnOrder.value) applyColumnOrderChange(() => persistColumnOrder(orderedDisplayableColumnIndexes.value));
+}
+
 function moveDisplayableColumn(fromDisplayableIndex: number, toDisplayableIndex: number) {
   const next = moveDisplayableColumnIndex({
     orderedIndexes: orderedDisplayableColumnIndexes.value,
@@ -3360,7 +3380,7 @@ const {
     if (headerRef.value) headerRef.value.scrollLeft = scroller.scrollLeft;
   },
   onRefreshMetrics: scheduleColumnLayoutRefresh,
-  onPersistColumnOrder: requestColumnOrderPersistence,
+  onPersistColumnOrder: applyColumnHeaderOrder,
   frozenColumnCount,
   columnReferenceDrag: columnHeaderReferenceDragController,
 });
@@ -15457,6 +15477,10 @@ defineExpose({
   invertColumnVisibility,
   hasCustomColumnOrder,
   moveDisplayableColumn,
+  hasTemporaryColumnOrder,
+  confirmColumnHeaderReorder,
+  setConfirmColumnHeaderReorder,
+  savePreviewColumnOrder,
   resetColumnOrder,
   autoFitAllColumns,
   resetColumnWidths,

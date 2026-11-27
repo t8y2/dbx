@@ -2363,6 +2363,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "Yeniden sıralamak için sütun başlığını sürükleyin",
     invertColumnVisibility: "Tersine çevir",
     resetColumnOrder: "Sıralamayı sıfırla",
+    confirmColumnHeaderReorder: "Sütun başlığını sürükledikten sonra onayla",
+    saveColumnOrder: "Sütun sırasını kaydet",
     showAllColumns: "Tümünü göster",
     showSelectedColumns: "Seçilenleri göster",
     showSelectedColumnsHint: "Yalnızca mevcut aramayla eşleşen alanları göster.",

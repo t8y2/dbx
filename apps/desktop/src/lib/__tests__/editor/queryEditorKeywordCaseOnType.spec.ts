@@ -6,7 +6,7 @@ import { ensureSyntaxTree } from "@codemirror/language";
 import { MySQL, sql } from "@codemirror/lang-sql";
 import { beforeAll, describe, expect, it } from "vitest";
 import { loadEngine } from "@/lib/sql/layout/internals";
-import { createQueryEditorKeywordCaseOnTypeFilter, type QueryEditorKeywordCaseOnTypeOptions } from "@/lib/editor/queryEditorKeywordCaseOnType";
+import { casedKeywordFromSyntaxTree, createQueryEditorKeywordCaseOnTypeFilter, type QueryEditorKeywordCaseOnTypeOptions } from "@/lib/editor/queryEditorKeywordCaseOnType";
 
 beforeAll(async () => {
   // The filter classifies synchronously and skips until the engine is imported.
@@ -138,6 +138,16 @@ describe("queryEditorKeywordCaseOnType", () => {
     // space); only a pure typed insertion may be processed here.
     const state = createState("select", {}, 5);
     expect(state.update({ changes: { from: 0, to: 5, insert: " " }, userEvent: "input.type" }).state.doc.toString()).toBe(" t");
+  });
+
+  it("classifies directly from the syntax tree for the cold-start fallback", () => {
+    const treeState = createTreeState("select");
+    expect(casedKeywordFromSyntaxTree(treeState, 0, 6, "upper")).toEqual({ from: 0, to: 6, insert: "SELECT" });
+    expect(casedKeywordFromSyntaxTree(treeState, 0, 6, "lower")).toBeNull();
+    const identifier = createTreeState("select mycol");
+    expect(casedKeywordFromSyntaxTree(identifier, 7, 12, "upper")).toBeNull();
+    // Without the Lezer grammar mounted the tree has no Keyword nodes to trust.
+    expect(casedKeywordFromSyntaxTree(EditorState.create({ doc: "select" }), 0, 6, "upper")).toBeNull();
   });
 
   it("keeps the conversion and the typed character in one undo step", () => {

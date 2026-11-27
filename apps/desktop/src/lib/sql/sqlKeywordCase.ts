@@ -135,8 +135,9 @@ export interface SqlKeywordWordReplacement {
  * their own boundaries while the user typed them.
  *
  * Synchronous by design (typing path). When the formatter engine has not been
- * imported yet this warms the cache and returns `null`, so the first keystroke
- * after opening the app is left alone instead of waiting on an import.
+ * imported yet this warms the cache and returns `null`; the typing-path caller
+ * then classifies that one keystroke from the editor's syntax tree instead of
+ * waiting on the import (see queryEditorKeywordCaseOnType.ts).
  */
 export function casedKeywordBefore(text: string, dialect: SqlFormatDialect, mode: SqlKeywordCaseMode): SqlKeywordWordReplacement | null {
   if (!text) return null;

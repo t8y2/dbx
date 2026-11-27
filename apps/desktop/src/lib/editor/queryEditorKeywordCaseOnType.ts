@@ -1,6 +1,7 @@
 import type { ChangeSet, EditorState, Transaction, TransactionSpec } from "@codemirror/state";
-import { StreamLanguage, language } from "@codemirror/language";
+import { StreamLanguage, language, syntaxTree } from "@codemirror/language";
 import { casedKeywordBefore, type SqlKeywordCaseMode } from "@/lib/sql/sqlKeywordCase";
+import { loadedSqlFormatterEngine } from "@/lib/sql/layout/internals";
 import { isSqlCommentContext, isSqlStringLiteralContext } from "@/lib/sql/sqlCompletion";
 import { resolveLexicalLeafFromSyntaxTree, resolveStatementWindowFromSyntaxTree } from "@/lib/sql/sqlSyntaxTreeWindow";
 import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
@@ -108,6 +109,38 @@ interface TypedInsert {
   from: number;
 }
 
+/** A keyword rewrite in document offsets. */
+interface KeywordReplacement {
+  from: number;
+  to: number;
+  insert: string;
+}
+
+/**
+ * Provisional classifier for the window before the formatter engine's lazy
+ * import has resolved — synchronously, from the editor's own Lezer SQL tree.
+ *
+ * The sql-formatter keyword lists remain the authority once the engine is
+ * loaded (that is what keeps typing, the toolbar `a`/`A` and a later format
+ * consistent). Without this fallback the very first keyword typed after a cold
+ * start would silently stay uncased, because the import cannot be awaited
+ * inside a synchronous transaction filter.
+ */
+export function casedKeywordFromSyntaxTree(state: EditorState, wordFrom: number, wordEnd: number, mode: SqlKeywordCaseMode): KeywordReplacement | null {
+  if (!hasLezerSqlGrammar(state)) return null;
+  const token = syntaxTree(state).resolveInner(wordEnd, -1);
+  if (token.name !== "Keyword" || token.to !== wordEnd) return null;
+  // `t.select` is a qualified segment, not a keyword position.
+  if (token.parent?.name === "CompositeIdentifier") return null;
+  const word = state.sliceDoc(wordFrom, wordEnd);
+  // The resolved leaf must be exactly the word being finished (`select` in
+  // `select(1)` is the same leaf; a neighbouring keyword must not be recased).
+  if (!word || state.sliceDoc(token.from, token.to).toLowerCase() !== word.toLowerCase()) return null;
+  const cased = mode === "upper" ? word.toUpperCase() : word.toLowerCase();
+  if (cased === word) return null;
+  return { from: wordFrom, to: wordEnd, insert: cased };
+}
+
 /** The typed text when the transaction is exactly one pure insertion, otherwise `null`. */
 function singleTypedInsert(changes: ChangeSet): TypedInsert | null {
   let result: TypedInsert | null = null;
@@ -155,17 +188,18 @@ export function createQueryEditorKeywordCaseOnTypeFilter(options: QueryEditorKey
     const windowText = state.sliceDoc(windowFrom, wordEnd);
     if (windowText.length > KEYWORD_CASE_WINDOW_MAX_CHARS) return transaction;
 
-    const replacement = casedKeywordBefore(windowText, options.dialect(), mode);
+    // The formatter's own keyword lists are authoritative. Until their lazy
+    // import resolves, the syntax tree answers instead, so the first keyword
+    // after a cold start still converts (see casedKeywordFromSyntaxTree).
+    const engineReplacement = casedKeywordBefore(windowText, options.dialect(), mode);
+    let replacement: KeywordReplacement | null = engineReplacement && { from: windowFrom + engineReplacement.from, to: windowFrom + engineReplacement.to, insert: engineReplacement.insert };
+    if (!replacement && loadedSqlFormatterEngine() === null) replacement = casedKeywordFromSyntaxTree(state, wordFrom, wordEnd, mode);
     if (!replacement) return transaction;
 
     return [
       transaction,
       {
-        changes: {
-          from: windowFrom + replacement.from,
-          to: windowFrom + replacement.to,
-          insert: replacement.insert,
-        },
+        changes: replacement,
         // A transaction without its own selection (programmatic inserts) would
         // otherwise keep the pre-typing caret, which never advances past the
         // character just inserted; real typing carries its own selection and is

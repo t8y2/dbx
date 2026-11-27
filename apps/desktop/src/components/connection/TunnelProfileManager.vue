@@ -189,13 +189,17 @@ function updateProxyType(value: unknown) {
 function updateHttpTunnelProtocol(value: unknown) {
   const profile = selectedHttp.value;
   if (!profile) return;
-  profile.protocol = String(value) === "navicat_mysql" ? "navicat_mysql" : "dbx_tcp";
-  if (profile.protocol === "navicat_mysql") profile.token = "";
-  if (profile.protocol === "navicat_mysql" && profile.url.trim()) {
+  const protocol = String(value);
+  profile.protocol = protocol === "navicat_mysql" || protocol === "sqlyog_mysql" ? protocol : "dbx_tcp";
+  // Both MySQL-compatible PHP tunnels carry the account in every request instead of a token.
+  if (profile.protocol !== "dbx_tcp") profile.token = "";
+  const defaultScript =
+    profile.protocol === "navicat_mysql" ? "ntunnel_mysql.php" : profile.protocol === "sqlyog_mysql" ? "SQLyogTunnel.php" : "";
+  if (defaultScript && profile.url.trim()) {
     try {
       const url = new URL(profile.url.trim());
       if (url.pathname.endsWith("/")) {
-        url.pathname += "ntunnel_mysql.php";
+        url.pathname += defaultScript;
         profile.url = url.toString();
       } else {
         profile.url = url.toString();
@@ -448,6 +452,7 @@ async function testSelected() {
               <SelectContent>
                 <SelectItem value="dbx_tcp">{{ t("connection.httpTunnelProtocolDbx") }}</SelectItem>
                 <SelectItem value="navicat_mysql">{{ t("connection.httpTunnelProtocolNavicat") }}</SelectItem>
+                <SelectItem value="sqlyog_mysql">{{ t("connection.httpTunnelProtocolSqlyog") }}</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -455,16 +460,19 @@ async function testSelected() {
         <div class="grid min-w-0 grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.httpTunnelUrl") }}</Label>
           <div class="col-span-3 min-w-0">
-            <Input v-model="selectedHttp!.url" class="w-full min-w-0" :placeholder="selectedHttp!.protocol === 'navicat_mysql' ? 'https://example.com/ntunnel_mysql.php' : 'https://dbx.example.com/dbx_tunnel.php'" />
+            <Input v-model="selectedHttp!.url" class="w-full min-w-0" :placeholder="selectedHttp!.protocol === 'navicat_mysql' ? 'https://example.com/ntunnel_mysql.php' : selectedHttp!.protocol === 'sqlyog_mysql' ? 'https://example.com/SQLyogTunnel.php' : 'https://dbx.example.com/dbx_tunnel.php'" />
           </div>
         </div>
         <div v-if="selectedHttp!.protocol === 'navicat_mysql'" class="col-span-4 min-w-0 text-xs text-muted-foreground">
           {{ t("connection.httpTunnelNavicatHint") }}
         </div>
+        <div v-if="selectedHttp!.protocol === 'sqlyog_mysql'" class="col-span-4 min-w-0 text-xs text-muted-foreground">
+          {{ t("connection.httpTunnelSqlyogHint") }}
+        </div>
         <div v-if="selectedHttp!.protocol === 'navicat_mysql'" class="col-span-4 min-w-0 text-xs">
           <a class="text-primary underline underline-offset-2" href="https://help.navicat.com/hc/en-us/articles/218283457-Where-can-I-get-the-HTTP-tunnel-script-file" target="_blank" rel="noopener noreferrer">{{ t("connection.httpTunnelNavicatScriptHelp") }}</a>
         </div>
-        <div v-if="selectedHttp!.protocol !== 'navicat_mysql'" class="grid min-w-0 grid-cols-4 items-center gap-4">
+        <div v-if="selectedHttp!.protocol === 'dbx_tcp'" class="grid min-w-0 grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.httpTunnelToken") }}</Label>
           <div class="col-span-3 min-w-0">
             <PasswordInput v-model="selectedHttp!.token" class="w-full min-w-0" :placeholder="t('connection.httpTunnelTokenPlaceholder')" />

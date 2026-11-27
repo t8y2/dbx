@@ -2237,6 +2237,9 @@ export default withEnglishFallback({
     httpTunnelProtocol: "隧道協定",
     httpTunnelProtocolDbx: "DBX TCP 指令碼",
     httpTunnelProtocolNavicat: "Navicat MySQL HTTP",
+    httpTunnelProtocolSqlyog: "SQLyog MySQL HTTP",
+    httpTunnelSqlyogHint:
+      "僅支援 MySQL。使用 PHP 伺服器上已部署的 SQLyog 隧道指令碼（SQLyogTunnel.php / tunnel.php），填寫其完整 URL。指令碼對每條 SQL 都新建資料庫連線，不支援事務、臨時表和工作階段變數；不支援同時啟用 MySQL SSL 或其他隧道層。",
     httpTunnelNavicatHint: "僅支援 MySQL；支援 HTTP/HTTPS 位址，建議使用 HTTPS。不能同時啟用 MySQL SSL 或其他隧道。",
     httpTunnelNavicatNoToken: "Navicat 通訊協定不使用 Token",
     httpTunnelNavicatScriptHelp: "查看官方 PHP 腳本取得方式",

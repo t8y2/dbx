@@ -663,7 +663,7 @@ function normalizeHttpTunnel(layer: Partial<HttpTunnelConfig>): HttpTunnelConfig
     enabled: layer.enabled !== false,
     url: layer.url || "",
     token: layer.token || "",
-    protocol: layer.protocol === "navicat_mysql" ? "navicat_mysql" : "dbx_tcp",
+    protocol: layer.protocol === "navicat_mysql" || layer.protocol === "sqlyog_mysql" ? layer.protocol : "dbx_tcp",
     connect_timeout_secs: Number(layer.connect_timeout_secs) || 10,
     profile_id: layer.profile_id || undefined,
   };
@@ -6990,13 +6990,17 @@ function updateSelectedProxyType(value: unknown) {
 function updateSelectedHttpTunnelProtocol(value: unknown) {
   const layer = selectedHttpTunnelLayer.value;
   if (!layer) return;
-  layer.protocol = String(value) === "navicat_mysql" ? "navicat_mysql" : "dbx_tcp";
-  if (layer.protocol === "navicat_mysql") layer.token = "";
-  if (layer.protocol === "navicat_mysql" && layer.url.trim()) {
+  const protocol = String(value);
+  layer.protocol = protocol === "navicat_mysql" || protocol === "sqlyog_mysql" ? protocol : "dbx_tcp";
+  // Both MySQL-compatible PHP tunnels carry the account in every request instead of a token.
+  if (layer.protocol !== "dbx_tcp") layer.token = "";
+  const defaultScript =
+    layer.protocol === "navicat_mysql" ? "ntunnel_mysql.php" : layer.protocol === "sqlyog_mysql" ? "SQLyogTunnel.php" : "";
+  if (defaultScript && layer.url.trim()) {
     try {
       const url = new URL(layer.url.trim());
       if (url.pathname.endsWith("/")) {
-        url.pathname += "ntunnel_mysql.php";
+        url.pathname += defaultScript;
         layer.url = url.toString();
       } else {
         layer.url = url.toString();
@@ -11506,6 +11510,7 @@ function openExternalUrl(url: string) {
                           <SelectContent>
                             <SelectItem value="dbx_tcp">{{ t("connection.httpTunnelProtocolDbx") }}</SelectItem>
                             <SelectItem v-if="form.db_type === 'mysql'" value="navicat_mysql">{{ t("connection.httpTunnelProtocolNavicat") }}</SelectItem>
+                            <SelectItem v-if="form.db_type === 'mysql'" value="sqlyog_mysql">{{ t("connection.httpTunnelProtocolSqlyog") }}</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
@@ -11516,7 +11521,7 @@ function openExternalUrl(url: string) {
                         <Input
                           v-model="selectedHttpTunnelLayer!.url"
                           class="w-full min-w-0"
-                          :placeholder="selectedHttpTunnelLayer!.protocol === 'navicat_mysql' ? 'https://example.com/ntunnel_mysql.php' : 'https://dbx.example.com/dbx_tunnel.php'"
+                          :placeholder="selectedHttpTunnelLayer!.protocol === 'navicat_mysql' ? 'https://example.com/ntunnel_mysql.php' : selectedHttpTunnelLayer!.protocol === 'sqlyog_mysql' ? 'https://example.com/SQLyogTunnel.php' : 'https://dbx.example.com/dbx_tunnel.php'"
                           :disabled="selectedHttpTunnelLayer!.enabled === false"
                         />
                       </div>
@@ -11524,7 +11529,10 @@ function openExternalUrl(url: string) {
                     <div v-if="selectedHttpTunnelLayer!.protocol === 'navicat_mysql'" class="col-span-4 min-w-0 text-xs text-muted-foreground">
                       {{ t("connection.httpTunnelNavicatHint") }}
                     </div>
-                    <div v-if="selectedHttpTunnelLayer!.protocol !== 'navicat_mysql'" class="grid min-w-0 grid-cols-4 items-center gap-4">
+                    <div v-if="selectedHttpTunnelLayer!.protocol === 'sqlyog_mysql'" class="col-span-4 min-w-0 text-xs text-muted-foreground">
+                      {{ t("connection.httpTunnelSqlyogHint") }}
+                    </div>
+                    <div v-if="selectedHttpTunnelLayer!.protocol === 'dbx_tcp'" class="grid min-w-0 grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.httpTunnelToken") }}</Label>
                       <div class="col-span-3 min-w-0">
                         <PasswordInput v-model="selectedHttpTunnelLayer!.token" class="w-full min-w-0" :placeholder="t('connection.httpTunnelTokenPlaceholder')" :disabled="selectedHttpTunnelLayer!.enabled === false" />

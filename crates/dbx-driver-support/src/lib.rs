@@ -13,6 +13,7 @@ pub mod http_tunnel;
 pub mod navicat_mysql_tunnel;
 pub mod query_messages;
 pub mod runtime_config;
+pub mod sqlyog_mysql_tunnel;
 pub mod ssh_config;
 pub mod ssh_host_key;
 pub mod wkb;

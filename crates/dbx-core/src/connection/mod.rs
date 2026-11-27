@@ -901,6 +901,17 @@ enum ConnectionTransportRoute {
         password: String,
         database: Option<String>,
     },
+    /// Same shape as [`ConnectionTransportRoute::Navicat`], speaking SQLyog's
+    /// `SQLyogTunnel.php` XML protocol instead.
+    Sqlyog {
+        url: String,
+        connect_timeout_secs: u64,
+        host: String,
+        port: u16,
+        username: String,
+        password: String,
+        database: Option<String>,
+    },
     HttpClientProxy {
         host: String,
         port: u16,
@@ -3832,7 +3843,10 @@ impl AppState {
                     mysql_pool_max_connections,
                 )
                 .await?;
-                if matches!(&transport_stamp.plan.route, ConnectionTransportRoute::Navicat { .. }) {
+                if matches!(
+                    &transport_stamp.plan.route,
+                    ConnectionTransportRoute::Navicat { .. } | ConnectionTransportRoute::Sqlyog { .. }
+                ) {
                     pool.set_stateless_http_tunnel();
                 }
                 PoolKind::Mysql(pool, mode)
@@ -4869,27 +4883,29 @@ impl AppState {
             config.host,
             config.port
         );
-        let navicat_layer = transport_layers.iter().enumerate().find_map(|(index, layer)| match layer {
-            TransportLayerConfig::HttpTunnel(http)
-                if http.protocol == crate::models::connection::HttpTunnelProtocol::NavicatMysql =>
-            {
-                Some(index)
-            }
+        // Navicat- and SQLyog-compatible MySQL HTTP tunnels carry the account in
+        // every request and need the connection's own MySQL host and credentials.
+        let mysql_http_tunnel = transport_layers.iter().enumerate().find_map(|(index, layer)| match layer {
+            TransportLayerConfig::HttpTunnel(http) => match http.protocol {
+                crate::models::connection::HttpTunnelProtocol::NavicatMysql => Some((index, "Navicat")),
+                crate::models::connection::HttpTunnelProtocol::SqlyogMysql => Some((index, "SQLyog")),
+                crate::models::connection::HttpTunnelProtocol::DbxTcp => None,
+            },
             _ => None,
         });
-        if let Some(index) = navicat_layer {
+        if let Some((index, product)) = mysql_http_tunnel {
             if config.db_type != DatabaseType::Mysql {
-                return Err("Navicat HTTP tunnel protocol is only supported for MySQL connections.".to_string());
+                return Err(format!("{product} HTTP tunnel protocol is only supported for MySQL connections."));
             }
             if index != 0 || transport_layers.len() != 1 {
-                return Err("Navicat MySQL HTTP tunnel must be the only transport layer.".to_string());
+                return Err(format!("{product} MySQL HTTP tunnel must be the only transport layer."));
             }
             if config.ssl
                 || !config.ca_cert_path.is_empty()
                 || !config.client_cert_path.is_empty()
                 || !config.client_key_path.is_empty()
             {
-                return Err("Navicat MySQL HTTP tunnel does not support MySQL TLS settings. Disable MySQL SSL or remove the TLS certificate paths.".to_string());
+                return Err(format!("{product} MySQL HTTP tunnel does not support MySQL TLS settings. Disable MySQL SSL or remove the TLS certificate paths."));
             }
         }
         let agent_env = self.agent_launch_env(config).await;
@@ -4928,12 +4944,9 @@ impl AppState {
             });
         }
         if let Some(TransportLayerConfig::HttpTunnel(http)) = transport_layers.first() {
-            if http.protocol == crate::models::connection::HttpTunnelProtocol::NavicatMysql {
-                return Ok(ConnectionTransportPlan {
-                    source_profile_ids,
-                    agent_env,
-                    layers: ResolvedTransportLayers::resolve(&[])?,
-                    route: ConnectionTransportRoute::Navicat {
+            let route = match http.protocol {
+                crate::models::connection::HttpTunnelProtocol::NavicatMysql => {
+                    Some(ConnectionTransportRoute::Navicat {
                         url: http.url.clone(),
                         connect_timeout_secs: http.connect_timeout_secs,
                         host: config.host.clone(),
@@ -4941,7 +4954,25 @@ impl AppState {
                         username: config.username.clone(),
                         password: config.password.clone(),
                         database: config.database.clone(),
-                    },
+                    })
+                }
+                crate::models::connection::HttpTunnelProtocol::SqlyogMysql => Some(ConnectionTransportRoute::Sqlyog {
+                    url: http.url.clone(),
+                    connect_timeout_secs: http.connect_timeout_secs,
+                    host: config.host.clone(),
+                    port: config.port,
+                    username: config.username.clone(),
+                    password: config.password.clone(),
+                    database: config.database.clone(),
+                }),
+                crate::models::connection::HttpTunnelProtocol::DbxTcp => None,
+            };
+            if let Some(route) = route {
+                return Ok(ConnectionTransportPlan {
+                    source_profile_ids,
+                    agent_env,
+                    layers: ResolvedTransportLayers::resolve(&[])?,
+                    route,
                 });
             }
         }
@@ -5146,6 +5177,30 @@ impl AppState {
                 let local_port = self
                     .http_tunnels
                     .start_navicat_mysql_tunnel(
+                        connection_id,
+                        url,
+                        *connect_timeout_secs,
+                        host,
+                        *port,
+                        username,
+                        password,
+                        database.as_deref(),
+                    )
+                    .await?;
+                Ok(ConnectionEndpoint::direct("127.0.0.1".to_owned(), local_port))
+            }
+            ConnectionTransportRoute::Sqlyog {
+                url,
+                connect_timeout_secs,
+                host,
+                port,
+                username,
+                password,
+                database,
+            } => {
+                let local_port = self
+                    .http_tunnels
+                    .start_sqlyog_mysql_tunnel(
                         connection_id,
                         url,
                         *connect_timeout_secs,

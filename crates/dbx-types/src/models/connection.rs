@@ -630,6 +630,8 @@ pub enum HttpTunnelProtocol {
     #[default]
     DbxTcp,
     NavicatMysql,
+    /// SQLyog `SQLyogTunnel.php` (XML over HTTP, one MySQL connection per request).
+    SqlyogMysql,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

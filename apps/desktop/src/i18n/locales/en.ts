@@ -2566,6 +2566,9 @@ export default {
     httpTunnelProtocol: "Tunnel Protocol",
     httpTunnelProtocolDbx: "DBX TCP script",
     httpTunnelProtocolNavicat: "Navicat MySQL HTTP",
+    httpTunnelProtocolSqlyog: "SQLyog MySQL HTTP",
+    httpTunnelSqlyogHint:
+      "MySQL only. Uses the SQLyog HTTP tunnel script (SQLyogTunnel.php / tunnel.php) already deployed on a PHP server; enter its full URL. The script opens a new MySQL connection for every statement, so transactions, temporary tables and session variables are not supported. MySQL SSL and other tunnel layers are not supported.",
     httpTunnelNavicatHint:
       "MySQL only. Get ntunnel_mysql.php from your Navicat installation, upload it to a PHP server, and enter its full URL. HTTP and HTTPS are supported; HTTP sends credentials and SQL in cleartext, so use it only on a trusted private network. If the server redirects, enter the final HTTPS URL. MySQL SSL and other tunnel layers are not supported.",
     httpTunnelNavicatScriptHelp: "Where to get the official PHP script",

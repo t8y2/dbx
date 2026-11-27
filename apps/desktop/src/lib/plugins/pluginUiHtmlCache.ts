@@ -5,6 +5,7 @@
 // plugin version pays the read/decode/inline pipeline.
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { decodeBase64ToBytes } from "@/lib/common/base64";
 import { COMPONENT_PLUGINS_UPDATED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 export interface PluginUiHtml {
@@ -154,7 +155,7 @@ async function inlineLocalUiAssets(html: string, pluginId: string): Promise<Plug
       const asset = await api.readPluginUiAsset(pluginId, path);
       return {
         resource,
-        content: new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0))),
+        content: new TextDecoder().decode(decodeBase64ToBytes(asset.dataBase64)),
       };
     }),
   );
@@ -190,7 +191,7 @@ async function inlineLocalUiAssets(html: string, pluginId: string): Promise<Plug
 /** Full first-boot pipeline: read the ui entry through the bridge, decode, and prepare local assets. */
 export async function loadPluginUiHtml(pluginId: string): Promise<PluginUiHtml> {
   const asset = await api.readPluginUiEntry(pluginId);
-  const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
+  const bytes = decodeBase64ToBytes(asset.dataBase64);
   return inlineLocalUiAssets(new TextDecoder().decode(bytes), pluginId);
 }
 

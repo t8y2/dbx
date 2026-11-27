@@ -12468,6 +12468,7 @@ export default withEnglishFallback({
     mcpToolListRoutines: "Список процедур",
     mcpToolGetRoutineSource: "Исходный код процедуры",
     mcpToolGetSchemaContext: "Контекст схемы",
+    mcpToolSearchSchema: "Поиск по метаданным схемы",
     mcpToolExecuteQuery: "Выполнить SQL / команды Mongo",
     mcpToolExecuteBatch: "Выполнить пакет SQL",
     mcpToolOpenSession: "Открыть сеанс запросов",

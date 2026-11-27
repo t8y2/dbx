@@ -12326,6 +12326,7 @@ export default withEnglishFallback({
     mcpToolListRoutines: "存储过程列表",
     mcpToolGetRoutineSource: "存储过程源码",
     mcpToolGetSchemaContext: "Schema 上下文",
+    mcpToolSearchSchema: "搜索 Schema 元数据",
     mcpToolExecuteQuery: "执行 SQL / Mongo 命令",
     mcpToolExecuteBatch: "批量执行 SQL",
     mcpToolOpenSession: "打开查询会话",

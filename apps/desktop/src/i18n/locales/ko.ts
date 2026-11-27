@@ -10979,6 +10979,7 @@ export default withEnglishFallback({
     mcpToolListRoutines: "루틴 목록",
     mcpToolGetRoutineSource: "루틴 소스",
     mcpToolGetSchemaContext: "Schema 컨텍스트",
+    mcpToolSearchSchema: "스키마 메타데이터 검색",
     mcpToolExecuteQuery: "SQL / Mongo 명령 실행",
     mcpToolExecuteBatch: "SQL 배치 실행",
     mcpToolOpenSession: "쿼리 세션 열기",

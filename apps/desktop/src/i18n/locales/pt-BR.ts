@@ -11200,6 +11200,7 @@ export default withEnglishFallback({
     mcpToolListRoutines: "Listar rotinas",
     mcpToolGetRoutineSource: "Código da rotina",
     mcpToolGetSchemaContext: "Contexto do Schema",
+    mcpToolSearchSchema: "Pesquisar metadados do esquema",
     mcpToolExecuteQuery: "Executar SQL / comandos Mongo",
     mcpToolExecuteBatch: "Executar lote SQL",
     mcpToolOpenSession: "Abrir sessão de consulta",

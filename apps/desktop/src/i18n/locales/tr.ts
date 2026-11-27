@@ -9366,6 +9366,7 @@ export default withEnglishFallback({
     mcpToolListRoutines: "Yordamları listele",
     mcpToolGetRoutineSource: "Yordam kaynağı",
     mcpToolGetSchemaContext: "Şema bağlamı",
+    mcpToolSearchSchema: "Şema meta verilerinde ara",
     mcpToolExecuteQuery: "SQL / Mongo komutlarını çalıştır",
     mcpToolExecuteBatch: "SQL toplu işlemini çalıştır",
     mcpToolOpenSession: "Sorgu oturumu aç",

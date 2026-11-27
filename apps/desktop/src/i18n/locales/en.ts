@@ -12361,6 +12361,7 @@ export default {
     mcpToolListRoutines: "List routines",
     mcpToolGetRoutineSource: "Routine source",
     mcpToolGetSchemaContext: "Schema context",
+    mcpToolSearchSchema: "Search schema metadata",
     mcpToolExecuteQuery: "Execute SQL / Mongo commands",
     mcpToolExecuteBatch: "Execute SQL batch",
     mcpToolOpenSession: "Open query session",

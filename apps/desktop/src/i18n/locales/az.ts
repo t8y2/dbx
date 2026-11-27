@@ -9443,6 +9443,7 @@ export default withEnglishFallback({
     mcpToolListRoutines: "Alt proqramları siyahıla",
     mcpToolGetRoutineSource: "Alt proqramın mənbə kodu",
     mcpToolGetSchemaContext: "Sxem konteksti",
+    mcpToolSearchSchema: "Sxem metadatasını axtar",
     mcpToolExecuteQuery: "SQL / Mongo əmrlərini icra et",
     mcpToolExecuteBatch: "SQL əmrlərini toplu icra et",
     mcpToolOpenSession: "Sorğu sessiyasını aç",

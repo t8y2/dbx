@@ -3,14 +3,26 @@ export interface DataGridInlineBulkEditKeyEvent {
   ctrlKey?: boolean;
   metaKey?: boolean;
   altKey?: boolean;
+  shiftKey?: boolean;
   isComposing?: boolean;
   keyCode?: number;
 }
 
+export function dataGridDirectCellEditValue(event: DataGridInlineBulkEditKeyEvent): string | undefined {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return undefined;
+  if (Array.from(event.key).length !== 1) return undefined;
+  if (event.keyCode === 229 && !/^[\x20-\x7E]$/.test(event.key)) return undefined;
+  return event.key;
+}
+
+export function isDataGridPlainEditEnter(event: DataGridInlineBulkEditKeyEvent): boolean {
+  return event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && !event.isComposing && event.keyCode !== 229;
+}
+
 export function dataGridInlineBulkEditValue(event: DataGridInlineBulkEditKeyEvent, selectedCellCount: number): string | undefined {
-  if (selectedCellCount <= 1 || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229) return undefined;
-  if (event.key === "Enter") return "";
-  return event.key !== "Process" && Array.from(event.key).length === 1 ? event.key : undefined;
+  if (selectedCellCount <= 1) return undefined;
+  if (isDataGridPlainEditEnter(event)) return "";
+  return dataGridDirectCellEditValue(event);
 }
 
 /**

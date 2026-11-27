@@ -430,8 +430,10 @@ describe("useDataGridSearch IME composition", () => {
   });
 
   it("treats the keyCode 229 / Process fallback as a composition", () => {
-    // WebKit fires compositionend before the committing keydown, so
-    // `isComposing` alone is not reliable in that window.
+    // Some engines report an active composition through keyCode 229 /
+    // "Process" instead of `isComposing`. (The Enter WebKit sends *after*
+    // compositionend is covered at the component level in
+    // DataGridSearchIme.spec.ts: only the search bar sees composition events.)
     const { search } = createSearch();
     for (const event of [keydown({ key: "Enter", keyCode: 229 }), keydown({ key: "Process" })]) {
       search.onKeydown(event);

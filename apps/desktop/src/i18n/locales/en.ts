@@ -11498,7 +11498,8 @@ export default {
     batchColumnSelectionIncludeComments: "Include comments when inserting selected columns",
     batchColumnSelectionIncludeCommentsDescription: "Include database column comments when inserting SELECT columns in bulk from the completion list.",
     autoKeywordCase: "Auto-convert keyword case while typing",
-    autoKeywordCaseDescription: "After a space, punctuation character or line break, the keyword just typed is converted to the keyword case configured in the SQL formatter settings.",
+    autoKeywordCaseDescription:
+      "Triggered when you type a space, a single punctuation character (comma, parenthesis, ...) or a line break: the word just typed is re-cased in place if it is a keyword, using the keyword case (upper/lower) from the SQL formatter settings. It never reformats the statement and never touches identifiers, strings or comments.",
     sqlServerSpaceConfirmsCompletion: "Space confirms completion (SQL Server style)",
     sqlServerSpaceConfirmsCompletionDescription: "While the completion list is open, pressing Space accepts the selected keyword, table, or column and keeps the trailing space. Enter and Tab behave as before.",
     functionCompletionIncludeParams: "Include parameter examples in function completion",

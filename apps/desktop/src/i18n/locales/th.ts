@@ -11980,7 +11980,7 @@ export default withEnglishFallback({
     batchColumnSelectionIncludeComments: "รวมความคิดเห็นเมื่อแทรกคอลัมน์ที่เลือก",
     batchColumnSelectionIncludeCommentsDescription: "รวมความคิดเห็นของคอลัมน์ในฐานข้อมูลเมื่อแทรกหลายคอลัมน์ SELECT จากรายการเติมข้อความอัตโนมัติ",
     autoKeywordCase: "แปลงตัวพิมพ์ของคีย์เวิร์ดอัตโนมัติขณะพิมพ์",
-    autoKeywordCaseDescription: "เมื่อพิมพ์ช่องว่าง เครื่องหมายวรรคตอน หรือขึ้นบรรทัดใหม่ คีย์เวิร์ดที่เพิ่งพิมพ์จะถูกแปลงตามการตั้งค่าตัวพิมพ์ของคีย์เวิร์ดในตัวจัดรูปแบบ SQL",
+    autoKeywordCaseDescription: "ทริกเกอร์เมื่อพิมพ์ช่องว่าง เครื่องหมายวรรคตอนตัวเดียว (จุลภาค วงเล็บ ฯลฯ) หรือขึ้นบรรทัดใหม่: คำที่เพิ่งพิมพ์จะถูกแปลงในตำแหน่งนั้นหากเป็นคีย์เวิร์ด ตามการตั้งค่าตัวพิมพ์ของคีย์เวิร์ดในตัวจัดรูปแบบ SQL โดยไม่จัดรูปแบบประโยคใหม่และไม่แตะ identifier สตริง หรือคอมเมนต์",
     sqlServerSpaceConfirmsCompletion: "ใช้ Space เพื่อยืนยันการเติม (รูปแบบ SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "ขณะรายการเติมเปิดอยู่ กด Space เพื่อยอมรับ Keyword ตาราง หรือคอลัมน์ที่เลือกและคงช่องว่างต่อท้ายไว้ Enter และ Tab ทำงานเหมือนเดิม",
     functionCompletionIncludeParams: "รวมตัวอย่างพารามิเตอร์ในการเติม Function",

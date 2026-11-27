@@ -10341,7 +10341,8 @@ export default withEnglishFallback({
     batchColumnSelectionIncludeComments: "Incluir comentários ao inserir colunas selecionadas",
     batchColumnSelectionIncludeCommentsDescription: "Inclui os comentários das colunas do banco de dados ao inserir várias colunas SELECT pela lista de preenchimento automático.",
     autoKeywordCase: "Converter automaticamente o caso das palavras-chave ao digitar",
-    autoKeywordCaseDescription: "Após um espaço, sinal de pontuação ou quebra de linha, a palavra-chave recém-digitada é convertida para o caso configurado no formatador SQL.",
+    autoKeywordCaseDescription:
+      "É acionado ao digitar um espaço, um único sinal de pontuação (vírgula, parêntese, …) ou quebra de linha: a palavra recém-digitada é convertida no local se for uma palavra-chave, conforme o caso configurado no formatador SQL. Não reformata a instrução nem altera identificadores, strings ou comentários.",
     sqlServerSpaceConfirmsCompletion: "Confirmar a conclusão com espaço (estilo SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Com a lista de sugestões aberta, pressionar espaço aceita a palavra-chave, tabela ou coluna selecionada e mantém o espaço. Enter e Tab continuam iguais.",
     functionCompletionIncludeParams: "Incluir exemplos de parâmetros no preenchimento de funções",

@@ -9967,7 +9967,8 @@ export default withEnglishFallback({
     batchColumnSelectionIncludeComments: "Includi i commenti quando inserisci le colonne selezionate",
     batchColumnSelectionIncludeCommentsDescription: "Include i commenti delle colonne del database quando inserisci più colonne SELECT dall'elenco di completamento.",
     autoKeywordCase: "Converti automaticamente il caso delle parole chiave durante la digitazione",
-    autoKeywordCaseDescription: "Dopo uno spazio, un segno di punteggiatura o un a capo, la parola chiave appena digitata viene convertita nel caso configurato nel formattatore SQL.",
+    autoKeywordCaseDescription:
+      "Si attiva digitando uno spazio, un singolo segno di punteggiatura (virgola, parentesi, …) o un a capo: la parola appena digitata viene convertita sul posto se è una parola chiave, secondo il caso configurato nel formattatore SQL. Non riformatta l'istruzione e non tocca identificatori, stringhe o commenti.",
     sqlServerSpaceConfirmsCompletion: "Conferma il completamento con lo spazio (stile SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Con l'elenco dei suggerimenti aperto, premendo spazio si accetta la parola chiave, la tabella o la colonna selezionata mantenendo lo spazio. Invio e Tab restano invariati.",
     functionCompletionIncludeParams: "Includi esempi di parametri nel completamento funzioni",

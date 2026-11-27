@@ -9073,7 +9073,7 @@ export default withEnglishFallback({
     batchColumnSelectionIncludeComments: "批次插入欄位時包含註解",
     batchColumnSelectionIncludeCommentsDescription: "從補全清單批次插入 SELECT 欄位時，附帶資料庫欄位註解。",
     autoKeywordCase: "輸入時自動轉換關鍵字大小寫",
-    autoKeywordCaseDescription: "輸入空格、標點或換行後，把剛輸入的關鍵字依 SQL 格式化設定中的關鍵字大小寫自動轉換。",
+    autoKeywordCaseDescription: "在輸入空格、逗號/括號等單一標點或換行時觸發：如果游標前剛輸入的單字是關鍵字，就依「SQL 格式化」設定中的關鍵字大小寫（大寫/小寫）就地轉換。不會重新排版，也不會改動識別字、字串或註解。",
     sqlServerSpaceConfirmsCompletion: "空格確認補全（SQL Server 習慣）",
     sqlServerSpaceConfirmsCompletionDescription: "補全清單開啟時，按空格直接採用選取的關鍵字、資料表或欄名，並保留空格。Enter 與 Tab 維持原本行為。",
     functionCompletionIncludeParams: "函數補全帶參數範例",

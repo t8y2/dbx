@@ -10330,7 +10330,7 @@ export default withEnglishFallback({
     batchColumnSelectionIncludeComments: "選択した列の挿入時にコメントを含める",
     batchColumnSelectionIncludeCommentsDescription: "補完リストから SELECT の列を一括挿入するときに、データベースの列コメントを含めます。",
     autoKeywordCase: "入力時にキーワードの大文字小文字を自動変換",
-    autoKeywordCaseDescription: "スペース、記号、改行を入力したとき、直前に入力したキーワードを SQL フォーマッターのキーワード大小文字設定に合わせて自動変換します。",
+    autoKeywordCaseDescription: "スペース、カンマや括弧などの 1 文字の記号、または改行を入力したときに、直前に入力した単語がキーワードであれば SQL フォーマッターのキーワード大文字小文字設定（大文字/小文字）でその場で変換します。再フォーマットは行わず、識別子・文字列・コメントは変更しません。",
     sqlServerSpaceConfirmsCompletion: "スペースで補完を確定（SQL Server 方式）",
     sqlServerSpaceConfirmsCompletionDescription: "補完リストの表示中にスペースを押すと、選択中のキーワード・テーブル・列を確定し、空白を保持します。Enter と Tab は従来どおり動作します。",
     functionCompletionIncludeParams: "関数補完に引数プレースホルダーを含める",

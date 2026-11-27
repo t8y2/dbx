@@ -9789,7 +9789,8 @@ export default withEnglishFallback({
     batchColumnSelectionIncludeComments: "Dołączaj komentarze podczas wstawiania wybranych kolumn",
     batchColumnSelectionIncludeCommentsDescription: "Dołączaj komentarze kolumn bazy danych podczas zbiorczego wstawiania kolumn SELECT z listy autouzupełniania.",
     autoKeywordCase: "Automatycznie zmieniaj wielkość liter słów kluczowych podczas pisania",
-    autoKeywordCaseDescription: "Po wpisaniu spacji, znaku interpunkcyjnego lub przejścia do nowej linii słowo kluczowe zostanie przekonwertowane na wielkość liter z ustawień formatera SQL.",
+    autoKeywordCaseDescription:
+      "Uruchamia się po wpisaniu spacji, pojedynczego znaku interpunkcyjnego (przecinek, nawias, …) lub przejścia do nowej linii: właśnie wpisane słowo jest konwertowane w miejscu, jeśli jest słowem kluczowym, zgodnie z ustawieniem wielkości liter formatera SQL. Nie formatuje ponownie instrukcji ani nie zmienia identyfikatorów, łańcuchów znaków i komentarzy.",
     sqlServerSpaceConfirmsCompletion: "Spacja zatwierdza uzupełnienie (styl SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Gdy lista uzupełniania jest otwarta, naciśnięcie Spacji akceptuje wybrane słowo kluczowe, tabelę lub kolumnę i zachowuje spację na końcu. Enter i Tab działają bez zmian.",
     functionCompletionIncludeParams: "Dołączaj przykłady parametrów w uzupełnianiu funkcji",

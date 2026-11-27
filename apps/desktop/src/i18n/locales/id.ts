@@ -9400,7 +9400,8 @@ export default withEnglishFallback({
     batchColumnSelectionIncludeComments: "Sertakan komentar saat menyisipkan kolom yang dipilih",
     batchColumnSelectionIncludeCommentsDescription: "Sertakan komentar kolom basis data saat menyisipkan beberapa kolom SELECT dari daftar pelengkapan.",
     autoKeywordCase: "Konversi otomatis huruf besar/kecil kata kunci saat mengetik",
-    autoKeywordCaseDescription: "Setelah spasi, tanda baca, atau baris baru, kata kunci yang baru diketik dikonversi sesuai pengaturan huruf besar/kecil kata kunci pada formatter SQL.",
+    autoKeywordCaseDescription:
+      "Dipicu saat mengetik spasi, satu tanda baca (koma, kurung, …), atau baris baru: kata yang baru diketik dikonversi di tempat jika merupakan kata kunci, sesuai pengaturan huruf besar/kecil kata kunci pada formatter SQL. Tidak memformat ulang pernyataan dan tidak mengubah identifier, string, atau komentar.",
     sqlServerSpaceConfirmsCompletion: "Spasi mengonfirmasi pelengkapan (gaya SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Saat daftar pelengkapan terbuka, menekan Spasi akan menerima kata kunci, tabel, atau kolom yang dipilih serta mempertahankan spasi di akhir. Enter dan Tab tetap berperilaku seperti sebelumnya.",
     functionCompletionIncludeParams: "Sertakan contoh parameter dalam pelengkapan fungsi",

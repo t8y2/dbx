@@ -2,6 +2,8 @@
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { history, undo } from "@codemirror/commands";
+import { ensureSyntaxTree } from "@codemirror/language";
+import { MySQL, sql } from "@codemirror/lang-sql";
 import { beforeAll, describe, expect, it } from "vitest";
 import { loadEngine } from "@/lib/sql/layout/internals";
 import { createQueryEditorKeywordCaseOnTypeFilter, type QueryEditorKeywordCaseOnTypeOptions } from "@/lib/editor/queryEditorKeywordCaseOnType";
@@ -30,6 +32,22 @@ function typeText(state: EditorState, text: string, userEvent = "input.type") {
   // Mirrors real typing: replaces the selection (if any) and carries a caret
   // after the inserted text.
   return state.update({ ...state.replaceSelection(text), userEvent }).state;
+}
+
+/**
+ * The production editor mounts @codemirror/lang-sql, so the statement window and
+ * the lexical context come from the syntax tree rather than the scanner
+ * fallback the other tests exercise (no language mounted there).
+ */
+function createTreeState(doc: string) {
+  const state = EditorState.create({
+    doc,
+    selection: { anchor: doc.length },
+    extensions: [sql({ dialect: MySQL }), EditorState.transactionFilter.of(createQueryEditorKeywordCaseOnTypeFilter({ enabled: () => true, keywordCase: () => "upper", dialect: () => "mysql", databaseType: () => "mysql" }))],
+  });
+  // Let the background parser catch up so the tree-backed window resolves.
+  ensureSyntaxTree(state, state.doc.length, 2000);
+  return state;
 }
 
 describe("queryEditorKeywordCaseOnType", () => {
@@ -107,6 +125,19 @@ describe("queryEditorKeywordCaseOnType", () => {
     const doc = `select ${"x,".repeat(9000)}from`;
     expect(doc.length).toBeGreaterThan(16 * 1024);
     expect(typeText(createState(doc), " ").doc.toString()).toBe(`${doc} `);
+  });
+
+  it("resolves the window and the lexical context from the SQL syntax tree when the grammar is mounted", () => {
+    expect(typeText(createTreeState("select a from"), " ").doc.toString()).toBe("select a FROM ");
+    expect(typeText(createTreeState("select 'select"), " ").doc.toString()).toBe("select 'select ");
+    expect(typeText(createTreeState("-- select"), " ").doc.toString()).toBe("-- select ");
+  });
+
+  it("never reprocesses a replacement transaction", () => {
+    // The SQL Server space branch dispatches a range replacement (keyword plus
+    // space); only a pure typed insertion may be processed here.
+    const state = createState("select", {}, 5);
+    expect(state.update({ changes: { from: 0, to: 5, insert: " " }, userEvent: "input.type" }).state.doc.toString()).toBe(" t");
   });
 
   it("keeps the conversion and the typed character in one undo step", () => {

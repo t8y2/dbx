@@ -1711,6 +1711,31 @@ export function getGeneratorCategoryAndLabel(key: string): { category: string; c
 
 type NumericInput = { readonly integer: true; readonly value: bigint } | { readonly integer: false; readonly value: number };
 
+const MAX_EXACT_NUMERIC_INPUT_DIGITS = 10000;
+
+function parseExactDecimalInteger(text: string): bigint | undefined {
+  const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:e([+-]?\d+))?$/i.exec(text);
+  if (!match) return undefined;
+  const [, sign, integerPart = "", fractionPart = "", leadingFraction = "", exponentText] = match;
+  const fractional = integerPart ? fractionPart : leadingFraction;
+  const digits = `${integerPart}${fractional}`.replace(/^0+/, "");
+  if (!digits) return 0n;
+  const exponent = exponentText ? Number(exponentText) : 0;
+  if (!Number.isSafeInteger(exponent)) return undefined;
+  const shift = exponent - fractional.length;
+  let integerDigits: string;
+  if (shift >= 0) {
+    if (digits.length + shift > MAX_EXACT_NUMERIC_INPUT_DIGITS) return undefined;
+    integerDigits = digits + "0".repeat(shift);
+  } else {
+    const fractionalZeros = -shift;
+    if (fractionalZeros >= digits.length || !/^0+$/.test(digits.slice(-fractionalZeros))) return undefined;
+    integerDigits = digits.slice(0, -fractionalZeros);
+  }
+  const value = BigInt(integerDigits);
+  return sign === "-" ? -value : value;
+}
+
 function parseNumericInput(value: number | string | undefined): NumericInput | undefined {
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return undefined;
@@ -1719,11 +1744,11 @@ function parseNumericInput(value: number | string | undefined): NumericInput | u
   }
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
-  if (/^[+-]?\d+$/.test(trimmed)) return { integer: true, value: BigInt(trimmed) };
   if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(trimmed)) return undefined;
+  const exactInteger = parseExactDecimalInteger(trimmed);
+  if (exactInteger !== undefined) return { integer: true, value: exactInteger };
   const numeric = Number(trimmed);
   if (!Number.isFinite(numeric)) return undefined;
-  if (Number.isInteger(numeric) && Number.isSafeInteger(numeric)) return { integer: true, value: BigInt(numeric) };
   return { integer: false, value: numeric };
 }
 

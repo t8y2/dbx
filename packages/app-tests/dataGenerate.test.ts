@@ -29,6 +29,18 @@ test("generates exact twenty-digit integer sequences without rounding", () => {
   assert.equal(displayGeneratedValue(result.rows[0][0]), start);
 });
 
+test("generates exact integers within twenty-digit random bounds", () => {
+  const random = vi.spyOn(Math, "random").mockReturnValue(0);
+  try {
+    const generated = generateValue("id", "bigint", "number", 0, { min: "12345678901234567890", max: "12345678901234567899" });
+    assert.equal(generated, 12345678901234567890n);
+    assert.equal(formatGeneratedValue(generated), "12345678901234567890");
+    assert.equal(generateValue("id", "integer", "number", 0, { min: 1, max: 10 }), 1);
+  } finally {
+    random.mockRestore();
+  }
+});
+
 test("keeps exact sequence bounds and decimal sequence compatibility", () => {
   assert.equal(generateValue("id", "bigint", "sequence", 2, { startValue: "12345678901234567890", increment: "1", sequenceMin: "12345678901234567890", sequenceMax: "12345678901234567891", sequenceCycle: true }), 12345678901234567890n);
   assert.equal(generateValue("id", "numeric", "sequence", 2, { startValue: 0.5, increment: 0.25 }), 1);

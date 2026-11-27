@@ -1,4 +1,4 @@
-import type { ColumnGenerateConfig, TableGenerateConfig } from "./dataGenerate";
+import { numericInputValueAsNumber, type ColumnGenerateConfig, type TableGenerateConfig } from "./dataGenerate";
 
 export class MysqlGeneratePartitionError extends Error {
   constructor(
@@ -78,8 +78,8 @@ export function constrainMysqlGenerateColumns(config: TableGenerateConfig, parti
     if (!tokens.length || tokens.some((s) => !/^-?\d+$/.test(s) || !Number.isSafeInteger(Number(s)))) return fail();
     const allowed = new Set(tokens.map(Number));
     if (generatorKey === "sequence") {
-      const start = params.startValue ?? 1;
-      const increment = params.increment ?? 1;
+      const start = numericInputValueAsNumber(params.startValue, 1);
+      const increment = numericInputValueAsNumber(params.increment, 1);
       if (config.rowCount > allowed.size && increment !== 0) return fail();
       const count = increment === 0 ? Math.min(config.rowCount, 1) : config.rowCount;
       for (let i = 0; i < count; i++) if (!allowed.has(start + i * increment)) return fail();
@@ -93,13 +93,13 @@ export function constrainMysqlGenerateColumns(config: TableGenerateConfig, parti
     const max = Math.max(...limits) - 1;
     if (!Number.isSafeInteger(max)) return fail();
     if (generatorKey === "sequence") {
-      const start = params.startValue ?? 1;
-      const last = start + Math.max(0, config.rowCount - 1) * (params.increment ?? 1);
+      const start = numericInputValueAsNumber(params.startValue, 1);
+      const last = start + Math.max(0, config.rowCount - 1) * numericInputValueAsNumber(params.increment, 1);
       if (Math.max(start, last) > max) return fail();
     } else if (generatorKey === "number" || !generatorKey) {
-      params.max = Math.min(params.max ?? max, max);
+      params.max = Math.min(numericInputValueAsNumber(params.max, max), max);
       if (/unsigned/i.test(column.dataType) && max < 0) return fail();
-      params.min = Math.min(params.min ?? 1, params.max);
+      params.min = Math.min(numericInputValueAsNumber(params.min, 1), params.max);
       params.numberType = "integer";
     } else return fail();
   }

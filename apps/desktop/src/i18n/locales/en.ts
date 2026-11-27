@@ -12370,6 +12370,7 @@ export default {
     mcpToolListRoutines: "List routines",
     mcpToolGetRoutineSource: "Routine source",
     mcpToolGetSchemaContext: "Schema context",
+    mcpToolQuery: "Run a read-only SQL query",
     mcpToolExecuteQuery: "Execute SQL / Mongo commands",
     mcpToolExecuteBatch: "Execute SQL batch",
     mcpToolOpenSession: "Open query session",

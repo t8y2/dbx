@@ -325,9 +325,11 @@ const tabLayoutRevision = ref(0);
 // with no match would empty the always-visible top tab bar while the active
 // tab's content stays on screen.
 const tabOverflowSearchQuery = ref("");
-// The strip's own search box lives only in the vertical toolbar, where
-// filtering the strip itself is the point of the search.
+// The strip search is independent of the overflow popover's list search.
 const tabSearchQuery = ref("");
+const horizontalTabSearchOpen = ref(false);
+const horizontalTabSearchButton = ref<HTMLButtonElement | null>(null);
+const horizontalTabSearchInput = ref<InstanceType<typeof Input> | null>(null);
 const filteredGroupTabs = computed(() => {
   const query = tabOverflowSearchQuery.value.trim().toLocaleLowerCase();
   if (!query) {
@@ -342,6 +344,16 @@ watch(tabOverflowOpen, (open) => {
     nextTick(() => document.querySelector<HTMLInputElement>("[data-group-tab-search-input]")?.focus());
   }
 });
+
+function toggleHorizontalTabSearch() {
+  horizontalTabSearchOpen.value = !horizontalTabSearchOpen.value;
+  if (horizontalTabSearchOpen.value) {
+    void nextTick(() => horizontalTabSearchInput.value?.$el.focus());
+  } else {
+    tabSearchQuery.value = "";
+    void nextTick(() => horizontalTabSearchButton.value?.focus());
+  }
+}
 
 function setTabSectionRef(key: string, element: Element | null) {
   const row = element instanceof HTMLElement ? element : null;
@@ -1090,6 +1102,16 @@ function getTabGroupMenuItems(tab: QueryTab): ContextMenuItem[] {
 
 function getTabGroupHeaderMenuItems(entry: Extract<StripEntry, { kind: "header" }>): ContextMenuItem[] {
   if (settingsStore.editorSettings.tabGroupMode !== "sidebar") return getTabGroupMenuItems(entry.tab);
+  let tabIds = entry.tabIds;
+  if (horizontalTabSearchOpen.value && tabSearchQuery.value.trim()) {
+    const sectionTabs = entry.pinned ? sortedPinnedTabs.value : sortedRegularTabs.value;
+    const tabs = isTwoRowLayout.value ? [...sortedPinnedTabs.value, ...sortedRegularTabs.value] : sectionTabs;
+    const fullGroup = buildConnectionDatabaseTabGroupStripEntries(
+      tabs.filter((tab) => tab.connectionId),
+      entry.pinned,
+    ).find((item) => item.kind === "header" && item.groupId === entry.groupId);
+    if (fullGroup?.kind === "header") tabIds = fullGroup.tabIds;
+  }
   const customization = tabGroupCustomization(entry.tab);
   const customizationItems: ContextMenuItem[] =
     entry.level === "connection"
@@ -1100,12 +1122,12 @@ function getTabGroupHeaderMenuItems(entry: Extract<StripEntry, { kind: "header" 
         ]
       : [];
   return [
-    ...getTabGroupWindowMenuItems(entry.tabIds),
+    ...getTabGroupWindowMenuItems(tabIds),
     ...customizationItems,
     { label: t("contextMenu.collapseAll"), action: collapseAllTabGroups, icon: ChevronsDownUp },
     { label: t("contextMenu.expandAll"), action: () => expandAllTabGroups(), icon: ChevronsUpDown },
     { label: "", separator: true },
-    { label: t("contextMenu.closeTabGroup"), action: () => closeTabsByIds(entry.tabIds), icon: X, variant: "destructive" },
+    { label: t("contextMenu.closeTabGroup"), action: () => closeTabsByIds(tabIds), icon: X, variant: "destructive" },
   ];
 }
 
@@ -1157,7 +1179,7 @@ function tabMatchesSearch(tab: QueryTab, query: string) {
 }
 
 /**
- * The strips apply the vertical toolbar search box: sections filter by title
+ * The strips apply their toolbar search box: sections filter by title
  * before clustering. The overflow popover's query (tabOverflowSearchQuery) is
  * scoped to the popover list and deliberately does not reach the strip.
  */
@@ -1350,15 +1372,16 @@ const twoRowTabEntries = computed<StripEntry[]>(() => {
 
 function getTwoRowGroupMenuItems(group: TwoRowGroupItem): ContextMenuItem[] {
   const customization = group.key ? tabGroupCustomization(group.tab) : undefined;
+  const tabIds = horizontalTabSearchOpen.value && tabSearchQuery.value.trim() ? [...sortedPinnedTabs.value, ...sortedRegularTabs.value].filter((tab) => tabGroupKey(tab) === group.key).map((tab) => tab.id) : group.tabIds;
   return [
-    ...getTabGroupWindowMenuItems(group.tabIds),
+    ...getTabGroupWindowMenuItems(tabIds),
     { label: t("contextMenu.editTabGroup"), action: () => openTabGroupEditor(group.tab), icon: Pencil, visible: !!group.key },
     { label: t("contextMenu.resetTabGroup"), action: () => resetTabGroupCustomization(group.tab), icon: RotateCcw, visible: !!group.key && !!(customization?.name || customization?.color) },
     { label: "", separator: true, visible: !!group.key },
     { label: t("contextMenu.collapseAll"), action: collapseAllTabGroups, icon: ChevronsDownUp, visible: settingsStore.editorSettings.tabGroupMode === "sidebar" },
     { label: t("contextMenu.expandAll"), action: expandAllTabGroups, icon: ChevronsUpDown, visible: settingsStore.editorSettings.tabGroupMode === "sidebar" },
     { label: "", separator: true },
-    { label: t("contextMenu.closeTabGroup"), action: () => closeTabsByIds(group.tabIds), icon: X, variant: "destructive" },
+    { label: t("contextMenu.closeTabGroup"), action: () => closeTabsByIds(tabIds), icon: X, variant: "destructive" },
   ];
 }
 
@@ -2102,7 +2125,8 @@ watch(
 );
 
 watch(isVerticalLayout, (vertical) => {
-  if (!vertical) tabSearchQuery.value = "";
+  if (vertical) horizontalTabSearchOpen.value = false;
+  tabSearchQuery.value = "";
 });
 
 watch(twoRowSelectedKey, () => {
@@ -2127,6 +2151,7 @@ watch(
     settingsStore.editorSettings.tabGroupRows,
     settingsStore.editorSettings.tabMaxWidth,
     compactTabTitle.value,
+    tabSearchQuery.value,
     Array.from(collapsedTabGroups.value).sort().join("|"),
   ],
   () => {
@@ -2331,6 +2356,20 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
         max-height="min(600px, calc(100vh - 16px))"
         @update:model-value="selectTabOrganizationItem"
       />
+      <div v-if="!isVerticalLayout && (tabs.length > 1 || horizontalTabSearchOpen)" class="mx-1 flex max-w-[49%] min-w-0 shrink-0 items-center gap-1 self-center">
+        <button
+          ref="horizontalTabSearchButton"
+          type="button"
+          class="tab-bar-action-button shrink-0 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          :aria-label="t('tabs.searchOpenTabs')"
+          :aria-expanded="horizontalTabSearchOpen"
+          :title="t('tabs.searchOpenTabs')"
+          @click="toggleHorizontalTabSearch"
+        >
+          <component :is="horizontalTabSearchOpen ? X : Search" class="h-4 w-4" aria-hidden="true" />
+        </button>
+        <Input v-if="horizontalTabSearchOpen" ref="horizontalTabSearchInput" v-model="tabSearchQuery" type="search" class="h-7 w-36 min-w-0 text-xs" :placeholder="t('tabs.searchOpenTabs')" :aria-label="t('tabs.searchOpenTabs')" @keydown.esc.prevent.stop="toggleHorizontalTabSearch" />
+      </div>
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
         <div v-if="showTabScrollbar" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
           <div class="app-tab-scrollbar__thumb" :style="tabScrollbarThumbStyle" />
@@ -2349,6 +2388,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
           @scroll="!isVerticalLayout && !hasHorizontalFixedRows && updateScrollButtons()"
           @wheel="!isVerticalLayout && !hasHorizontalFixedRows && !isWrapLayout && onTabsWheel($event)"
         >
+          <span v-if="horizontalTabSearchOpen && tabSearchQuery.trim() && filteredPinnedTabs.length === 0 && filteredRegularTabs.length === 0" role="status" class="shrink-0 px-2 text-xs text-muted-foreground">{{ t("tabs.noMatchingTabs") }}</span>
           <template v-for="section in stripSections" :key="section.key">
             <div
               class="tab-section-frame"

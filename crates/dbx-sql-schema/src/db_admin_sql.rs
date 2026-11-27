@@ -1658,6 +1658,61 @@ mod tests {
     }
 
     #[test]
+    fn builds_postgres_create_database_sql_with_encoding_from_template0() {
+        assert_eq!(
+            build_create_database_sql(CreateDatabaseSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                driver_profile: None,
+                target: None,
+                parent: None,
+                name: "app_db".to_string(),
+                charset: Some("UTF8".to_string()),
+                collation: None,
+                identifier_quote: None,
+            })
+            .unwrap(),
+            "CREATE DATABASE \"app_db\" TEMPLATE template0 ENCODING 'UTF8';"
+        );
+    }
+
+    #[test]
+    fn preserves_postgres_default_database_creation_without_encoding() {
+        for charset in [None, Some("utf8mb4")] {
+            assert_eq!(
+                build_create_database_sql(CreateDatabaseSqlOptions {
+                    database_type: Some(DatabaseType::Postgres),
+                    driver_profile: None,
+                    target: None,
+                    parent: None,
+                    name: "app_db".to_string(),
+                    charset: charset.map(str::to_string),
+                    collation: None,
+                    identifier_quote: None,
+                })
+                .unwrap(),
+                "CREATE DATABASE \"app_db\";"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_postgres_database_encoding() {
+        let error = build_create_database_sql(CreateDatabaseSqlOptions {
+            database_type: Some(DatabaseType::Postgres),
+            driver_profile: None,
+            target: None,
+            parent: None,
+            name: "app_db".to_string(),
+            charset: Some("UTF8'; DROP DATABASE other; --".to_string()),
+            collation: None,
+            identifier_quote: None,
+        })
+        .unwrap_err();
+
+        assert_eq!(error, "Invalid PostgreSQL database encoding.");
+    }
+
+    #[test]
     fn builds_vastbase_create_database_sql_without_mysql_charset_options() {
         assert_eq!(
             build_create_database_sql(CreateDatabaseSqlOptions {

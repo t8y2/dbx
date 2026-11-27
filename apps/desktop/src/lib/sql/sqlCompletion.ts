@@ -5787,6 +5787,24 @@ function completionBatchSelectionQualifier(context: SqlCompletionContext, dialec
   return parts.map((part, index) => completionBatchQualifierPart(part, quoted?.[index], dialect)).join(".");
 }
 
+/**
+ * Formats a referenced table's alias or name for use as a column/join qualifier.
+ *
+ * Unlike catalog object names, an alias or bare table name already written in
+ * the user's SQL is folded by the database (`FROM table_a ta` -> TA,
+ * `FROM table_a` -> TABLE_A). Re-quoting it (`"ta"` / `"table_a"`) addresses a
+ * different case-sensitive identifier and fails with ORA-00904 on Oracle
+ * (#11330, #15190, #15725).
+ */
+function referencedTableQualifierApplySql(reference: Pick<SqlCompletionReferencedTable, "name" | "nameQuoted" | "alias" | "aliasSql">, dialect?: SqlCompletionApplyDialect): string {
+  if (reference.aliasSql) return reference.aliasSql;
+  if (reference.alias) return reference.alias;
+  if (reference.nameQuoted === false && BARE_QUALIFIER_PART.test(reference.name) && !POSTGRES_IDENTIFIER_KEYWORDS.has(reference.name.toLowerCase())) {
+    return reference.name;
+  }
+  return quoteCompletionApplyIdentifier(reference.name, dialect);
+}
+
 function quoteCompletionApplyName(applyName: string, dialect?: SqlCompletionApplyDialect): string {
   if (dialect !== "mysql" && dialect !== "oracle" && dialect !== "sqlserver" && dialect !== "clickhouse") return applyName;
   const parts = splitQualifiedNameRawParts(applyName);
@@ -6495,7 +6513,7 @@ export function buildSelectStarExpansion(context: SqlCompletionContext, columnsB
 
   return references
     .flatMap((reference) => {
-      const qualifier = reference.aliasSql ?? (reference.alias ? quoteCompletionApplyIdentifier(reference.alias, dialect) : quoteCompletionApplyIdentifier(reference.name, dialect));
+      const qualifier = referencedTableQualifierApplySql(reference, dialect);
       return uniqueColumnsByName(columnsForSelectAllReferencedTable(reference, columnsByTable)).map((column) => `${qualifier}.${quoteSelectStarColumnIdentifier(column.name, dialect, databaseType)}`);
     })
     .join(", ");
@@ -6536,7 +6554,7 @@ function buildSelectAllColumnItems(context: SqlCompletionContext, columnsByTable
     const label = `${displayRef}.*`;
     if (!selectAllColumnItemMatchesPrefix(label, ref, columns, context.prefix, matchMode)) continue;
 
-    const qualifier = context.qualifier || ref.alias || (shouldQualify ? quoteCompletionApplyIdentifier(ref.name, dialect) : undefined);
+    const qualifier = context.qualifier ? (completionBatchSelectionQualifier(context, dialect) ?? context.qualifier) : ref.alias || shouldQualify ? referencedTableQualifierApplySql(ref, dialect) : undefined;
     const expansion = buildSelectAllColumnExpansion(columns, qualifier, !!context.qualifier, dialect, databaseType);
     const countText = (t?.starExpansionColumns ?? "{count} columns").replace("{count}", String(columns.length));
     items.push({
@@ -7019,7 +7037,7 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
   // Keep ambiguous names qualified even when optional table prefixes are disabled.
   const qualifyAllColumns = qualifyColumns && !context.qualifier && !context.insertTable && context.referencedTables.length > 1;
   const seen = new Set<string>();
-  const uniqueColumns: Array<SqlCompletionColumn & { key: string; displayLabel: string }> = [];
+  const uniqueColumns: Array<SqlCompletionColumn & { key: string; displayLabel: string; sourceTableRef?: Pick<SqlCompletionReferencedTable, "name" | "nameQuoted" | "alias" | "aliasSql"> }> = [];
   for (const c of relevantCols) {
     const count = nameCount.get(normalizeIdentifierPart(c.name)) || 0;
     if (count > 1 || qualifyAllColumns) {
@@ -7083,11 +7101,12 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
   });
 }
 
-function completionColumnsForReferencedTable<T extends SqlCompletionColumn & { key: string }>(table: SqlCompletionReferencedTable, columns: readonly T[]): T[] {
+function completionColumnsForReferencedTable<T extends SqlCompletionColumn & { key: string }>(table: SqlCompletionReferencedTable, columns: readonly T[]): Array<T & { sourceTableRef?: Pick<SqlCompletionReferencedTable, "name" | "nameQuoted" | "alias" | "aliasSql"> }> {
   const matched = columns.filter((column) => columnMatchesReferencedTable(column, table));
   const aliasedColumns = applyReferencedColumnAliases(table, matched);
-  if (!table.alias) return aliasedColumns;
-  return aliasedColumns.map((column) => ({ ...column, sourceAlias: table.alias, sourceQualifierSql: table.aliasSql }));
+  const sourceTableRef = { name: table.name, nameQuoted: table.nameQuoted, alias: table.alias, aliasSql: table.aliasSql };
+  if (!table.alias) return aliasedColumns.map((column) => ({ ...column, sourceTableRef }));
+  return aliasedColumns.map((column) => ({ ...column, sourceAlias: table.alias, sourceQualifierSql: table.aliasSql, sourceTableRef }));
 }
 
 function applyReferencedColumnAliases<T extends SqlCompletionColumn>(table: SqlCompletionReferencedTable, columns: readonly T[]): T[] {
@@ -7145,14 +7164,20 @@ function normalizeCompletionKey(key: string): string {
     .join(".");
 }
 
-function buildColumnApply(column: SqlCompletionColumn & { displayLabel: string }, context: SqlCompletionContext, dialect?: SqlCompletionApplyDialect, columnName = quoteCompletionApplyIdentifier(column.name, dialect)): string {
+function buildColumnApply(
+  column: SqlCompletionColumn & { displayLabel: string; sourceTableRef?: Pick<SqlCompletionReferencedTable, "name" | "nameQuoted" | "alias" | "aliasSql"> },
+  context: SqlCompletionContext,
+  dialect?: SqlCompletionApplyDialect,
+  columnName = quoteCompletionApplyIdentifier(column.name, dialect),
+): string {
   if (context.qualifier || column.displayLabel === column.name || !column.displayLabel.includes(".")) {
     return columnName;
   }
-  // `sourceAlias` is the alias as written in the document, so it is reused
-  // verbatim: quoting it would change its meaning on folding dialects
-  // (Oracle `ap` -> AP). Only the metadata table name needs quoting (#11330).
-  const qualifier = column.sourceQualifierSql ?? column.sourceAlias ?? quoteCompletionApplyIdentifier(column.table, dialect);
+  // Reuse the alias or bare table name as written in the document: quoting it
+  // would change its meaning on folding dialects (Oracle `ta` -> TA,
+  // `table_a` -> TABLE_A). Only metadata names or explicitly quoted references
+  // need quoting (#11330, #15725).
+  const qualifier = column.sourceTableRef ? referencedTableQualifierApplySql(column.sourceTableRef, dialect) : (column.sourceQualifierSql ?? column.sourceAlias ?? quoteCompletionApplyIdentifier(column.table, dialect));
   return `${qualifier}.${columnName}`;
 }
 
@@ -7340,8 +7365,8 @@ function buildDirectionalForeignKeyJoinConditionItems(
 function buildJoinConditionPart(owner: SqlCompletionReferencedTable, ownerColumn: string, referenced: SqlCompletionReferencedTable, referencedColumn: string, dialect?: SqlCompletionApplyDialect): { label: string; apply: string } {
   const ownerRef = owner.alias || owner.name;
   const referencedRef = referenced.alias || referenced.name;
-  const ownerApplyRef = owner.alias ? owner.alias : quoteCompletionApplyIdentifier(owner.name, dialect);
-  const referencedApplyRef = referenced.alias ? referenced.alias : quoteCompletionApplyIdentifier(referenced.name, dialect);
+  const ownerApplyRef = referencedTableQualifierApplySql(owner, dialect);
+  const referencedApplyRef = referencedTableQualifierApplySql(referenced, dialect);
   return {
     label: `${ownerRef}.${ownerColumn} = ${referencedRef}.${referencedColumn}`,
     apply: `${ownerApplyRef}.${quoteCompletionApplyIdentifier(ownerColumn, dialect)} = ${referencedApplyRef}.${quoteCompletionApplyIdentifier(referencedColumn, dialect)}`,
@@ -7391,8 +7416,8 @@ function buildJoinConditionItemsForPair(
   const items: SqlCompletionItem[] = [];
   const leftRef = left.alias || left.name;
   const rightRef = right.alias || right.name;
-  const leftApplyRef = left.alias ? left.alias : quoteCompletionApplyIdentifier(left.name, dialect);
-  const rightApplyRef = right.alias ? right.alias : quoteCompletionApplyIdentifier(right.name, dialect);
+  const leftApplyRef = referencedTableQualifierApplySql(left, dialect);
+  const rightApplyRef = referencedTableQualifierApplySql(right, dialect);
   const leftTableKey = singularTableName(left.name);
   const rightTableKey = singularTableName(right.name);
 
@@ -7512,8 +7537,8 @@ function buildCompositeHeuristicJoinConditionItems(
 
   const leftRef = left.alias || left.name;
   const rightRef = right.alias || right.name;
-  const leftApplyRef = left.alias ? left.alias : quoteCompletionApplyIdentifier(left.name, dialect);
-  const rightApplyRef = right.alias ? right.alias : quoteCompletionApplyIdentifier(right.name, dialect);
+  const leftApplyRef = referencedTableQualifierApplySql(left, dialect);
+  const rightApplyRef = referencedTableQualifierApplySql(right, dialect);
   const items: SqlCompletionItem[] = [];
 
   for (const candidate of candidates.slice(0, 2)) {

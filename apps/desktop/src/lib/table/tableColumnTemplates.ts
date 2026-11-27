@@ -72,6 +72,13 @@ export function createTableColumnTemplateDrafts(options: { templateId: string; d
   return presetFieldColumns(options.databaseType, parseTableColumnTemplateFields([...(options.columnNames ?? DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS)]), options.createId).filter((column) => !existingNames.has(column.name.toLowerCase()));
 }
 
+export function tableColumnTemplateFieldNamesForDatabase(value: unknown, databaseType: DatabaseType | undefined): string[] {
+  if (!databaseType) return [];
+  return parseTableColumnTemplateFields(value)
+    .filter((field) => isTableColumnTemplateFieldApplicable(field, databaseType))
+    .map((field) => field.name);
+}
+
 /** Case-insensitive name merge: first wins for field props; per-DB types are unioned. */
 function mergeTableColumnTemplateFields(fields: readonly TableColumnTemplateField[]): TableColumnTemplateField[] {
   const order: string[] = [];

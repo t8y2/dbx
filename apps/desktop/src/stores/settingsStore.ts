@@ -1161,6 +1161,7 @@ export interface EditorSettings {
   dataGridHideNullColumns: boolean;
   dataGridHideEmptyColumns: boolean;
   dataGridFreezeFirstColumn: boolean;
+  dataGridConfirmColumnHeaderReorder: boolean;
   dataGridBooleanDisplayMode: "dropdown" | "checkbox";
   dataGridBooleanValueStyle: BooleanCellValueStyle;
   numericColumnRightAlign: boolean;
@@ -1581,6 +1582,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridHideNullColumns: false,
   dataGridHideEmptyColumns: false,
   dataGridFreezeFirstColumn: false,
+  dataGridConfirmColumnHeaderReorder: false,
   dataGridBooleanDisplayMode: "dropdown",
   dataGridBooleanValueStyle: "true-false",
   numericColumnRightAlign: true,
@@ -2366,6 +2368,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridHideNullColumns: settings.dataGridHideNullColumns === true,
     dataGridHideEmptyColumns: settings.dataGridHideEmptyColumns === true,
     dataGridFreezeFirstColumn: settings.dataGridFreezeFirstColumn === true,
+    dataGridConfirmColumnHeaderReorder: settings.dataGridConfirmColumnHeaderReorder === true,
     dataGridBooleanDisplayMode: settings.dataGridBooleanDisplayMode === "checkbox" ? "checkbox" : "dropdown",
     dataGridBooleanValueStyle: normalizeDataGridBooleanValueStyle(settings.dataGridBooleanValueStyle),
     numericColumnRightAlign: typeof settings.numericColumnRightAlign === "boolean" ? settings.numericColumnRightAlign : DEFAULT_EDITOR_SETTINGS.numericColumnRightAlign,
@@ -3404,6 +3407,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridHideNullColumns !== undefined) editorSettings.value.dataGridHideNullColumns = partial.dataGridHideNullColumns === true;
     if (partial.dataGridHideEmptyColumns !== undefined) editorSettings.value.dataGridHideEmptyColumns = partial.dataGridHideEmptyColumns === true;
     if (partial.dataGridFreezeFirstColumn !== undefined) editorSettings.value.dataGridFreezeFirstColumn = partial.dataGridFreezeFirstColumn === true;
+    if (partial.dataGridConfirmColumnHeaderReorder !== undefined) editorSettings.value.dataGridConfirmColumnHeaderReorder = partial.dataGridConfirmColumnHeaderReorder === true;
     if (partial.dataGridBooleanValueStyle !== undefined) editorSettings.value.dataGridBooleanValueStyle = normalizeDataGridBooleanValueStyle(partial.dataGridBooleanValueStyle);
     if (partial.dataGridBooleanDisplayMode !== undefined) editorSettings.value.dataGridBooleanDisplayMode = partial.dataGridBooleanDisplayMode === "dropdown" ? "dropdown" : "checkbox";
     if (partial.numericColumnRightAlign !== undefined) editorSettings.value.numericColumnRightAlign = partial.numericColumnRightAlign === true;

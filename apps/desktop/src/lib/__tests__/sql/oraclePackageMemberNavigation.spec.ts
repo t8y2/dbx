@@ -89,6 +89,99 @@ END BZ_EM_PRO;`;
     const resolved = resolveAt(spec, specContext, "LOG_EVENT(P_CODE");
     expect(resolved?.kind === "packageBody" && resolved.target.signature).toBe("P_CODE NUMBER, P_TEXT VARCHAR2");
   });
+
+  /**
+   * 调用点没有签名可用。同名重载有多个实现时必须交回元数据解析链，而不是挑「第一个实现」——
+   * 那会让 Ctrl/Cmd+点击悄悄跳到错误的重载。
+   */
+  describe("overloaded call sites", () => {
+    const OVERLOADS = `CREATE OR REPLACE PACKAGE BODY LLMES.BZ_EM_PRO AS
+  PROCEDURE LOG_EVENT(P_TEXT VARCHAR2) IS
+  BEGIN
+    NULL;
+  END LOG_EVENT;
+
+  PROCEDURE LOG_EVENT(P_CODE NUMBER, P_TEXT VARCHAR2) IS
+  BEGIN
+    NULL;
+  END LOG_EVENT;
+
+  PROCEDURE PING IS
+  BEGIN
+    NULL;
+  END PING;
+
+  PROCEDURE PING(P_CODE NUMBER) IS
+  BEGIN
+    NULL;
+  END PING;
+
+  PROCEDURE SOLO(P_CODE NUMBER) IS
+  BEGIN
+    NULL;
+  END SOLO;
+
+  PROCEDURE RUN IS
+  BEGIN
+    LOG_EVENT('hi');
+    PING(1);
+    SOLO(1);
+  END RUN;
+END BZ_EM_PRO;`;
+
+    it("refuses an ambiguous overload instead of jumping to the first implementation", () => {
+      expect(resolveAt(OVERLOADS, bodyContext, "LOG_EVENT('hi')")).toBeNull();
+    });
+
+    it("refuses when one of the overloads takes no parameters", () => {
+      // PING / PING(P_CODE) cannot be told apart from the call text alone, and a
+      // no-argument header yields no signature to match on either.
+      expect(resolveAt(OVERLOADS, bodyContext, "PING(1)")).toBeNull();
+    });
+
+    it("still resolves a call whose name has exactly one implementation", () => {
+      const resolved = resolveAt(OVERLOADS, bodyContext, "SOLO(1)");
+      expect(resolved?.kind).toBe("document");
+      expect(resolved?.entry.implemented).toBe(true);
+      expect(resolved?.entry.line).toBe(22);
+    });
+  });
+
+  /** Oracle 下引号标识符大小写敏感：`"MixedCase"` 和 `"MIXEDCASE"` 是两个不同的名字。 */
+  describe("quoted identifiers", () => {
+    const QUOTED = `CREATE OR REPLACE PACKAGE BODY LLMES.BZ_EM_PRO AS
+  PROCEDURE "MixedCase"(P_TEXT VARCHAR2) IS
+  BEGIN
+    NULL;
+  END "MixedCase";
+
+  PROCEDURE RUN IS
+  BEGIN
+    "MixedCase"('hi');
+    "MIXEDCASE"('hi');
+  END RUN;
+END BZ_EM_PRO;`;
+
+    it("resolves a quoted call that matches the member case exactly", () => {
+      const resolved = resolveAt(QUOTED, bodyContext, `"MixedCase"('hi')`);
+      expect(resolved?.kind).toBe("document");
+      expect(resolved?.entry.name).toBe("MixedCase");
+    });
+
+    it("does not bind a quoted call to a member that differs only in case", () => {
+      expect(resolveAt(QUOTED, bodyContext, `"MIXEDCASE"('hi')`)).toBeNull();
+    });
+
+    it("keeps an unquoted package qualifier case-insensitive", () => {
+      const source = BODY.replace("BZ_EM_CLEAN_REC_E(V0, IRET, SRET);", "bz_em_pro.BZ_EM_CLEAN_REC_E(V0, IRET, SRET);");
+      expect(resolveAt(source, bodyContext, "bz_em_pro.BZ_EM_CLEAN_REC_E")?.kind).toBe("document");
+    });
+
+    it("does not treat a quoted package qualifier of another case as this package", () => {
+      const source = BODY.replace("BZ_EM_CLEAN_REC_E(V0, IRET, SRET);", `"bz_em_pro".BZ_EM_CLEAN_REC_E(V0, IRET, SRET);`);
+      expect(resolveAt(source, bodyContext, `"bz_em_pro".BZ_EM_CLEAN_REC_E`, 13)).toBeNull();
+    });
+  });
 });
 
 describe("oraclePackageMemberSourceRequest", () => {

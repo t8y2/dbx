@@ -8,7 +8,7 @@
 
 import { normalizeOracleNavigationTarget, sqlObjectNavigationPackageMember, sqlObjectNavigationSourceKind, sqlObjectNavigationSourceName, sqlObjectNavigationSourceSchema, sqlObjectNavigationTarget, type SqlObjectNavigationIdentity, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import type { ObjectSourceKind, PackageMemberFocus } from "@/types/database";
-import { findOraclePackageMember, oraclePackageMemberEntries, oraclePackageMemberHeaderAt, type OraclePackageMemberEntry } from "@/lib/sql/oraclePackageMembers";
+import { findOraclePackageMember, oraclePackageMemberHeaderAt, type OraclePackageMemberEntry } from "@/lib/sql/oraclePackageMembers";
 
 /** 当前源码 tab 正在显示的包（包头或包体）。 */
 export interface OraclePackageSourceContext {
@@ -36,10 +36,11 @@ function memberSignature(entry: OraclePackageMemberEntry): string | undefined {
   return entry.parameters.map((name, index) => `${name} ${entry.parameterTypes[index]}`).join(", ");
 }
 
-/** 重载歧义时 {@link findOraclePackageMember} 宁可不选；这里仍要一个落点，优先实现。 */
-function anyNamedMember(source: string, wanted: string): OraclePackageMemberEntry | null {
-  const named = oraclePackageMemberEntries(source).filter((entry) => entry.name.toUpperCase() === wanted.toUpperCase());
-  return named.find((entry) => entry.implemented) ?? named[0] ?? null;
+/**
+ * 带引号的引用在 Oracle 里大小写敏感，`"MyPkg"` 不等于 `MYPKG`；不带引号的才按大小写不敏感比。
+ */
+function referencesSameIdentifier(reference: string, referenceQuoted: boolean | undefined, stored: string): boolean {
+  return referenceQuoted ? reference === stored : reference.toUpperCase() === stored.toUpperCase();
 }
 
 /**
@@ -54,14 +55,16 @@ export function resolveOraclePackageMemberNavigation(options: { source: string; 
 
   const parts = identity.parts.length;
   if (parts > 2) return null;
-  if (parts === 2 && (identity.qualifier ?? "").toUpperCase() !== context.name.toUpperCase()) return null;
+  if (parts === 2 && !referencesSameIdentifier(identity.qualifier ?? "", identity.qualifierQuoted, context.name)) return null;
 
   const header = parts === 1 ? oraclePackageMemberHeaderAt(source, position) : null;
   if (parts === 1 && !header && identity.role !== "routine_call") return null;
 
   const wanted = identity.name;
-  // 点在头上时那个头就是答案；否则按名字（必要时按签名）在本文件里找。
-  const found = header ?? findOraclePackageMember(source, { name: wanted }) ?? anyNamedMember(source, wanted);
+  // 点在头上时那个头就是答案；否则按名字在本文件里找。调用点没有签名可用，重载同名时
+  // {@link findOraclePackageMember} 会返回 null —— 这里不再强行挑一个「第一个实现」，
+  // 否则 Ctrl/Cmd+点击会悄悄跳到错误的重载。拿不准就交回元数据解析链。
+  const found = header ?? findOraclePackageMember(source, { name: wanted, nameQuoted: identity.nameQuoted });
   if (!found) return null;
 
   const signature = memberSignature(found);

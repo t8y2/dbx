@@ -34,6 +34,8 @@ export interface OraclePackageMemberQuery {
   name: string;
   kind?: "procedure" | "function";
   signature?: string;
+  /** 源码里这个名字是带引号写的：Oracle 下引号标识符大小写敏感，不能再退回大小写不敏感匹配。 */
+  nameQuoted?: boolean;
 }
 
 function unquoteIdentifierText(raw: string): string {
@@ -199,7 +201,8 @@ export function findOraclePackageMember(source: string, query: OraclePackageMemb
   if (!wanted) return null;
   const all = oraclePackageMemberEntries(source).filter((entry) => !query.kind || entry.isFunction === (query.kind === "function"));
   const exactName = all.filter((entry) => entry.name === wanted);
-  const named = exactName.length ? exactName : all.filter((entry) => entry.name.toUpperCase() === wanted.toUpperCase());
+  // 引号标识符在 Oracle 下大小写敏感：`"MyProc"` 不该落到 MYPROC 上，所以不走大小写不敏感回退。
+  const named = exactName.length ? exactName : query.nameQuoted ? [] : all.filter((entry) => entry.name.toUpperCase() === wanted.toUpperCase());
   const signature = query.signature === undefined ? undefined : readSignature(query.signature);
   const candidates = signature ? named.filter((entry) => entry.parameters.length === signature.parameters.length && entry.parameters.every((name, index) => name === signature.parameters[index])) : named;
   if (!candidates.length) return null;

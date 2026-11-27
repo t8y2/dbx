@@ -142,7 +142,7 @@ describe("EditorSettingsDialog completion delay input", () => {
   it("keeps intermediate edits and normalizes the value on blur", async () => {
     const { store } = await mountSettings("page");
     const input = host.querySelector<HTMLInputElement>("#editor-completion-auto-activation-delay")!;
-    expect(input.value).toBe("500");
+    expect(input.value).toBe("50");
     input.focus();
     for (const value of ["50", "5", "", "2000", "20000"]) {
       input.value = value;
@@ -153,6 +153,6 @@ describe("EditorSettingsDialog completion delay input", () => {
     input.blur();
     await settle();
     expect(input.value).toBe("5000");
-    expect(store.editorSettings.completionAutoActivationDelayMs).toBe(500);
+    expect(store.editorSettings.completionAutoActivationDelayMs).toBe(50);
   });
 });

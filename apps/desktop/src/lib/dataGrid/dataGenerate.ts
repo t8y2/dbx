@@ -119,10 +119,10 @@ export interface GeneratorParams {
   weekdayMode?: "all" | "weekday" | "custom";
   weekdays?: number[];
   // sequence
-  startValue?: number;
-  increment?: number;
-  sequenceMin?: number;
-  sequenceMax?: number;
+  startValue?: number | string;
+  increment?: number | string;
+  sequenceMin?: number | string;
+  sequenceMax?: number | string;
   sequenceCycle?: boolean;
   // enum
   values?: string;
@@ -1709,6 +1709,76 @@ export function getGeneratorCategoryAndLabel(key: string): { category: string; c
   return { category: "general", categoryLabel: "通用", label: key };
 }
 
+type SequenceNumeric = { readonly integer: true; readonly value: bigint } | { readonly integer: false; readonly value: number };
+
+function parseSequenceNumeric(value: number | string | undefined): SequenceNumeric | undefined {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return undefined;
+    if (Number.isInteger(value)) return { integer: true, value: BigInt(value) };
+    return { integer: false, value };
+  }
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (/^[+-]?\d+$/.test(trimmed)) return { integer: true, value: BigInt(trimmed) };
+  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(trimmed)) return undefined;
+  const numeric = Number(trimmed);
+  if (!Number.isFinite(numeric)) return undefined;
+  if (Number.isInteger(numeric) && Number.isSafeInteger(numeric)) return { integer: true, value: BigInt(numeric) };
+  return { integer: false, value: numeric };
+}
+
+function sequenceNumericAsNumber(parsed: SequenceNumeric): number {
+  return parsed.integer ? Number(parsed.value) : parsed.value;
+}
+
+function positiveModulo(value: bigint, divisor: bigint): bigint {
+  return ((value % divisor) + divisor) % divisor;
+}
+
+function generatedIntegerValue(value: bigint): number | bigint {
+  return value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value;
+}
+
+/** Calculates a sequence value exactly for integer inputs while preserving decimal-sequence compatibility. */
+export function generateSequenceValue(rowIndex: number, params?: GeneratorParams): number | bigint {
+  const start = parseSequenceNumeric(params?.startValue) ?? { integer: true as const, value: 1n };
+  const increment = parseSequenceNumeric(params?.increment) ?? { integer: true as const, value: 1n };
+  const minimum = parseSequenceNumeric(params?.sequenceMin);
+  const maximum = parseSequenceNumeric(params?.sequenceMax);
+  const exactInteger = [start, increment, minimum, maximum].every((value) => value === undefined || value.integer);
+
+  if (!exactInteger) {
+    const startNumber = sequenceNumericAsNumber(start);
+    const incrementNumber = sequenceNumericAsNumber(increment);
+    let value = startNumber + rowIndex * incrementNumber;
+    if (minimum !== undefined && maximum !== undefined && params?.sequenceCycle) {
+      const minNumber = sequenceNumericAsNumber(minimum);
+      const maxNumber = sequenceNumericAsNumber(maximum);
+      const range = maxNumber - minNumber + 1;
+      value = minNumber + ((((value - minNumber) % range) + range) % range);
+    } else if (minimum !== undefined && value < sequenceNumericAsNumber(minimum)) {
+      value = sequenceNumericAsNumber(minimum);
+    } else if (maximum !== undefined && value > sequenceNumericAsNumber(maximum)) {
+      value = sequenceNumericAsNumber(maximum);
+    }
+    return value;
+  }
+
+  let value = start.value as bigint;
+  value += BigInt(rowIndex) * (increment.value as bigint);
+  const minValue = minimum?.value as bigint | undefined;
+  const maxValue = maximum?.value as bigint | undefined;
+  if (minValue !== undefined && maxValue !== undefined && params?.sequenceCycle && maxValue >= minValue) {
+    const range = maxValue - minValue + 1n;
+    value = minValue + positiveModulo(value - minValue, range);
+  } else if (minValue !== undefined && value < minValue) {
+    value = minValue;
+  } else if (maxValue !== undefined && value > maxValue) {
+    value = maxValue;
+  }
+  return generatedIntegerValue(value);
+}
+
 export function generateValue(columnName: string, dataType: string, generatorKey: string | undefined, rowIndex: number, params?: GeneratorParams, columnDefault?: string | null): unknown {
   // null / default overrides
   if (params?.includeNull && params.nullPercent && Math.random() * 100 < params.nullPercent) return null;
@@ -1733,18 +1803,7 @@ export function generateValue(columnName: string, dataType: string, generatorKey
     return randInt(min, max);
   }
   if (key === "sequence") {
-    const start = params?.startValue ?? 1;
-    const inc = params?.increment ?? 1;
-    let val = start + rowIndex * inc;
-    if (params?.sequenceMin !== undefined && params?.sequenceMax !== undefined && params?.sequenceCycle) {
-      const range = params.sequenceMax - params.sequenceMin + 1;
-      val = params.sequenceMin + ((((val - params.sequenceMin) % range) + range) % range);
-    } else if (params?.sequenceMin !== undefined && val < params.sequenceMin) {
-      val = params.sequenceMin;
-    } else if (params?.sequenceMax !== undefined && val > params.sequenceMax) {
-      val = params.sequenceMax;
-    }
-    return val;
+    return generateSequenceValue(rowIndex, params);
   }
   if (key === "datetime") {
     const start = params?.start ? parseLocalDate(params.start) : new Date("2020-01-01");
@@ -1914,7 +1973,7 @@ function formatOracleTemporalValue(value: string, dataType: string): string | nu
 export function formatGeneratedValue(value: unknown, databaseType?: DatabaseType, dataType?: string): string {
   if (isGeneratedSqlExpression(value)) return value.sql;
   if (value === null || value === undefined) return "NULL";
-  if (typeof value === "number") return String(value);
+  if (typeof value === "number" || typeof value === "bigint") return String(value);
   if (typeof value === "boolean") return value ? "1" : "0";
   const stringValue = String(value);
   const bitLiteral = formatBitStringLiteral(stringValue, databaseType, dataType);
@@ -2001,6 +2060,7 @@ function generatedValueIdentity(value: unknown): string {
   if (value === null) return "null";
   if (value === undefined) return "undefined";
   if (typeof value === "number") return `number:${value}`;
+  if (typeof value === "bigint") return `bigint:${value}`;
   if (typeof value === "boolean") return `boolean:${value}`;
   if (typeof value === "string") return `string:${value}`;
   return `${typeof value}:${JSON.stringify(value)}`;

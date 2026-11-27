@@ -2683,6 +2683,99 @@ WHERE t2.product_name = '12345'
   });
 });
 
+// #15717: `IF <condition> <statement>` takes the following statement as its body,
+// so a guard written on its own line and the body below it are one execution
+// range. Running the guard alone is rejected by the server, and the body must not
+// swallow the next guard.
+describe("SQL Server IF/WHILE guard statements (#15717)", () => {
+  const guardScript = ["if not exists (select 1 from systypes where name ='aaa')", "CREATE TYPE [dbo].[aaa] FROM [varchar](24) NULL", "", "if not exists (select 1 from systypes where name ='bbb')", "CREATE TYPE [dbo].[bbb] FROM [bit] NOT NULL"].join("\n");
+  const firstGuardedCreateType = "if not exists (select 1 from systypes where name ='aaa')\nCREATE TYPE [dbo].[aaa] FROM [varchar](24) NULL";
+  const secondGuardedCreateType = "if not exists (select 1 from systypes where name ='bbb')\nCREATE TYPE [dbo].[bbb] FROM [bit] NOT NULL";
+
+  it("keeps every guard together with its CREATE TYPE body", () => {
+    const ranges = executableStatementRanges(guardScript, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([firstGuardedCreateType, secondGuardedCreateType]);
+  });
+
+  it("frames the guarded statement at the caret instead of the next guard", () => {
+    const frameAt = (needle: string, occurrence = 1) => statementRangeAtCursor(guardScript, indexOf(guardScript, needle, occurrence), "sqlserver")?.sql.trim();
+
+    expect(frameAt("if not exists", 1)).toBe(firstGuardedCreateType);
+    expect(frameAt("CREATE TYPE", 1)).toBe(firstGuardedCreateType);
+    expect(frameAt("if not exists", 2)).toBe(secondGuardedCreateType);
+    expect(frameAt("CREATE TYPE", 2)).toBe(secondGuardedCreateType);
+    // The blank line between the two guarded statements frames nothing.
+    expect(statementRangeAtCursor(guardScript, indexOf(guardScript, "\n\n") + 1, "sqlserver")).toBeNull();
+  });
+
+  it("resolves the execution candidate at a guard line to the guarded statement", () => {
+    const candidates = buildExecutionCandidates(guardScript, indexOf(guardScript, "if not exists", 2), "sqlserver");
+
+    expect(candidates[0]?.sql.trim()).toBe(secondGuardedCreateType);
+  });
+
+  it("keeps a guard with an UPDATE body together and leaves the next statement alone", () => {
+    const sql = "IF @x=1\n  UPDATE t SET a=1\nSELECT 3";
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["IF @x=1\n  UPDATE t SET a=1", "SELECT 3"]);
+  });
+
+  it("keeps a WHILE guard with its SET body together", () => {
+    const sql = "WHILE @i<10\nSET @i=@i+1\nSELECT 1";
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["WHILE @i<10\nSET @i=@i+1", "SELECT 1"]);
+  });
+
+  it("completes nested guards with the innermost body", () => {
+    const sql = "IF a=1\n IF b=2\n  SELECT 1\nSELECT 2";
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["IF a=1\n IF b=2\n  SELECT 1", "SELECT 2"]);
+  });
+
+  it("keeps a guard whose body is a BEGIN TRANSACTION with that body", () => {
+    const sql = "IF @x = 1\nBEGIN TRAN\nSELECT 2";
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["IF @x = 1\nBEGIN TRAN", "SELECT 2"]);
+  });
+
+  it("does not attach the next statement to a guard that already carries a body", () => {
+    const inline = "IF @x=1 SELECT 1\nSELECT 2";
+    const inlinePrint = "IF EXISTS (SELECT 1 FROM t) PRINT 'x'\nSELECT 2";
+    const nextLinePrint = "IF NOT EXISTS (SELECT 1 FROM t)\nPRINT 'missing'\nSELECT 2";
+
+    expect(rangeSqlTexts(executableStatementRanges(inline, "sqlserver"))).toEqual(["IF @x=1 SELECT 1", "SELECT 2"]);
+    expect(rangeSqlTexts(executableStatementRanges(inlinePrint, "sqlserver"))).toEqual(["IF EXISTS (SELECT 1 FROM t) PRINT 'x'", "SELECT 2"]);
+    expect(rangeSqlTexts(executableStatementRanges(nextLinePrint, "sqlserver"))).toEqual(["IF NOT EXISTS (SELECT 1 FROM t)\nPRINT 'missing'", "SELECT 2"]);
+  });
+
+  it("keeps the same guard statements when they are terminated by semicolons", () => {
+    const sql = `${firstGuardedCreateType};\n\n${secondGuardedCreateType};`;
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([firstGuardedCreateType, secondGuardedCreateType]);
+  });
+
+  it("keeps a guard with an inline body or a lone guard as one range", () => {
+    const sql = "IF @x = 1 SELECT 1";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual([sql]);
+    expect(rangeSqlTexts(executableStatementRanges("IF @x = 1", "sqlserver"))).toEqual(["IF @x = 1"]);
+  });
+
+  it("leaves other dialects' IF/WHILE lines out of the guard merge", () => {
+    // MySQL has no line-oriented `IF` statement, so the line keeps its own range
+    // exactly as it did before #15717.
+    const sql = "IF @x=1\nSELECT 1\nSELECT 2";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["IF @x=1", "SELECT 1", "SELECT 2"]);
+  });
+});
+
 describe("nested execution candidates (#15213)", () => {
   it("offers the peeled subquery and keeps current mode on the full statement", () => {
     const sql = "INSERT INTO t (a) SELECT a FROM (SELECT 1 AS a) src;";

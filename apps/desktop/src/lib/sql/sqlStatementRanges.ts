@@ -284,7 +284,9 @@ const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly st
   sqlite: ["ATTACH", "DETACH", "REINDEX"],
   duckdb: ["ATTACH", "DETACH", "EXPORT", "IMPORT", "INSTALL", "LOAD"],
   clickhouse: ["ATTACH", "CHECK", "DETACH", "EXCHANGE", "KILL", "OPTIMIZE", "SYSTEM"],
-  sqlserver: ["BACKUP", "DBCC", "DENY", "KILL", "RESTORE"],
+  // IF/WHILE are line-oriented control-flow guards: their body is the following
+  // statement, so the guard line has to be able to open its own range (#15717).
+  sqlserver: ["BACKUP", "DBCC", "DENY", "IF", "KILL", "RESTORE", "WHILE"],
   saphana: ["DO"],
   oracle: ["FLASHBACK", "LOCK", "PURGE"],
   dameng: ["FLASHBACK", "LOCK", "PURGE"],
@@ -1002,7 +1004,8 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
     }
   }
 
-  return ranges.length > 0 ? ranges : [statement];
+  if (ranges.length === 0) return [statement];
+  return mergeSqlServerGuardBodies(sql, ranges, databaseType, parameterOptions);
 }
 
 // `BEGIN` opens a control-flow block only when it does not start a transaction or a
@@ -1203,6 +1206,68 @@ function mergeSqlServerControlFlowBatches(sql: string, statements: RawStatement[
         pending.unshift({ hitFrom: closedAt, from: remainderFrom, to: last.to, sql: sql.slice(remainderFrom, last.to) });
       }
     }
+  }
+
+  return merged;
+}
+
+/**
+ * Keywords that can only introduce a statement. Finding one after a T-SQL guard
+ * condition means the guard's body already starts inside the same range.
+ * `BEGIN` covers `IF ... BEGIN ... END` and `BEGIN TRY`; `ELSE` guards against
+ * a branch tail that survives the batch merge.
+ */
+const SQLSERVER_GUARD_BODY_KEYWORDS = new Set<string>([...COMMON_SOFT_STATEMENT_START_KEYWORDS, ...(DATABASE_SOFT_STATEMENT_KEYWORDS.sqlserver ?? []), "PRINT", "RAISERROR", "THROW", "RETURN", "BREAK", "CONTINUE", "GOTO", "WAITFOR", "ELSE"]);
+
+/**
+ * True when `statement` is a T-SQL `IF`/`WHILE` guard holding nothing but its
+ * condition (`IF @x = 1`, `IF NOT EXISTS (SELECT 1 FROM t)`, `WHILE @i < 10`).
+ * A guard that can execute something on its own line — an inline body, a
+ * `BEGIN ... END` block, an `ELSE` branch — is self-contained instead (#15717).
+ */
+function isSqlServerBareGuard(sql: string, statement: RawStatement, parameterOptions?: SqlParameterOptions): boolean {
+  const first = nextSqlWordToken(sql, statement.from, "sqlserver", parameterOptions)?.word;
+  if (first !== "IF" && first !== "WHILE") return false;
+  // Variables (@x), numbers and operators are not words and parenthesised
+  // conditions are sub-terms, so a bare condition contributes no further word.
+  const { words } = topLevelWordsInRange(sql, statement.from, statement.to, "sqlserver", parameterOptions);
+  for (let index = 1; index < words.length; index += 1) {
+    if (SQLSERVER_GUARD_BODY_KEYWORDS.has(words[index]!)) return false;
+  }
+  return true;
+}
+
+/**
+ * Re-joins a T-SQL guard with the body the soft splitter cut off (#15717).
+ *
+ * `IF <condition>` owns the following statement, so a guard written on its own
+ * line and the body below it are one execution range. Splitting them apart runs
+ * a body-less `IF` (rejected by the server) and lets the previous body swallow
+ * the next guard. Nested guards cascade: the innermost body completes every
+ * guard waiting for it, because that resolved statement is also the outer
+ * guard's body.
+ */
+function mergeSqlServerGuardBodies(sql: string, ranges: RawStatement[], databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
+  if (databaseType !== "sqlserver" || ranges.length < 2) return ranges;
+
+  const merged: RawStatement[] = [];
+  /** Indices in `merged` of guards that are still waiting for their body. */
+  const pendingGuards: number[] = [];
+
+  for (const range of ranges) {
+    const current: RawStatement = { hitFrom: range.hitFrom, from: range.from, to: range.to, sql: range.sql };
+    merged.push(current);
+    if (isSqlServerBareGuard(sql, current, parameterOptions)) {
+      pendingGuards.push(merged.length - 1);
+      continue;
+    }
+    if (pendingGuards.length === 0) continue;
+    const outermost = pendingGuards[0];
+    const guard = merged[outermost];
+    const to = current.to;
+    merged[outermost] = { hitFrom: guard.hitFrom, from: guard.from, to, sql: sql.slice(guard.from, to) };
+    merged.length = outermost + 1;
+    pendingGuards.length = 0;
   }
 
   return merged;

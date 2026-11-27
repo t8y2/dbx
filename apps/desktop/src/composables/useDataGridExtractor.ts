@@ -28,7 +28,7 @@ import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
 import { formatError } from "@/lib/backend/errorUtils";
 import { parseJsonPreservingLargeNumbers, stringifyJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import { tableMetaWithoutOptionalDatabaseQualifier } from "@/lib/table/tableSelectSql";
-import { isPartiallyLoadedCopy, partialLoadCopyHintKey, type PartialLoadCopyInfo } from "@/lib/dataGrid/copyPartialLoadHint";
+import { coversAllLoadedRows, isPartiallyLoadedCopy, partialLoadCopyHintKey, type PartialLoadCopyInfo } from "@/lib/dataGrid/copyPartialLoadHint";
 import { isTemporalColumnType } from "@/lib/dataGrid/columnFormatter";
 import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
@@ -608,7 +608,11 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       options.onCopied?.(result);
       showWarnings(result.warnings, result.omittedColumns);
       const partialLoadInfo = options.partialLoadInfo?.value;
-      if (partialLoadInfo && isPartiallyLoadedCopy(partialLoadInfo)) {
+      // The hint counts the rows the grid holds, so it only describes copies of
+      // those rows. A copy of two checked rows, a cell range or one right-clicked
+      // cell reports its own rows on the clipboard; claiming "copied the {loaded}
+      // loaded rows" there is wrong (#15602).
+      if (partialLoadInfo && isPartiallyLoadedCopy(partialLoadInfo) && coversAllLoadedRows(partialLoadInfo, request.rows.length)) {
         toast(t(partialLoadCopyHintKey(partialLoadInfo), { loaded: partialLoadInfo.loadedRows, total: partialLoadInfo.totalRows ?? undefined }), 5000);
       }
       return true;

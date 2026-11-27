@@ -459,6 +459,12 @@ pub(super) fn format_default_for_sql(dialect: StructureDialect, data_type: &str,
     if default_value.is_empty() {
         return String::new();
     }
+    // A bare `NULL` is the SQL keyword, never the string `'NULL'` (which
+    // arrives quoted). `normalize_default` already maps it to empty, so
+    // this only guards direct callers.
+    if default_value.trim().eq_ignore_ascii_case("null") {
+        return "NULL".to_string();
+    }
     let base_type = data_type.split('(').next().unwrap_or(data_type).trim();
     if is_temporal_type_for_default(dialect, base_type) {
         if dialect == StructureDialect::Mysql {
@@ -557,5 +563,11 @@ mod tests {
             "CONCAT(N'a', N'b')"
         );
         assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "varchar(50)", "中文"), "'中文'");
+    }
+
+    #[test]
+    fn bare_null_default_stays_unquoted() {
+        assert_eq!(format_default_for_sql(StructureDialect::Mysql, "varchar(30)", "NULL"), "NULL");
+        assert_eq!(format_default_for_sql(StructureDialect::Mysql, "varchar(30)", "'NULL'"), "'NULL'");
     }
 }

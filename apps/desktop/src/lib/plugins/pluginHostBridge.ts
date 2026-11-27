@@ -336,7 +336,13 @@ export interface PluginHostBridgeApi {
   openFolderFile?(pluginId: string, folderHandleId: string, relativePath: string, target: "app" | "system"): Promise<void>;
   /** Write a UTF-8 text file inside a granted folder handle; parent dirs created. Returns on success; absolute paths never leave the sandbox. */
   folderWriteText?(pluginId: string, folderHandleId: string, relativePath: string, content: string, options?: { create?: boolean }): Promise<void>;
-  /** Write raw base64 bytes (PNG/XLSX) inside a granted folder handle. `offset` enables chunked appends for payloads above the bridge limit. */
+  /**
+   * Write raw base64 bytes (PNG/XLSX) inside a granted folder handle.
+   * Each request is capped at 8 MiB of base64 (`MAX_BRIDGE_BINARY_BYTES`, ~6 MiB
+   * of file bytes) and larger payloads are rejected here, before the IPC call.
+   * `offset` enables chunked appends: `offset: 0` truncates first, later chunks
+   * append; without `offset` the whole file is replaced atomically.
+   */
   folderWriteBinary?(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, options?: { create?: boolean; offset?: number }): Promise<void>;
   /** Close a directory handle, releasing the grant. */
   closeFolderHandle?(pluginId: string, folderHandleId: string): Promise<void>;

@@ -350,6 +350,12 @@ async fn run_query(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cl
     }
     if connection.db_type == DatabaseType::MongoDb {
         let command = mongo::parse(&sql).map_err(|message| CliError::new("QUERY_ERROR", message))?;
+        let (allow_writes, allow_dangerous) =
+            if command.is_mutating() || command.is_dangerous() || command.has_effectively_unbounded_filter() {
+                capped_write_permissions(backend, &connection, &database, None, allow_writes, allow_dangerous).await?
+            } else {
+                (allow_writes, allow_dangerous)
+            };
         if let Err(error) = mongo::validate_safety(
             &command,
             allow_writes,
@@ -357,16 +363,25 @@ async fn run_query(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cl
             is_production_database(&connection, &database),
         ) {
             return Err(match error {
-                MongoSafetyError::WritesDisabled => {
-                    CliError::new("SQL_BLOCKED", "MongoDB write command is blocked. Pass --allow-writes to allow it.")
-                }
+                MongoSafetyError::WritesDisabled => CliError::new(
+                    "SQL_BLOCKED",
+                    if flags.allow_writes || env_allow_writes {
+                        "MongoDB write command is blocked by the connection access policy."
+                    } else {
+                        "MongoDB write command is blocked. Pass --allow-writes to allow it."
+                    },
+                ),
                 MongoSafetyError::EmptyFilter => CliError::new(
                     "SQL_BLOCKED",
                     "MongoDB update/delete commands require a non-empty filter unless --allow-dangerous-sql is set.",
                 ),
                 MongoSafetyError::Dangerous => CliError::new(
                     "SQL_BLOCKED",
-                    "Dangerous MongoDB command is blocked. Pass --allow-dangerous-sql to allow it.",
+                    if flags.allow_dangerous || env_allow_dangerous {
+                        "Dangerous MongoDB command is blocked by the connection access policy."
+                    } else {
+                        "Dangerous MongoDB command is blocked. Pass --allow-dangerous-sql to allow it."
+                    },
                 ),
                 MongoSafetyError::ProductionWrite => {
                     CliError::new("SQL_BLOCKED", "Writes and DDL are blocked for production databases.")
@@ -380,6 +395,11 @@ async fn run_query(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cl
     }
     let risk = classify_sql_risk_for_database(&sql, connection.db_type)
         .map_err(|message| CliError::new("SQL_BLOCKED", message))?;
+    let (allow_writes, allow_dangerous) = if matches!(risk, SqlRisk::Write | SqlRisk::Ddl) {
+        capped_write_permissions(backend, &connection, &database, Some(&sql), allow_writes, allow_dangerous).await?
+    } else {
+        (allow_writes, allow_dangerous)
+    };
     if risk == SqlRisk::Transaction
         || risk == SqlRisk::Write && !allow_writes
         || risk == SqlRisk::Ddl && !allow_dangerous
@@ -395,6 +415,39 @@ async fn run_query(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cl
         .await
         .map_err(command_error)?;
     format_query(connection_name, &result, flags.format)
+}
+
+/// Cap the per-run write flags by the saved access policy, mirroring the MCP
+/// server: the effective global/group/connection/database tier and the
+/// connection read-only flag are upper bounds the flags cannot widen.
+async fn capped_write_permissions(
+    backend: &dyn DbxBackend,
+    connection: &ConnectionConfig,
+    database: &str,
+    sql: Option<&str>,
+    allow_writes: bool,
+    allow_dangerous: bool,
+) -> Result<(bool, bool), CliError> {
+    let policy = backend.load_mcp_global_policy().await.map_err(store_error)?;
+    if let Some(sql) = sql {
+        dbx_core::mcp_policy::ensure_sql_database_execution_scope(&policy, connection, database, sql)
+            .map_err(|message| CliError::new("SQL_BLOCKED", message))?;
+    }
+    let group_ids = backend
+        .load_connection_group_details()
+        .await
+        .map_err(store_error)?
+        .get(&connection.id)
+        .map(|path| path.ids.clone())
+        .unwrap_or_default();
+    let (read_only, policy_allow_dangerous) = dbx_core::mcp_policy::effective_database_execution_policy_with_groups(
+        &policy,
+        &group_ids,
+        &connection.id,
+        database,
+    );
+    let policy_allow_writes = !read_only && !connection.read_only;
+    Ok((allow_writes && policy_allow_writes, allow_dangerous && policy_allow_writes && policy_allow_dangerous))
 }
 
 fn truncate_query_result(result: &mut QueryResult, max_rows: Option<usize>) {
@@ -1058,16 +1111,21 @@ mod tests {
     use dbx_core::{
         agent_events::ToolResult,
         agent_tools::AgentSqlPermissions,
-        storage::{McpGlobalPolicy, Storage},
+        storage::{McpConnectionPolicy, McpDatabasePolicy, McpGlobalPolicy, Storage},
     };
     use dbx_mcp::{backend::new_connection_config, mongo::MongoCommand};
 
     struct MongoBackend {
         connection: ConnectionConfig,
+        policy: McpGlobalPolicy,
     }
 
     impl MongoBackend {
         fn new() -> Self {
+            Self::with_policy(McpGlobalPolicy::default())
+        }
+
+        fn with_policy(policy: McpGlobalPolicy) -> Self {
             Self {
                 connection: new_connection_config(
                     "mongo-test".to_string(),
@@ -1082,6 +1140,7 @@ mod tests {
                     None,
                 )
                 .unwrap(),
+                policy,
             }
         }
     }
@@ -1089,7 +1148,7 @@ mod tests {
     #[async_trait]
     impl DbxBackend for MongoBackend {
         async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
-            Ok(McpGlobalPolicy::default())
+            Ok(self.policy.clone())
         }
 
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
@@ -1133,6 +1192,114 @@ mod tests {
                 elasticsearch_raw_body: None,
                 messages: Vec::new(),
             })
+        }
+
+        async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+            Ok(config)
+        }
+
+        async fn duplicate_connection_for_mcp(
+            &self,
+            _source_id: &str,
+            _copy_id: &str,
+            _copy_name: &str,
+        ) -> Result<ConnectionConfig, String> {
+            Err("not exercised".to_string())
+        }
+
+        async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    fn empty_query_result(affected_rows: u64) -> QueryResult {
+        QueryResult {
+            columns: Vec::new(),
+            column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
+            spatial_values: vec![],
+            rows: Vec::new(),
+            affected_rows,
+            execution_time_ms: 0,
+            server_execute_time_us: None,
+            query_timings_ms: None,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        }
+    }
+
+    struct SqlBackend {
+        connection: ConnectionConfig,
+        policy: McpGlobalPolicy,
+        executed: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl SqlBackend {
+        fn new(policy: McpGlobalPolicy) -> Self {
+            Self::with_connection(
+                policy,
+                new_connection_config(
+                    "sql-test".to_string(),
+                    "local-mysql".to_string(),
+                    DatabaseType::Mysql,
+                    "127.0.0.1".to_string(),
+                    3306,
+                    String::new(),
+                    String::new(),
+                    Some("app".to_string()),
+                    false,
+                    None,
+                )
+                .unwrap(),
+            )
+        }
+
+        fn with_connection(policy: McpGlobalPolicy, connection: ConnectionConfig) -> Self {
+            Self { connection, policy, executed: std::sync::Mutex::new(Vec::new()) }
+        }
+
+        fn executed_sql(&self) -> Vec<String> {
+            self.executed.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl DbxBackend for SqlBackend {
+        async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+            Ok(self.policy.clone())
+        }
+
+        async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
+            Ok(vec![self.connection.clone()])
+        }
+
+        async fn execute_agent_tool(
+            &self,
+            _connection: &ConnectionConfig,
+            _database: &str,
+            _tool_name: &str,
+            _arguments: Value,
+            _permissions: AgentSqlPermissions,
+        ) -> ToolResult {
+            panic!("CLI queries must not fall through to agent SQL execution")
+        }
+
+        async fn execute_query(
+            &self,
+            _connection: &ConnectionConfig,
+            _database: &str,
+            sql: &str,
+            _max_rows: Option<usize>,
+            _timeout_secs: Option<u64>,
+        ) -> Result<QueryResult, String> {
+            self.executed.lock().unwrap().push(sql.to_string());
+            Ok(empty_query_result(1))
         }
 
         async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
@@ -1329,6 +1496,170 @@ mod tests {
         let flags =
             parse_flags(&args(&["query", "local-mongo", "db.products.insertOne({name: 'demo'})", "--json"])).unwrap();
         let error = run_with_backend(&MongoBackend::new(), flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+    }
+
+    #[tokio::test]
+    async fn read_only_access_policy_blocks_flagged_ddl() {
+        let backend = SqlBackend::new(McpGlobalPolicy { read_only: true, ..Default::default() });
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mysql",
+            "create temporary table mysql._dbx_probe(x int)",
+            "--allow-writes",
+            "--allow-dangerous-sql",
+            "--json",
+        ]))
+        .unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+        assert!(backend.executed_sql().is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_access_policy_blocks_flagged_ddl() {
+        let backend = SqlBackend::new(McpGlobalPolicy::default());
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mysql",
+            "create temporary table _dbx_probe(x int)",
+            "--allow-writes",
+            "--allow-dangerous-sql",
+            "--json",
+        ]))
+        .unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+        assert!(backend.executed_sql().is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_access_policy_allows_flagged_write() {
+        let backend = SqlBackend::new(McpGlobalPolicy::default());
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mysql",
+            "update users set name = 'Ada' where id = 1",
+            "--allow-writes",
+            "--json",
+        ]))
+        .unwrap();
+        run_with_backend(&backend, flags).await.unwrap();
+        assert_eq!(backend.executed_sql().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn full_access_policy_allows_flagged_ddl() {
+        let backend = SqlBackend::new(McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() });
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mysql",
+            "create temporary table _dbx_probe(x int)",
+            "--allow-writes",
+            "--allow-dangerous-sql",
+            "--json",
+        ]))
+        .unwrap();
+        run_with_backend(&backend, flags).await.unwrap();
+        assert_eq!(backend.executed_sql().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_only_connection_blocks_flagged_write() {
+        let mut connection = SqlBackend::new(McpGlobalPolicy::default()).connection;
+        connection.read_only = true;
+        let backend = SqlBackend::with_connection(
+            McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() },
+            connection,
+        );
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mysql",
+            "update users set name = 'Ada' where id = 1",
+            "--allow-writes",
+            "--json",
+        ]))
+        .unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+        assert!(backend.executed_sql().is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_only_access_policy_still_allows_reads() {
+        let backend = SqlBackend::new(McpGlobalPolicy { read_only: true, ..Default::default() });
+        let flags = parse_flags(&args(&["query", "local-mysql", "select 1", "--json"])).unwrap();
+        run_with_backend(&backend, flags).await.unwrap();
+        assert_eq!(backend.executed_sql().len(), 1);
+    }
+
+    fn database_read_only_policy() -> McpGlobalPolicy {
+        McpGlobalPolicy {
+            connection_policies: vec![McpConnectionPolicy {
+                connection_id: "sql-test".to_string(),
+                read_only: false,
+                allow_dangerous_sql: true,
+                execution_mode_configured: true,
+                execution_mode_policy_version: Some(dbx_core::mcp_policy::MCP_EXECUTION_POLICY_VERSION),
+                database_scope: Default::default(),
+                allowed_databases: Vec::new(),
+                database_policies: vec![McpDatabasePolicy {
+                    database_name: "app".to_string(),
+                    read_only: true,
+                    allow_dangerous_sql: false,
+                }],
+                allow_salesforce_dml: false,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn database_read_only_policy_blocks_flagged_write() {
+        let backend = SqlBackend::new(database_read_only_policy());
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mysql",
+            "update users set name = 'Ada' where id = 1",
+            "--allow-writes",
+            "--json",
+        ]))
+        .unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+        assert!(backend.executed_sql().is_empty());
+    }
+
+    #[tokio::test]
+    async fn database_policy_blocks_cross_database_write() {
+        let backend = SqlBackend::new(database_read_only_policy());
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mysql",
+            "update app.users set name = 'Ada' where id = 1",
+            "--database",
+            "other",
+            "--allow-writes",
+            "--json",
+        ]))
+        .unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
+        assert_eq!(error.code, "SQL_BLOCKED");
+        assert!(backend.executed_sql().is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_only_access_policy_blocks_flagged_mongo_write() {
+        let backend = MongoBackend::with_policy(McpGlobalPolicy { read_only: true, ..Default::default() });
+        let flags = parse_flags(&args(&[
+            "query",
+            "local-mongo",
+            "db.products.insertOne({name: 'demo'})",
+            "--allow-writes",
+            "--json",
+        ]))
+        .unwrap();
+        let error = run_with_backend(&backend, flags).await.unwrap_err();
         assert_eq!(error.code, "SQL_BLOCKED");
     }
 

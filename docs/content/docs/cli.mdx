@@ -157,7 +157,7 @@ dbx query local "update users set name = 'Ada' where id = 1" --allow-writes
 
 Dangerous SQL such as `DROP`, `TRUNCATE`, and `ALTER` requires both `--allow-writes` and `--allow-dangerous-sql`. Explicit transaction statements remain blocked by CLI; use [MCP stateful sessions](/en/docs/mcp#stateful-query-sessions) or the DBX editor for pinned multi-step sessions.
 
-Writes and DDL against production databases remain blocked even when both flags are present. Production detection, SQL risk classification, connection read-only protection, and database privileges form independent upper bounds; the flags are not a production bypass.
+The flags cannot widen saved permissions. The access-control tier for the connection and database, connection read-only protection, production detection, SQL risk classification, and database privileges form independent upper bounds, so writes and DDL against production databases remain blocked even when both flags are present.
 
 ## SQL Starting With a Dash
 

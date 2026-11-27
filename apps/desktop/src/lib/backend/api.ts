@@ -350,6 +350,7 @@ export const buildSearchResultWhere = forward("buildSearchResultWhere");
 export const buildRenameObjectSql = forward("buildRenameObjectSql");
 export const buildRenameDatabaseSql = forward("buildRenameDatabaseSql");
 export const buildRenameDatabasePreflightSql = forward("buildRenameDatabasePreflightSql");
+export const buildMysqlRenameDatabaseSql = forward("buildMysqlRenameDatabaseSql");
 export const buildCreateDatabaseSql = forward("buildCreateDatabaseSql");
 export const buildDuckDbAttachDatabaseSql = forward("buildDuckDbAttachDatabaseSql");
 export const buildSqliteAttachDatabaseSql = forward("buildSqliteAttachDatabaseSql");

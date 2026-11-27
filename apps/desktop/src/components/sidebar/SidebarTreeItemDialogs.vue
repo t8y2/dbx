@@ -39,6 +39,7 @@ const {
   renameObjectDialogTitle,
   renameObjectPreviewSql,
   renameObjectError,
+  renameObjectWarning,
   confirmRenameObject,
   viewRenamePlan,
   viewRenameDrafts,
@@ -381,6 +382,7 @@ watch(
           @reload="validateSidebarTableRenameDrafts()"
         />
         <pre v-else-if="renameObjectPreviewSql" class="max-h-32 min-w-0 max-w-full overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(renameObjectPreviewSql)"></pre>
+        <p v-if="renameObjectWarning" class="min-w-0 max-w-full text-sm text-amber-600 dark:text-amber-400">{{ renameObjectWarning }}</p>
         <p v-if="renameObjectError" class="min-w-0 max-w-full overflow-x-auto text-sm text-destructive">{{ renameObjectError }}</p>
       </div>
       <DialogFooter>

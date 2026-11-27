@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_PERSISTED_TAB_SQL_CHARS } from "@/lib/app/openTabsPersistence";
 import {
   QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH,
   QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT,
@@ -40,5 +41,10 @@ describe("query editor large document policy", () => {
 
   it("keeps the grammar budget above the bounded-analysis budget so the grammar covers every ordinary document", () => {
     expect(QUERY_EDITOR_SYNTAX_PARSE_MAX_DOCUMENT_LENGTH).toBeGreaterThan(QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH);
+  });
+
+  it("keeps the grammar budget below the persisted tab truncation cap so truncated restored tabs open in stream mode", () => {
+    expect(QUERY_EDITOR_SYNTAX_PARSE_MAX_DOCUMENT_LENGTH).toBeLessThan(MAX_PERSISTED_TAB_SQL_CHARS);
+    expect(shouldParseQueryEditorSyntax(MAX_PERSISTED_TAB_SQL_CHARS)).toBe(false);
   });
 });

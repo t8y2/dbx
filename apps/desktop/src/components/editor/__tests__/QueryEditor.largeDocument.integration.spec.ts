@@ -7,6 +7,7 @@ import { StreamLanguage, ensureSyntaxTree, foldable, foldedRanges, language, syn
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH, QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT } from "@/lib/editor/queryEditorLargeDocument";
+import { MAX_INSERT_VALUE_HINTS } from "@/lib/editor/codemirrorInsertValueHints";
 import type { QueryEditorProps } from "../queryEditorTypes";
 import { useSettingsStore } from "@/stores/settingsStore";
 
@@ -338,5 +339,52 @@ describe("QueryEditor large document mode", () => {
 
     const untouched = view.state.doc.line(3);
     expect(foldable(view.state, untouched.from, untouched.to)).toBeNull();
+  });
+
+  it("switches to StreamLanguage synchronously on an oversized paste without spinning semantic highlight refreshes", async () => {
+    const { host, view } = await mountEditor("", { databaseType: "mysql", dialect: "mysql" });
+    expect(view.state.facet(language)).not.toBeInstanceOf(StreamLanguage);
+
+    const line = "SELECT a.id FROM orders a WHERE a.status = 'OPEN';\n";
+    const repeatCount = Math.max(QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT + 1, Math.ceil((SYNTAX_PARSE_TEST_BUDGET + 1) / line.length));
+    const oversized = line.repeat(repeatCount);
+    expect(oversized.length).toBeGreaterThan(SYNTAX_PARSE_TEST_BUDGET);
+
+    view.dispatch({
+      changes: { from: 0, to: 0, insert: oversized },
+      selection: { anchor: oversized.length },
+      userEvent: "input.paste",
+    });
+
+    // The transaction filter must install StreamLanguage atomically on the paste transaction itself,
+    // before any microtask or Lezer parse of the oversized document can run.
+    expect(view.state.facet(language)).toBeInstanceOf(StreamLanguage);
+    await nextTick();
+    expect(host.firstElementChild?.getAttribute("data-large-document-mode")).toBe("true");
+
+    // Wait for the initial debounced semantic highlight refresh, then verify it stops instead of
+    // polling syntaxTreeAvailable every 100ms in stream mode.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const dispatchSpy = vi.spyOn(view, "dispatch");
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    const nullEffectDispatches = dispatchSpy.mock.calls.filter(([spec]) => {
+      if (!spec || typeof spec !== "object" || !("effects" in spec) || !spec.effects) return false;
+      const effects = Array.isArray(spec.effects) ? spec.effects : [spec.effects];
+      return effects.some((effect) => effect && typeof effect === "object" && "value" in effect && effect.value === null);
+    });
+    expect(nullEffectDispatches).toHaveLength(0);
+  });
+
+  it("caps INSERT value inlay hint widgets on a giant single-line MySQL INSERT", async () => {
+    const rows = Array.from({ length: 2_500 }, (_, index) => `(${index},'name_${index}','payload_${index}')`).join(",");
+    const singleLineInsert = `INSERT INTO big_table (id, name, payload) VALUES ${rows};`;
+    expect(singleLineInsert.length).toBeGreaterThan(64 * 1024);
+
+    const { host } = await mountEditor(singleLineInsert, { databaseType: "mysql", dialect: "mysql" });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const hintCount = host.querySelectorAll(".cm-insert-value-hint").length;
+    expect(hintCount).toBeGreaterThan(0);
+    expect(hintCount).toBeLessThanOrEqual(MAX_INSERT_VALUE_HINTS);
   });
 });

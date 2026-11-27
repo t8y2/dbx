@@ -26,6 +26,13 @@ export interface SqlSemanticDiagnosticVisibleRange {
   to: number;
 }
 
+/**
+ * Maximum single-statement length sent to semantic/reference diagnostics (IPC + SQL parser +
+ * semantic model). Multi-hundred-KB generated statements (batch INSERTs, giant IN lists) would
+ * otherwise choke IPC serialization, rust sqlparser and main-thread tokenization on paste/restore.
+ */
+export const MAX_SQL_SEMANTIC_DIAGNOSTIC_STATEMENT_LENGTH = 100_000;
+
 export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRanges: readonly SqlSemanticDiagnosticVisibleRange[], databaseType?: DatabaseType, cachedStatements?: readonly SqlTextRange[], parameterOptions?: { compatibilityMode?: string }): SqlTextRange[] {
   const statements = databaseType === "sqlserver" ? sqlServerSemanticDiagnosticRanges(sql) : (cachedStatements ?? executableStatementRanges(sql, databaseType, parameterOptions));
   if (statements.length === 0 || visibleRanges.length === 0) return [];
@@ -33,6 +40,7 @@ export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRange
   const selected: SqlTextRange[] = [];
   const seen = new Set<string>();
   for (const statement of statements) {
+    if (statement.to - statement.from > MAX_SQL_SEMANTIC_DIAGNOSTIC_STATEMENT_LENGTH) continue;
     if (keepsOracleStyleBlockTogether(statement.sql, databaseType, parameterOptions)) continue;
     if (!visibleRanges.some((visibleRange) => rangesIntersect(statement, visibleRange))) continue;
     const key = `${statement.from}:${statement.to}`;

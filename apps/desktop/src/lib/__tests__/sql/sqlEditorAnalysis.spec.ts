@@ -10,6 +10,7 @@ import { analyzeSqlDiagnostics } from "@/lib/sql/sqlDiagnosticAnalysis";
 import { sqlSemanticDiagnosticRangesForViewport, sqlServerRoutineDefinitionRangesForViewport } from "@/lib/sql/semantic/diagnostics";
 import type { DatabaseType } from "@/types/database";
 import { computeBlockFoldRanges } from "@/lib/editor/codemirrorSqlBlockFolding";
+import { QUERY_EDITOR_SYNTAX_PARSE_MAX_DOCUMENT_LENGTH } from "@/lib/editor/queryEditorLargeDocument";
 
 describe("background SQL completion parity", () => {
   it.each([
@@ -49,6 +50,20 @@ describe("background SQL completion parity", () => {
     const edited = engine.analyze({ ...request, sql: editedSql, cursor: editedSql.indexOf("  FROM") + 1 });
     expect(edited.localSchema.tables[0]?.columns.map((column) => column.name)).toEqual(["id", "display_name"]);
     expect(structuredClone(edited)).toEqual(edited);
+  });
+
+  it("skips full-document Lezer parsing in completion analysis past the syntax budget", () => {
+    const padding = "SELECT 1 FROM dummy_table WHERE id = 1;\n".repeat(Math.ceil((QUERY_EDITOR_SYNTAX_PARSE_MAX_DOCUMENT_LENGTH + 1) / 40));
+    const tail = "WITH local_cte(id, total) AS (SELECT id, total FROM orders) SELECT local_cte. FROM local_cte";
+    const sql = `${padding}${tail}`;
+    expect(sql.length).toBeGreaterThan(QUERY_EDITOR_SYNTAX_PARSE_MAX_DOCUMENT_LENGTH);
+
+    const engine = new SqlCompletionAnalysisEngine();
+    const cursor = sql.lastIndexOf("local_cte.") + "local_cte.".length;
+    const result = engine.analyze({ sql, cursor, databaseType: "mysql", dialect: "mysql", semanticCompletionEnabled: true });
+
+    expect(result.completionContext.qualifier).toBe("local_cte");
+    expect(result.cteDefinitions).toContainEqual({ name: "local_cte", columns: ["id", "total"] });
   });
 });
 

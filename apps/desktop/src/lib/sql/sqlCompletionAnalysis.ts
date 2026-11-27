@@ -2,11 +2,14 @@ import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
 import * as langSql from "@codemirror/lang-sql";
 import { createDbxCodeMirrorSqlDialect, type CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
+import { shouldParseQueryEditorSyntax } from "@/lib/editor/queryEditorLargeDocument";
+import { expandToBoundedSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import { extractCteDefinitions, getSqlCompletionContext, getPostgresSequenceLiteralCompletionContext, isSqlCompletionSuppressedContext, shouldAutoOpenSqlCompletion, type SqlCompletionContext } from "@/lib/sql/sqlCompletion";
 import { oracleDatabaseLinkCompletionContext } from "./oracleDatabaseLinkCompletion";
 import { resolveSqlServerUseDatabaseCompletion } from "./sqlCompletionLookupTarget";
 import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion";
-import { buildSqlLocalSchemaOverlay, type SqlLocalSchemaOverlay } from "@/lib/sql/semantic/localSchema";
+import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
+import { buildSqlLocalSchemaOverlay, MAX_LOCAL_SCHEMA_SQL_LENGTH, type SqlLocalSchemaOverlay } from "@/lib/sql/semantic/localSchema";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import type { DatabaseType } from "@/types/database";
 import type { SqlSemanticBuildOptions } from "./semantic/types";
@@ -56,7 +59,14 @@ export class SqlCompletionAnalysisEngine {
     return analyzeSqlCompletion(request, this.editorStateFor(request));
   }
 
-  private editorStateFor(request: SqlCompletionAnalysisRequest): EditorState {
+  private editorStateFor(request: SqlCompletionAnalysisRequest): EditorState | undefined {
+    // Past the editor syntax budget, building a full-document Lezer tree in the completion worker
+    // allocates hundreds of megabytes and stalls completion; fall back to the bounded scanner.
+    if (!shouldParseQueryEditorSyntax(request.sql.length)) {
+      this.state = null;
+      this.document = "";
+      return undefined;
+    }
     const dialectName = request.syntaxDialect ?? (request.dialect === "doris" ? "mysql" : request.dialect) ?? "mysql";
     const dialectKey = `${request.databaseType ?? ""}:${dialectName}:${request.driverProfile ?? ""}`;
     if (!this.state || this.dialectKey !== dialectKey) {
@@ -87,6 +97,13 @@ export function analyzeSqlCompletion(request: SqlCompletionAnalysisRequest, edit
   };
   const legacyContext = getSqlCompletionContext(request.sql, request.cursor, options);
   const completionContext = request.semanticCompletionEnabled ? sqlCompletionContextFromSemantic(buildSqlSemanticModel(request.sql, request.cursor, options), legacyContext) : legacyContext;
+  const cteSource =
+    request.sql.length > MAX_LOCAL_SCHEMA_SQL_LENGTH
+      ? (() => {
+          const window = expandToBoundedSqlStatementWindow(request.sql, request.cursor, request.cursor, resolveSqlDialectId(options));
+          return request.sql.slice(window.from, window.to);
+        })()
+      : request.sql;
   return {
     completionContext,
     positionalEligible: shouldAutoOpenSqlCompletion(request.sql, request.cursor, options, legacyContext),
@@ -94,7 +111,7 @@ export function analyzeSqlCompletion(request: SqlCompletionAnalysisRequest, edit
     sequenceLiteralContext: getPostgresSequenceLiteralCompletionContext(request.sql, request.cursor, request.databaseType),
     databaseLinkContext: oracleDatabaseLinkCompletionContext(request.sql, request.cursor, request.databaseType),
     useDatabaseCompletion: resolveSqlServerUseDatabaseCompletion({ sql: request.sql, cursor: request.cursor, databaseType: request.databaseType }),
-    cteDefinitions: extractCteDefinitions(request.sql),
+    cteDefinitions: extractCteDefinitions(cteSource),
     localSchema: buildSqlLocalSchemaOverlay(request.sql, options),
   };
 }

@@ -12,6 +12,10 @@ export const insertValueHintsRefreshDispatchSpec = {
 
 /** Debounce hint reparse while the user is typing / holding a key. */
 const INSERT_HINT_REPARSE_DELAY_MS = 80;
+/** Cap per-range span so a single multi-MB line (e.g. mysqldump INSERT) never tokenizes the whole line. */
+export const MAX_INSERT_HINT_RANGE_LENGTH = 64 * 1024;
+/** Cap inlay widget count so a huge multi-row INSERT never floods WebKit with tens of thousands of inline-block DOM nodes. */
+export const MAX_INSERT_VALUE_HINTS = 1_000;
 
 export interface InsertValueHintsExtensionOptions {
   isEnabled?: () => boolean;
@@ -101,16 +105,18 @@ function parseClausesNearView(view: EditorView, dialectId: string): InsertValues
   const seenStmtStarts = new Set<number>();
 
   for (const range of interestRanges(view)) {
-    // Pull a bounded neighborhood from the doc instead of materializing the whole script.
+    // Pull a bounded neighborhood from the doc instead of materializing the whole script
+    // or an entire multi-megabyte single line.
     const pad = 32 * 1024;
+    const boundedTo = Math.min(range.to, range.from + MAX_INSERT_HINT_RANGE_LENGTH);
     let sliceFrom = Math.max(0, range.from - pad);
     // When the cursor sits inside a PostgreSQL dollar-quoted routine body, a slice that still
     // includes the opening $tag$ makes expandToSqlStatementWindow treat the whole body as one
     // opaque literal. Advance sliceFrom past the opening delimiter instead.
-    const sliceTo = Math.min(doc.length, range.to + pad);
+    const sliceTo = Math.min(doc.length, boundedTo + pad);
     let dollarQuoteStart: number | null = null;
     if (sliceTo > sliceFrom && doc.sliceString(sliceFrom, sliceTo).includes("$")) {
-      const probePos = Math.min(doc.length, Math.max(range.from, range.to));
+      const probePos = Math.min(doc.length, Math.max(range.from, boundedTo));
       dollarQuoteStart = findEnclosingDollarQuoteStartInText(doc, probePos) ?? findEnclosingDollarQuoteStartInText(doc, range.from);
     }
     if (dollarQuoteStart !== null) {
@@ -122,7 +128,7 @@ function parseClausesNearView(view: EditorView, dialectId: string): InsertValues
     // Cheap reject before lexing: a statement window is a substring of the slice, so no INSERT in
     // the slice means none in the window.
     if (!/insert/i.test(slice)) continue;
-    const window = expandToSqlStatementWindow(slice, range.from - sliceFrom, range.to - sliceFrom, dialectId);
+    const window = expandToSqlStatementWindow(slice, range.from - sliceFrom, boundedTo - sliceFrom, dialectId);
     if (window.to <= window.from) continue;
     const absStart = sliceFrom + window.from;
     if (seenStmtStarts.has(absStart)) continue;
@@ -144,9 +150,12 @@ function buildHints(view: EditorView, options: InsertValueHintsExtensionOptions)
     const cached = options.getTableColumns?.(clause.table, clause.schema, clause.database);
     if (!cached) options.requestTableColumns?.(clause.table, clause.schema, clause.database);
   }
-  return buildInsertValueHints(clauses, {
+  const hints = buildInsertValueHints(clauses, {
     resolveTableColumns: (table, schema, database) => options.getTableColumns?.(table, schema, database),
   });
+  const visibleRanges = view.visibleRanges;
+  const scoped = visibleRanges.length > 0 ? hints.filter((hint) => visibleRanges.some((range) => hint.from >= range.from && hint.from <= range.to)) : hints;
+  return scoped.length > MAX_INSERT_VALUE_HINTS ? scoped.slice(0, MAX_INSERT_VALUE_HINTS) : scoped;
 }
 
 const insertValueHintsTheme = EditorView.baseTheme({

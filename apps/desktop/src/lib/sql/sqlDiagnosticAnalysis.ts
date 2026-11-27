@@ -7,6 +7,7 @@ import { buildSqlSemanticModel } from "./semantic/model";
 import { mergeSqlSemanticReferenceAnalysis } from "./semantic/references";
 import type { SqlSemanticBuildOptions } from "./semantic/types";
 import type { SqlParameterOptions } from "./sqlParameters";
+import { executableStatementRanges } from "./sqlStatementRanges";
 
 export interface SqlDiagnosticAnalysisRequest {
   sql: string;
@@ -22,7 +23,8 @@ export interface SqlDiagnosticAnalysisRequest {
 export function analyzeSqlDiagnosticDocument(request: SqlDiagnosticAnalysisRequest) {
   const { sql, cursor, databaseType, visibleRanges, parameterOptions } = request;
   const shouldRun = shouldRunSqlSemanticDiagnostics(sql, cursor, { databaseType });
-  const diagnosticRanges = shouldRun ? sqlSemanticDiagnosticRangesForViewport(sql, visibleRanges, databaseType, undefined, parameterOptions) : [];
+  const cachedStatements = shouldRun && databaseType !== "sqlserver" ? executableStatementRanges(sql, databaseType, parameterOptions) : undefined;
+  const diagnosticRanges = shouldRun ? sqlSemanticDiagnosticRangesForViewport(sql, visibleRanges, databaseType, cachedStatements, parameterOptions) : [];
   const sqlServerRoutineRanges = shouldRun && databaseType === "sqlserver" ? sqlServerRoutineDefinitionRangesForViewport(sql, visibleRanges) : [];
   return {
     shouldRun,
@@ -30,7 +32,7 @@ export function analyzeSqlDiagnosticDocument(request: SqlDiagnosticAnalysisReque
     diagnosticRanges,
     sqlServerRoutineRanges,
     oracleSyntaxDiagnostics: shouldRun ? buildOracleSyntaxDiagnostics(sql, databaseType) : [],
-    mysqlRoutineAnalysis: shouldRun && databaseType === "mysql" && supportsMysqlRoutineSyntaxDiagnostics(request.driverProfile) ? analyzeMysqlRoutineSyntax(sql) : null,
+    mysqlRoutineAnalysis: shouldRun && databaseType === "mysql" && supportsMysqlRoutineSyntaxDiagnostics(request.driverProfile) ? analyzeMysqlRoutineSyntax(sql, cachedStatements) : null,
     sqlServerRoutineDiagnostics: sqlServerRoutineRanges.map((range) => buildSqlServerRoutineSyntaxDiagnostics(range.sql, databaseType)),
   };
 }

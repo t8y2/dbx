@@ -1,4 +1,6 @@
 export const dataDictionaryEn = {
+  exportObjectHeading: "Object",
+  exportWarningsHeading: "Warnings",
   title: "Export Data Dictionary",
   includeIndexes: "Include indexes and foreign keys",
   loading: "Reading structure…",
@@ -110,6 +112,8 @@ export const dataDictionaryEn = {
 };
 
 export const dataDictionaryZhCN = {
+  exportObjectHeading: "对象",
+  exportWarningsHeading: "警告",
   title: "导出数据字典",
   includeIndexes: "包含索引和外键",
   loading: "正在读取结构…",
@@ -221,6 +225,8 @@ export const dataDictionaryZhCN = {
 };
 
 export const dataDictionaryZhTW = {
+  exportObjectHeading: "物件",
+  exportWarningsHeading: "警告",
   title: "匯出資料字典",
   includeIndexes: "包含索引與外鍵",
   loading: "正在讀取結構…",
@@ -332,6 +338,8 @@ export const dataDictionaryZhTW = {
 };
 
 export const dataDictionaryJa = {
+  exportObjectHeading: "オブジェクト",
+  exportWarningsHeading: "警告",
   title: "データ辞書をエクスポート",
   includeIndexes: "インデックスと外部キーを含める",
   loading: "構造を読み込み中…",
@@ -443,6 +451,8 @@ export const dataDictionaryJa = {
 };
 
 export const dataDictionaryKo = {
+  exportObjectHeading: "객체",
+  exportWarningsHeading: "경고",
   title: "데이터 사전 내보내기",
   includeIndexes: "인덱스와 외래 키 포함",
   loading: "구조를 읽는 중…",
@@ -554,6 +564,8 @@ export const dataDictionaryKo = {
 };
 
 export const dataDictionaryEs = {
+  exportObjectHeading: "Objeto",
+  exportWarningsHeading: "Advertencias",
   title: "Exportar diccionario de datos",
   includeIndexes: "Incluir índices y claves foráneas",
   loading: "Leyendo estructura…",
@@ -665,6 +677,8 @@ export const dataDictionaryEs = {
 };
 
 export const dataDictionaryIt = {
+  exportObjectHeading: "Oggetto",
+  exportWarningsHeading: "Avvisi",
   title: "Esporta dizionario dati",
   includeIndexes: "Includi indici e chiavi esterne",
   loading: "Lettura della struttura…",
@@ -776,6 +790,8 @@ export const dataDictionaryIt = {
 };
 
 export const dataDictionaryPtBR = {
+  exportObjectHeading: "Objeto",
+  exportWarningsHeading: "Avisos",
   title: "Exportar dicionário de dados",
   includeIndexes: "Incluir índices e chaves estrangeiras",
   loading: "Lendo estrutura…",
@@ -887,6 +903,8 @@ export const dataDictionaryPtBR = {
 };
 
 export const dataDictionaryTr = {
+  exportObjectHeading: "Nesne",
+  exportWarningsHeading: "Uyarılar",
   title: "Veri sözlüğünü dışa aktar",
   includeIndexes: "Dizinleri ve yabancı anahtarları dahil et",
   loading: "Yapı okunuyor…",
@@ -998,6 +1016,8 @@ export const dataDictionaryTr = {
 };
 
 export const dataDictionaryRu = {
+  exportObjectHeading: "Объект",
+  exportWarningsHeading: "Предупреждения",
   title: "Экспорт словаря данных",
   includeIndexes: "Включить индексы и внешние ключи",
   loading: "Чтение структуры…",
@@ -1109,6 +1129,8 @@ export const dataDictionaryRu = {
 };
 
 export const dataDictionaryId = {
+  exportObjectHeading: "Objek",
+  exportWarningsHeading: "Peringatan",
   title: "Ekspor Kamus Data",
   includeIndexes: "Sertakan indeks dan kunci asing",
   loading: "Membaca struktur…",
@@ -1220,6 +1242,8 @@ export const dataDictionaryId = {
 };
 
 export const dataDictionaryAz = {
+  exportObjectHeading: "Obyekt",
+  exportWarningsHeading: "Xəbərdarlıqlar",
   title: "Məlumat lüğətini ixrac et",
   includeIndexes: "İndeksləri və xarici açarları daxil et",
   loading: "Struktur oxunur…",
@@ -1333,6 +1357,8 @@ export const dataDictionaryAz = {
 // Polish interface overrides; retains all keys from the canonical English object.
 export const dataDictionaryPl = {
   ...dataDictionaryEn,
+  exportObjectHeading: "Obiekt",
+  exportWarningsHeading: "Ostrzeżenia",
   title: "Eksportuj słownik danych",
   includeIndexes: "Uwzględnij indeksy i klucze obce",
   loading: "Odczytywanie struktury…",

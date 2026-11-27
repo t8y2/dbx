@@ -3,8 +3,9 @@ import { useExportTracker } from "@/composables/useExportTracker";
 import { emptyAnnotations } from "@/docs/annotationEdits";
 import type { SchemaSnapshot, SnapshotWarning } from "@/docs/types";
 import { uuid } from "@/lib/common/utils";
-import { exportBlockedBySkippedTables, objectKey, orderDictionaryTables, warningsForSelection, type DataDictionaryLabels, type DictionaryLayout, type DictionaryObjectRef, type DictionaryTable } from "./dataDictionary";
+import { exportBlockedBySkippedTables, objectKey, orderDictionaryTables, warningsForSelection, type DictionaryExportFormat, type DictionaryLayout, type DictionaryObjectRef, type DictionaryTable } from "./dataDictionary";
 import { renderDataDictionaryPdf } from "./renderDataDictionaryPdf";
+import type { DictionaryTabularLabels } from "./renderDataDictionaryTabular";
 import { saveDataDictionaryFile } from "./saveDataDictionaryFile";
 
 export interface DictionaryExportRequest {
@@ -14,7 +15,8 @@ export interface DictionaryExportRequest {
   objects: DictionaryObjectRef[];
   snapshot?: SchemaSnapshot | null;
   layout: DictionaryLayout;
-  labels: DataDictionaryLabels;
+  labels: DictionaryTabularLabels;
+  format?: DictionaryExportFormat;
   outputPath: string;
   overwrite: boolean;
   continueOnError: boolean;
@@ -106,9 +108,18 @@ export function startDataDictionaryExport(request: DictionaryExportRequest): boo
       tracker.updateDataDictionaryTask(id, { dictionaryPhase: "generating", dictionaryCurrent: "" });
       // Worker messages cannot clone Vue proxies; capture only serializable metadata.
       const ordered = JSON.parse(JSON.stringify(orderDictionaryTables(tables, order))) as DictionaryTable[];
-      const bytes = await renderDataDictionaryPdf(ordered, request.labels, request.layout, request.continueOnError ? warnings : []);
+      const format = request.format ?? "pdf";
+      const includedWarnings = request.continueOnError ? warnings : [];
+      const bytes =
+        format === "pdf"
+          ? await renderDataDictionaryPdf(ordered, request.labels, request.layout, includedWarnings)
+          : (await import("./renderDataDictionaryTabular")).renderDataDictionaryTabular(format, ordered, request.labels, {
+              title: request.layout.title,
+              includeIndexesAndForeignKeys: request.layout.includeIndexesAndForeignKeys,
+              warnings: includedWarnings,
+            });
       tracker.updateDataDictionaryTask(id, { dictionaryPhase: "saving", status: "Writing" });
-      const path = await saveDataDictionaryFile(request.outputPath, bytes, { overwrite: request.overwrite, grantedPath: request.outputPath });
+      const path = await saveDataDictionaryFile(request.outputPath, bytes, { overwrite: request.overwrite, grantedPath: request.outputPath, format });
       if (!path) throw new Error("File was not saved");
       tracker.updateDataDictionaryTask(id, { status: "Done", filePath: path, dictionaryWarnings: warnings.length });
       request.onSuccess(path, warnings.length);

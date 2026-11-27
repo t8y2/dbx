@@ -6,6 +6,13 @@ export type DictionaryPaper = "A4" | "A3" | "Letter" | "Legal";
 export type DictionaryOrientation = "portrait" | "landscape";
 export type DictionaryTemplateId = "standard" | "detailed" | "compact" | "catalog" | "reference";
 
+export const DICTIONARY_EXPORT_FORMATS = {
+  pdf: { label: "PDF", mimeType: "application/pdf" },
+  md: { label: "Markdown", mimeType: "text/markdown;charset=utf-8" },
+  xlsx: { label: "Excel (.xlsx)", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+} as const;
+export type DictionaryExportFormat = keyof typeof DICTIONARY_EXPORT_FORMATS;
+
 export interface DataDictionaryLabels {
   column: string;
   type: string;
@@ -76,6 +83,7 @@ export interface DictionaryProfile {
   overwrite: boolean;
   continueOnError: boolean;
   fileName: string;
+  format?: DictionaryExportFormat;
 }
 
 export interface DictionaryTable extends DocTable {
@@ -160,9 +168,9 @@ export function appendTimestampToFileName(path: string, now = new Date()): strin
   const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
   const base = slash >= 0 ? path.slice(slash + 1) : path;
-  const extIndex = base.toLowerCase().endsWith(".pdf") ? base.length - 4 : -1;
-  const stem = extIndex >= 0 ? base.slice(0, extIndex) : base;
-  const ext = extIndex >= 0 ? base.slice(extIndex) : ".pdf";
+  const extension = /\.(?:pdf|md|xlsx)$/i.exec(base);
+  const stem = extension ? base.slice(0, extension.index) : base;
+  const ext = extension?.[0] ?? ".pdf";
   if (/_\d{14}$/.test(stem)) return `${dir}${stem}${ext}`;
   return `${dir}${stem}_${stamp}${ext}`;
 }
@@ -171,6 +179,11 @@ export function dataDictionaryFileName(database: string, appendTimestamp: boolea
   const safe = database.replace(/[\\/:*?"<>|]/g, "_").trim() || "DataDictionary";
   const name = `${safe}-data-dictionary.pdf`;
   return appendTimestamp ? appendTimestampToFileName(name, now) : name;
+}
+
+export function withDictionaryFileFormat(path: string, format: DictionaryExportFormat): string {
+  const name = path.trim();
+  return name ? name.replace(/\.(?:pdf|md|xlsx)$/i, "") + "." + format : "";
 }
 
 /** Apply the timestamp choice to either a typed/browsed path or the fallback name. */
@@ -210,7 +223,14 @@ export function warningsForSelection<T extends { kind: string; table?: string }>
 export function isDictionaryProfile(value: unknown): value is DictionaryProfile {
   if (!value || typeof value !== "object") return false;
   const profile = value as Partial<DictionaryProfile>;
-  return profile.version === 1 && Array.isArray(profile.databases) && Array.isArray(profile.objects) && !!profile.layout && typeof profile.fileName === "string";
+  return (
+    profile.version === 1 &&
+    Array.isArray(profile.databases) &&
+    Array.isArray(profile.objects) &&
+    !!profile.layout &&
+    typeof profile.fileName === "string" &&
+    (profile.format === undefined || (typeof profile.format === "string" && Object.prototype.hasOwnProperty.call(DICTIONARY_EXPORT_FORMATS, profile.format)))
+  );
 }
 
 export function columnComment(table: DocTable, column: ColumnInfo): string {

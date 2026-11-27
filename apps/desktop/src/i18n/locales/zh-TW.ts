@@ -5269,6 +5269,7 @@ export default withEnglishFallback({
     createDatabaseCharsetSearchPlaceholder: "搜尋或輸入字元集",
     createDatabaseCharsetEmpty: "找不到字元集",
     createDatabaseCharsetLoading: "正在載入字元集...",
+    createPostgresDatabaseEncodingHint: "選擇字元集後使用 template0。字元集須與範本的地區設定相容。",
     createDatabaseCharsetCustomOption: "使用「{value}」",
     createDatabaseCollation: "排序規則",
     createDatabaseCollationPlaceholder: "例如 utf8mb4_unicode_ci",

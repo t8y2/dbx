@@ -5768,6 +5768,7 @@ export default withEnglishFallback({
     createDatabaseCharsetSearchPlaceholder: "搜索或输入字符集",
     createDatabaseCharsetEmpty: "未找到字符集",
     createDatabaseCharsetLoading: "正在加载字符集...",
+    createPostgresDatabaseEncodingHint: "选择字符集后使用 template0。字符集须与模板的区域设置兼容。",
     createDatabaseCharsetCustomOption: "使用“{value}”",
     createDatabaseCollation: "排序规则",
     createDatabaseCollationPlaceholder: "例如 utf8mb4_unicode_ci",

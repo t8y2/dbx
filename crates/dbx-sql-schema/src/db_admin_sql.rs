@@ -385,6 +385,17 @@ fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result
     }
     let name =
         quote_rename_identifier_with_quote(options.database_type, &options.name, options.identifier_quote.as_deref());
+    if options.database_type == Some(DatabaseType::Postgres) {
+        let encoding = options.charset.as_deref().unwrap_or_default().trim();
+        // Older clients sent the MySQL default even for a PostgreSQL dialog without a picker.
+        if encoding.is_empty() || encoding.eq_ignore_ascii_case("utf8mb4") {
+            return Ok(format!("CREATE DATABASE {name};"));
+        }
+        if !encoding.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+            return Err("Invalid PostgreSQL database encoding.".to_string());
+        }
+        return Ok(format!("CREATE DATABASE {name} TEMPLATE template0 ENCODING {};", quote_sql_string(encoding)));
+    }
     let charset = clean_sql_option(options.charset.as_deref());
     let collation = clean_sql_option(options.collation.as_deref());
     if !supports_create_database_charset(options.database_type, options.driver_profile.as_deref()) || charset.is_empty()

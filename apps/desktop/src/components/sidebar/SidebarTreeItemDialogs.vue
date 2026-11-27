@@ -184,6 +184,7 @@ const {
   schemaCommentPreviewSql,
   confirmEditSchemaComment,
   canSetCreateDatabaseCharset,
+  canSetCreatePostgresEncoding,
   updateCreateDatabaseCharset,
   canEditDatabaseCharsetCollation,
   updateEditDatabaseCharset,
@@ -647,19 +648,20 @@ watch(
         <DialogTitle>{{ t("contextMenu.createDatabase") }}</DialogTitle>
       </DialogHeader>
       <Input v-model="createDatabaseName" :placeholder="t('contextMenu.createDatabaseNamePlaceholder')" @keydown.enter.prevent="confirmCreateDatabase" />
-      <div v-if="canSetCreateDatabaseCharset" class="grid gap-2">
+      <div v-if="canSetCreateDatabaseCharset || canSetCreatePostgresEncoding" class="grid gap-2">
         <div class="grid gap-1.5">
           <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.createDatabaseCharset") }}</label>
           <SearchableSelect
             :model-value="createDatabaseCharset"
             :options="createDatabaseCharsetOptions"
-            :placeholder="t('contextMenu.createDatabaseCharsetPlaceholder')"
+            :placeholder="t(canSetCreatePostgresEncoding ? 'common.default' : 'contextMenu.createDatabaseCharsetPlaceholder')"
             :search-placeholder="t('contextMenu.createDatabaseCharsetSearchPlaceholder')"
             :empty-text="t('contextMenu.createDatabaseCharsetEmpty')"
             :loading-text="t('contextMenu.createDatabaseCharsetLoading')"
             :loading="createDatabaseCharsetLoading"
             :normalize-custom="normalizeCreateDatabaseCharset"
-            allow-custom
+            :allow-custom="!canSetCreatePostgresEncoding"
+            :display-name="(value) => value || t('common.default')"
             trigger-variant="outline"
             trigger-class="h-9 w-full max-w-none justify-between border bg-background px-3 text-sm shadow-xs hover:bg-accent"
             content-class="w-[var(--reka-popover-trigger-width)]"
@@ -669,6 +671,7 @@ watch(
               <span class="truncate">{{ t("contextMenu.createDatabaseCharsetCustomOption", { value }) }}</span>
             </template>
           </SearchableSelect>
+          <p v-if="canSetCreatePostgresEncoding" class="text-xs text-muted-foreground">{{ t("contextMenu.createPostgresDatabaseEncodingHint") }}</p>
         </div>
         <!-- The gbase8s locale path has no collations; only show the picker when the selected
              charset actually has collation options (MySQL always does). -->

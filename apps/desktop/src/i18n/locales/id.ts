@@ -4608,6 +4608,7 @@ export default withEnglishFallback({
     createDatabaseCharsetSearchPlaceholder: "Cari atau ketik character set",
     createDatabaseCharsetEmpty: "Tidak ada character set yang ditemukan",
     createDatabaseCharsetLoading: "Memuat character set...",
+    createPostgresDatabaseEncodingHint: "Enkode yang dipilih menggunakan template0 dan harus sesuai dengan lokalnya.",
     createDatabaseCharsetCustomOption: 'Gunakan "{value}"',
     createDatabaseCollation: "Collation",
     createDatabaseCollationPlaceholder: "mis. utf8mb4_unicode_ci",

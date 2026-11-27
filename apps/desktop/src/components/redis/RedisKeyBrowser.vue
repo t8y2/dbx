@@ -4449,26 +4449,26 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             </TabsContent>
 
             <TabsContent value="command" class="m-0 min-h-0 flex-1 flex flex-col">
-              <div class="dbx-editor-font-family relative flex min-h-0 flex-1 flex-col bg-[#171b21] text-[13px] leading-5 text-slate-200" @click="onCommandAreaClick">
+              <div class="dbx-editor-font-family relative flex min-h-0 flex-1 flex-col bg-white text-[13px] leading-5 text-slate-800 dark:bg-[#171b21] dark:text-slate-200" @click="onCommandAreaClick">
                 <div ref="commandTerminalRef" class="redis-command-terminal min-h-0 flex-1 overflow-auto px-4 pb-3 pt-4">
-                  <div class="mb-4 text-slate-400">
-                    <span class="text-slate-200">{{ t("redis.commandWelcome") }}</span>
+                  <div class="mb-4 text-slate-500 dark:text-slate-400">
+                    <span class="text-slate-700 dark:text-slate-200">{{ t("redis.commandWelcome") }}</span>
                   </div>
 
                   <div v-for="entry in commandHistory" :key="entry.id" class="mb-2">
                     <div class="flex min-w-0 items-start gap-2 whitespace-pre-wrap break-words">
-                      <span class="shrink-0 text-[#d7ba7d]">{{ entry.prompt }}</span>
-                      <span class="min-w-0 text-slate-200">{{ entry.command }}</span>
+                      <span class="shrink-0 text-amber-700 dark:text-[#d7ba7d]">{{ entry.prompt }}</span>
+                      <span class="min-w-0 text-slate-800 dark:text-slate-200">{{ entry.command }}</span>
                     </div>
-                    <pre v-if="entry.output" class="ml-0 whitespace-pre-wrap break-words pl-0" :class="entry.error ? 'text-[#ff6b6b]' : 'text-slate-300'">{{ entry.output }}</pre>
+                    <pre v-if="entry.output" class="ml-0 whitespace-pre-wrap break-words pl-0" :class="entry.error ? 'text-red-600 dark:text-[#ff6b6b]' : 'text-slate-600 dark:text-slate-300'">{{ entry.output }}</pre>
                   </div>
                 </div>
 
-                <form class="flex shrink-0 items-center gap-2 border-t border-white/10 bg-[#171b21] px-4 py-2" @submit.prevent="executeCommand">
-                  <span class="shrink-0 text-[#d7ba7d]">{{ commandPrompt }}</span>
+                <form class="flex shrink-0 items-center gap-2 border-t border-border bg-white dark:border-white/10 dark:bg-[#171b21] px-4 py-2" @submit.prevent="executeCommand">
+                  <span class="shrink-0 text-amber-700 dark:text-[#d7ba7d]">{{ commandPrompt }}</span>
                   <div class="relative min-w-0 flex-1">
-                    <div v-if="commandCompletionOpen" class="absolute bottom-[calc(100%+0.5rem)] left-0 z-20 w-full overflow-hidden rounded-md border border-white/15 bg-[#20262f] py-1 shadow-xl">
-                      <div v-if="commandDocumentationLoading || commandCompletionLoading" class="flex items-center justify-center px-3 py-2 text-slate-400">
+                    <div v-if="commandCompletionOpen" class="absolute bottom-[calc(100%+0.5rem)] left-0 z-20 w-full overflow-hidden rounded-md border border-border bg-white dark:border-white/15 dark:bg-[#20262f] py-1 shadow-xl">
+                      <div v-if="commandDocumentationLoading || commandCompletionLoading" class="flex items-center justify-center px-3 py-2 text-slate-500 dark:text-slate-400">
                         <Loader2 class="h-3.5 w-3.5 animate-spin" />
                       </div>
                       <div v-else :id="commandCompletionListboxId" role="listbox" aria-label="Redis command completions" class="max-h-60 overflow-y-auto">
@@ -4479,7 +4479,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                           type="button"
                           role="option"
                           class="flex w-full items-center gap-3 px-3 py-1.5 text-left text-xs transition-colors"
-                          :class="commandCompletionSelectedIndex === index ? 'bg-[#2b3440] text-white' : 'text-slate-200 hover:text-white'"
+                          :class="commandCompletionSelectedIndex === index ? 'bg-slate-100 text-slate-950 dark:bg-[#2b3440] dark:text-white' : 'text-slate-700 hover:text-slate-950 dark:text-slate-200 dark:hover:text-white'"
                           :aria-selected="commandCompletionSelectedIndex === index"
                           :aria-description="item.info"
                           @pointerenter="selectCommandCompletion(index)"
@@ -4488,10 +4488,10 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                         >
                           <span class="min-w-0 flex-1">
                             <span class="block truncate font-mono">{{ item.label }}</span>
-                            <span v-if="item.summary" class="block truncate text-[11px] text-slate-400">{{ item.summary }}</span>
-                            <span v-if="item.apply && item.apply !== item.label" class="block truncate text-[11px] text-slate-500">{{ item.apply }}</span>
+                            <span v-if="item.summary" class="block truncate text-[11px] text-slate-500 dark:text-slate-400">{{ item.summary }}</span>
+                            <span v-if="item.apply && item.apply !== item.label" class="block truncate text-[11px] text-slate-400 dark:text-slate-500">{{ item.apply }}</span>
                           </span>
-                          <span v-if="item.detail" class="shrink-0 text-slate-400">{{ item.detail }}</span>
+                          <span v-if="item.detail" class="shrink-0 text-slate-500 dark:text-slate-400">{{ item.detail }}</span>
                           <!-- The slot keeps its width on every row so the hint never shifts the text. -->
                           <span class="flex w-7 shrink-0 justify-end">
                             <KeyCap v-if="commandCompletionSelectedIndex === index" label="Tab" />
@@ -4502,7 +4502,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                     <input
                       v-model="commandText"
                       data-redis-command-input
-                      class="dbx-editor-font-family min-w-0 w-full border-0 bg-transparent p-0 text-[13px] text-slate-200 caret-[#d7ba7d] outline-none placeholder:text-slate-500"
+                      class="dbx-editor-font-family min-w-0 w-full border-0 bg-transparent p-0 text-[13px] text-slate-800 caret-amber-700 outline-none placeholder:text-slate-400 dark:text-slate-200 dark:caret-[#d7ba7d] dark:placeholder:text-slate-500"
                       :class="{ 'opacity-50': commandRunning }"
                       :readonly="commandRunning"
                       autocomplete="off"
@@ -4518,7 +4518,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                       @keydown="onCommandInputKeydown"
                     />
                   </div>
-                  <Loader2 v-if="commandRunning" class="h-3.5 w-3.5 shrink-0 animate-spin text-slate-500" />
+                  <Loader2 v-if="commandRunning" class="h-3.5 w-3.5 shrink-0 animate-spin text-slate-400 dark:text-slate-500" />
                 </form>
               </div>
             </TabsContent>

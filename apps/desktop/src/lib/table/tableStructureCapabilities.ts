@@ -2,7 +2,7 @@ import { getStarRocksCapabilities } from "./starrocksCapabilities";
 import type { DatabaseType } from "@/types/database";
 import type { EditableStructureIndex } from "@/lib/table/tableStructureEditorSql";
 
-export type TableStructureDialect = "mysql" | "postgres" | "sqlite" | "duckdb" | "sqlserver" | "oracle" | "h2" | "clickhouse" | "informix" | "influxdb" | "unsupported";
+export type TableStructureDialect = "mysql" | "postgres" | "sqlite" | "duckdb" | "sqlserver" | "oracle" | "h2" | "clickhouse" | "informix" | "influxdb" | "spark" | "unsupported";
 export type TableStructureAlterStrategy = "none" | "direct" | "sqlite-rebuild";
 
 export interface TableStructureCapabilities {
@@ -421,6 +421,16 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   informix: informixCapabilities,
   saphana: sapHanaCapabilities,
   transwarp: transwarpCapabilities,
+  spark: capabilities({
+    dialect: "spark",
+    createTable: true,
+    addColumn: true,
+    dropColumn: true,
+    renameColumn: true,
+    alterExistingColumn: true,
+    alterType: true,
+    comment: true,
+  }),
   influxdb: influxdbCapabilities,
   manticoresearch: manticoreSearchCapabilities,
 };

@@ -484,6 +484,83 @@ fn saphana_table_structure_uses_add_drop_and_alter_syntax() {
 }
 
 #[test]
+fn spark_paimon_derived_partitions() {
+    for (mode, definition) in [
+        ("day", "DATE GENERATED ALWAYS AS (CAST(`ts` AS DATE))"),
+        ("month", "DATE GENERATED ALWAYS AS (TRUNC(CAST(`ts` AS DATE), 'MONTH'))"),
+        ("year", "INT GENERATED ALWAYS AS (YEAR(`ts`))"),
+        ("group", "STRING"),
+    ] {
+        let mut source = column("ts");
+        source.data_type = "TIMESTAMP_NTZ".into();
+        source.is_primary_key = true;
+        let result = build_create_table_sql_with_dialect_options(
+            structure_change_options(DatabaseType::Spark, Some("ods"), "events", vec![source]),
+            None,
+            CreateTableDialectOptions {
+                paimon: Some(super::create_options::PaimonCreateOptions {
+                    partition_mode: mode.into(),
+                    partition_column_ids: vec!["ts".into()],
+                    generate_partition: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let sql = &result.statements[0];
+        assert!(sql.contains(&format!("`p_{mode}` {definition}")));
+        assert!(sql.contains(&format!("PARTITIONED BY (`p_{mode}`)")));
+        assert!(sql.contains(&format!("'primary-key' = 'ts,p_{mode}'")));
+    }
+}
+
+#[test]
+fn spark_paimon_create_and_alter_use_spark_sql() {
+    let mut key = column("event id");
+    key.data_type = "BIGINT(20)".into();
+    key.is_primary_key = true;
+    let mut day = column("dt");
+    day.data_type = "DATE".into();
+    day.is_primary_key = false;
+    let mut payload = column("payload");
+    payload.data_type = "STRING(255)".into();
+    payload.default_value = "''".into();
+    let result = build_create_table_sql_with_dialect_options(
+        structure_change_options(DatabaseType::Spark, Some("analytics"), "events", vec![key, day, payload]),
+        None,
+        CreateTableDialectOptions {
+            paimon: Some(super::create_options::PaimonCreateOptions {
+                partition_column_ids: vec!["dt".into()],
+                bucket_column_ids: vec!["event id".into()],
+                bucket_count: "8".into(),
+                property_rows: vec![("file.format".into(), "parquet".into())],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert!(result.statements[0].starts_with("CREATE TABLE `analytics`.`events`"));
+    let sql = &result.statements[0];
+    assert!(sql.contains("`event id` BIGINT"));
+    assert!(sql.contains("`payload` STRING DEFAULT ''"));
+    assert!(!sql.contains("BIGINT(20)") && !sql.contains("STRING(255)"));
+    assert!(sql.contains("PARTITIONED BY (`dt`)"));
+    assert!(sql.ends_with("TBLPROPERTIES ('bucket' = '8', 'bucket-key' = 'event id', 'file.format' = 'parquet', 'primary-key' = 'event id,dt');"));
+
+    let mut added = column("payload");
+    added.data_type = "STRING(255)".into();
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Spark,
+        Some("analytics"),
+        "events",
+        vec![added],
+    ));
+    assert_eq!(result.statements, ["ALTER TABLE `analytics`.`events` ADD COLUMNS (`payload` STRING);"]);
+}
+
+#[test]
 fn transwarp_table_comments_use_inceptor_syntax() {
     let mut options =
         structure_change_options(DatabaseType::Transwarp, Some("analytics"), "users", vec![column("name")]);
@@ -12592,6 +12669,7 @@ fn starrocks_places_primary_keys_before_value_columns() {
 
 fn starrocks_layout_options(granularity: StarRocksTimeGranularity) -> CreateTableDialectOptions {
     CreateTableDialectOptions {
+        paimon: None,
         postgres_foreign_table: None,
         mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
@@ -12693,6 +12771,7 @@ fn starrocks_validates_hash_keys_and_bucket_count() {
 #[test]
 fn starrocks_random_distribution_requires_duplicate_table_and_supported_version() {
     let settings = CreateTableDialectOptions {
+        paimon: None,
         postgres_foreign_table: None,
         mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions { distribution: StarRocksDistribution::Random, ..Default::default() }),
@@ -12730,6 +12809,7 @@ fn starrocks_builds_multicolumn_value_and_list_partitions() {
     let options =
         structure_change_options(DatabaseType::StarRocks, None, "events", vec![column("city"), column("channel")]);
     let values = CreateTableDialectOptions {
+        paimon: None,
         postgres_foreign_table: None,
         mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
@@ -12741,6 +12821,7 @@ fn starrocks_builds_multicolumn_value_and_list_partitions() {
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert!(result.statements[0].contains("PARTITION BY (`city`, `channel`) DISTRIBUTED BY RANDOM"));
     let list = CreateTableDialectOptions {
+        paimon: None,
         postgres_foreign_table: None,
         mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
@@ -12765,6 +12846,7 @@ fn starrocks_builds_range_bounds_and_validates_arity() {
     // Intentionally interleaved primary and value columns: SQL reorders without changing membership.
     options.columns.insert(1, column("payload"));
     let settings = CreateTableDialectOptions {
+        paimon: None,
         postgres_foreign_table: None,
         mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
@@ -12818,6 +12900,7 @@ fn starrocks_time_slice_and_mixed_partitions_are_version_and_type_checked() {
 fn starrocks_rejects_duplicate_list_values_and_incompatible_partition_types() {
     let options = structure_change_options(DatabaseType::StarRocks, None, "events", vec![column("city")]);
     let list = CreateTableDialectOptions {
+        paimon: None,
         postgres_foreign_table: None,
         mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
@@ -12833,6 +12916,7 @@ fn starrocks_rejects_duplicate_list_values_and_incompatible_partition_types() {
     };
     assert!(build_create_table_sql_with_dialect_options(options.clone(), Some("3.5.0"), list).statements.is_empty());
     let range = CreateTableDialectOptions {
+        paimon: None,
         postgres_foreign_table: None,
         mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
@@ -12856,6 +12940,7 @@ fn starrocks_sort_columns_preserve_priority_and_allow_non_primary_columns() {
     options.columns[1].is_primary_key = false;
     options.columns[1].name = "event`time".into();
     let settings = CreateTableDialectOptions {
+        paimon: None,
         postgres_foreign_table: None,
         mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
@@ -12889,6 +12974,7 @@ fn starrocks_sort_validates_version_identity_and_primary_table_types() {
             _ => {}
         }
         let settings = CreateTableDialectOptions {
+            paimon: None,
             postgres_foreign_table: None,
             mysql_table_charset: None,
             starrocks: Some(StarRocksCreateOptions { sort_column_ids: ids, ..Default::default() }),
@@ -12907,6 +12993,7 @@ fn starrocks_duplicate_sort_requires_33_and_allows_decimal() {
     }
     options.columns[1].data_type = "decimal(10,2)".into();
     let settings = CreateTableDialectOptions {
+        paimon: None,
         postgres_foreign_table: None,
         mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions { sort_column_ids: vec!["ts".into()], ..Default::default() }),

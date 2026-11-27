@@ -30,6 +30,7 @@ export interface StarRocksPhysicalOptionsDraft {
 }
 export interface CreateTableDialectOptions {
   mysqlTableCharset?: import("@/lib/table/tableStructureEditorSql").MysqlTableCharsetChange;
+  paimon?: { partitionMode?: string; partitionTarget?: string; generatePartition?: boolean; partitionColumnIds: string[]; bucketColumnIds: string[]; bucketCount: string; propertyRows: [string, string][] };
   postgresForeignTable?: import("@/lib/table/postgresForeignTable").PostgresForeignTableCreateOptions;
   starrocks?: {
     timePartition?: { columnId: string; granularity: StarRocksTimeGranularity; interval?: number; additionalColumnIds: string[] };

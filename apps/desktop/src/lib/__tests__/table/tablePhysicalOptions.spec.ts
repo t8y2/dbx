@@ -19,6 +19,17 @@ describe("table physical options", () => {
     expect(hasTablePhysicalOptions(emptyTablePhysicalOptions())).toBe(false);
   });
 
+  it("restores legacy properties and preserves equals signs in values", () => {
+    const physicalOptions = { ...emptyTablePhysicalOptions(), properties: "file.format=parquet\n\nfilter=a=b" };
+    const restored = restoreTablePhysicalOptions({ physicalOptions });
+    expect(restored.propertyRows).toEqual([
+      ["file.format", "parquet"],
+      ["filter", "a=b"],
+    ]);
+    expect(hasTablePhysicalOptions(restored)).toBe(true);
+    expect(hasTablePhysicalOptions({ ...restored, propertyRows: [["", ""]] })).toBe(false);
+  });
+
   it("uses the current column name after a selected column is renamed", () => {
     const draft = { ...emptyTablePhysicalOptions(), partitionColumnIds: ["second"], distributionColumnIds: ["first"], bucketCount: "2", storageFormat: "ORC", transactional: true };
     const renamed = columns.map((column) => (column.id === "second" ? { ...column, name: "event_day" } : column));

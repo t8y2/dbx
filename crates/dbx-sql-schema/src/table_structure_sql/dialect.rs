@@ -24,6 +24,7 @@ pub(super) enum StructureDialect {
     // 但使用 UBTREE 索引类型（而非 BTREE），不支持 INCLUDE/FILTER 等。
     // DROP INDEX 使用 PostgreSQL 风格（DROP INDEX name），而非 MySQL 的 DROP INDEX name ON table。
     GaussdbM,
+    Spark,
     Unsupported,
 }
 
@@ -412,6 +413,15 @@ pub(super) fn capabilities_for(
             ..base
         },
         // Inceptor accepts ADD COLUMNS and CHANGE, but not DROP COLUMN.
+        Some(DatabaseType::Spark) => TableStructureCapabilities {
+            dialect: StructureDialect::Spark,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
+            ..base
+        },
         Some(DatabaseType::Transwarp) => TableStructureCapabilities {
             dialect: StructureDialect::Mysql,
             add_column: true,
@@ -458,6 +468,7 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
         StructureDialect::Informix => "informix",
         StructureDialect::GaussdbM => "gaussdb-m",
         StructureDialect::Questdb => "questdb",
+        StructureDialect::Spark => "spark",
         StructureDialect::Unsupported => "this database",
     }
     .to_string()
@@ -482,6 +493,7 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         StructureDialect::Informix => Some(DatabaseType::Informix),
         StructureDialect::Questdb => Some(DatabaseType::Questdb),
         StructureDialect::GaussdbM => Some(DatabaseType::Mysql),
+        StructureDialect::Spark => Some(DatabaseType::Spark),
         StructureDialect::Unsupported => None,
     }
 }

@@ -89,15 +89,21 @@ const nativeConfigs: Partial<ConnectionConfig>[] = [
 ];
 
 describe.each(nativeConfigs.flatMap((config) => (["grouped", "simple"] as const).map((mode) => ({ mode, config }))))("$mode released root window: $config", ({ mode, config }) => {
-  it.each(["disconnected", "dead-pool"])("loads the initial page after %s connection recovery", async (reason) => {
-    const f = await setup(mode, config);
-    if (reason === "disconnected") f.store.connectedIds.delete("pg");
-    else f.checkConnectionHealth.mockRejectedValueOnce(new Error("pool dead"));
-    await f.open();
-    await f.settle();
-    expect(f.connectDb).toHaveBeenCalledTimes(1);
-    expect(f.tables()).toHaveLength(70);
-    expect(f.parent.isExpanded).toBe(true);
+  describe("connection recovery", () => {
+    let f: Awaited<ReturnType<typeof setup>>;
+    beforeEach(async () => {
+      f = await setup(mode, config);
+    }, 30_000);
+
+    it.each(["disconnected", "dead-pool"])("loads the initial page after %s connection recovery", async (reason) => {
+      if (reason === "disconnected") f.store.connectedIds.delete("pg");
+      else f.checkConnectionHealth.mockRejectedValueOnce(new Error("pool dead"));
+      await f.open();
+      await f.settle();
+      expect(f.connectDb).toHaveBeenCalledTimes(1);
+      expect(f.tables()).toHaveLength(70);
+      expect(f.parent.isExpanded).toBe(true);
+    });
   });
   it("preserves all 73 roots and complete partitions over three release/reopen cycles", async () => {
     const f = await setup(mode, config);

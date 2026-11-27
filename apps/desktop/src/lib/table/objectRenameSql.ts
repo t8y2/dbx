@@ -27,7 +27,7 @@ export function supportsObjectRename(databaseType: DatabaseType | undefined, obj
     return false;
   }
   if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1" || databaseType === "duckdb") return objectType === "TABLE";
-  if (databaseType === "transwarp" || databaseType === "starrocks" || databaseType === "saphana") return objectType === "TABLE";
+  if (databaseType === "spark" || databaseType === "transwarp" || databaseType === "starrocks" || databaseType === "saphana") return objectType === "TABLE";
   if (databaseType === "oceanbase-oracle") return objectType === "TABLE" || objectType === "VIEW";
   if (databaseType === "mysql" || databaseType === "goldendb") return objectType === "TABLE" || objectType === "VIEW";
   if (postgresLikeRenameTypes.has(databaseType)) return objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW";

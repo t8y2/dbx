@@ -120,3 +120,63 @@ export async function executeStarRocksCopyPlan(plan: StarRocksCopyPlan, execute:
   }
   stage("complete");
 }
+
+// Spark SHOW CREATE TABLE supplies the authoritative column definitions and provider.
+export function readPaimonCopySource(sql: string) {
+  const info = body(sql);
+  const tail = info.all.filter((token) => token.span.start >= info.close.span.end && token.depth === 0);
+  const provider = tail.findIndex((token) => token.normalized === "using");
+  if (provider < 0 || tail[provider + 1]?.normalized !== "paimon") throw new Error("A Paimon SHOW CREATE TABLE definition is required.");
+  const propsIndex = info.all.findIndex((token) => token.depth === 0 && token.normalized === "tblproperties");
+  const properties = new Map<string, string>();
+  if (propsIndex >= 0) {
+    const entries = info.all.slice(propsIndex + 2);
+    const decode = (text: string) =>
+      text
+        .slice(1, -1)
+        .replace(/\\(['\\])/g, "$1")
+        .replaceAll("''", "'");
+    for (let i = 0; i < entries.length && entries[i].text !== ")"; i += 4) {
+      const [key, eq, value, separator] = entries.slice(i, i + 4);
+      if (key?.kind !== "string" || eq?.text !== "=" || value?.kind !== "string" || ![",", ")"].includes(separator?.text)) throw new Error("Unrecognized Paimon table properties.");
+      properties.set(decode(key.text), decode(value.text));
+      if (separator.text === ")") break;
+    }
+  }
+  for (const key of properties.keys()) {
+    if (/^(path|location)$/i.test(key)) properties.delete(key);
+  }
+  const partitionIndex = info.all.findIndex((token) => token.span.start > info.close.span.start && token.depth === 0 && token.normalized === "partitioned");
+  const partitionNames: string[] = [];
+  if (partitionIndex >= 0) {
+    const cols = info.all.slice(partitionIndex + 3);
+    for (const token of cols) {
+      if (token.depth === 0) break;
+      if (token.text === ",") continue;
+      if (!["quoted_identifier", "word"].includes(token.kind)) throw new Error("Unsupported partition expression.");
+      partitionNames.push(unquoteSqlSemanticIdentifier(token));
+    }
+  }
+  const comment = tail.findIndex((token) => token.normalized === "comment");
+  return { partitionNames, definitions: sql.slice(info.open.span.end, info.close.span.start), properties, commentSql: comment >= 0 && tail[comment + 1]?.kind === "string" ? " COMMENT " + tail[comment + 1].text : "" };
+}
+
+export function paimonCopyDdl(source: ReturnType<typeof readPaimonCopySource>, generated: string, destination: string, derived: boolean, replacedPartition?: string) {
+  const info = body(generated);
+  const lastComma = derived ? info.all.filter((token) => token.text === "," && token.depth === 1 && token.span.start < info.close.span.start).pop() : undefined;
+  if (derived && !lastComma) throw new Error("Missing derived partition column.");
+  const extra = lastComma ? generated.slice(lastComma.span.start, info.close.span.start) : "";
+  const suffix = generated.slice(info.close.span.end).trim().replace(/;$/, "");
+  const props = info.all.find((token) => token.depth === 0 && token.normalized === "tblproperties");
+  const layout = props ? generated.slice(info.close.span.end, props.span.start).trim() : suffix;
+  const properties = props ? " " + generated.slice(props.span.start, info.end).trim() : "";
+  let definitions = source.definitions.trimEnd();
+  if (replacedPartition) {
+    const parts = tokens(definitions);
+    const start = parts.findIndex((part, index) => (index === 0 || (parts[index - 1]?.text === "," && parts[index - 1]?.depth === 0)) && ["word", "quoted_identifier"].includes(part.kind) && unquoteSqlSemanticIdentifier(part) === replacedPartition);
+    if (start < 0 || !source.partitionNames.includes(replacedPartition)) throw new Error("Partition definition unavailable.");
+    const next = parts.slice(start + 1).find((part) => part.text === "," && part.depth === 0);
+    definitions = next ? definitions.slice(0, parts[start]!.span.start) + definitions.slice(next.span.end) : definitions.slice(0, parts[start - 1]?.span.start ?? 0);
+  }
+  return `CREATE TABLE ${destination} (${definitions}${extra}\n) USING paimon ${layout}${source.commentSql}${properties};`;
+}

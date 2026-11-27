@@ -106,6 +106,7 @@ fn build_create_table_sql_impl(
         },
         None => None,
     };
+    let paimon_options = dialect_options.paimon.clone().unwrap_or_default();
     let create_dialect = create_table_dialect(&options, server_version, dialect_options);
     let capabilities;
     let dialect;
@@ -339,6 +340,9 @@ fn build_create_table_sql_impl(
         if dialect == StructureDialect::Mysql && capabilities.comment && !clean(&column.comment).is_empty() {
             parts.push(format!("COMMENT {}", quote_string(&clean(&column.comment))));
         }
+        if dialect == StructureDialect::Spark && !clean(&column.comment).is_empty() {
+            parts.push(format!("COMMENT {}", super::util::spark_string(&clean(&column.comment))));
+        }
         column_definitions.push(parts.join(" "));
     }
 
@@ -356,7 +360,7 @@ fn build_create_table_sql_impl(
         .map(|column| quote_new_ident(options.database_type, dialect, &column.name))
         .collect::<Vec<_>>()
         .join(", ");
-    if !pk_list.is_empty() && create_dialect.primary_key_in_column_list() {
+    if dialect != StructureDialect::Spark && !pk_list.is_empty() && create_dialect.primary_key_in_column_list() {
         // Optional user-supplied constraint name; empty keeps the anonymous form.
         let constraint = super::columns::new_primary_key_constraint_clause(&options, dialect);
         column_definitions.push(format!("{constraint}PRIMARY KEY ({pk_list})"));
@@ -368,6 +372,17 @@ fn build_create_table_sql_impl(
 
     let is_foreign_table = foreign_clause.is_some();
     let kind = if is_foreign_table { "FOREIGN TABLE" } else { "TABLE" };
+    let paimon_suffix = if dialect == StructureDialect::Spark {
+        match super::create_options::paimon_create_suffix(
+            &paimon_options,
+            &active_columns,
+            options.table_comment.as_deref(),
+            &mut column_definitions,
+        ) {
+            Ok(suffix) => suffix,
+            Err(warning) => return TableStructureSqlResult { statements: Vec::new(), warnings: vec![warning] }.into(),
+        }
+    } else { String::new() };
     let mut create_table = format!("CREATE {kind} {table} (\n  {}\n)", column_definitions.join(",\n  "));
     create_table.push_str(&create_dialect.after_columns(&options, &pk_list));
     create_table.push_str(&transwarp::create_table_suffix(&options, &active_columns, dialect));
@@ -381,6 +396,7 @@ fn build_create_table_sql_impl(
     if let Some(clause) = foreign_clause {
         create_table.push_str(&clause);
     }
+    create_table.push_str(&paimon_suffix);
     statements.push(format!("{create_table};"));
 
     if let Some(engine) = options.mysql_engine.as_deref().map(str::trim).filter(|engine| !engine.is_empty()) {

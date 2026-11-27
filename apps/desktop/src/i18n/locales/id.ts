@@ -5833,6 +5833,8 @@ export default withEnglishFallback({
     mysqlTableEngineLoadFailed: "Gagal memuat storage engine: {message}",
     transwarpPartitionColumns: "Kolom partisi",
     transwarpBucketColumns: "Kolom bucket",
+    addProperty: "Tambah properti",
+    removeProperty: "Hapus properti",
     transwarpBucketCount: "Bucket",
     transwarpStorageFormat: "Format penyimpanan",
     transwarpTransactional: "Tabel transaksional",

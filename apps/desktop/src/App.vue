@@ -6072,6 +6072,14 @@ onUnmounted(() => {
                       (tabId: string, commentChanged: boolean, createdTableName?: string) => {
                         const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
                         if (!tab) return;
+                        const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId));
+                        if (createdTableName && (databaseType === 'starrocks' || databaseType === 'spark')) {
+                          const target = { connectionId: tab.connectionId, database: tab.database, schema: tab.schema, catalog: tab.catalog, tableName: createdTableName };
+                          connectionStore.invalidateCompletionTableCache(target.connectionId, target.database, target.tableName, target.schema, target.catalog);
+                          void openTableTarget(target, { onOpened: () => queryStore.closeTab(tabId, { skipHistory: true }) });
+                          void connectionStore.refreshObjectListTreeNode(target.connectionId, target.database, target.schema || undefined).catch((error) => toast(String(error), 5000));
+                          return;
+                        }
                         if (createdTableName) {
                           tab.structureTableName = createdTableName;
                           tab.title = t('structureEditor.editTabTitle', { tableName: createdTableName });

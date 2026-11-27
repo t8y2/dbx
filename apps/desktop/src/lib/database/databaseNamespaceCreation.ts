@@ -79,7 +79,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   transwarp: { connection: "database" },
   kyuubi: { deferred: "Kyuubi database creation needs dedicated metadata validation first" },
   impala: { deferred: "Impala database creation needs dedicated metadata validation first" },
-  spark: { deferred: "Spark database creation needs agent metadata validation first" },
+  spark: { connection: "database" },
   db2: { database: "schema" },
   informix: { connection: "database" },
   neo4j: { deferred: "database creation depends on edition/admin privileges" },

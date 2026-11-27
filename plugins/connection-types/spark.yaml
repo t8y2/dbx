@@ -25,11 +25,11 @@ capabilities:
   schemaSearch: true
   diagram: false
   tableDataEdit: true
-  tableStructureEdit: false
+  tableStructureEdit: true
   tableImport: false
   dataTransfer: true
   sqlFileExecution: true
-  databaseCreate: false
+  databaseCreate: true
   fieldLineage: false
   sqlExplain: false
   userAdmin: false

@@ -24,6 +24,11 @@ pub(super) fn build_table_comment_sql(options: &TableStructureSqlOptions, warnin
         return vec![format!("ALTER TABLE {table} SET TBLPROPERTIES ('comment' = {quoted});")];
     }
     match dialect {
+        StructureDialect::Spark => {
+            let quoted = super::util::spark_string(&clean(new_comment));
+            vec![format!("ALTER TABLE {table} SET TBLPROPERTIES ('comment' = {quoted});")]
+        }
+
         StructureDialect::Mysql | StructureDialect::GaussdbM => {
             vec![format!("ALTER TABLE {table} COMMENT = {quoted};")]
         }

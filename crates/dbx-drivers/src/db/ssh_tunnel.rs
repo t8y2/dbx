@@ -426,7 +426,7 @@ async fn authenticate_keyboard_interactive(
                 let answers = if answered_locally {
                     // Eligibility required a configured, non-blank secret.
                     let secret = totp_secret.expect("local TOTP answer requires a configured secret");
-                    vec![ssh_totp::generate_code(
+                    vec![ssh_totp::generate_code_now(
                         secret,
                         std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)

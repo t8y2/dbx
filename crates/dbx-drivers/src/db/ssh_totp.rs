@@ -22,20 +22,34 @@ const TIME_STEP_SECS: u64 = 30;
 /// RFC 6238 default code length.
 const CODE_DIGITS: u32 = 6;
 
-/// Decodes unpadded Base32 (RFC 4648 §6), the encoding every authenticator
-/// app exports its secret in.
+/// Seconds before a step ends at which [`generate_code_now`] switches early.
 ///
-/// Eight characters carry five bytes; a trailing partial group is decoded by
-/// the same shift-accumulate loop and simply yields fewer bytes, which is what
-/// the unpadded form requires. Kept local rather than taking a dependency for
-/// the single call site here.
+/// RFC 6238 §5.2 recommends accepting the adjacent steps because a code can
+/// cross a step boundary between generation and verification: a code computed
+/// at second 29.9 of a step is already stale when the server reads it a moment
+/// later. One step either way is the conventional tolerance and keeps the
+/// window at three codes rather than the fifty the RFC warns about for HOTP.
+const BOUNDARY_TOLERANCE_SECS: u64 = 3;
+
+/// Decodes Base32 (RFC 4648 §6), the encoding every authenticator app exports
+/// its secret in.
+///
+/// Accepts both cases and tolerates `=` padding and interior whitespace, because
+/// secrets get copied out of provisioning pages and QR-code exports where all
+/// three appear. Eight characters carry five bytes; a trailing partial group is
+/// decoded by the same shift-accumulate loop and simply yields fewer bytes,
+/// which is what the unpadded form requires. Kept local rather than taking a
+/// dependency for the single call site here.
 fn base32_decode(input: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(input.len() * 5 / 8 + 1);
     let (mut acc, mut bits) = (0u32, 0u32);
     for byte in input.bytes() {
         let value = match byte {
             b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a',
             b'2'..=b'7' => byte - b'2' + 26,
+            // Padding and layout whitespace carry no bits.
+            b'=' | b' ' | b'\t' | b'\r' | b'\n' => continue,
             _ => return None,
         };
         acc = (acc << 5) | u32::from(value);
@@ -55,9 +69,28 @@ fn base32_decode(input: &str) -> Option<Vec<u8>> {
 pub fn generate_code(secret: &str, unix_time: u64) -> Result<String, String> {
     let key =
         base32_decode(secret).ok_or_else(|| "TOTP secret is not valid Base32 (expected A-Z and 2-7).".to_string())?;
-    let counter = (unix_time / TIME_STEP_SECS).to_be_bytes();
+    Ok(code_for_counter(&key, unix_time / TIME_STEP_SECS))
+}
 
-    let mut mac = HmacSha1::new_from_slice(&key).map_err(|error| format!("TOTP secret is unusable: {error}"))?;
+/// Generates the code to submit now, tolerating a step boundary.
+///
+/// Inside the last [`BOUNDARY_TOLERANCE_SECS`] of a step the *next* step's code
+/// is returned instead: the current one expires before the server can verify
+/// it, and the server accepts the next step early under the same tolerance it
+/// uses for late codes. Everywhere else this is the plain current-step code.
+pub fn generate_code_now(secret: &str, unix_time: u64) -> Result<String, String> {
+    let step = unix_time / TIME_STEP_SECS;
+    let step = if unix_time % TIME_STEP_SECS + BOUNDARY_TOLERANCE_SECS >= TIME_STEP_SECS { step + 1 } else { step };
+    let key =
+        base32_decode(secret).ok_or_else(|| "TOTP secret is not valid Base32 (expected A-Z and 2-7).".to_string())?;
+    Ok(code_for_counter(&key, step))
+}
+
+/// Computes the RFC 4226 code for an explicit counter value.
+fn code_for_counter(key: &[u8], counter: u64) -> String {
+    let counter = counter.to_be_bytes();
+
+    let mut mac = HmacSha1::new_from_slice(key).expect("HMAC accepts keys of any length");
     mac.update(&counter);
     let digest = mac.finalize().into_bytes();
 
@@ -69,7 +102,7 @@ pub fn generate_code(secret: &str, unix_time: u64) -> Result<String, String> {
         | ((digest[offset + 2] as u32) << 8)
         | (digest[offset + 3] as u32);
 
-    Ok(format!("{:0width$}", binary % 10u32.pow(CODE_DIGITS), width = CODE_DIGITS as usize))
+    format!("{:0width$}", binary % 10u32.pow(CODE_DIGITS), width = CODE_DIGITS as usize)
 }
 
 /// Whether a keyboard-interactive prompt is asking for a TOTP code.
@@ -151,6 +184,35 @@ mod tests {
     fn base32_decodes_the_rfc_seed() {
         assert_eq!(base32_decode("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap(), b"12345678901234567890");
         assert!(base32_decode("GEZD1NBV").is_none(), "'1' is outside the alphabet");
+    }
+
+    /// Secrets arrive from provisioning pages in whatever case and padding the
+    /// page used, so the decoder must not reject a perfectly valid secret.
+    #[test]
+    fn base32_accepts_lowercase_padding_and_whitespace() {
+        let expected = b"12345678901234567890";
+        assert_eq!(base32_decode("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap(), expected);
+        assert_eq!(base32_decode("gezdgnbvgy3tqojqgezdgnbvgy3tqojq").unwrap(), expected);
+        assert_eq!(base32_decode("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ====").unwrap(), expected);
+        assert_eq!(base32_decode(" GEZDGNBV GY3TQOJQ GEZDGNBVGY3TQOJQ \n").unwrap(), expected);
+    }
+
+    /// Near a step boundary the next step's code is submitted, because the
+    /// current one would expire before the server could verify it.
+    #[test]
+    fn code_switches_to_the_next_step_near_the_boundary() {
+        let secret = "JBSWY3DPEHPK3PXP";
+        let step_start = 1_700_000_010u64 - 1_700_000_010 % TIME_STEP_SECS;
+        let current = generate_code(secret, step_start).unwrap();
+
+        // Comfortably inside the step: current code.
+        assert_eq!(generate_code_now(secret, step_start).unwrap(), current);
+        assert_eq!(generate_code_now(secret, step_start + 10).unwrap(), current);
+
+        // Within the tolerance window: next step's code.
+        let next = generate_code(secret, step_start + TIME_STEP_SECS).unwrap();
+        assert_eq!(generate_code_now(secret, step_start + TIME_STEP_SECS - 1).unwrap(), next);
+        assert_eq!(generate_code_now(secret, step_start + TIME_STEP_SECS - BOUNDARY_TOLERANCE_SECS).unwrap(), next);
     }
 
     /// The same code must repeat within a step and change across one.

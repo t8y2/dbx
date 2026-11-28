@@ -110,7 +110,7 @@ export const CONNECTION_PROFILES = {
   jdbc: { type: "jdbc", port: 0, user: "", label: "JDBC", icon: "jdbc" },
   tdengine: { type: "tdengine", port: 6041, user: "root", label: "TDengine", icon: "tdengine" },
   xugu: { type: "xugu", port: 5138, user: "", label: "虚谷 XuguDB", icon: "xugu" },
-  iotdb: { type: "iotdb", port: 6667, user: "root", label: "Apache IoTDB", icon: "iotdb" },
+  iotdb: { type: "iotdb", port: 6667, user: "root", label: "Apache IoTDB", icon: "iotdb", urlParams: "sql_dialect=table" },
   etcd: { type: "etcd", port: 2379, user: "", label: "etcd", icon: "etcd" },
   "etcd-v2": { type: "etcd", port: 2379, user: "", label: "etcd 2.x (v2 API)", icon: "etcd" },
   zookeeper: { type: "zookeeper", port: 2181, user: "", label: "Apache ZooKeeper", icon: "zookeeper" },

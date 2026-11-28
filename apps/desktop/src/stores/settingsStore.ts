@@ -55,6 +55,7 @@ import { normalizeSqlVariableSyntaxOverrides, type SqlVariableSyntaxOverrides } 
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { type DataTabReuseMode, DEFAULT_DATA_TAB_REUSE_MODE, normalizeDataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
 import { normalizeTableHoverLookupMode, type TableHoverLookupMode } from "@/lib/editor/hoverTableLookup";
+import { normalizePreferredTableAlias } from "@/lib/sql/sqlIdentifier";
 import { normalizeCompletionTriggerMode, type SqlCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import { DEFAULT_SQL_COMPLETION_MATCH_MODE, normalizeCompletionMatchMode, type SqlCompletionMatchMode } from "@/lib/sql/sqlCompletionMatchMode";
 import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletions";
@@ -999,6 +1000,7 @@ export interface EditorSettings {
   /** Whether the query toolbar connection picker shows the full group path. */
   showConnectionGroupPath: boolean;
   autoAliasTables: boolean;
+  preferredTableAlias: string;
   qualifyColumnCompletions: boolean;
   batchColumnSelectionIncludeComments: boolean;
   tableCompletionSchemaQualification: SqlTableCompletionSchemaQualification;
@@ -1455,6 +1457,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showInsertValueHints: true,
   showConnectionGroupPath: false,
   autoAliasTables: true,
+  preferredTableAlias: "",
   qualifyColumnCompletions: true,
   batchColumnSelectionIncludeComments: true,
   tableCompletionSchemaQualification: DEFAULT_SQL_TABLE_COMPLETION_SCHEMA_QUALIFICATION,
@@ -2242,6 +2245,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showInsertValueHints: typeof settings.showInsertValueHints === "boolean" ? settings.showInsertValueHints : DEFAULT_EDITOR_SETTINGS.showInsertValueHints,
     showConnectionGroupPath: typeof settings.showConnectionGroupPath === "boolean" ? settings.showConnectionGroupPath : DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
+    preferredTableAlias: normalizePreferredTableAlias(settings.preferredTableAlias),
     qualifyColumnCompletions: typeof settings.qualifyColumnCompletions === "boolean" ? settings.qualifyColumnCompletions : DEFAULT_EDITOR_SETTINGS.qualifyColumnCompletions,
     batchColumnSelectionIncludeComments: typeof settings.batchColumnSelectionIncludeComments === "boolean" ? settings.batchColumnSelectionIncludeComments : DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments,
     tableCompletionSchemaQualification: normalizeSqlTableCompletionSchemaQualification(settings.tableCompletionSchemaQualification),
@@ -3267,6 +3271,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showInsertValueHints !== undefined) editorSettings.value.showInsertValueHints = partial.showInsertValueHints === true;
     if (partial.showConnectionGroupPath !== undefined) editorSettings.value.showConnectionGroupPath = partial.showConnectionGroupPath === true;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
+    if (partial.preferredTableAlias !== undefined) editorSettings.value.preferredTableAlias = normalizePreferredTableAlias(partial.preferredTableAlias);
     if (partial.qualifyColumnCompletions !== undefined) editorSettings.value.qualifyColumnCompletions = partial.qualifyColumnCompletions === true;
     if (partial.batchColumnSelectionIncludeComments !== undefined) editorSettings.value.batchColumnSelectionIncludeComments = partial.batchColumnSelectionIncludeComments === true;
     if (partial.tableCompletionSchemaQualification !== undefined) editorSettings.value.tableCompletionSchemaQualification = normalizeSqlTableCompletionSchemaQualification(partial.tableCompletionSchemaQualification);

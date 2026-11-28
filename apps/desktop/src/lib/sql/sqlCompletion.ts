@@ -15,7 +15,7 @@ import type { SqlSemanticBuildOptions, SqlSemanticSpan } from "@/lib/sql/semanti
 import { isEditorStatePlausibleFor, resolveLexicalLeafFromSyntaxTree, resolveSqlStatementWindow } from "@/lib/sql/sqlSyntaxTreeWindow";
 import { DEFAULT_SQL_SNIPPETS, MANTICORESEARCH_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 import { BACKSLASH_ESCAPE_STRING_DIALECTS } from "@/lib/sql/sqlStatementRanges";
-import { requiresClickhouseIdentifierQuote, requiresMysqlIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
+import { normalizePreferredTableAlias, requiresClickhouseIdentifierQuote, requiresMysqlIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
 import { isFullwidthParenthesis, MYSQL_FULLWIDTH_IDENTIFIER_CHARACTERS } from "@/lib/sql/sqlIdentifierCharacters";
 import { identifierMatchScore, matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
 import type { SqlCompletionMatchMode } from "./sqlCompletionMatchMode";
@@ -2014,6 +2014,7 @@ export interface SqlCompletionProviderInput {
   functionCase?: SqlKeywordCase;
   identifierCase?: SqlKeywordCase;
   autoAliasTables?: boolean;
+  preferredTableAlias?: string;
   qualifyColumnCompletions?: boolean;
   tableCompletionSchemaQualification?: SqlTableCompletionSchemaQualification;
   quoteIdentifiers?: boolean;
@@ -2041,6 +2042,7 @@ export function buildSqlCompletionItems(
     functionCase?: SqlKeywordCase;
     identifierCase?: SqlKeywordCase;
     autoAliasTables?: boolean;
+    preferredTableAlias?: string;
     qualifyColumnCompletions?: boolean;
     tableCompletionSchemaQualification?: SqlTableCompletionSchemaQualification;
     quoteIdentifiers?: boolean;
@@ -2223,9 +2225,12 @@ class SqlCompletionProvider {
     if (!context.exclusiveColumnSuggestions && context.suggestTables) {
       const autoAliasTables = !!this.input.autoAliasTables && context.autoAliasTableCompletions && !context.tableCompletionTargetAliasUnsafe && supportsTableAliases(this.databaseType);
       const schemaQualification = normalizeSqlTableCompletionSchemaQualification(this.input.tableCompletionSchemaQualification);
-      this.items.push(...buildForeignKeyRelatedTableItems(context, completionTables, this.input.foreignKeysByTable, this.dialect, autoAliasTables, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect, this.matchMode));
+      const preferredAlias = normalizePreferredTableAlias(this.input.preferredTableAlias);
+      const existingAliases = new Set(context.referencedTables.map((ref) => (ref.alias || (preferredAlias ? ref.name : "")).toLowerCase()).filter((alias): alias is string => !!alias));
+      const tableAlias = autoAliasTables ? (name: string) => generateTableCompletionAlias(name, existingAliases, preferredAlias) : undefined;
+      this.items.push(...buildForeignKeyRelatedTableItems(context, completionTables, this.input.foreignKeysByTable, this.dialect, tableAlias, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect, this.matchMode));
       this.items.push(...buildReferencedTableItems(context, completionTables, this.dialect, this.input.identifierCase, this.identifierDialect, this.matchMode));
-      this.items.push(...buildTableItems(context, completionTables, this.dialect, autoAliasTables, context.referencedTables, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect, this.matchMode));
+      this.items.push(...buildTableItems(context, completionTables, this.dialect, tableAlias, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect, this.matchMode));
       if (this.databaseType === "clickhouse") {
         this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table", this.input.functionCompletionIncludeParams, this.matchMode));
       }
@@ -2249,7 +2254,7 @@ class SqlCompletionProvider {
         // Within one schema a function name is unique, so the signature lookup
         // by name cannot cross schemas once the scope above is applied.
         const signaturesByLabel = new Map(tableValuedFunctionObjects.map((object) => [object.name.toLowerCase(), object.signature]));
-        const tableItems = buildTableItems(context, tableValuedFunctions, this.dialect, false, context.referencedTables, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect);
+        const tableItems = buildTableItems(context, tableValuedFunctions, this.dialect, undefined, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect);
         // A table-valued function must be invoked as a call: even without a
         // signature the insert is `Name()`, never the bare name
         // (t8y2/dbx#13394 review).
@@ -6001,8 +6006,7 @@ function buildTableItems(
   context: Pick<SqlCompletionContext, "prefix" | "qualifier" | "qualifierParts">,
   tables: SqlCompletionTable[],
   dialect?: SqlCompletionApplyDialect,
-  autoAliasTables = false,
-  referencedTables: SqlCompletionReferencedTable[] = [],
+  tableAlias?: (name: string) => string,
   databaseType?: DatabaseType,
   currentSchema?: string,
   schemaQualificationMode: SqlTableCompletionSchemaQualification = "collision",
@@ -6012,7 +6016,6 @@ function buildTableItems(
 ): SqlCompletionItem[] {
   const { prefix } = context;
   const qualifierSchema = context.qualifierParts?.[context.qualifierParts.length - 1] ?? context.qualifier?.split(".").filter(Boolean).pop();
-  const existingAliases = new Set(referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
   const matchingTables = tables.filter((table) => matchesTableSearch(table, prefix, matchMode));
   // Ambiguity is decided among matching tables only.
   const schemasByTableName = collectSchemasByTableName(matchingTables);
@@ -6034,7 +6037,7 @@ function buildTableItems(
             : ambiguousTableName && table.schema && (!suppliedApplyName || !suppliedApplyNameIsQualified)
               ? defaultApplyName
               : (casedSuppliedApplyName ?? defaultApplyName);
-      const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";
+      const alias = tableAlias?.(table.name) ?? "";
       const schemaDetail = ambiguousTableName && table.schema ? `${table.schema}.${table.name}` : undefined;
       const comment = tableCompletionComment(table);
       const commentDetail = comment ? `→ ${comment}` : undefined;
@@ -6066,7 +6069,7 @@ function buildForeignKeyRelatedTableItems(
   tables: SqlCompletionTable[],
   foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>,
   dialect?: SqlCompletionApplyDialect,
-  autoAliasTables = false,
+  tableAlias?: (name: string) => string,
   databaseType?: DatabaseType,
   currentSchema?: string,
   schemaQualificationMode: SqlTableCompletionSchemaQualification = "collision",
@@ -6076,7 +6079,6 @@ function buildForeignKeyRelatedTableItems(
 ): SqlCompletionItem[] {
   if (!foreignKeysByTable || context.referencedTables.length === 0) return [];
   const candidates = new Map<string, { table: SqlCompletionTable; detail: string }>();
-  const existingAliases = new Set(context.referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
   for (const ref of context.referencedTables) {
     for (const [ownerKey, foreignKeys] of foreignKeysByTable.entries()) {
       const owner = foreignKeyOwnerFromKey(ownerKey);
@@ -6109,7 +6111,7 @@ function buildForeignKeyRelatedTableItems(
       const tableName = applySqlIdentifierCase(table.name, identifierCase, identifierDialect ?? dialect);
       const unqualifiedApplyName = quoteCasedIdentifier(table.name, tableName, dialect);
       const applyName = qualifiedByContext || schemaQualificationMode === "never" ? unqualifiedApplyName : defaultApplyName;
-      const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";
+      const alias = tableAlias?.(table.name) ?? "";
       const comment = tableCompletionComment(table);
       const nameMatches = matchesPrefix(table.name, context.prefix, matchMode);
       return {
@@ -6823,8 +6825,8 @@ function generateAlias(tableName: string, existing = new Set<string>()): string 
   return fallback;
 }
 
-function generateTableCompletionAlias(tableName: string, existing = new Set<string>()): string {
-  const candidates = buildAliasCandidates(tableName);
+function generateTableCompletionAlias(tableName: string, existing: Set<string>, preferredAlias: string): string {
+  const candidates = [preferredAlias, ...buildAliasCandidates(tableName)];
 
   for (const candidate of candidates.filter(Boolean)) {
     if (isUnsafeSqlAlias(candidate.toLowerCase())) continue;

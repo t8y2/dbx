@@ -1,0 +1,15 @@
+[package]
+name = "dbx-android-worker"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "On-device SQLite worker for DBX Android (ADB) connections, launched via `adb shell run-as <pkg>`"
+publish = false
+
+[dependencies]
+dbx-sqlite-worker = { path = "../dbx-sqlite-worker", default-features = false, features = ["runtime"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+
+[[bin]]
+name = "dbx-android-worker"
+path = "src/main.rs"

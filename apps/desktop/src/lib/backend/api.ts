@@ -540,6 +540,10 @@ export const readUserSkills = forward("readUserSkills");
 export const listSystemFonts = forward("listSystemFonts");
 export const listSshConfigHosts = forward("listSshConfigHosts");
 export const listLocalSshKeys = forward("listLocalSshKeys");
+export const adbDetectBinary = forward("adbDetectBinary");
+export const listAdbDevices = forward("listAdbDevices");
+export const listAdbPackages = forward("listAdbPackages");
+export const listAdbDatabases = forward("listAdbDatabases");
 
 // SQL File Execution
 export const previewSqlFile = forward("previewSqlFile");

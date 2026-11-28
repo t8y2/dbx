@@ -891,7 +891,7 @@ pub fn profile_for(db_type: DatabaseType) -> DdlDialectProfile {
         Access => access_profile(),
 
         // SQLite family
-        Sqlite | Rqlite | Turso | CloudflareD1 => sqlite_family(db_type),
+        Sqlite | Rqlite | Turso | CloudflareD1 | AndroidAdb => sqlite_family(db_type),
 
         H2 => h2_profile(),
 

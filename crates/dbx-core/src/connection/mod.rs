@@ -3909,6 +3909,13 @@ impl AppState {
                     PoolKind::Sqlite(pool)
                 }
             }
+            DatabaseType::AndroidAdb => {
+                // Android (ADB): the on-device worker speaks the same JSON
+                // line protocol as the SSH SQLite worker, so the existing
+                // SqliteHandle worker path drives it unchanged.
+                let worker = db::adb_worker::connect_adb_worker(&db_config).await?;
+                PoolKind::Sqlite(db::sqlite::SqliteHandle::from_worker(worker))
+            }
             DatabaseType::Rqlite => {
                 let client = db::rqlite_driver::RqliteClient::new(
                     &url,

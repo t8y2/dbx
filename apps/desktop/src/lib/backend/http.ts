@@ -273,6 +273,7 @@ import type {
   MeilisearchIndexSettings,
   ElasticsearchIndexMetadataKind,
   ElasticsearchDeleteByQueryResult,
+  AdbDevice,
 } from "@/lib/backend/tauri";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import type { PluginTableMetadata, PluginTableMetadataRequest } from "@/types/pluginSchemaMetadata";
@@ -730,6 +731,26 @@ export async function listSystemFonts(): Promise<string[]> {
 
 export async function listSshConfigHosts(): Promise<SshConfigHostEntry[]> {
   return get("/api/ssh/config-hosts");
+}
+
+export async function adbDetectBinary(_configuredPath?: string | null): Promise<string | null> {
+  console.warn("adbDetectBinary: Android (ADB) connections are only available in the desktop backend");
+  return null;
+}
+
+export async function listAdbDevices(_configuredPath?: string | null): Promise<AdbDevice[]> {
+  console.warn("listAdbDevices: Android (ADB) connections are only available in the desktop backend");
+  return [];
+}
+
+export async function listAdbPackages(_configuredPath: string | null, _serial: string): Promise<string[]> {
+  console.warn("listAdbPackages: Android (ADB) connections are only available in the desktop backend");
+  return [];
+}
+
+export async function listAdbDatabases(_configuredPath: string | null, _serial: string, _packageName: string): Promise<string[]> {
+  console.warn("listAdbDatabases: Android (ADB) connections are only available in the desktop backend");
+  return [];
 }
 
 export async function listLocalSshKeys(): Promise<LocalSshKey[]> {

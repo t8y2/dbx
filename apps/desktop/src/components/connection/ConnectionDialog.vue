@@ -71,6 +71,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import PluginConnectionFields from "@/components/plugins/PluginConnectionFields.vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import * as api from "@/lib/backend/api";
+import type { AdbDevice } from "@/lib/backend/tauri";
 import {
   buildPluginConnectionConfig,
   createFrontendPluginRegistry,
@@ -3046,6 +3047,15 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     if (profile.type === "sqlite") {
       form.value.database = undefined;
     }
+    if (profile.type === "android-adb") {
+      form.value.host = "";
+      form.value.database = undefined;
+      form.value.port = 0;
+      adbDevices.value = [];
+      adbPackages.value = [];
+      adbDatabases.value = [];
+      adbAdoptedSerial.value = false;
+    }
     if (profile.type === "dynamodb") {
       form.value.database = "us-east-1";
       form.value.connection_string = undefined;
@@ -4358,6 +4368,140 @@ const sqliteWorkerPlacementOptions = [
   },
 ] as const;
 const shouldShowSqliteSshWorkerInstallHint = computed(() => form.value.db_type === "sqlite" && sqliteUsesSsh.value && showAgentDriverInstallHint("sqlite", agentDrivers.value, form.value.driver_profile, { ssh: true }));
+
+// --- Android (ADB) connection state -------------------------------------
+const isAndroidAdb = computed(() => form.value.db_type === "android-adb");
+const adbDevices = ref<AdbDevice[]>([]);
+const adbPackages = ref<string[]>([]);
+const adbDatabases = ref<string[]>([]);
+const adbDevicesLoading = ref(false);
+const adbPackagesLoading = ref(false);
+const adbDatabasesLoading = ref(false);
+const adbPackageFilter = ref("");
+const adbAdoptedSerial = ref(false);
+
+const adbPath = computed({
+  get: () => getUrlParam(form.value.url_params, "adb_path"),
+  set: (value: string) => {
+    form.value.url_params = setUrlParam(form.value.url_params, "adb_path", value.trim());
+  },
+});
+const adbSerial = computed({
+  get: () => getUrlParam(form.value.url_params, "adb_serial"),
+  set: (value: string) => {
+    form.value.url_params = setUrlParam(form.value.url_params, "adb_serial", value);
+  },
+});
+const adbPackage = computed({
+  get: () => getUrlParam(form.value.url_params, "adb_package"),
+  set: (value: string) => {
+    form.value.url_params = setUrlParam(form.value.url_params, "adb_package", value);
+  },
+});
+const adbOnlineDevices = computed(() => adbDevices.value.filter((device) => device.state === "device"));
+
+function deviceLabel(device: AdbDevice): string {
+  const base = device.model ? `${device.serial} (${device.model})` : device.serial;
+  // adb native states: device / offline / unauthorized / unknown — show the
+  // raw state for anything that is not connected so a saved serial stays
+  // visible and selectable even when its device is currently unplugged.
+  return device.state === "device" ? base : `${base} · ${device.state}`;
+}
+const adbFilteredPackages = computed(() => {
+  const needle = adbPackageFilter.value.trim().toLowerCase();
+  if (!needle) return adbPackages.value;
+  return adbPackages.value.filter((pkg) => pkg.toLowerCase().includes(needle));
+});
+
+async function refreshAdbDevices() {
+  adbDevicesLoading.value = true;
+  try {
+    adbDevices.value = await api.listAdbDevices(adbPath.value || null);
+    if (!adbAdoptedSerial.value && adbSerial.value && !adbOnlineDevices.value.some((device) => device.serial === adbSerial.value)) {
+      adbDevices.value = [{ serial: adbSerial.value, state: "unknown", model: null }, ...adbDevices.value];
+    }
+    adbAdoptedSerial.value = true;
+  } catch (error) {
+    adbDevices.value = [];
+    throw error;
+  } finally {
+    adbDevicesLoading.value = false;
+  }
+}
+
+async function loadAdbPackages(serial: string) {
+  adbPackagesLoading.value = true;
+  try {
+    adbPackages.value = await api.listAdbPackages(adbPath.value || null, serial);
+  } catch (error) {
+    adbPackages.value = [];
+    throw error;
+  } finally {
+    adbPackagesLoading.value = false;
+  }
+}
+
+async function loadAdbDatabases(serial: string, pkg: string) {
+  adbDatabasesLoading.value = true;
+  try {
+    adbDatabases.value = await api.listAdbDatabases(adbPath.value || null, serial, pkg);
+  } catch (error) {
+    adbDatabases.value = [];
+    throw error;
+  } finally {
+    adbDatabasesLoading.value = false;
+  }
+}
+
+async function onAdbSerialChange(serial: string) {
+  adbSerial.value = serial;
+  adbPackage.value = "";
+  form.value.host = "";
+  adbPackages.value = [];
+  adbDatabases.value = [];
+  if (serial) await loadAdbPackages(serial);
+}
+
+async function onAdbPackageChange(pkg: string) {
+  adbPackage.value = pkg;
+  form.value.host = "";
+  adbDatabases.value = [];
+  const serial = adbSerial.value;
+  if (serial && pkg) await loadAdbDatabases(serial, pkg);
+}
+
+async function initAndroidAdbFields() {
+  const serial = adbSerial.value;
+  const pkg = adbPackage.value;
+  try {
+    await refreshAdbDevices();
+  } catch {
+    /* adb missing or unauthorized: keep the manual fields editable */
+  }
+  if (serial) {
+    try {
+      await loadAdbPackages(serial);
+    } catch {
+      /* device offline: keep manual entry */
+    }
+  }
+  if (serial && pkg) {
+    try {
+      await loadAdbDatabases(serial, pkg);
+    } catch {
+      /* keep manual entry */
+    }
+  }
+}
+
+watch(
+  isAndroidAdb,
+  (active) => {
+    if (active) void initAndroidAdbFields();
+  },
+  { immediate: true },
+);
+// --- End Android (ADB) state --------------------------------------------
 const shouldShowAgentDriverInstallHint = computed(() => {
   if (form.value.db_type === "sqlite" && sqliteUsesSsh.value) return false;
   return showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile, { ssh: sqliteUsesSsh.value });
@@ -8338,6 +8482,62 @@ function openExternalUrl(url: string) {
                       </div>
                       <SavePasswordCheckbox v-model="form.save_password" />
                     </template>
+                  </template>
+
+                  <!-- Android (ADB): device → debuggable package → database file -->
+                  <template v-else-if="form.db_type === 'android-adb'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.adbBinaryPath") }}</Label>
+                      <div class="col-span-3 flex items-center gap-1">
+                        <Input v-model="adbPath" class="flex-1" :placeholder="t('connection.adbBinaryPathPlaceholder')" />
+                        <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="adbDevicesLoading" @click="refreshAdbDevices">
+                          <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': adbDevicesLoading }" />
+                        </Button>
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.adbDevice") }}</Label>
+                      <Select :model-value="adbSerial" @update:model-value="(value) => onAdbSerialChange(String(value ?? ''))">
+                        <SelectTrigger class="col-span-3 h-9">
+                          <SelectValue :placeholder="adbDevicesLoading ? t('common.loading') : t('connection.adbDevicePlaceholder')" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem v-for="device in adbDevices" :key="device.serial" :value="device.serial">
+                            {{ deviceLabel(device) }}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelTopClass">{{ t("connection.adbPackage") }}</Label>
+                      <div class="col-span-3 space-y-2">
+                        <Input v-model="adbPackageFilter" :placeholder="t('connection.adbPackageFilterPlaceholder')" class="h-9" />
+                        <Select :model-value="adbPackage" :disabled="!adbSerial" @update:model-value="(value) => onAdbPackageChange(String(value ?? ''))">
+                          <SelectTrigger class="h-9">
+                            <SelectValue :placeholder="adbPackagesLoading ? t('common.loading') : t('connection.adbPackagePlaceholder')" />
+                          </SelectTrigger>
+                          <SelectContent class="max-h-64">
+                            <SelectItem v-for="pkg in adbFilteredPackages" :key="pkg" :value="pkg">{{ pkg }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs text-muted-foreground">{{ t("connection.adbPackageHint") }}</p>
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.adbDatabaseFile") }}</Label>
+                      <div class="col-span-3 space-y-1">
+                        <Select v-if="adbDatabases.length > 0" :model-value="form.host" @update:model-value="(value) => (form.host = String(value ?? ''))">
+                          <SelectTrigger class="h-9">
+                            <SelectValue :placeholder="adbDatabasesLoading ? t('common.loading') : t('connection.adbDatabasePlaceholder')" />
+                          </SelectTrigger>
+                          <SelectContent class="max-h-64">
+                            <SelectItem v-for="file in adbDatabases" :key="file" :value="file">{{ file }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <Input v-else v-model="form.host" :placeholder="t('connection.adbDatabaseManualPlaceholder')" />
+                        <p class="text-xs text-muted-foreground">{{ t("connection.adbDatabaseHint") }}</p>
+                      </div>
+                    </div>
                   </template>
 
                   <!-- Message Queue: admin URL and auth -->

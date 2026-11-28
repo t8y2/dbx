@@ -1366,6 +1366,9 @@ impl ConnectionConfig {
             DatabaseType::Sqlite | DatabaseType::DuckDb => {
                 format!("{}?mode=rwc", self.host)
             }
+            // Android (ADB): the "host" is the database file path inside the
+            // app data dir; adb transport parameters live in url_params.
+            DatabaseType::AndroidAdb => self.host.clone(),
             DatabaseType::Access => self.host.clone(),
             DatabaseType::Redis => {
                 let scheme = if self.ssl { "rediss" } else { "redis" };
@@ -1539,6 +1542,9 @@ impl ConnectionConfig {
             DatabaseType::Sqlite | DatabaseType::DuckDb => {
                 format!("{}?mode=rwc", self.host)
             }
+            // Android (ADB): the "host" is the database file path inside the
+            // app data dir; adb transport parameters live in url_params.
+            DatabaseType::AndroidAdb => self.host.clone(),
             DatabaseType::Access => self.host.clone(),
             DatabaseType::Redis => {
                 let scheme = if self.ssl { "rediss" } else { "redis" };

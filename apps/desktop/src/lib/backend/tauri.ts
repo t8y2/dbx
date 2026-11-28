@@ -1424,6 +1424,28 @@ export async function listSshConfigHosts(): Promise<SshConfigHostEntry[]> {
   return invoke("list_ssh_config_hosts");
 }
 
+export interface AdbDevice {
+  serial: string;
+  state: string;
+  model?: string | null;
+}
+
+export async function adbDetectBinary(configuredPath?: string | null): Promise<string | null> {
+  return invoke("adb_detect_binary", { configuredPath: configuredPath ?? null });
+}
+
+export async function listAdbDevices(configuredPath?: string | null): Promise<AdbDevice[]> {
+  return invoke("list_adb_devices", { configuredPath: configuredPath ?? null });
+}
+
+export async function listAdbPackages(configuredPath: string | null, serial: string): Promise<string[]> {
+  return invoke("list_adb_packages", { configuredPath: configuredPath ?? null, serial });
+}
+
+export async function listAdbDatabases(configuredPath: string | null, serial: string, packageName: string): Promise<string[]> {
+  return invoke("list_adb_databases", { configuredPath: configuredPath ?? null, serial, package: packageName });
+}
+
 export async function listLocalSshKeys(): Promise<LocalSshKey[]> {
   return invoke("list_local_ssh_keys");
 }

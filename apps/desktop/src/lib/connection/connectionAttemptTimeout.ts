@@ -7,6 +7,10 @@ export const MONGO_OIDC_BROWSER_AUTH_TIMEOUT_MS = 5 * 60_000;
 export const AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS = 30;
 export const ACCESS_AGENT_MIN_CONNECT_TIMEOUT_SECS = 30;
 const DEFAULT_CONNECT_TIMEOUT_SECS = 10;
+// Android (ADB) connections run a multi-step adb handshake (device probe,
+// worker install/verify, worker session, protocol open); each step is a
+// separate adb process invocation, so give the attempt a generous floor.
+const ANDROID_ADB_CONNECT_TIMEOUT_SECS = 45;
 
 const DRIVER_STARTUP_FLOOR_TYPES = new Set<DatabaseType>([
   "dameng",
@@ -77,6 +81,7 @@ export function connectionAttemptTimeoutMs(config: Pick<ConnectionConfig, "conne
   const baseTimeoutSecs = positiveSeconds(config.connect_timeout_secs, DEFAULT_CONNECT_TIMEOUT_SECS);
   const agentMinTimeoutSecs = config.db_type === "access" ? ACCESS_AGENT_MIN_CONNECT_TIMEOUT_SECS : AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS;
   let timeoutSecs = DRIVER_STARTUP_FLOOR_TYPES.has(config.db_type as DatabaseType) ? Math.max(baseTimeoutSecs, agentMinTimeoutSecs) : baseTimeoutSecs;
+  if (config.db_type === "android-adb") timeoutSecs = Math.max(timeoutSecs, ANDROID_ADB_CONNECT_TIMEOUT_SECS);
   let hasEnabledTransportLayer = false;
   for (const unresolvedLayer of config.transport_layers ?? []) {
     const layer = resolvedTimeoutLayer(unresolvedLayer, resolveTunnelProfile);

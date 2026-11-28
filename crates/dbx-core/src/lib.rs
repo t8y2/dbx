@@ -30,6 +30,8 @@ pub use dbx_drivers::agent_recovery;
 pub use dbx_drivers::agent_runtime;
 pub use dbx_drivers::agent_service;
 pub use dbx_drivers::backend_error;
+pub use dbx_drivers::db::adb_transport;
+pub use dbx_drivers::db::adb_worker;
 pub use dbx_drivers::oracle_oci;
 pub use host::changelog;
 pub use persistence::cloud_sync;

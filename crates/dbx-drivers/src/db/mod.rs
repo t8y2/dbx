@@ -1,4 +1,6 @@
 pub use dbx_driver_agent::agent_driver;
+pub mod adb_transport;
+pub mod adb_worker;
 pub mod clickhouse_driver;
 pub mod cloudberry;
 pub mod cloudflare_d1;

@@ -2253,6 +2253,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbx-android-worker"
+version = "0.1.0"
+dependencies = [
+ "dbx-sqlite-worker",
+ "serde_json",
+]
+
+[[package]]
 name = "dbx-cli"
 version = "0.4.146"
 dependencies = [

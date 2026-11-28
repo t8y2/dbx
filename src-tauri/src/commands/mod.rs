@@ -1,3 +1,4 @@
+pub mod adb;
 pub mod agents;
 pub mod ai;
 pub mod ai_multi_config;

@@ -67,6 +67,13 @@ profiles:
     port: 443
     user: ""
     category: lightweight
+  - id: android-adb
+    dbType: android-adb
+    label: Android (ADB)
+    icon: android-adb
+    port: 0
+    user: ""
+    category: lightweight
   - id: duckdb
     dbType: duckdb
     label: DuckDB

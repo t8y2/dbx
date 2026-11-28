@@ -12,18 +12,72 @@ use crate::protocol::{WorkerBody, WorkerOp, WorkerRequest, WorkerResponse};
 const MAX_BLOB_BYTES: usize = 512 * 1024;
 const MAX_RESPONSE_JSON_BYTES: usize = 8 * 1024 * 1024;
 
+/// Runtime knobs for a worker process. The default matches the historical
+/// stdio behavior so existing callers (local/SSH SQLite worker) keep working.
+#[derive(Debug, Clone)]
+pub struct RuntimeOptions {
+    pub busy_timeout: Duration,
+    /// Before the first write statement of the session, snapshot the database
+    /// file next to itself (`<db>.dbx-backup-<unix-ts>`). Older snapshots are
+    /// pruned to keep at most [`RuntimeOptions::backup_keep`] files.
+    pub backup_before_write: bool,
+    pub backup_keep: usize,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self { busy_timeout: Duration::from_secs(10), backup_before_write: false, backup_keep: 3 }
+    }
+}
+
+/// Mutable per-process worker state: the open connection plus session knobs.
+pub struct WorkerState {
+    connection: Option<Connection>,
+    options: RuntimeOptions,
+    database_path: Option<String>,
+    write_backup_done: bool,
+}
+
+impl WorkerState {
+    pub fn new(options: RuntimeOptions) -> Self {
+        Self { connection: None, options, database_path: None, write_backup_done: false }
+    }
+}
+
 pub fn run_stdio() -> Result<(), String> {
+    run_stdio_with_options(RuntimeOptions::default())
+}
+
+pub fn run_stdio_with_options(options: RuntimeOptions) -> Result<(), String> {
+    run_stdio_with_options_and_preopen(options, None)
+}
+
+/// Optionally opens the database before serving requests (`--db <path>`).
+pub fn run_stdio_with_options_and_preopen(options: RuntimeOptions, preopen_path: Option<String>) -> Result<(), String> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
-    let mut connection = None;
+    let mut state = WorkerState::new(options);
+    if let Some(path) = preopen_path {
+        let opened = open_database(&path, state.options.busy_timeout);
+        match opened {
+            Ok(conn) => {
+                state.connection = Some(conn);
+                state.database_path = Some(path);
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                return Err(error);
+            }
+        }
+    }
     for line in stdin.lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
         if line.trim().is_empty() {
             continue;
         }
         let request: WorkerRequest = serde_json::from_str(&line).map_err(|e| format!("invalid worker request: {e}"))?;
-        let response = handle(&mut connection, request);
+        let response = handle_with_state(&mut state, request);
         serde_json::to_writer(&mut stdout, &response).map_err(|e| e.to_string())?;
         stdout.write_all(b"\n").map_err(|e| e.to_string())?;
         stdout.flush().map_err(|e| e.to_string())?;
@@ -34,37 +88,60 @@ pub fn run_stdio() -> Result<(), String> {
     Ok(())
 }
 
-fn handle(connection: &mut Option<Connection>, request: WorkerRequest) -> WorkerResponse {
+fn handle_with_state(state: &mut WorkerState, request: WorkerRequest) -> WorkerResponse {
     let body = match request.op {
-        WorkerOp::Open { path } => match open_database(&path) {
+        WorkerOp::Open { path } => match open_database(&path, state.options.busy_timeout) {
             Ok(opened) => {
-                *connection = Some(opened);
+                state.connection = Some(opened);
+                state.database_path = Some(path);
+                state.write_backup_done = false;
                 WorkerBody::ok()
             }
             Err(error) => WorkerBody::err(error),
         },
-        WorkerOp::Query { sql, max_rows } => match connection.as_mut() {
-            Some(conn) => query(conn, &sql, max_rows.unwrap_or(10_000)),
+        WorkerOp::Query { sql, max_rows } => {
+            let options = state.options.clone();
+            let backup_done = state.write_backup_done;
+            let database_path = state.database_path.clone();
+            match state.connection.as_mut() {
+                Some(conn) => {
+                    let (body, backup_done) =
+                        query_with_state(conn, &options, backup_done, database_path.as_deref(), &sql, max_rows.unwrap_or(10_000));
+                    state.write_backup_done = backup_done;
+                    body
+                }
+                None => WorkerBody::err("SQLite worker has no open database"),
+            }
+        }
+        WorkerOp::Backup { dest } => match state.connection.as_mut() {
+            Some(conn) => backup(conn, &dest).map_or_else(WorkerBody::err, |_| WorkerBody::ok()),
             None => WorkerBody::err("SQLite worker has no open database"),
         },
-        WorkerOp::Backup { dest } => match connection.as_mut() {
-            Some(conn) => backup(conn, &dest),
-            None => WorkerBody::err("SQLite worker has no open database"),
-        },
-        WorkerOp::Restore { src } => match connection.as_mut() {
+        WorkerOp::Restore { src } => match state.connection.as_mut() {
             Some(conn) => restore(conn, &src),
             None => WorkerBody::err("SQLite worker has no open database"),
         },
         WorkerOp::Ping => WorkerBody::pong(),
         WorkerOp::Close => {
-            *connection = None;
+            state.connection = None;
+            state.database_path = None;
+            state.write_backup_done = false;
             WorkerBody::ok()
         }
     };
     WorkerResponse { id: request.id, body }
 }
 
-fn open_database(path: &str) -> Result<Connection, String> {
+/// Back-compat wrapper used by tests: default options, no session knobs.
+fn handle(connection: &mut Option<Connection>, request: WorkerRequest) -> WorkerResponse {
+    let mut state = WorkerState::new(RuntimeOptions::default());
+    state.connection = connection.take();
+    let response = handle_with_state(&mut state, request);
+    *connection = state.connection.take();
+    response
+}
+
+fn open_database(path: &str, busy_timeout: Duration) -> Result<Connection, String> {
     if path.trim().is_empty() {
         return Err("SQLite path is empty".to_string());
     }
@@ -76,10 +153,86 @@ fn open_database(path: &str) -> Result<Connection, String> {
         return Err(format!("File does not exist: {path}"));
     }
     let conn = Connection::open_with_flags(path, flags).map_err(|e| format!("failed to open SQLite file: {e}"))?;
-    conn.busy_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
+    conn.busy_timeout(busy_timeout).map_err(|e| e.to_string())?;
     Ok(conn)
 }
 
+fn query_with_state(
+    conn: &Connection,
+    options: &RuntimeOptions,
+    backup_done: bool,
+    database_path: Option<&str>,
+    sql: &str,
+    max_rows: usize,
+) -> (WorkerBody, bool) {
+    let trimmed = sql.trim();
+    if trimmed.is_empty() {
+        return (WorkerBody::err("SQL is empty"), backup_done);
+    }
+    if sqlite_statement_returns_rows(trimmed) {
+        return (query_statement(conn, trimmed, max_rows), backup_done);
+    }
+    // Non-row-returning statements are scripts/DDL/DML: a write session on
+    // this file starts here, so take the one-time safety snapshot first.
+    let mut backup_done = backup_done;
+    if options.backup_before_write && !backup_done {
+        match snapshot_before_write(conn, database_path, options.backup_keep) {
+            Ok(()) => backup_done = true,
+            Err(error) => return (WorkerBody::err(error), backup_done),
+        }
+    }
+    match conn.execute_batch(trimmed) {
+        Ok(()) => (WorkerBody::query(Vec::new(), Vec::new(), Vec::new(), conn.changes(), false), backup_done),
+        Err(error) => (WorkerBody::err(error.to_string()), backup_done),
+    }
+}
+
+/// Copy the live database into `<dir>/<name>.dbx-backup-<unix-ts>` and prune
+/// older snapshots of the same file, keeping at most `keep` of them.
+fn snapshot_before_write(conn: &Connection, database_path: Option<&str>, keep: usize) -> Result<(), String> {
+    let Some(path) = database_path else {
+        return Err("Write backup requested but the worker has no database path".to_string());
+    };
+    let file = Path::new(path);
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    let stem = file
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "database".to_string());
+    let unix_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    let dest = dir.join(format!("{stem}.dbx-backup-{unix_ts}"));
+    backup(conn, &dest.to_string_lossy())?;
+    prune_old_backups(dir, &stem, keep);
+    Ok(())
+}
+
+fn prune_old_backups(dir: &Path, stem: &str, keep: usize) {
+    let prefix = format!("{stem}.dbx-backup-");
+    let mut backups: Vec<(u64, std::path::PathBuf)> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let ts = name.strip_prefix(&prefix)?.parse::<u64>().ok()?;
+                Some((ts, entry.path()))
+            })
+            .collect(),
+        Err(_) => return,
+    };
+    if backups.len() <= keep {
+        return;
+    }
+    backups.sort_by_key(|(ts, _)| *ts);
+    let to_remove = backups.len() - keep;
+    for (_, path) in backups.into_iter().take(to_remove) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
 fn query(conn: &Connection, sql: &str, max_rows: usize) -> WorkerBody {
     let trimmed = sql.trim();
     if trimmed.is_empty() {
@@ -195,20 +348,20 @@ fn query_statement(conn: &Connection, sql: &str, max_rows: usize) -> WorkerBody 
     }
 }
 
-fn backup(conn: &Connection, dest: &str) -> WorkerBody {
+fn backup(conn: &Connection, dest: &str) -> Result<(), String> {
     if dest.trim().is_empty() || dest.contains('\0') {
-        return WorkerBody::err("Backup destination is invalid");
+        return Err("Backup destination is invalid".to_string());
     }
     if let Some(parent) = Path::new(dest).parent() {
         if !parent.as_os_str().is_empty() {
             if let Err(error) = std::fs::create_dir_all(parent) {
-                return WorkerBody::err(error.to_string());
+                return Err(error.to_string());
             }
         }
     }
     match conn.backup(DatabaseName::Main, dest, None) {
-        Ok(()) => WorkerBody::ok(),
-        Err(error) => WorkerBody::err(format!("SQLite backup failed: {error}")),
+        Ok(()) => Ok(()),
+        Err(error) => Err(format!("SQLite backup failed: {error}")),
     }
 }
 
@@ -441,6 +594,53 @@ mod tests {
         let hex = value.as_str().expect("hex string");
         assert!(hex.starts_with("0x"));
         assert_eq!(hex.len(), 2 + MAX_BLOB_BYTES * 2);
+    }
+
+    #[test]
+    fn first_write_takes_a_backup_when_enabled_and_prunes_old_ones() {
+        let dir = std::env::temp_dir().join(format!("dbx-sqlite-worker-backup-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("app.db");
+        rusqlite::Connection::open(&db).unwrap();
+        // Seed two pre-existing backups so pruning has something to remove.
+        for ts in [1000u64, 2000] {
+            std::fs::write(dir.join(format!("app.db.dbx-backup-{ts}")), b"old").unwrap();
+        }
+        let mut state = WorkerState::new(RuntimeOptions { busy_timeout: Duration::from_secs(1), backup_before_write: true, backup_keep: 3 });
+        let open = handle_with_state(
+            &mut state,
+            WorkerRequest { id: 1, op: WorkerOp::Open { path: db.to_string_lossy().into() } },
+        );
+        assert!(matches!(open.body, WorkerBody::Ok { .. }));
+        let write = handle_with_state(
+            &mut state,
+            WorkerRequest { id: 2, op: WorkerOp::Query { sql: "CREATE TABLE t(id INTEGER)".into(), max_rows: None } },
+        );
+        assert!(matches!(write.body, WorkerBody::Ok { .. }), "{write:?}");
+        let backups: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.contains(".dbx-backup-").then_some(name)
+            })
+            .collect();
+        assert_eq!(backups.len(), 3, "one fresh backup + two pruned to keep=3 with the 2 old seeds: {backups:?}");
+        // The fresh snapshot must be a valid SQLite file, not just a rename.
+        assert!(rusqlite::Connection::open(dir.join(backups.iter().find(|name| !name.starts_with("app.db.dbx-backup-1000")).unwrap())).is_ok());
+        // A second write does not create another snapshot.
+        let second = handle_with_state(
+            &mut state,
+            WorkerRequest { id: 3, op: WorkerOp::Query { sql: "INSERT INTO t VALUES (1)".into(), max_rows: None } },
+        );
+        assert!(matches!(second.body, WorkerBody::Ok { .. }));
+        let backups_after = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".dbx-backup-"))
+            .count();
+        assert_eq!(backups_after, 3);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn uuid_like() -> String {

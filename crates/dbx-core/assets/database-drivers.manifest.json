@@ -207,6 +207,44 @@
       }
     },
     {
+      "dbType": "android-adb",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
+      "label": "Android (ADB)",
+      "dialect": "SQLite",
+      "runtimeMode": "file",
+      "mcpMode": "unsupported",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "localFile": false,
+      "traits": {
+        "diagramSql": true
+      },
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": false,
+        "schemaSearch": true,
+        "diagram": true,
+        "tableDataEdit": true,
+        "tableStructureEdit": false,
+        "tableImport": true,
+        "dataTransfer": true,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": true,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
       "dbType": "cloudflare-d1",
       "compareModes": [
         "schema",

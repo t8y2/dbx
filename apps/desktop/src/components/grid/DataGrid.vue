@@ -92,6 +92,7 @@ import DataGridPagination from "@/components/grid/DataGridPagination.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 import DataGridToolbar from "@/components/grid/DataGridToolbar.vue";
 import DataGridVirtualRowIdentifier from "@/components/grid/DataGridVirtualRowIdentifier.vue";
+import DataGridVirtualForeignKeyDialog from "@/components/grid/DataGridVirtualForeignKeyDialog.vue";
 import DataGridExtractorDialog from "@/components/grid/DataGridExtractorDialog.vue";
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
 import { dataGridColumnSourceText } from "@/lib/dataGrid/columnSourceText";
@@ -365,7 +366,17 @@ import {
   type DataGridColumnSortState,
 } from "@/lib/dataGrid/dataGridContextMenu";
 import { clearAllColumnHighlights, clearColumnHighlight, computeColumnHighlightMatchKeys, hasColumnHighlight, isColumnDuplicateHighlightActive, isColumnNullHighlightActive, setColumnDuplicateHighlight, setColumnNullHighlight, type ColumnHighlightRule } from "@/lib/dataGrid/dataGridColumnHighlight";
-import { buildColumnForeignKeyMap, combineForeignKeyConditions, foreignKeyAssociationCells, foreignKeyNavigationTarget, foreignKeySourceColumnName, type ForeignKeyAssociation } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
+import {
+  buildColumnForeignKeyAssociationsMap,
+  combineForeignKeyConditions,
+  foreignKeyAssociationCells,
+  foreignKeyNavigationTarget,
+  foreignKeySourceColumnName,
+  formatForeignKeyTargetLabel,
+  isForeignKeyDatabaseTreeHierarchy,
+  type ForeignKeyAssociation,
+} from "@/lib/dataGrid/dataGridForeignKeyNavigation";
+import { virtualForeignKeysForConnection, virtualForeignKeysForTable, type PortableVirtualForeignKeyRule, type VirtualForeignKeyRule } from "@/lib/dataGrid/virtualForeignKeys";
 import {
   collectForeignKeyDisplayValues,
   createForeignKeyDisplayRequestCoordinator,
@@ -1275,6 +1286,10 @@ const gridSnapshotSource = ref<GridSnapshotSource | null>(null);
 const detailCell = ref<{ rowIndex: number; col: number } | null>(null);
 const hoveredDetailCell = ref<{ rowIndex: number; col: number } | null>(null);
 const quickDownloadMenuCell = ref<{ rowIndex: number; col: number } | null>(null);
+const foreignKeyMenuCell = ref<{ rowIndex: number; col: number } | null>(null);
+const virtualForeignKeyDialogOpen = ref(false);
+const virtualForeignKeyDialogColumn = ref("");
+const virtualForeignKeyDialogContext = ref<{ database: string; schema: string; catalog?: string; tableName: string; columns: string[] } | null>(null);
 const showCellDetail = ref(false);
 const showMongoJsonPreview = ref(false);
 const mongoJsonPreviewScope = ref<"selected" | "page">("selected");
@@ -3992,6 +4007,7 @@ watch(isScrolling, (scrolling) => {
   if (scrolling) {
     hoveredDetailCell.value = null;
     quickDownloadMenuCell.value = null;
+    foreignKeyMenuCell.value = null;
   }
 });
 
@@ -7677,6 +7693,7 @@ function onCellMouseenter(rowIndex: number, visibleColIdx: number, actualColIdx:
   stopReleasedSelectionGesture(event);
   if (!isSelectingCells.value) {
     quickDownloadMenuCell.value = retainBinaryCellDownloadMenuForHover(quickDownloadMenuCell.value, { rowIndex, col: actualColIdx });
+    foreignKeyMenuCell.value = retainBinaryCellDownloadMenuForHover(foreignKeyMenuCell.value, { rowIndex, col: actualColIdx });
     if (!isScrolling.value) hoveredDetailCell.value = { rowIndex, col: actualColIdx };
   }
   if (isCellSelectionDragConfirmed()) extendCellSelection(rowIndex, visibleColIdx);
@@ -7704,9 +7721,29 @@ function handleQuickDownloadMenuOpenChange(open: boolean, rowIndex: number, actu
   }
 }
 
+function foreignKeyMenuOpenFor(rowIndex: number, actualColIdx: number): boolean {
+  return foreignKeyMenuCell.value?.rowIndex === rowIndex && foreignKeyMenuCell.value.col === actualColIdx;
+}
+
+function handleForeignKeyMenuOpenChange(open: boolean, rowIndex: number, actualColIdx: number) {
+  if (open) {
+    foreignKeyMenuCell.value = { rowIndex, col: actualColIdx };
+    hoveredDetailCell.value = { rowIndex, col: actualColIdx };
+    return;
+  }
+  if (foreignKeyMenuOpenFor(rowIndex, actualColIdx)) {
+    foreignKeyMenuCell.value = null;
+  }
+}
+
 function cellDetailButtonVisible(rowIndex: number, actualColIdx: number) {
   if (isScrolling.value) return false;
-  return (hoveredDetailCell.value?.rowIndex === rowIndex && hoveredDetailCell.value.col === actualColIdx) || quickDownloadMenuOpenFor(rowIndex, actualColIdx) || (showCellDetail.value && detailCell.value?.rowIndex === rowIndex && detailCell.value.col === actualColIdx);
+  return (
+    (hoveredDetailCell.value?.rowIndex === rowIndex && hoveredDetailCell.value.col === actualColIdx) ||
+    quickDownloadMenuOpenFor(rowIndex, actualColIdx) ||
+    foreignKeyMenuOpenFor(rowIndex, actualColIdx) ||
+    (showCellDetail.value && detailCell.value?.rowIndex === rowIndex && detailCell.value.col === actualColIdx)
+  );
 }
 
 function affectedRowIds(): number[] {
@@ -9799,7 +9836,7 @@ const canvasReadonlyTextCellStyle = computed(() => {
 
 const canvasDetailButtonCell = computed(() => {
   if (!useCanvasGridRows.value || isScrolling.value) return null;
-  const target = hoveredDetailCell.value ?? quickDownloadMenuCell.value ?? (showCellDetail.value ? detailCell.value : null);
+  const target = hoveredDetailCell.value ?? quickDownloadMenuCell.value ?? foreignKeyMenuCell.value ?? (showCellDetail.value ? detailCell.value : null);
   if (!target || !cellDetailButtonVisible(target.rowIndex, target.col)) return null;
   const editing = editingCell.value;
   if (editing && editing.rowId === displayItems.value[target.rowIndex]?.id && editing.col === target.col) return null;
@@ -9812,7 +9849,8 @@ const canvasDetailButtonCell = computed(() => {
   const visibleLeft = Math.max(rowNumberWidth.value, rect.left);
   const visibleRight = viewportWidth > 0 ? Math.min(viewportWidth, rect.left + rect.width) : rect.left + rect.width;
   const canQuickDownload = canQuickDownloadCellValue(target.rowIndex, target.col);
-  const foreignKey = canvasCellForeignKey(target.rowIndex, target.col);
+  const foreignKeysForCell = canvasCellForeignKeys(target.rowIndex, target.col);
+  const foreignKey = foreignKeysForCell[0]?.foreignKey ?? null;
   const externalUrl = cellExternalUrl(displayItemAt(target.rowIndex)?.data[target.col]);
   if (!cellDetailButtonEnabled.value && !canQuickDownload && !foreignKey && !externalUrl) return null;
   const minWidth = canvasDataGridActionOverlayWidth(canQuickDownload, !!foreignKey, cellDetailButtonEnabled.value, !!externalUrl) + 2;
@@ -9824,6 +9862,7 @@ const canvasDetailButtonCell = computed(() => {
     rect,
     canQuickDownload,
     foreignKey,
+    foreignKeys: foreignKeysForCell,
     externalUrl,
   };
 });
@@ -10997,6 +11036,7 @@ function transposeCellEditorActive(recordIndex: number, valueIndex: number): boo
 
 function onTransposeCellMouseenter(rowIndex: number, actualColIdx: number) {
   quickDownloadMenuCell.value = retainBinaryCellDownloadMenuForHover(quickDownloadMenuCell.value, { rowIndex, col: actualColIdx });
+  foreignKeyMenuCell.value = retainBinaryCellDownloadMenuForHover(foreignKeyMenuCell.value, { rowIndex, col: actualColIdx });
   if (isScrolling.value) return;
   hoveredDetailCell.value = { rowIndex, col: actualColIdx };
 }
@@ -14788,20 +14828,93 @@ watch(
   { immediate: true },
 );
 
-// ---- 外键单元格跳转 ----
-const columnForeignKeyMap = computed(() => buildColumnForeignKeyMap(foreignKeys.value));
-const foreignKeyNavigationEnabled = computed(() => !!props.connectionId && !!props.tableMeta?.tableName && tableMetadataCapabilities.value.foreignKeys);
+// ---- 外键单元格跳转（含客户端虚拟外键） ----
+const foreignKeyDatabaseTreeHierarchy = computed(() =>
+  isForeignKeyDatabaseTreeHierarchy({
+    connection: props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined,
+    databaseType: resolvedDatabaseType.value,
+  }),
+);
+const currentVirtualForeignKeyTableContext = computed(() => {
+  if (!props.connectionId || !props.tableMeta?.tableName) return null;
+  return {
+    connectionId: props.connectionId,
+    database: props.tableMeta.database || props.database || "",
+    schema: props.tableMeta.schema || props.schema || "",
+    tableName: props.tableMeta.tableName,
+    databaseTreeHierarchy: foreignKeyDatabaseTreeHierarchy.value,
+  };
+});
+const connectionVirtualForeignKeys = computed<VirtualForeignKeyRule[]>(() => (props.connectionId ? virtualForeignKeysForConnection(settingsStore.editorSettings.virtualForeignKeys, props.connectionId) : []));
+const tableVirtualForeignKeys = computed<ForeignKeyInfo[]>(() => (currentVirtualForeignKeyTableContext.value ? virtualForeignKeysForTable(settingsStore.editorSettings.virtualForeignKeys, currentVirtualForeignKeyTableContext.value) : []));
+const columnForeignKeyAssociationsMap = computed(() => buildColumnForeignKeyAssociationsMap(foreignKeys.value, tableVirtualForeignKeys.value));
+const physicalForeignKeyFetchEnabled = computed(() => !!props.connectionId && !!props.tableMeta?.tableName && tableMetadataCapabilities.value.foreignKeys);
+const hasResolvedDisplaySourceTable = computed(() => props.context === "results" && !!props.queryDisplaySourceColumns?.some((ref) => !!ref?.tableName));
+const foreignKeyNavigationEnabled = computed(() => !!props.connectionId && ((!!props.tableMeta?.tableName && (tableMetadataCapabilities.value.foreignKeys || tableVirtualForeignKeys.value.length > 0)) || (hasResolvedDisplaySourceTable.value && connectionVirtualForeignKeys.value.length > 0)));
+const canConfigureVirtualForeignKeys = computed(() => !!props.connectionId && (!!props.tableMeta?.tableName || hasResolvedDisplaySourceTable.value));
+const virtualForeignKeySourceColumns = computed(() => {
+  const fromMeta = props.tableMeta?.columns.map((column) => column.name).filter(Boolean) ?? [];
+  if (fromMeta.length > 0) return fromMeta;
+  return [...new Set(props.result.columns.filter(Boolean))];
+});
 
-function cellForeignKeyAssociation(actualColIdx: number): ForeignKeyAssociation | null {
-  if (!foreignKeyNavigationEnabled.value) return null;
+function displaySourceMatchesTableMeta(ref: QueryResultSourceColumnRef | undefined): boolean {
+  if (!ref?.tableName || !props.tableMeta?.tableName) return false;
+  if (ref.tableName.trim().toLowerCase() !== props.tableMeta.tableName.trim().toLowerCase()) return false;
+  const refSchema = (ref.schema ?? "").trim().toLowerCase();
+  const metaSchema = (props.tableMeta.schema ?? props.schema ?? "").trim().toLowerCase();
+  if (refSchema && metaSchema && refSchema !== metaSchema) return false;
+  const refDb = (ref.database ?? "").trim().toLowerCase();
+  const metaDb = (props.tableMeta.database ?? props.database ?? "").trim().toLowerCase();
+  if (refDb && metaDb && refDb !== metaDb) return false;
+  return true;
+}
+
+function displaySourceForColumn(actualColIdx: number): QueryResultSourceColumnRef | undefined {
+  if (props.context !== "results" || actualColIdx < 0) return undefined;
+  return props.queryDisplaySourceColumns?.[actualColIdx];
+}
+
+function virtualForeignKeyContextForColumn(actualColIdx?: number) {
+  if (!props.connectionId) return null;
+  const displaySource = actualColIdx !== undefined ? displaySourceForColumn(actualColIdx) : undefined;
+  if (displaySource?.tableName) {
+    return {
+      connectionId: props.connectionId,
+      database: displaySource.database || props.database || props.tableMeta?.database || "",
+      schema: displaySource.schema || props.schema || props.tableMeta?.schema || "",
+      tableName: displaySource.tableName,
+      databaseTreeHierarchy: foreignKeyDatabaseTreeHierarchy.value,
+    };
+  }
+  return currentVirtualForeignKeyTableContext.value;
+}
+
+function cellForeignKeyAssociations(actualColIdx: number): ForeignKeyAssociation[] {
+  if (!foreignKeyNavigationEnabled.value) return [];
+  const displaySource = displaySourceForColumn(actualColIdx);
+  if (displaySource?.tableName && !displaySourceMatchesTableMeta(displaySource)) {
+    const columnContext = virtualForeignKeyContextForColumn(actualColIdx);
+    if (!columnContext) return [];
+    const columnVirtualFks = virtualForeignKeysForTable(settingsStore.editorSettings.virtualForeignKeys, columnContext);
+    if (columnVirtualFks.length === 0) return [];
+    return buildColumnForeignKeyAssociationsMap([], columnVirtualFks).get(displaySource.sourceColumn.toLowerCase()) ?? [];
+  }
   const columnName = foreignKeySourceColumnName({
     context: props.context,
     resultColumns: props.result.columns,
     sourceColumns: props.sourceColumns,
+    displaySourceColumns: props.queryDisplaySourceColumns,
+    expectedSourceKey: displaySource?.sourceKey,
+    expectedTableName: props.tableMeta?.tableName,
     columnIndex: actualColIdx,
   });
-  if (!columnName) return null;
-  return columnForeignKeyMap.value.get(columnName.toLowerCase()) ?? null;
+  if (!columnName) return [];
+  return columnForeignKeyAssociationsMap.value.get(columnName.toLowerCase()) ?? [];
+}
+
+function cellForeignKeyAssociation(actualColIdx: number): ForeignKeyAssociation | null {
+  return cellForeignKeyAssociations(actualColIdx)[0] ?? null;
 }
 
 function formatterForeignKeyForColumn(columnIndex: number): ForeignKeyInfo | undefined {
@@ -14941,19 +15054,46 @@ watch(
   { immediate: true },
 );
 
-function canvasCellForeignKey(rowIndex: number, actualColIdx: number): ForeignKeyInfo | null {
-  const association = cellForeignKeyAssociation(actualColIdx);
-  if (!association) return null;
+function canvasCellForeignKeys(rowIndex: number, actualColIdx: number): ForeignKeyAssociation[] {
+  const associations = cellForeignKeyAssociations(actualColIdx);
+  if (associations.length === 0) return [];
   const item = displayItems.value[rowIndex];
-  if (!item) return null;
-  const cells = foreignKeyAssociationCells({
-    association,
-    context: props.context,
-    resultColumns: props.result.columns,
-    sourceColumns: props.sourceColumns,
-    row: item.data,
-  });
-  return cells ? association.foreignKey : null;
+  if (!item) return [];
+  const displaySource = displaySourceForColumn(actualColIdx);
+  return associations.filter(
+    (association) =>
+      !!foreignKeyAssociationCells({
+        association,
+        context: props.context,
+        resultColumns: props.result.columns,
+        sourceColumns: props.sourceColumns,
+        displaySourceColumns: props.queryDisplaySourceColumns,
+        expectedSourceKey: displaySource?.sourceKey,
+        expectedTableName: displaySource?.tableName ?? props.tableMeta?.tableName,
+        row: item.data,
+      }),
+  );
+}
+
+function canvasCellForeignKey(rowIndex: number, actualColIdx: number): ForeignKeyInfo | null {
+  return canvasCellForeignKeys(rowIndex, actualColIdx)[0]?.foreignKey ?? null;
+}
+
+function foreignKeyTargetMenuLabel(association: ForeignKeyAssociation, actualColIdx?: number): string {
+  const displaySource = actualColIdx !== undefined ? displaySourceForColumn(actualColIdx) : undefined;
+  const target = formatForeignKeyTargetLabel(association.foreignKey, displaySource?.schema || props.tableMeta?.schema || props.schema);
+  return association.virtual ? `${target} (${t("grid.virtualForeignKeyBadge")})` : target;
+}
+
+function foreignKeyMenuItemsForCell(rowIndex: number, actualColIdx: number, associations: readonly ForeignKeyAssociation[]) {
+  return associations.map((association, index) => ({
+    label: foreignKeyTargetMenuLabel(association, actualColIdx),
+    value: `${index}:${association.foreignKey.name}:${association.foreignKey.ref_table}:${association.foreignKey.ref_column}`,
+    icon: association.virtual ? Link2 : ArrowUpRight,
+    onSelect: () => {
+      void navigateToForeignKeyCell(rowIndex, actualColIdx, association);
+    },
+  }));
 }
 
 // 外键跳转按钮需要 FK 元数据：表身份就绪即后台加载（fetchForeignKeys 自带去重，
@@ -14961,21 +15101,25 @@ function canvasCellForeignKey(rowIndex: number, actualColIdx: number): ForeignKe
 watch(
   () => [props.connectionId, props.database, props.tableMeta?.catalog, props.tableMeta?.schema, props.tableMeta?.tableName],
   () => {
-    if (foreignKeyNavigationEnabled.value) void fetchForeignKeys();
+    if (physicalForeignKeyFetchEnabled.value) void fetchForeignKeys();
   },
   { immediate: true },
 );
 
 /** Referenced table and the WHERE condition that selects the row a foreign-key cell points to. */
-async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number) {
-  const association = cellForeignKeyAssociation(actualColIdx);
+async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number, targetAssociation?: ForeignKeyAssociation) {
+  const association = targetAssociation ?? cellForeignKeyAssociation(actualColIdx);
   const item = displayItems.value[rowIndex];
   if (!association || !item || !props.connectionId) return null;
+  const displaySource = displaySourceForColumn(actualColIdx);
   let cells = foreignKeyAssociationCells({
     association,
     context: props.context,
     resultColumns: props.result.columns,
     sourceColumns: props.sourceColumns,
+    displaySourceColumns: props.queryDisplaySourceColumns,
+    expectedSourceKey: displaySource?.sourceKey,
+    expectedTableName: displaySource?.tableName ?? props.tableMeta?.tableName,
     row: item.data,
   });
   if (!cells) return null;
@@ -14988,13 +15132,14 @@ async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number)
     cells = cells.map((cell) => (resolvedRow.has(cell.columnIndex) ? { ...cell, value: resolvedRow.get(cell.columnIndex) ?? null } : cell));
     if (cells.some((cell) => cell.value === null)) throw new Error(t("grid.largeValueRowUnavailable"));
   }
+  const matchesTableMeta = !displaySource?.tableName || displaySourceMatchesTableMeta(displaySource);
   const conditions = await Promise.all(
     cells.map(({ foreignKey, value }) =>
       buildColumnValueFilterCondition({
         databaseType: resolvedDatabaseType.value,
         identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
         columnName: foreignKey.ref_column,
-        columnInfo: props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase()),
+        columnInfo: matchesTableMeta ? props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase()) : undefined,
         rawValue: String(value),
       }),
     ),
@@ -15003,8 +15148,8 @@ async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number)
   if (!condition) return null;
   return foreignKeyNavigationTarget({
     connectionId: props.connectionId,
-    database: props.database || props.tableMeta?.database || "",
-    currentSchema: props.tableMeta?.schema || props.schema,
+    database: displaySource?.database || props.database || props.tableMeta?.database || "",
+    currentSchema: displaySource?.schema || props.tableMeta?.schema || props.schema,
     fk: association.foreignKey,
     whereInput: condition,
     connection: connectionStore.getConfig(props.connectionId),
@@ -15012,9 +15157,9 @@ async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number)
   });
 }
 
-async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) {
+async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number, targetAssociation?: ForeignKeyAssociation) {
   try {
-    const target = await foreignKeyReferenceTarget(rowIndex, actualColIdx);
+    const target = await foreignKeyReferenceTarget(rowIndex, actualColIdx, targetAssociation);
     if (target) await openTableTarget(target);
   } catch (e: any) {
     toast(String(e?.message || e), 5000);
@@ -15080,28 +15225,107 @@ watch(
 function contextForeignKeyMenuItem(): ContextMenuItem | null {
   const cell = contextCell.value;
   if (!cell || cell.col < 0) return null;
-  const association = cellForeignKeyAssociation(cell.col);
   const item = contextRowItem.value;
-  if (
-    !association ||
-    !item ||
-    !foreignKeyAssociationCells({
-      association,
-      context: props.context,
-      resultColumns: props.result.columns,
-      sourceColumns: props.sourceColumns,
-      row: item.data,
-    })
-  )
-    return null;
-  const fk = association.foreignKey;
+  if (!item) return null;
+  const displaySource = displaySourceForColumn(cell.col);
+  const navigable = cellForeignKeyAssociations(cell.col).filter(
+    (association) =>
+      !!foreignKeyAssociationCells({
+        association,
+        context: props.context,
+        resultColumns: props.result.columns,
+        sourceColumns: props.sourceColumns,
+        displaySourceColumns: props.queryDisplaySourceColumns,
+        expectedSourceKey: displaySource?.sourceKey,
+        expectedTableName: displaySource?.tableName ?? props.tableMeta?.tableName,
+        row: item.data,
+      }),
+  );
+  if (navigable.length === 0) return null;
+  if (navigable.length === 1) {
+    const association = navigable[0]!;
+    return {
+      label: t("grid.foreignKeyNavigate", { table: association.foreignKey.ref_table }),
+      icon: ArrowUpRight,
+      action: () => {
+        void navigateToForeignKeyCell(cell.rowIndex, cell.col, association);
+      },
+    };
+  }
   return {
-    label: t("grid.foreignKeyNavigate", { table: fk.ref_table }),
+    label: t("grid.foreignKeyNavigateTargets"),
     icon: ArrowUpRight,
-    action: () => {
-      void navigateToForeignKeyCell(cell.rowIndex, cell.col);
-    },
+    children: navigable.map((association) => ({
+      label: foreignKeyTargetMenuLabel(association, cell.col),
+      icon: association.virtual ? Link2 : ArrowUpRight,
+      action: () => {
+        void navigateToForeignKeyCell(cell.rowIndex, cell.col, association);
+      },
+    })),
   };
+}
+
+function openVirtualForeignKeyDialog(columnIndex?: number) {
+  if (!canConfigureVirtualForeignKeys.value) return;
+  const displaySource = columnIndex !== undefined ? displaySourceForColumn(columnIndex) : undefined;
+  if (displaySource?.tableName && !displaySourceMatchesTableMeta(displaySource)) {
+    const sameSourceColumns = (props.queryDisplaySourceColumns ?? [])
+      .filter((ref): ref is QueryResultSourceColumnRef => !!ref?.sourceColumn && (displaySource.sourceKey ? ref.sourceKey === displaySource.sourceKey : ref.tableName?.trim().toLowerCase() === displaySource.tableName?.trim().toLowerCase()))
+      .map((ref) => ref.sourceColumn);
+    const uniqueColumns = [...new Set([displaySource.sourceColumn, ...sameSourceColumns])];
+    virtualForeignKeyDialogContext.value = {
+      database: displaySource.database || props.database || props.tableMeta?.database || "",
+      schema: displaySource.schema || props.schema || props.tableMeta?.schema || "",
+      tableName: displaySource.tableName,
+      columns: uniqueColumns,
+    };
+    virtualForeignKeyDialogColumn.value = displaySource.sourceColumn;
+    virtualForeignKeyDialogOpen.value = true;
+    return;
+  }
+  virtualForeignKeyDialogContext.value = null;
+  const resolvedColumn =
+    columnIndex !== undefined && columnIndex >= 0
+      ? foreignKeySourceColumnName({
+          context: props.context,
+          resultColumns: props.result.columns,
+          sourceColumns: props.sourceColumns,
+          displaySourceColumns: props.queryDisplaySourceColumns,
+          expectedSourceKey: displaySource?.sourceKey,
+          expectedTableName: props.tableMeta?.tableName,
+          columnIndex,
+        }) || ""
+      : "";
+  virtualForeignKeyDialogColumn.value = resolvedColumn || virtualForeignKeySourceColumns.value[0] || "";
+  virtualForeignKeyDialogOpen.value = true;
+}
+
+function contextVirtualForeignKeyMenuItem(): ContextMenuItem | null {
+  if (!canConfigureVirtualForeignKeys.value) return null;
+  const colIdx = contextCell.value && contextCell.value.col >= 0 ? contextCell.value.col : (contextHeaderColumnIndex.value ?? undefined);
+  if (colIdx === undefined || colIdx < 0) return null;
+  if (!virtualForeignKeyContextForColumn(colIdx)) return null;
+  return {
+    label: t("grid.virtualForeignKeyManage"),
+    icon: Link2,
+    action: () => openVirtualForeignKeyDialog(colIdx),
+  };
+}
+
+function saveVirtualForeignKey(rule: Omit<VirtualForeignKeyRule, "id">) {
+  settingsStore.upsertVirtualForeignKey(rule);
+  toast(t("grid.virtualForeignKeySaved"), 2500);
+}
+
+function removeVirtualForeignKey(id: string) {
+  settingsStore.removeVirtualForeignKey(id);
+  toast(t("grid.virtualForeignKeyRemoved"), 2500);
+}
+
+function importVirtualForeignKeysToConnection(rules: PortableVirtualForeignKeyRule[]) {
+  if (!props.connectionId) return;
+  const result = settingsStore.importVirtualForeignKeys(props.connectionId, rules);
+  toast(t("grid.virtualForeignKeyImported", { added: result.added, upgraded: result.upgraded }), 3000);
 }
 
 if (showTableInfo.value && props.tableMeta && props.connectionId) {
@@ -16094,6 +16318,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       deferDeleteToDangerousMenu: true,
       filterSubmenu: filterSubmenu(),
       highlightSubmenu: highlightSubmenu(),
+      virtualForeignKeyItem: contextVirtualForeignKeyMenuItem(),
     }),
     createDataGridCellContextMenuItems({
       hasCell: !!contextCell.value,
@@ -16132,6 +16357,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       importItem: binaryImportItem(contextCellDetail.value),
       downloadItem: binaryDownloadSubmenu(contextCellDetail.value),
       foreignKeyItem: contextForeignKeyMenuItem(),
+      virtualForeignKeyItem: contextVirtualForeignKeyMenuItem(),
       copySubmenu: copySubmenu(),
       pasteCellItem:
         !contextHeaderColumn.value && row && cellColumn >= 0 && canEditCellItem(row, cellColumn)
@@ -17761,8 +17987,23 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                         >
                           <ExternalLink class="h-3 w-3" />
                         </button>
+                        <LightDropdownMenu
+                          v-if="canvasDetailButtonCell.foreignKeys.length > 1"
+                          :items="foreignKeyMenuItemsForCell(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx, canvasDetailButtonCell.foreignKeys)"
+                          :open="foreignKeyMenuOpenFor(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)"
+                          align="end"
+                          content-class="w-56"
+                          :match-trigger-width="false"
+                          @update:open="(value: boolean) => handleForeignKeyMenuOpenChange(value, canvasDetailButtonCell!.rowIndex, canvasDetailButtonCell!.actualColIdx)"
+                        >
+                          <template #trigger="{ open, toggle }">
+                            <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.foreignKeyNavigateTargets')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
+                              <ArrowUpRight class="h-3 w-3" />
+                            </button>
+                          </template>
+                        </LightDropdownMenu>
                         <button
-                          v-if="canvasDetailButtonCell.foreignKey"
+                          v-else-if="canvasDetailButtonCell.foreignKey"
                           class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
                           :title="
                             t('grid.foreignKeyNavigate', {
@@ -17770,7 +18011,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                             })
                           "
                           @mousedown.stop
-                          @click.stop="navigateToForeignKeyCell(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)"
+                          @click.stop="navigateToForeignKeyCell(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx, canvasDetailButtonCell.foreignKeys[0])"
                         >
                           <ArrowUpRight class="h-3 w-3" />
                         </button>
@@ -18011,6 +18252,34 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                                 @click.stop="openCellExternalUrl(item.displayIndex, col.actualColIdx)"
                               >
                                 <ExternalLink class="h-3 w-3" />
+                              </button>
+                              <LightDropdownMenu
+                                v-if="canvasCellForeignKeys(item.displayIndex, col.actualColIdx).length > 1"
+                                :items="foreignKeyMenuItemsForCell(item.displayIndex, col.actualColIdx, canvasCellForeignKeys(item.displayIndex, col.actualColIdx))"
+                                :open="foreignKeyMenuOpenFor(item.displayIndex, col.actualColIdx)"
+                                align="end"
+                                content-class="w-56"
+                                :match-trigger-width="false"
+                                @update:open="(value: boolean) => handleForeignKeyMenuOpenChange(value, item.displayIndex, col.actualColIdx)"
+                              >
+                                <template #trigger="{ open, toggle }">
+                                  <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.foreignKeyNavigateTargets')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
+                                    <ArrowUpRight class="h-3 w-3" />
+                                  </button>
+                                </template>
+                              </LightDropdownMenu>
+                              <button
+                                v-else-if="canvasCellForeignKeys(item.displayIndex, col.actualColIdx).length === 1"
+                                class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                                :title="
+                                  t('grid.foreignKeyNavigate', {
+                                    table: canvasCellForeignKeys(item.displayIndex, col.actualColIdx)[0]!.foreignKey.ref_table,
+                                  })
+                                "
+                                @mousedown.stop
+                                @click.stop="navigateToForeignKeyCell(item.displayIndex, col.actualColIdx, canvasCellForeignKeys(item.displayIndex, col.actualColIdx)[0])"
+                              >
+                                <ArrowUpRight class="h-3 w-3" />
                               </button>
                               <button
                                 v-if="cellDetailButtonEnabled"
@@ -18694,6 +18963,23 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       :copy="copyAdvancedFormat"
     />
     <DataGridCopyColumnNamesDialog v-if="copyColumnNamesDialogMounted" v-model:open="copyColumnNamesDialogOpen" :column-names="copyColumnNamesDialogColumns" :database-type="resolvedDatabaseType" :column-comments="columnCommentMap" @copy="copyText" />
+    <DataGridVirtualForeignKeyDialog
+      v-if="canConfigureVirtualForeignKeys && virtualForeignKeyDialogOpen"
+      v-model:open="virtualForeignKeyDialogOpen"
+      :connection-id="props.connectionId || ''"
+      :database="virtualForeignKeyDialogContext?.database ?? (props.tableMeta?.database || props.database || '')"
+      :schema="virtualForeignKeyDialogContext?.schema ?? (props.tableMeta?.schema || props.schema || '')"
+      :catalog="virtualForeignKeyDialogContext ? virtualForeignKeyDialogContext.catalog : props.tableMeta?.catalog"
+      :table-name="virtualForeignKeyDialogContext?.tableName ?? (props.tableMeta?.tableName || '')"
+      :columns="virtualForeignKeyDialogContext?.columns ?? virtualForeignKeySourceColumns"
+      :initial-column="virtualForeignKeyDialogColumn"
+      :database-tree-hierarchy="foreignKeyDatabaseTreeHierarchy"
+      :rules="connectionVirtualForeignKeys"
+      @save="saveVirtualForeignKey"
+      @remove="removeVirtualForeignKey"
+      @import-rules="importVirtualForeignKeysToConnection"
+      @copy="copyText"
+    />
     <GridSnapshotDialog v-model:open="gridSnapshotOpen" :source="gridSnapshotSource" />
     <DataGridFilterModeOrderDialog v-model:open="filterModeOrderDialogOpen" :database-type="resolvedDatabaseType" :options="supportedFilterModeOptions" @saved="onFilterModeOrderSaved" />
 

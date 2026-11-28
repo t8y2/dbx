@@ -165,6 +165,7 @@ export function createDataGridColumnContextMenuItems(options: {
   };
   filterSubmenu: DataGridContextMenuItem;
   highlightSubmenu?: DataGridContextMenuItem;
+  virtualForeignKeyItem?: DataGridContextMenuItem | null;
 }): DataGridContextMenuItem[] {
   const items: DataGridContextMenuItem[] = [];
   if (options.headerColumn) {
@@ -174,6 +175,7 @@ export function createDataGridColumnContextMenuItems(options: {
     if (options.canCopyComment) items.push({ label: options.labels.copyComment, action: options.actions.copyComment, icon: options.icons.copy });
     items.push({ label: options.labels.copyNames, action: options.actions.copyNames, icon: options.icons.copy });
     items.push({ label: options.labels.details, action: options.actions.details, icon: options.icons.columnDetails });
+    if (options.virtualForeignKeyItem) items.push(options.virtualForeignKeyItem);
     if (options.canCopyAlterSql) items.push({ label: options.labels.copyAlterSql, action: options.actions.copyAlterSql, icon: options.icons.copy });
     if (options.highlightSubmenu) items.push({ label: "", separator: true }, options.highlightSubmenu);
   }
@@ -269,6 +271,7 @@ export function createDataGridCellContextMenuItems(options: {
   importItem?: DataGridContextMenuItem | null;
   downloadItem?: DataGridContextMenuItem | null;
   foreignKeyItem?: DataGridContextMenuItem | null;
+  virtualForeignKeyItem?: DataGridContextMenuItem | null;
   copySubmenu: DataGridContextMenuItem;
   pasteCellItem?: DataGridContextMenuItem | null;
   clearSelectionItem?: DataGridContextMenuItem;
@@ -283,6 +286,7 @@ export function createDataGridCellContextMenuItems(options: {
       if (options.importItem) items.push(options.importItem);
       if (options.downloadItem) items.push(options.downloadItem);
       if (options.foreignKeyItem) items.push(options.foreignKeyItem);
+      if (options.virtualForeignKeyItem) items.push(options.virtualForeignKeyItem);
       items.push({ label: options.labels.columnDetails, action: options.actions.columnDetails, icon: options.icons.columnDetails });
     }
     items.push({ label: options.labels.rowDetails, action: options.actions.rowDetails, icon: options.icons.rowDetails }, { label: "", separator: true });

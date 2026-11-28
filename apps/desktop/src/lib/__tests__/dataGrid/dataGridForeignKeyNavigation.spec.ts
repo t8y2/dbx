@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { buildColumnForeignKeyMap, combineForeignKeyConditions, foreignKeyAssociationCells, foreignKeyCellNavigable, foreignKeyMetadataRequestCurrent, foreignKeyNavigationTarget, foreignKeySourceColumnName, foreignKeyTableIdentity } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
+import {
+  buildColumnForeignKeyAssociationsMap,
+  buildColumnForeignKeyMap,
+  combineForeignKeyConditions,
+  foreignKeyAssociationCells,
+  foreignKeyCellNavigable,
+  foreignKeyMetadataRequestCurrent,
+  foreignKeyNavigationTarget,
+  foreignKeySourceColumnName,
+  foreignKeyTableIdentity,
+  formatForeignKeyTargetLabel,
+} from "@/lib/dataGrid/dataGridForeignKeyNavigation";
 import type { ForeignKeyInfo } from "@/types/database";
 
 function fk(overrides: Partial<ForeignKeyInfo> = {}): ForeignKeyInfo {
@@ -47,6 +58,60 @@ describe("foreignKeySourceColumnName", () => {
     expect(foreignKeySourceColumnName({ context: "results", resultColumns: ["customer_id"], columnIndex: 0 })).toBeUndefined();
   });
 
+  it("resuelve columnas en resultados SQL SELECT * o no editables mediante displaySourceColumns", () => {
+    const displaySourceColumns = [
+      { sourceKey: "t0", sourceColumn: "ID", schema: "PUBLIC", tableName: "DS_CUSTOMER" },
+      { sourceKey: "t0", sourceColumn: "DISPLAY_NAME", schema: "PUBLIC", tableName: "DS_CUSTOMER" },
+    ];
+    expect(
+      foreignKeySourceColumnName({
+        context: "results",
+        resultColumns: ["ID", "DISPLAY_NAME"],
+        sourceColumns: undefined,
+        displaySourceColumns,
+        expectedTableName: "DS_CUSTOMER",
+        columnIndex: 0,
+      }),
+    ).toBe("ID");
+    // Unmapped expression / aggregate stays undefined
+    expect(
+      foreignKeySourceColumnName({
+        context: "results",
+        resultColumns: ["ID"],
+        sourceColumns: undefined,
+        displaySourceColumns: [undefined],
+        expectedTableName: "DS_CUSTOMER",
+        columnIndex: 0,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("aisla columnas por sourceKey en consultas JOIN multitabla", () => {
+    const displaySourceColumns = [
+      { sourceKey: "o", sourceColumn: "ID", schema: "PUBLIC", tableName: "ORDERS" },
+      { sourceKey: "o", sourceColumn: "CUSTOMER_ID", schema: "PUBLIC", tableName: "ORDERS" },
+      { sourceKey: "c", sourceColumn: "ID", schema: "PUBLIC", tableName: "CUSTOMERS" },
+    ];
+    expect(
+      foreignKeySourceColumnName({
+        context: "results",
+        resultColumns: ["ID", "CUSTOMER_ID", "CID"],
+        displaySourceColumns,
+        expectedSourceKey: "c",
+        columnIndex: 0,
+      }),
+    ).toBeUndefined();
+    expect(
+      foreignKeySourceColumnName({
+        context: "results",
+        resultColumns: ["ID", "CUSTOMER_ID", "CID"],
+        displaySourceColumns,
+        expectedSourceKey: "c",
+        columnIndex: 2,
+      }),
+    ).toBe("ID");
+  });
+
   it("en datos de tabla usa el nombre visible si no hay binding separado", () => {
     expect(foreignKeySourceColumnName({ context: "table-data", resultColumns: ["customer_id"], columnIndex: 0 })).toBe("customer_id");
   });
@@ -90,6 +155,24 @@ describe("foreignKeyAssociationCells", () => {
         row: [42, null],
       }),
     ).toBeUndefined();
+  });
+
+  it("toma el valor exacto del sourceKey en resultados JOIN con columnas homónimas", () => {
+    const customerIdFk = buildColumnForeignKeyMap([fk({ name: "dbx_vfk:r1:rev", column: "ID", ref_table: "ORDERS", ref_column: "CUSTOMER_ID" })]).get("id")!;
+    const cells = foreignKeyAssociationCells({
+      association: customerIdFk,
+      context: "results",
+      resultColumns: ["ID", "CUSTOMER_ID", "CUST_ID"],
+      sourceColumns: undefined,
+      displaySourceColumns: [
+        { sourceKey: "o", sourceColumn: "ID", schema: "PUBLIC", tableName: "ORDERS" },
+        { sourceKey: "o", sourceColumn: "CUSTOMER_ID", schema: "PUBLIC", tableName: "ORDERS" },
+        { sourceKey: "c", sourceColumn: "ID", schema: "PUBLIC", tableName: "CUSTOMERS" },
+      ],
+      expectedSourceKey: "c",
+      row: [101, 7, 7],
+    });
+    expect(cells).toEqual([{ foreignKey: customerIdFk.foreignKey, columnIndex: 2, value: 7 }]);
   });
 });
 
@@ -249,5 +332,34 @@ describe("foreignKeyNavigationTarget", () => {
     });
     expect(target.database).toBe("other_db");
     expect(target.schema).toBeUndefined();
+  });
+});
+
+describe("buildColumnForeignKeyAssociationsMap with virtual foreign keys", () => {
+  it("keeps physical foreign keys first, deduplicates identical virtual targets, and retains extra virtual targets", () => {
+    const physical = [fk({ name: "fk_real_customer", column: "customer_id", ref_schema: "public", ref_table: "customers", ref_column: "id" })];
+    const virtual = [
+      fk({ name: "dbx_vfk:r1:fwd", column: "customer_id", ref_schema: "public", ref_table: "customers", ref_column: "id" }),
+      fk({ name: "dbx_vfk:r2:fwd", column: "customer_id", ref_schema: "crm", ref_table: "customer_profiles", ref_column: "customer_id" }),
+      fk({ name: "dbx_vfk:r3:rev", column: "id", ref_schema: "public", ref_table: "order_items", ref_column: "order_id" }),
+      fk({ name: "dbx_vfk:r4:rev", column: "id", ref_schema: "public", ref_table: "shipments", ref_column: "order_id" }),
+    ];
+
+    const map = buildColumnForeignKeyAssociationsMap(physical, virtual);
+    const customerTargets = map.get("customer_id") ?? [];
+    expect(customerTargets).toHaveLength(2);
+    expect(customerTargets[0]?.virtual).toBeUndefined();
+    expect(customerTargets[0]?.foreignKey.ref_table).toBe("customers");
+    expect(customerTargets[1]?.virtual).toBe(true);
+    expect(customerTargets[1]?.foreignKey.ref_table).toBe("customer_profiles");
+
+    const idTargets = map.get("id") ?? [];
+    expect(idTargets.map((item) => item.foreignKey.ref_table)).toEqual(["order_items", "shipments"]);
+    expect(idTargets.every((item) => item.virtual)).toBe(true);
+  });
+
+  it("formats target labels omitting the current schema when unchanged", () => {
+    expect(formatForeignKeyTargetLabel(fk({ ref_schema: "public", ref_table: "customers", ref_column: "id" }), "public")).toBe("customers.id");
+    expect(formatForeignKeyTargetLabel(fk({ ref_schema: "crm", ref_table: "customers", ref_column: "id" }), "public")).toBe("crm.customers.id");
   });
 });

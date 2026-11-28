@@ -1,5 +1,6 @@
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
+import { isVirtualForeignKeyName } from "@/lib/dataGrid/virtualForeignKeys";
 import type { DatabaseType, ForeignKeyInfo } from "@/types/database";
 import { isSchemaAware, usesDatabaseObjectTreeMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, type JdbcDialectConnection } from "@/lib/database/jdbcDialect";
@@ -7,6 +8,7 @@ import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnectio
 export interface ForeignKeyAssociation {
   foreignKey: ForeignKeyInfo;
   columnPairs: ForeignKeyInfo[];
+  virtual?: boolean;
 }
 
 export interface ForeignKeyAssociationCell {
@@ -15,29 +17,89 @@ export interface ForeignKeyAssociationCell {
   value: CellValue;
 }
 
+export interface ForeignKeyDisplaySourceColumnRef {
+  sourceKey?: string;
+  sourceColumn: string;
+  database?: string;
+  schema?: string;
+  tableName?: string;
+}
+
 function foreignKeyAssociationKey(foreignKey: ForeignKeyInfo): string {
   return JSON.stringify([foreignKey.name, foreignKey.ref_schema ?? "", foreignKey.ref_table, foreignKey.on_update ?? "", foreignKey.on_delete ?? ""]);
 }
 
-/** 列名（小写）→ 外键 association。同列出现在多个 association 时保留第一条。 */
-export function buildColumnForeignKeyMap(foreignKeys: ForeignKeyInfo[]): Map<string, ForeignKeyAssociation> {
+function singleColumnTargetSignature(association: ForeignKeyAssociation): string | null {
+  if (association.columnPairs.length !== 1) return null;
+  const fk = association.foreignKey;
+  return [(fk.ref_schema ?? "").trim().toLowerCase(), fk.ref_table.trim().toLowerCase(), fk.ref_column.trim().toLowerCase()].join("\u0000");
+}
+
+function collectAssociations(foreignKeys: readonly ForeignKeyInfo[], virtual: boolean): ForeignKeyAssociation[] {
   const associations = new Map<string, ForeignKeyAssociation>();
   for (const fk of foreignKeys) {
     if (!fk.column || !fk.ref_table || !fk.ref_column) continue;
     const associationKey = foreignKeyAssociationKey(fk);
     const association = associations.get(associationKey);
     if (association) association.columnPairs.push(fk);
-    else associations.set(associationKey, { foreignKey: fk, columnPairs: [fk] });
-  }
-
-  const map = new Map<string, ForeignKeyAssociation>();
-  for (const association of associations.values()) {
-    for (const foreignKey of association.columnPairs) {
-      const columnKey = foreignKey.column.toLowerCase();
-      if (!map.has(columnKey)) map.set(columnKey, association);
+    else {
+      associations.set(associationKey, {
+        foreignKey: fk,
+        columnPairs: [fk],
+        ...(virtual || isVirtualForeignKeyName(fk.name) ? { virtual: true } : {}),
+      });
     }
   }
+  return [...associations.values()];
+}
+
+/** 列名（小写）→ 全部可跳转外键 association 列表（物理外键优先，虚拟外键按目标去重后追加）。 */
+export function buildColumnForeignKeyAssociationsMap(physicalForeignKeys: readonly ForeignKeyInfo[], virtualForeignKeys: readonly ForeignKeyInfo[] = []): Map<string, ForeignKeyAssociation[]> {
+  const map = new Map<string, ForeignKeyAssociation[]>();
+  const seenTargetsByColumn = new Map<string, Set<string>>();
+
+  const append = (associations: readonly ForeignKeyAssociation[]) => {
+    for (const association of associations) {
+      const targetSig = singleColumnTargetSignature(association);
+      for (const foreignKey of association.columnPairs) {
+        const columnKey = foreignKey.column.toLowerCase();
+        let list = map.get(columnKey);
+        if (!list) {
+          list = [];
+          map.set(columnKey, list);
+        }
+        let seen = seenTargetsByColumn.get(columnKey);
+        if (!seen) {
+          seen = new Set<string>();
+          seenTargetsByColumn.set(columnKey, seen);
+        }
+        if (targetSig && seen.has(targetSig)) continue;
+        if (list.includes(association)) continue;
+        list.push(association);
+        if (targetSig) seen.add(targetSig);
+      }
+    }
+  };
+
+  append(collectAssociations(physicalForeignKeys, false));
+  append(collectAssociations(virtualForeignKeys, true));
   return map;
+}
+
+/** 列名（小写）→ 外键 association。同列出现在多个 association 时保留第一条。 */
+export function buildColumnForeignKeyMap(foreignKeys: ForeignKeyInfo[], virtualForeignKeys: ForeignKeyInfo[] = []): Map<string, ForeignKeyAssociation> {
+  const all = buildColumnForeignKeyAssociationsMap(foreignKeys, virtualForeignKeys);
+  const map = new Map<string, ForeignKeyAssociation>();
+  for (const [columnKey, associations] of all) {
+    if (associations[0]) map.set(columnKey, associations[0]);
+  }
+  return map;
+}
+
+export function formatForeignKeyTargetLabel(fk: ForeignKeyInfo, currentSchema?: string): string {
+  const refSchema = fk.ref_schema?.trim();
+  const showSchema = !!refSchema && refSchema.toLowerCase() !== (currentSchema ?? "").trim().toLowerCase();
+  return `${showSchema ? `${refSchema}.` : ""}${fk.ref_table}.${fk.ref_column}`;
 }
 
 /** NULL/undefined 没有可跳转的目标记录；0、空串、false 都是合法外键值 */
@@ -45,19 +107,57 @@ export function foreignKeyCellNavigable(value: CellValue | undefined): value is 
   return value !== null && value !== undefined;
 }
 
-export function foreignKeySourceColumnName(options: { context?: "results" | "table-data"; resultColumns: readonly string[]; sourceColumns?: readonly (string | undefined)[]; columnIndex: number }): string | undefined {
+export function foreignKeySourceColumnName(options: {
+  context?: "results" | "table-data";
+  resultColumns: readonly string[];
+  sourceColumns?: readonly (string | undefined)[];
+  displaySourceColumns?: readonly (ForeignKeyDisplaySourceColumnRef | undefined)[];
+  expectedSourceKey?: string;
+  expectedTableName?: string;
+  columnIndex: number;
+}): string | undefined {
+  const displaySource = options.displaySourceColumns?.[options.columnIndex];
+  if (options.expectedSourceKey) {
+    if (displaySource?.sourceColumn) {
+      if (displaySource.sourceKey && displaySource.sourceKey !== options.expectedSourceKey) return undefined;
+      return displaySource.sourceColumn;
+    }
+    if (options.context === "results") return undefined;
+  }
+
   const sourceColumn = options.sourceColumns?.[options.columnIndex] || undefined;
-  if (sourceColumn || options.context === "results") return sourceColumn;
+  if (sourceColumn) return sourceColumn;
+
+  if (displaySource?.sourceColumn) {
+    if (options.expectedTableName && displaySource.tableName && displaySource.tableName.trim().toLowerCase() !== options.expectedTableName.trim().toLowerCase()) {
+      return undefined;
+    }
+    return displaySource.sourceColumn;
+  }
+
+  if (options.context === "results") return undefined;
   return options.resultColumns[options.columnIndex] || undefined;
 }
 
-export function foreignKeyAssociationCells(options: { association: ForeignKeyAssociation; context?: "results" | "table-data"; resultColumns: readonly string[]; sourceColumns?: readonly (string | undefined)[]; row: readonly (CellValue | undefined)[] }): ForeignKeyAssociationCell[] | undefined {
+export function foreignKeyAssociationCells(options: {
+  association: ForeignKeyAssociation;
+  context?: "results" | "table-data";
+  resultColumns: readonly string[];
+  sourceColumns?: readonly (string | undefined)[];
+  displaySourceColumns?: readonly (ForeignKeyDisplaySourceColumnRef | undefined)[];
+  expectedSourceKey?: string;
+  expectedTableName?: string;
+  row: readonly (CellValue | undefined)[];
+}): ForeignKeyAssociationCell[] | undefined {
   const sourceColumnIndexes = new Map<string, number>();
   for (let columnIndex = 0; columnIndex < options.resultColumns.length; columnIndex += 1) {
     const sourceColumn = foreignKeySourceColumnName({
       context: options.context,
       resultColumns: options.resultColumns,
       sourceColumns: options.sourceColumns,
+      displaySourceColumns: options.displaySourceColumns,
+      expectedSourceKey: options.expectedSourceKey,
+      expectedTableName: options.expectedTableName,
       columnIndex,
     });
     if (sourceColumn && !sourceColumnIndexes.has(sourceColumn.toLowerCase())) sourceColumnIndexes.set(sourceColumn.toLowerCase(), columnIndex);
@@ -89,7 +189,7 @@ export function foreignKeyMetadataRequestCurrent(options: { requestGeneration: n
   return options.requestGeneration === options.currentGeneration && options.requestIdentity === options.currentIdentity;
 }
 
-function isDatabaseTreeHierarchy(options: { connection?: JdbcDialectConnection; databaseType?: DatabaseType }): boolean {
+export function isForeignKeyDatabaseTreeHierarchy(options: { connection?: JdbcDialectConnection; databaseType?: DatabaseType }): boolean {
   const type = options.connection ? (effectiveDatabaseTypeForConnection(options.connection) ?? options.databaseType) : options.databaseType;
   if (type) {
     return !isSchemaAware(type) || (options.connection ? connectionUsesDatabaseObjectTreeMode(options.connection) : usesDatabaseObjectTreeMode(type));
@@ -105,7 +205,7 @@ function isDatabaseTreeHierarchy(options: { connection?: JdbcDialectConnection; 
  * - 模式感知数据库（如 PostgreSQL / SQL Server）：database 保持当前库，ref_schema 承载模式名（缺失时回退当前 schema，同 ER 图）
  */
 export function foreignKeyNavigationTarget(options: { connectionId: string; database: string; currentSchema?: string; fk: ForeignKeyInfo; whereInput?: string; connection?: JdbcDialectConnection; databaseType?: DatabaseType }): NavigationTarget {
-  const isDbTree = isDatabaseTreeHierarchy(options);
+  const isDbTree = isForeignKeyDatabaseTreeHierarchy(options);
   if (isDbTree) {
     const database = options.fk.ref_schema?.trim() || options.database;
     return {

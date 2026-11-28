@@ -650,6 +650,7 @@ profiles:
     icon: iotdb
     port: 6667
     user: root
+    urlParams: sql_dialect=table
     category: timeseries
   - id: etcd
     dbType: etcd

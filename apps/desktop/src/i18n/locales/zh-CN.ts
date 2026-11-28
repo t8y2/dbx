@@ -11695,6 +11695,7 @@ export default withEnglishFallback({
     shortcutConflictBlocksApply: "存在 {count} 项同作用域冲突（{pairs} 组重复）",
     shortcutPressShortcut: "按下快捷键",
     shortcutModifierDoubleTapHint: "可按下组合键，或快速按下并松开同一个修饰键两次（如 Shift、Cmd、Ctrl、Alt）。",
+    shortcutPresets: "快捷键模板",
     shortcutSearchPlaceholder: "搜索快捷键",
     shortcutSearchNoResults: "没有匹配的快捷键。",
     shortcutRecordKeys: "录制组合键",

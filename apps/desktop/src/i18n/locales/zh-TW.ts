@@ -9245,6 +9245,7 @@ export default withEnglishFallback({
     shortcutConflictBlocksApply: "存在 {count} 項同作用域衝突（{pairs} 組重複）",
     shortcutPressShortcut: "按下快速鍵",
     shortcutModifierDoubleTapHint: "可按下組合鍵，或快速按下並放開同一個修飾鍵兩次（如 Shift、Cmd、Ctrl、Alt）。",
+    shortcutPresets: "快速鍵範本",
     shortcutSearchPlaceholder: "搜尋快速鍵",
     shortcutSearchNoResults: "沒有符合的快速鍵。",
     shortcutRecordKeys: "錄製組合鍵",

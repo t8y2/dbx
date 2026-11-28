@@ -11824,6 +11824,7 @@ export default withEnglishFallback({
     shortcutConflictBlocksApply: "{count} конфликтов в одной области ({pairs} дублирующихся пар)",
     shortcutPressShortcut: "Нажмите сочетание клавиш",
     shortcutModifierDoubleTapHint: "Нажмите сочетание клавиш или быстро нажмите и отпустите одну и ту же клавишу-модификатор дважды (Shift, Cmd, Ctrl, Alt).",
+    shortcutPresets: "Шаблоны сочетаний клавиш",
     shortcutSearchPlaceholder: "Поиск сочетаний клавиш",
     shortcutSearchNoResults: "Нет сочетаний клавиш, соответствующих запросу.",
     shortcutRecordKeys: "Записать клавиши",

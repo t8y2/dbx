@@ -12194,6 +12194,7 @@ export default withEnglishFallback({
     shortcutConflictBlocksApply: "มีความขัดแย้ง {count} รายการในขอบเขตเดียว ({pairs} คู่ที่ซ้ำกัน)",
     shortcutPressShortcut: "กดทางลัด",
     shortcutModifierDoubleTapHint: "กดชุดคีย์ หรือกดแล้วปล่อย Modifier เดิมสองครั้งอย่างรวดเร็ว (เช่น Shift, Cmd, Ctrl, Alt)",
+    shortcutPresets: "ชุดปุ่มลัดสำเร็จรูป",
     shortcutSearchPlaceholder: "ค้นหาทางลัด",
     shortcutSearchNoResults: "ไม่มีทางลัดที่ตรงกับการค้นหา",
     shortcutConflict: "ทางลัดนี้ขัดแย้งกับการดำเนินการอื่นในขอบเขตเดียวกัน",

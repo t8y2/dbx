@@ -8791,6 +8791,7 @@ export default withEnglishFallback({
     shortcutConflictBlocksApply: "Eyni əhatə dairəsində {count} toqquşma var ({pairs} təkrarlanan cüt)",
     shortcutPressShortcut: "Qısayol düymələrini bas",
     shortcutModifierDoubleTapHint: "Düymə kombinasiyasını basın və ya eyni dəyişdirici düyməni sürətlə iki dəfə basıb buraxın (Shift, Cmd, Ctrl, Alt).",
+    shortcutPresets: "Qısayol şablonları",
     shortcutSearchPlaceholder: "Qısayolları axtar",
     shortcutSearchNoResults: "Axtarışınıza uyğun qısayol yoxdur.",
     shortcutRecordKeys: "Qısayol düymələrini yaz",

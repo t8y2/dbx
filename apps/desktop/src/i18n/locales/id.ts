@@ -9605,6 +9605,7 @@ export default withEnglishFallback({
     shortcutConflictBlocksApply: "{count} konflik dalam satu cakupan ({pairs} pasangan duplikat)",
     shortcutPressShortcut: "Tekan pintasan",
     shortcutModifierDoubleTapHint: "Tekan kombinasi tombol, atau tekan dan lepaskan tombol pengubah yang sama dua kali dengan cepat (Shift, Cmd, Ctrl, Alt).",
+    shortcutPresets: "Prasetel pintasan",
     shortcutSearchPlaceholder: "Cari pintasan",
     shortcutSearchNoResults: "Tidak ada pintasan yang cocok dengan pencarian Anda.",
     shortcutRecordKeys: "Rekam tombol",

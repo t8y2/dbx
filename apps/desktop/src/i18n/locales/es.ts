@@ -10443,6 +10443,7 @@ export default withEnglishFallback({
     shortcutConflictBlocksApply: "Hay {count} conflictos en un mismo ámbito ({pairs} pares duplicados)",
     shortcutPressShortcut: "Presiona un atajo",
     shortcutModifierDoubleTapHint: "Pulsa una combinación de teclas o pulsa y suelta rápidamente el mismo modificador dos veces (Shift, Cmd, Ctrl, Alt).",
+    shortcutPresets: "Preajustes de atajos",
     shortcutSearchPlaceholder: "Buscar atajos",
     shortcutSearchNoResults: "Ningún atajo coincide con la búsqueda.",
     shortcutRecordKeys: "Grabar teclas",

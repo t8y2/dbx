@@ -279,6 +279,8 @@ import {
   findShortcutConflict,
   isReservedShortcut,
   normalizeShortcutSettings,
+  shortcutSettingsForPreset,
+  type ShortcutPreset,
   resolveCapturedShortcutEdit,
   type ShortcutActionId,
   type ShortcutDefinition,
@@ -286,6 +288,7 @@ import {
 } from "@/lib/editor/shortcutRegistry";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { formatShortcutDisplay, normalizeShortcutSearch } from "@/lib/editor/shortcutDisplay";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { COLUMN_NAME_COPY_SEPARATOR_LABELS, COLUMN_NAME_COPY_SEPARATOR_OPTIONS, isColumnNameCopySeparator, type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletions";
@@ -3817,6 +3820,12 @@ function setDoubleClickStringSelectionMode(value: unknown) {
 
 function setIconTheme(value: DesktopIconTheme) {
   editIconTheme.value = value;
+}
+
+function applyShortcutPreset(preset: ShortcutPreset) {
+  cancelShortcutEdit();
+  modifierDoubleTapRecorder.reset();
+  editShortcuts.value = shortcutSettingsForPreset(preset);
 }
 
 function onShortcutChange(actionId: ShortcutActionId, value: any) {
@@ -11856,6 +11865,19 @@ onUnmounted(() => {
                   <Search class="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input v-model="shortcutSearchQuery" autocomplete="off" :placeholder="t('settings.shortcutSearchPlaceholder')" class="h-9 pl-9 text-sm" />
                 </div>
+                <DropdownMenu>
+                  <DropdownMenuTrigger as-child>
+                    <Button type="button" variant="outline" size="sm" class="h-9 shrink-0">
+                      {{ t("settings.shortcutPresets") }}
+                      <ChevronDown class="h-3.5 w-3.5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem @select="applyShortcutPreset('dbx')">DBX · {{ t("common.default") }}</DropdownMenuItem>
+                    <DropdownMenuItem @select="applyShortcutPreset('jetbrains')">JetBrains</DropdownMenuItem>
+                    <DropdownMenuItem @select="applyShortcutPreset('eclipse')">Eclipse</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
                 <!-- #11787：VS Code 式键盘录入。data-shortcut-recorder 只在录入态渲染：
                      App.vue 的两个 capture 阶段全局快捷键处理器按「焦点元素是否带该属性」
                      决定让路，非录入态焦点停在这个按钮上的行为与普通按钮一致。 -->

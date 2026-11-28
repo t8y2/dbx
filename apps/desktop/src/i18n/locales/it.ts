@@ -10172,6 +10172,7 @@ export default withEnglishFallback({
     shortcutConflictBlocksApply: "Ci sono {count} conflitti nello stesso ambito ({pairs} coppie duplicate)",
     shortcutPressShortcut: "Premi scorciatoia",
     shortcutModifierDoubleTapHint: "Premi una combinazione di tasti oppure premi e rilascia rapidamente lo stesso modificatore due volte (Shift, Cmd, Ctrl, Alt).",
+    shortcutPresets: "Preimpostazioni delle scorciatoie",
     shortcutSearchPlaceholder: "Cerca scorciatoie",
     shortcutSearchNoResults: "Nessuna scorciatoia corrisponde alla ricerca.",
     shortcutRecordKeys: "Registra tasti",

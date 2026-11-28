@@ -9978,6 +9978,7 @@ export default withEnglishFallback({
     shortcutConflictBlocksApply: "{count} konfliktów w ramach jednego zakresu ({pairs} zduplikowanych par)",
     shortcutPressShortcut: "Naciśnij skrót",
     shortcutModifierDoubleTapHint: "Naciśnij kombinację klawiszy albo szybko dwukrotnie naciśnij i zwolnij ten sam klawisz modyfikujący (np. Shift, Cmd, Ctrl lub Alt).",
+    shortcutPresets: "Zestawy skrótów",
     shortcutSearchPlaceholder: "Szukaj skrótów",
     shortcutSearchNoResults: "Żadne skróty nie pasują do wyszukiwania.",
     shortcutRecordKeys: "Nagrywanie klawiszy",

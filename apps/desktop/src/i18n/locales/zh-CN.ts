@@ -12647,6 +12647,7 @@ export default withEnglishFallback({
     includeStructure: "表结构 (DDL)",
     includeCreateDatabase: "导出建库语句（CREATE DATABASE / USE）",
     dropTableIfExists: "导出前添加 DROP TABLE IF EXISTS",
+    dropTableIfExistsWithoutObjects: "未勾选「视图 / 存储过程 / 函数 / 序列」时，还原会连带删除目标库中依赖这些表的视图，且不会重建（DROP TABLE … CASCADE）。",
     omitAutoIncrement: "省略 AUTO_INCREMENT（用于全新安装的初始化脚本）",
     omitDatabaseQualifier: "表名省略库名前缀",
     preserveOriginalLanguage: "在 SQL 中保留原始语言（解码 \\uXXXX 转义）",

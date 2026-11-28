@@ -12690,6 +12690,7 @@ export default {
     includeStructure: "Table structure (DDL)",
     includeCreateDatabase: "Include database setup (CREATE DATABASE / USE)",
     dropTableIfExists: "Add DROP TABLE IF EXISTS before DDL",
+    dropTableIfExistsWithoutObjects: "With views/procedures/functions/sequences excluded, the restore also drops existing views that depend on these tables and does not recreate them (DROP TABLE … CASCADE).",
     omitAutoIncrement: "Omit AUTO_INCREMENT (for fresh-install scripts)",
     omitDatabaseQualifier: "Omit database prefix in table names",
     preserveOriginalLanguage: "Preserve original language in SQL (decode \\uXXXX escapes)",

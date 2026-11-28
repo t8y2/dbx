@@ -11659,6 +11659,7 @@ export default withEnglishFallback({
     includeStructure: "テーブル構造 (DDL)",
     includeCreateDatabase: "データベース作成文を含める（CREATE DATABASE / USE）",
     dropTableIfExists: "DDLの前にDROP TABLE IF EXISTSを追加",
+    dropTableIfExistsWithoutObjects: "ビュー/ストアドプロシージャ/関数/シーケンスを選択していない場合、復元時にこれらのテーブルに依存する既存のビューも削除され、再作成されません（DROP TABLE … CASCADE）。",
     omitAutoIncrement: "AUTO_INCREMENT を省略（新規インストール用スクリプト向け）",
     omitDatabaseQualifier: "テーブル名からDB名の接頭辞を省略",
     preserveOriginalLanguage: "元の言語を SQL に保持する（\\uXXXX エスケープをデコード）",

@@ -440,6 +440,9 @@ watch(
         <label class="flex items-center gap-2 text-sm"><input v-model="draft.includeObjects" type="checkbox" class="h-4 w-4 accent-primary" />{{ t("databaseExport.includeObjects") }}</label>
         <label class="flex items-center gap-2 text-sm"><input v-model="draft.dropTableIfExists" type="checkbox" class="h-4 w-4 accent-primary" />{{ t("databaseExport.dropTableIfExists") }}</label>
       </div>
+      <p v-if="selectedConnectionType === 'postgres' && draft.dropTableIfExists && !draft.includeObjects" class="text-xs text-muted-foreground">
+        {{ t("databaseExport.dropTableIfExistsWithoutObjects") }}
+      </p>
     </div>
   </div>
 </template>

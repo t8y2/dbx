@@ -13196,6 +13196,7 @@ export default withEnglishFallback({
     includeStructure: "โครงสร้างตาราง (DDL)",
     includeCreateDatabase: "รวมการตั้งค่าฐานข้อมูล (CREATE DATABASE / USE)",
     dropTableIfExists: "เพิ่ม DROP TABLE IF EXISTS ก่อน DDL",
+    dropTableIfExistsWithoutObjects: "หากไม่ได้เลือกมุมมอง/โพรซีเดอร์/ฟังก์ชัน/ซีเควนซ์ การกู้คืนจะลบมุมมองที่มีอยู่ซึ่งอ้างอิงตารางเหล่านี้และไม่สร้างใหม่ (DROP TABLE … CASCADE).",
     omitAutoIncrement: "ละเว้น AUTO_INCREMENT (สำหรับ Script ติดตั้งใหม่)",
     omitDatabaseQualifier: "ละเว้นคำนำหน้า DB ในชื่อตาราง",
     preserveOriginalLanguage: "คงภาษาเดิมใน SQL (ถอดรหัส Escape \\uXXXX)",

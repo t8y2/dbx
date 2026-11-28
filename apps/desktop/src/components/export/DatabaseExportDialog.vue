@@ -145,6 +145,7 @@ function persistExportOptions() {
 // `AUTO_INCREMENT` stripping is a MySQL-only DDL transform (backend gates on
 // db_type == mysql, which also covers MariaDB / TiDB / OceanBase-MySQL-mode).
 const isMysqlFamily = computed(() => store.getConfig(connectionId.value)?.db_type === "mysql");
+const isPostgresFamily = computed(() => store.getConfig(connectionId.value)?.db_type === "postgres");
 const isPostgresAllSchemas = computed(() => store.getConfig(connectionId.value)?.db_type === "postgres" && schema.value === POSTGRES_ALL_SCHEMAS);
 
 // Export state
@@ -1419,6 +1420,9 @@ watch(
               <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
               {{ t("databaseExport.dropTableIfExists") }}
             </div>
+            <p v-if="isPostgresFamily && includeStructure && dropTableIfExists && !includeObjects" class="pl-5 text-[11px] text-muted-foreground">
+              {{ t("databaseExport.dropTableIfExistsWithoutObjects") }}
+            </p>
             <div v-if="includeStructure && isMysqlFamily" class="flex items-center gap-2 cursor-pointer text-xs" @click="omitAutoIncrement = !omitAutoIncrement">
               <CheckSquare v-if="omitAutoIncrement" class="w-3.5 h-3.5 text-primary shrink-0" />
               <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />

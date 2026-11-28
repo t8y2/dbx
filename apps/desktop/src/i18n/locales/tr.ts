@@ -9626,6 +9626,7 @@ export default withEnglishFallback({
     includeStructure: "Tablo yapısı (DDL)",
     includeCreateDatabase: "Veritabanı kurulumunu dâhil et (CREATE DATABASE / USE)",
     dropTableIfExists: "DDL'den önce DROP TABLE IF EXISTS ekle",
+    dropTableIfExistsWithoutObjects: "Görünümler/saklı yordamlar/işlevler/diziler seçilmezse geri yükleme, bu tablolara bağlı mevcut görünümleri de siler ve yeniden oluşturmaz (DROP TABLE … CASCADE).",
     omitAutoIncrement: "AUTO_INCREMENT'i atla (sıfırdan kurulum betikleri için)",
     omitDatabaseQualifier: "Tablo adlarında DB önekini atla",
     preserveOriginalLanguage: "SQL'de orijinal dili koru (\\uXXXX kaçış dizilerini çöz)",

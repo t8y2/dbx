@@ -11632,6 +11632,7 @@ export default withEnglishFallback({
     includeStructure: "Estrutura da tabela (DDL)",
     includeCreateDatabase: "Incluir criação do banco (CREATE DATABASE / USE)",
     dropTableIfExists: "Adicionar DROP TABLE IF EXISTS antes do DDL",
+    dropTableIfExistsWithoutObjects: "Sem visões/procedimentos/funções/sequências no backup, a restauração também remove as visões existentes que dependem dessas tabelas e não as recria (DROP TABLE … CASCADE).",
     omitAutoIncrement: "Omitir AUTO_INCREMENT (para scripts de instalação do zero)",
     omitDatabaseQualifier: "Omitir o prefixo do BD nos nomes de tabela",
     preserveOriginalLanguage: "Preservar o idioma original no SQL (decodificar escapes \\uXXXX)",

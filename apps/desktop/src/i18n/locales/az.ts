@@ -9731,6 +9731,7 @@ export default withEnglishFallback({
     includeStructure: "Cədvəlin quruluşu (DDL)",
     includeCreateDatabase: "Verilənlər bazasının qurulmasını daxil et (CREATE DATABASE / USE)",
     dropTableIfExists: "DDL-dən əvvəl DROP TABLE IF EXISTS ifadəsini əlavə et",
+    dropTableIfExistsWithoutObjects: "Görünüşlər/saxlanılan prosedurlar/funksiyalar/ardıcıllıqlar seçilmədikdə bərpa bu cədvəllərdən asılı olan mövcud görünüşləri də silir və onları yenidən yaratmır (DROP TABLE … CASCADE).",
     omitAutoIncrement: "AUTO_INCREMENT parametrini daxil etmə (yeni quraşdırma skriptləri üçün)",
     omitDatabaseQualifier: "Cədvəl adlarında DB prefiksini burax",
     preserveOriginalLanguage: "SQL-də orijinal dili saxla (\\uXXXX kaçış ardıcıllıqlarını deşifr et)",

@@ -32,6 +32,8 @@ export interface QuickOpenMetadataCache {
   connectionFingerprint: string;
   capturedAt: string;
   items: PersistedQuickOpenItem[];
+  state?: "ready" | "partial";
+  error?: string;
 }
 
 const PERSISTED_RESULT_TYPES = new Set<PersistedQuickOpenResultType>(["database", "schema", "table", "view", "materialized_view", "column", "procedure", "function", "sequence", "package", "package-body"]);
@@ -68,13 +70,15 @@ export function isPersistedQuickOpenResultType(value: unknown): value is Persist
   return typeof value === "string" && PERSISTED_RESULT_TYPES.has(value as PersistedQuickOpenResultType);
 }
 
-export function encodeQuickOpenMetadataCache(connectionId: string, connectionFingerprint: string, items: readonly PersistedQuickOpenItem[], nowMs = Date.now()): QuickOpenMetadataCache {
+export function encodeQuickOpenMetadataCache(connectionId: string, connectionFingerprint: string, items: readonly PersistedQuickOpenItem[], nowMs = Date.now(), status: { state?: "ready" | "partial"; error?: string } = {}): QuickOpenMetadataCache {
   return {
     version: QUICK_OPEN_METADATA_CACHE_VERSION,
     connectionId,
     connectionFingerprint,
     capturedAt: new Date(nowMs).toISOString(),
     items: [...items],
+    ...(status.state ? { state: status.state } : {}),
+    ...(status.error ? { error: status.error } : {}),
   };
 }
 
@@ -105,6 +109,8 @@ export function decodeQuickOpenMetadataCache(payload: unknown, nowMs = Date.now(
   if (!payload || typeof payload !== "object") return null;
   const value = payload as Partial<QuickOpenMetadataCache>;
   if (value.version !== QUICK_OPEN_METADATA_CACHE_VERSION || typeof value.connectionId !== "string" || typeof value.connectionFingerprint !== "string" || typeof value.capturedAt !== "string" || !Array.isArray(value.items)) return null;
+  if (value.state !== undefined && value.state !== "ready" && value.state !== "partial") return null;
+  if (value.error !== undefined && typeof value.error !== "string") return null;
   const capturedAtMs = Date.parse(value.capturedAt);
   if (!Number.isFinite(capturedAtMs) || nowMs - capturedAtMs >= maxAgeMs) return null;
   const items = value.items.map(decodeItem);
@@ -115,5 +121,7 @@ export function decodeQuickOpenMetadataCache(payload: unknown, nowMs = Date.now(
     connectionFingerprint: value.connectionFingerprint,
     capturedAt: value.capturedAt,
     items: items as PersistedQuickOpenItem[],
+    ...(value.state ? { state: value.state } : {}),
+    ...(value.error ? { error: value.error } : {}),
   };
 }

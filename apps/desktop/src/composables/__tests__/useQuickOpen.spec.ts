@@ -3,12 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { matchQuickOpenText, useQuickOpen, type QuickOpenItem } from "@/composables/useQuickOpen";
 import * as api from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
-import { globalSearchSettingsVersion } from "@/lib/globalSearch/globalSearchSettings";
+import { getGlobalSearchItemTypes, globalSearchSettingsVersion } from "@/lib/globalSearch/globalSearchSettings";
 import { setQuickOpenScopeIds } from "@/lib/quickOpen/quickOpenScope";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { encodeQuickOpenMetadataCache, quickOpenMetadataCacheKey, quickOpenMetadataConnectionFingerprint } from "@/lib/quickOpen/quickOpenMetadataCache";
-import { matchesQuickSearchQuery, parseQuickSearchQuery, updateQuickSearchIndex } from "@/lib/quickOpen/quickSearch";
+import { matchesIndexedQuickSearchQuery, matchesQuickSearchQuery, parseQuickSearchQuery, quickSearchCandidateEntries, updateQuickSearchIndex } from "@/lib/quickOpen/quickSearch";
 
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: vi.fn(),
@@ -20,6 +20,7 @@ vi.mock("@/stores/savedSqlStore", () => ({
 
 vi.mock("@/lib/backend/api", () => ({
   listSqlFilesInFolder: vi.fn(),
+  listTables: vi.fn(),
   readExternalSqlFile: vi.fn(),
   listPlugins: vi.fn(),
   buildDatabaseStructureSearchSql: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock("@/lib/globalSearch/globalSearchSettings", async () => {
   return {
     composeGlobalSearchRoots: vi.fn(() => ["/sql"]),
     getGlobalSearchExtensions: vi.fn(() => ["sql"]),
+    getGlobalSearchItemTypes: vi.fn(() => ({ connection: true, database: true, schema: true, table: true, view: true, routine: true, column: true, file: true, content: true, command: true })),
     globalSearchSettingsVersion: ref(0),
   };
 });
@@ -105,6 +107,21 @@ describe("quick search query syntax", () => {
     expect(updated.entries.map((entry) => entry.result.id)).toEqual(["1", "2"]);
   });
 
+  it("narrows candidates without dropping literal, metadata, or fuzzy matches", () => {
+    const results = [
+      { id: "table", type: "table" as const, label: "api_clients", connectionId: "c", database: "analytics", searchText: "api_clients" },
+      { id: "comment", type: "table" as const, label: "users", connectionId: "c", database: "analytics", tableComment: "API access records", searchText: "users API access records" },
+      { id: "fuzzy", type: "table" as const, label: "application_items", connectionId: "c", database: "analytics", searchText: "application_items" },
+      { id: "other", type: "table" as const, label: "orders", connectionId: "c", database: "analytics", searchText: "orders" },
+    ];
+    const index = updateQuickSearchIndex(undefined, results);
+    const query = parseQuickSearchQuery("apis");
+    const candidates = quickSearchCandidateEntries(index, query);
+    expect(candidates.map((entry) => entry.result.id)).toEqual(expect.arrayContaining(["table", "fuzzy"]));
+    expect(candidates.some((entry) => entry.result.id === "other")).toBe(false);
+    expect(matchesIndexedQuickSearchQuery(index.entries[0]!, query)).toBe(true);
+  });
+
   it("filters results before fuzzy matching", () => {
     const query = parseQuickSearchQuery("kind:column db:analytics email");
     expect(matchesQuickSearchQuery({ id: "1", type: "column", label: "email", connectionId: "c", database: "analytics", searchText: "email" }, query)).toBe(true);
@@ -121,6 +138,7 @@ describe("useQuickOpen", () => {
   beforeEach(() => {
     vi.mocked(useSavedSqlStore).mockReturnValue(emptySavedSqlStore() as any);
     vi.mocked(getSqlFileFolderPaths).mockReturnValue([]);
+    vi.mocked(getGlobalSearchItemTypes).mockReturnValue({ connection: true, database: true, schema: true, table: true, view: true, routine: true, column: true, file: true, content: true, command: true });
   });
 
   afterEach(() => {
@@ -128,6 +146,209 @@ describe("useQuickOpen", () => {
     // watchers behind, so a leaked scope or mock would make later tests order-dependent.
     setQuickOpenScopeIds([]);
     vi.clearAllMocks();
+  });
+
+  describe("metadata index management", () => {
+    beforeEach(() => {
+      vi.mocked(api.listTables).mockReset().mockResolvedValue([]);
+    });
+
+    it("keeps the previous index status when rebuilding fails before persistence", async () => {
+      const connection = { id: "failed-index", name: "Failed", db_type: "postgres", database: "app" } as any;
+      const store = {
+        connections: [connection],
+        treeNodes: [],
+        connectedIds: new Set(),
+        getConfig: vi.fn(() => connection),
+        ensureConnected: vi.fn().mockRejectedValue(new Error("offline")),
+        loadDatabases: vi.fn(),
+        loadTreeNodeChildren: vi.fn(),
+        loadMoreObjectGroupChildren: vi.fn(),
+        loadAllObjectGroupChildren: vi.fn(),
+      };
+      vi.mocked(useConnectionStore).mockReturnValue(store as any);
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(encodeQuickOpenMetadataCache(connection.id, "fingerprint", [{ type: "table", label: "old_users", connectionId: connection.id, database: "app", tableName: "old_users" }]));
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await expect(state.rebuildMetadataIndex(connection.id)).rejects.toThrow("offline");
+        expect(vi.mocked(api.deleteSchemaCachePrefix)).not.toHaveBeenCalled();
+        expect(state.metadataIndexStatuses.value[connection.id]?.state).toBe("failed");
+      } finally {
+        scope.stop();
+      }
+    });
+
+    it("rejects plugin connections before attempting metadata loading", async () => {
+      const connection = { id: "plugin-1", name: "Plugin", db_type: "plugin" } as any;
+      const store = { connections: [connection], treeNodes: [], connectedIds: new Set(), getConfig: vi.fn(() => connection), ensureConnected: vi.fn(), loadDatabases: vi.fn(), loadTreeNodeChildren: vi.fn(), loadMoreObjectGroupChildren: vi.fn(), loadAllObjectGroupChildren: vi.fn() };
+      vi.mocked(useConnectionStore).mockReturnValue(store as any);
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await expect(state.rebuildMetadataIndex(connection.id)).rejects.toThrow("not supported");
+        expect(store.ensureConnected).not.toHaveBeenCalled();
+        expect(store.loadDatabases).not.toHaveBeenCalled();
+        expect(state.metadataIndexStatuses.value[connection.id]?.state).toBe("failed");
+      } finally {
+        scope.stop();
+      }
+    });
+
+    it("marks a partially collected metadata index as partial", async () => {
+      const connection = { id: "partial", name: "Partial", db_type: "postgres", database: "app" } as any;
+      const store = {
+        connections: [connection],
+        treeNodes: reactive([]),
+        connectedIds: new Set(["partial"]),
+        getConfig: vi.fn(() => connection),
+        ensureConnected: vi.fn().mockResolvedValue(undefined),
+        listCompletionDatabases: vi.fn().mockResolvedValue(["app"]),
+        listCompletionSchemas: vi.fn().mockResolvedValue(["public", "private"]),
+        listCompletionColumns: vi.fn().mockResolvedValue([]),
+        listCompletionObjects: vi.fn().mockResolvedValue([]),
+      };
+      vi.mocked(useConnectionStore).mockReturnValue(store as any);
+      vi.mocked(api.listTables).mockImplementation(async (_id, _database, schema) => {
+        if (schema === "private") throw new Error("schema unavailable");
+        return [{ name: "users", schema, table_type: "TABLE", comment: null }];
+      });
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(null);
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await state.rebuildMetadataIndex(connection.id);
+        expect(state.metadataIndexStatuses.value[connection.id]?.state).toBe("partial");
+        expect(state.metadataIndexStatuses.value[connection.id]?.error).toContain("private");
+        expect(api.listTables).toHaveBeenCalledTimes(2);
+
+        store.treeNodes.push({ id: "recovered-table", connectionId: connection.id, type: "table", database: "app", schema: "private", label: "recovered", children: [] });
+        await flushAsyncWork();
+        const latestPayload = vi.mocked(api.saveSchemaCache).mock.calls.at(-1)?.[1] as any;
+        expect(latestPayload?.items).toEqual(expect.arrayContaining([expect.objectContaining({ type: "table", label: "recovered" })]));
+        expect(latestPayload?.state).toBe("partial");
+      } finally {
+        scope.stop();
+      }
+    });
+
+    it("rebuilds and clears the persisted connection index", async () => {
+      const connection = { id: "indexed", name: "Indexed", db_type: "postgres", database: "app" } as any;
+      const store = {
+        connections: [connection],
+        treeNodes: [{ id: "indexed", connectionId: "indexed", type: "connection", children: [{ id: "indexed:app", connectionId: "indexed", type: "database", database: "app", label: "app", children: [] }] }],
+        connectedIds: new Set(["indexed"]),
+        getConfig: vi.fn(() => connection),
+        ensureConnected: vi.fn().mockResolvedValue(undefined),
+        loadDatabases: vi.fn().mockResolvedValue(undefined),
+        loadTreeNodeChildren: vi.fn().mockResolvedValue(undefined),
+        loadMoreObjectGroupChildren: vi.fn().mockResolvedValue(undefined),
+        loadAllObjectGroupChildren: vi.fn().mockResolvedValue(undefined),
+        listCompletionDatabases: vi.fn().mockResolvedValue(["app"]),
+        listCompletionSchemas: vi.fn().mockResolvedValue(["public"]),
+        listCompletionColumns: vi.fn().mockResolvedValue([{ name: "email", table: "users", schema: "public", dataType: "text", comment: "Email" }]),
+        listCompletionObjects: vi.fn().mockResolvedValue([]),
+      };
+      vi.mocked(useConnectionStore).mockReturnValue(store as any);
+      vi.mocked(api.listTables).mockResolvedValue([{ name: "users", schema: "public", table_type: "TABLE", comment: "Users" }]);
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(null);
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await state.rebuildMetadataIndex("indexed");
+        expect(store.ensureConnected).toHaveBeenCalledWith("indexed", { activate: false, passive: true });
+        expect(store.loadDatabases).not.toHaveBeenCalled();
+        expect(store.loadTreeNodeChildren).not.toHaveBeenCalled();
+        const savedPayload = vi.mocked(api.saveSchemaCache).mock.calls.at(-1)?.[1] as any;
+        expect(savedPayload?.items).toEqual(expect.arrayContaining([expect.objectContaining({ type: "database", label: "app" }), expect.objectContaining({ type: "table", label: "users" }), expect.objectContaining({ type: "column", label: "email" })]));
+        expect(vi.mocked(api.saveSchemaCache)).toHaveBeenCalledWith(quickOpenMetadataCacheKey("indexed"), expect.anything());
+        await state.clearMetadataIndex("indexed");
+        expect(vi.mocked(api.deleteSchemaCachePrefix)).toHaveBeenCalledWith(quickOpenMetadataCacheKey("indexed"));
+        expect(state.metadataIndexStatuses.value.indexed?.state).toBe("not-built");
+      } finally {
+        scope.stop();
+      }
+    });
+    it("indexes all 1,005 tables and their columns across metadata pages", async () => {
+      const connection = { id: "paged", name: "Paged", db_type: "sqlite", database: "main" } as const;
+      const tables = Array.from({ length: 1005 }, (_, index) => ({ name: `table_${index}`, table_type: "TABLE", comment: null }));
+      const listCompletionColumns = vi.fn().mockResolvedValue([{ name: "value", schema: "main" }]);
+      vi.mocked(useConnectionStore).mockReturnValue({
+        connections: [connection],
+        treeNodes: [],
+        connectedIds: new Set([connection.id]),
+        ensureConnected: vi.fn(),
+        listCompletionDatabases: vi.fn().mockResolvedValue(["main"]),
+        listCompletionColumns,
+        listCompletionObjects: vi.fn().mockResolvedValue([]),
+      } as any);
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(null);
+      vi.mocked(api.listTables).mockImplementation(async (_id, _database, _schema, _filter, limit, offset = 0) => tables.slice(offset, offset + limit!));
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await state.rebuildMetadataIndex(connection.id);
+        expect(api.listTables).toHaveBeenCalledTimes(6);
+        expect(listCompletionColumns).toHaveBeenCalledTimes(1005);
+        expect(state.metadataIndexStatuses.value[connection.id]).toMatchObject({ state: "ready", itemCount: 2011 });
+        expect(api.saveSchemaCache).toHaveBeenCalledWith(quickOpenMetadataCacheKey(connection.id), expect.objectContaining({ items: expect.arrayContaining([expect.objectContaining({ type: "column", tableName: "table_1004" })]) }));
+      } finally {
+        scope.stop();
+      }
+    });
+
+    it("keeps the previous snapshot when the routine listing reaches its cap", async () => {
+      const connection = { id: "capped", name: "Capped", db_type: "postgres", database: "app" } as const;
+      const objects = Array.from({ length: 1000 }, (_, index) => ({ name: `routine_${index}`, type: "function", schema: "public" }));
+      vi.mocked(useConnectionStore).mockReturnValue({
+        connections: [connection],
+        treeNodes: [],
+        connectedIds: new Set([connection.id]),
+        ensureConnected: vi.fn(),
+        listCompletionDatabases: vi.fn().mockResolvedValue(["app"]),
+        listCompletionSchemas: vi.fn().mockResolvedValue(["public"]),
+        listCompletionObjects: vi.fn().mockResolvedValue(objects),
+      } as any);
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(encodeQuickOpenMetadataCache(connection.id, quickOpenMetadataConnectionFingerprint(connection as any), [{ type: "function", label: "old_routine", objectName: "old_routine", connectionId: connection.id, database: "app", schema: "public" }]));
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await state.rebuildMetadataIndex(connection.id);
+        expect(state.metadataIndexStatuses.value[connection.id]?.state).toBe("partial");
+        expect(api.saveSchemaCache).toHaveBeenCalledWith(quickOpenMetadataCacheKey(connection.id), expect.objectContaining({ state: "partial", items: expect.arrayContaining([expect.objectContaining({ label: "old_routine" }), expect.objectContaining({ label: "routine_999" })]) }));
+      } finally {
+        scope.stop();
+      }
+    });
+
+    it.each([false, true])("starts at most two connections and handles queued work when cancelled=%s", async (cancelled) => {
+      const connections = ["first", "second", "third"].map((id) => ({ id, name: id, db_type: "sqlite", database: "main" }));
+      const first = deferred<void>();
+      const second = deferred<void>();
+      const ensureConnected = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise).mockResolvedValue(undefined);
+      vi.mocked(useConnectionStore).mockReturnValue({
+        connections,
+        treeNodes: [],
+        connectedIds: new Set(connections.map(({ id }) => id)),
+        ensureConnected,
+        listCompletionDatabases: vi.fn().mockResolvedValue(["main"]),
+        listCompletionObjects: vi.fn().mockResolvedValue([]),
+      } as any);
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(null);
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        const build = state.rebuildAllMetadataIndexes();
+        expect(ensureConnected).toHaveBeenCalledTimes(2);
+        if (cancelled) state.cancelSearch();
+        first.resolve(undefined);
+        second.resolve(undefined);
+        await expect(build).resolves.toBe(!cancelled);
+        expect(ensureConnected).toHaveBeenCalledTimes(cancelled ? 2 : 3);
+      } finally {
+        scope.stop();
+      }
+    });
   });
 
   describe("recent target snapshots", () => {
@@ -228,9 +449,33 @@ describe("useQuickOpen", () => {
         await flushAsyncWork();
         await flushAsyncWork();
         expect(state.matchingItems.value.find((item) => item.type === "column" && item.label === "email")).toMatchObject({ source: "cache", tableName: "users" });
+        expect(state.metadataIndexStatuses.value[connection.id]).toMatchObject({ state: "not-built", itemCount: 0 });
         state.setQuery("email");
         expect(state.matchingItems.value.some((item) => item.type === "column" && item.label === "email")).toBe(true);
         expect(ensureConnected).not.toHaveBeenCalled();
+      } finally {
+        scope.stop();
+      }
+    });
+
+    it.each([undefined, "ready", "partial"] as const)("keeps the stored build state %s on the first passive write after startup", async (buildState) => {
+      const connection = { id: "stored-index", name: "Stored index", db_type: "postgres", database: "app" } as const;
+      const status = { state: buildState, error: buildState === "partial" ? "Unreachable schema" : undefined };
+      const cachedItem = { type: "table", label: "old_users", tableName: "old_users", connectionId: connection.id, database: "app", schema: "public" } as const;
+      const treeNodes = reactive([{ id: "table-reports", type: "table", label: "live_reports", connectionId: connection.id, database: "app", schema: "public", children: [] }]);
+      const payload = encodeQuickOpenMetadataCache(connection.id, quickOpenMetadataConnectionFingerprint(connection as any), [cachedItem], Date.now(), status);
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(payload);
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [connection], treeNodes, connectedIds: new Set() } as any);
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await vi.waitFor(() => {
+          const saved = vi.mocked(api.saveSchemaCache).mock.calls.at(-1)?.[1] as typeof payload;
+          expect(saved?.items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "old_users" }), expect.objectContaining({ label: "live_reports" })]));
+          expect(saved.state).toBe(buildState);
+          expect(saved.error).toBe(status.error);
+          expect(state.metadataIndexStatuses.value[connection.id]?.state).toBe(buildState ?? "not-built");
+        });
       } finally {
         scope.stop();
       }
@@ -447,6 +692,37 @@ describe("useQuickOpen", () => {
       }
     });
 
+    it("clears previous content matches while a newer query is pending", async () => {
+      vi.useFakeTimers();
+      const pending = deferred<Awaited<ReturnType<typeof api.globalSearch>>>();
+      vi.mocked(api.globalSearch).mockResolvedValueOnce({
+        matches: [{ path: "/sql/old.sql", fileName: "old.sql", line: 1, column: 1, lineText: "old", matchText: "old" }],
+        errors: [],
+      });
+      vi.mocked(api.globalSearch).mockReturnValueOnce(pending.promise);
+      vi.mocked(api.cancelGlobalSearch).mockResolvedValue(undefined);
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [], connectedIds: new Set() } as any);
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        state.setContentMode(true);
+        state.setQuery("old");
+        await vi.advanceTimersByTimeAsync(250);
+        await flushAsyncWork();
+        expect(state.contentGroups.value[0]?.filePath).toBe("/sql/old.sql");
+
+        state.setQuery("new");
+        expect(state.contentGroups.value).toEqual([]);
+        expect(state.contentSearching.value).toBe(true);
+        await vi.advanceTimersByTimeAsync(250);
+        pending.resolve({ matches: [], errors: [] });
+        await flushAsyncWork();
+      } finally {
+        scope.stop();
+        vi.useRealTimers();
+      }
+    });
+
     it("keeps partial matches when the backend reports scan errors", async () => {
       vi.useFakeTimers();
       vi.mocked(api.globalSearch).mockResolvedValueOnce({
@@ -620,6 +896,53 @@ describe("useQuickOpen", () => {
       }
     });
 
+    it("filters disabled search types from the empty-query home list", async () => {
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
+      const state = useQuickOpen({
+        extraItems: ref([
+          { id: "file", type: "sql_file", label: "report.sql", searchText: "report.sql", connectionId: "" },
+          { id: "table", type: "table", label: "users", searchText: "users", connectionId: "" },
+        ]),
+      });
+      state.recordRecentItem({ id: "file", type: "sql_file", label: "report.sql", searchText: "report.sql", connectionId: "" });
+      state.recordRecentItem({ id: "table", type: "table", label: "users", searchText: "users", connectionId: "" });
+      expect(state.homeItems.value.map((item) => item.type)).toEqual(expect.arrayContaining(["sql_file", "table"]));
+      vi.mocked(getGlobalSearchItemTypes).mockReturnValue({ connection: true, database: true, schema: true, table: true, view: true, routine: true, column: true, file: false, content: false, command: true });
+      globalSearchSettingsVersion.value++;
+      await nextTick();
+      expect(state.homeItems.value.map((item) => item.type)).toEqual(["table"]);
+      vi.mocked(getGlobalSearchItemTypes).mockReturnValue({ connection: true, database: true, schema: true, table: true, view: true, routine: true, column: true, file: true, content: true, command: true });
+    });
+
+    it("debounces the result snapshot while keeping the input query immediate", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
+        const state = useQuickOpen({
+          extraItems: ref([{ id: "email", type: "table", label: "email", searchText: "email", connectionId: "" }, ...Array.from({ length: 500 }, (_, index) => ({ id: `table-${index}`, type: "table" as const, label: `table-${index}`, searchText: `table-${index}`, connectionId: "" }))]),
+        });
+
+        state.setQuery("email");
+        expect(state.searchQuery.value).toBe("email");
+        expect(state.displayedSearchQuery.value).toBe("");
+        await vi.advanceTimersByTimeAsync(119);
+        expect(state.displayedSearchQuery.value).toBe("");
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(state.displayedSearchQuery.value).toBe("email");
+        expect(state.displayedFilteredItems.value).toHaveLength(1);
+
+        state.setQuery("missing");
+        expect(state.searchQuery.value).toBe("missing");
+        expect(state.displayedSearchQuery.value).toBe("email");
+        await vi.advanceTimersByTimeAsync(120);
+        expect(state.displayedSearchQuery.value).toBe("missing");
+        expect(state.displayedFilteredItems.value).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("does not combine connection and database characters when finding a table", () => {
       vi.mocked(useConnectionStore).mockReturnValue({
         connections: [{ id: "conn1", name: "Production", db_type: "postgres" }],
@@ -705,12 +1028,18 @@ describe("useQuickOpen", () => {
   });
 
   describe("fuzzyMatch function", () => {
-    it("ranks exact names, initials, prefixes, substrings, and fuzzy matches in order", () => {
-      const exact = matchQuickOpenText("shop", "shop");
-      const initials = matchQuickOpenText("gafi", "groupon_apply_finance_invoice");
-      const prefix = matchQuickOpenText("shop", "shop_attribute");
-      const substring = matchQuickOpenText("shop", "sale_payway_shop");
-      const fuzzy = matchQuickOpenText("gafi", "giftcard_define_item");
+    it("keeps enhanced identifier matching opt-in for ordinary searches", () => {
+      expect(matchQuickOpenText("api", "a_p_i", "precise")).toBeNull();
+      expect(matchQuickOpenText("api", "a_p_i", "enhanced")?.kind).toBe("initials");
+      expect(matchQuickOpenText("api", "api_users", "precise")?.kind).toBe("prefix");
+    });
+
+    it("ranks exact names, initials, prefixes, substrings, and fuzzy matches in enhanced mode", () => {
+      const exact = matchQuickOpenText("shop", "shop", "enhanced");
+      const initials = matchQuickOpenText("gafi", "groupon_apply_finance_invoice", "enhanced");
+      const prefix = matchQuickOpenText("shop", "shop_attribute", "enhanced");
+      const substring = matchQuickOpenText("shop", "sale_payway_shop", "enhanced");
+      const fuzzy = matchQuickOpenText("gafi", "giftcard_define_item", "enhanced");
 
       expect([exact?.kind, initials?.kind, prefix?.kind, substring?.kind, fuzzy?.kind]).toEqual(["exact", "initials", "prefix", "substring", "fuzzy"]);
       expect(exact!.score).toBeLessThan(initials!.score);

@@ -1,3 +1,5 @@
+import { containsHan, pinyinFirstLetters } from "@/lib/common/pinyin";
+
 export type QuickSearchResultType = "connection" | "plugin_workbench" | "database" | "schema" | "table" | "view" | "materialized_view" | "column" | "procedure" | "function" | "sequence" | "package" | "package-body" | "sql_file" | "sql_library_file" | "content_match" | "plugin_command";
 
 export type QuickSearchCategory = "all" | "connections" | "databases" | "objects" | "fields" | "files" | "content" | "commands";
@@ -44,6 +46,15 @@ export interface QuickSearchFields {
   comment: string;
   context: string;
   path: string;
+}
+
+export interface QuickSearchNormalizedFields {
+  name: string;
+  comment: string;
+  context: string;
+  path: string;
+  searchText: string;
+  pinyinName: string;
 }
 
 export interface QuickSearchQuery {
@@ -121,7 +132,18 @@ export function parseQuickSearchQuery(raw: string): QuickSearchQuery {
 }
 
 function includesValue(value: string | undefined, expected: string | undefined): boolean {
-  return !expected || (value || "").toLocaleLowerCase().includes(expected.toLocaleLowerCase());
+  return !expected || (value || "").toLowerCase().includes(expected.toLowerCase());
+}
+
+function normalizedQuickSearchFields(result: QuickSearchResult & { filePath?: string; fileName?: string }, fields = quickSearchFields(result)): QuickSearchNormalizedFields {
+  return {
+    name: fields.name.toLowerCase(),
+    comment: fields.comment.toLowerCase(),
+    context: fields.context.toLowerCase(),
+    path: fields.path.toLowerCase(),
+    searchText: result.searchText.toLowerCase(),
+    pinyinName: containsHan(fields.name) ? pinyinFirstLetters(fields.name) : "",
+  };
 }
 
 export function quickSearchFields(result: QuickSearchResult & { filePath?: string; fileName?: string }): QuickSearchFields {
@@ -143,16 +165,19 @@ export function matchesQuickSearchContext(context: Pick<QuickSearchResult, "conn
 
 /** Apply all explicit filters before fuzzy ranking is attempted. */
 export function matchesQuickSearchQuery(result: QuickSearchResult & { filePath?: string; fileName?: string }, query: QuickSearchQuery): boolean {
-  const fields = quickSearchFields(result);
+  return matchesQuickSearchQueryFields(result, query, normalizedQuickSearchFields(result));
+}
+
+function matchesQuickSearchQueryFields(result: QuickSearchResult, query: QuickSearchQuery, fields: QuickSearchNormalizedFields): boolean {
   const filters = query.filters;
   if (filters.kind) {
     const kindMatches = filters.kind === "file" ? ["sql_file", "sql_library_file", "content_match"].includes(result.type) : filters.kind === "object" ? !["sql_file", "sql_library_file", "content_match", "plugin_command", "plugin_workbench"].includes(result.type) : result.type === filters.kind;
     if (!kindMatches) return false;
   }
   if (!matchesQuickSearchContext(result, query)) return false;
-  if (!includesValue(result.schemaNamespace ?? result.schema, filters.schema)) return false;
-  if (filters.comment && !includesValue(fields.comment, filters.comment)) return false;
-  if (filters.file && !includesValue(fields.path, filters.file)) return false;
+  if (filters.schema && !(result.schemaNamespace ?? result.schema ?? "").toLowerCase().includes(filters.schema.toLowerCase())) return false;
+  if (filters.comment && !fields.comment.includes(filters.comment.toLowerCase())) return false;
+  if (filters.file && !fields.path.includes(filters.file.toLowerCase())) return false;
   if (filters.source && inferQuickSearchSource(result) !== filters.source) return false;
   if (filters.category) {
     const category = result.type === "sql_file" || result.type === "sql_library_file" || result.type === "content_match" ? "files" : result.type === "plugin_command" || result.type === "plugin_workbench" ? "commands" : "objects";
@@ -164,6 +189,7 @@ export function matchesQuickSearchQuery(result: QuickSearchResult & { filePath?:
 export interface QuickSearchIndexEntry<T extends QuickSearchResult = QuickSearchResult> {
   result: T;
   fields: QuickSearchFields;
+  normalized: QuickSearchNormalizedFields;
   source: QuickSearchSource;
 }
 
@@ -171,6 +197,7 @@ export interface QuickSearchIndex<T extends QuickSearchResult = QuickSearchResul
   entries: QuickSearchIndexEntry<T>[];
   byName: Map<string, QuickSearchIndexEntry<T>[]>;
   byComment: Map<string, QuickSearchIndexEntry<T>[]>;
+  byCharacter: Map<string, Uint32Array>;
 }
 
 export function inferQuickSearchSource(result: QuickSearchResult): QuickSearchSource {
@@ -193,26 +220,66 @@ export function updateQuickSearchIndex<T extends QuickSearchResult & { filePath?
     const fields = quickSearchFields(result);
     const source = inferQuickSearchSource(result);
     const old = previousById.get(result.id);
-    if (old && old.source === source && old.fields.name === fields.name && old.fields.comment === fields.comment && old.fields.context === fields.context && old.fields.path === fields.path) {
+    if (old && old.source === source && old.fields.name === fields.name && old.fields.comment === fields.comment && old.fields.context === fields.context && old.fields.path === fields.path && old.normalized.searchText === result.searchText.toLowerCase()) {
       old.result = result;
       return old;
     }
-    return { result, fields, source };
+    return { result, fields, normalized: normalizedQuickSearchFields(result, fields), source };
   });
   const byName = new Map<string, QuickSearchIndexEntry<T>[]>();
   const byComment = new Map<string, QuickSearchIndexEntry<T>[]>();
-  for (const entry of entries) {
-    const nameKey = entry.fields.name.toLocaleLowerCase();
+  const characterPostings = new Map<string, number[]>();
+  for (const [entryIndex, entry] of entries.entries()) {
+    const nameKey = entry.normalized.name;
     const nameEntries = byName.get(nameKey);
     if (nameEntries) nameEntries.push(entry);
     else byName.set(nameKey, [entry]);
-    for (const comment of entry.fields.comment.toLocaleLowerCase().split(/\s+/).filter(Boolean)) {
+    for (const comment of entry.normalized.comment.split(/\s+/).filter(Boolean)) {
       const commentEntries = byComment.get(comment);
       if (commentEntries) commentEntries.push(entry);
       else byComment.set(comment, [entry]);
     }
+    const searchableCharacters = new Set(`${entry.normalized.name} ${entry.normalized.comment} ${entry.normalized.context} ${entry.normalized.path} ${entry.normalized.searchText} ${entry.normalized.pinyinName}`);
+    for (const character of searchableCharacters) {
+      if (/\s/u.test(character)) continue;
+      const characterEntries = characterPostings.get(character);
+      if (characterEntries) characterEntries.push(entryIndex);
+      else characterPostings.set(character, [entryIndex]);
+    }
   }
-  return { entries, byName, byComment };
+  const byCharacter = new Map([...characterPostings].map(([character, posting]) => [character, Uint32Array.from(posting)]));
+  return { entries, byName, byComment, byCharacter };
+}
+
+/** Narrow the full index using characters that must occur in any literal or fuzzy match. */
+export function quickSearchCandidateEntries<T extends QuickSearchResult>(index: QuickSearchIndex<T>, query: QuickSearchQuery): QuickSearchIndexEntry<T>[] {
+  const filterText = [query.text, query.filters.comment, query.filters.file, query.filters.connection, query.filters.database, query.filters.schema].filter(Boolean).join(" ").toLowerCase();
+  const characters = [...new Set([...filterText].filter((character) => !/\s/u.test(character)))];
+  if (characters.length === 0) return index.entries;
+
+  let smallest: Uint32Array | undefined;
+  for (const character of characters) {
+    const entries = index.byCharacter.get(character);
+    if (!entries) return [];
+    if (!smallest || entries.length < smallest.length) smallest = entries;
+  }
+  if (!smallest) return index.entries;
+  let candidates = Array.from(smallest);
+  const allowedMarks = new Uint32Array(index.entries.length);
+  let mark = 0;
+  for (const character of characters) {
+    const entries = index.byCharacter.get(character)!;
+    if (entries === smallest) continue;
+    mark += 1;
+    for (const entryIndex of entries) allowedMarks[entryIndex] = mark;
+    candidates = candidates.filter((entryIndex) => allowedMarks[entryIndex] === mark);
+    if (candidates.length === 0) return [];
+  }
+  return candidates.map((entryIndex) => index.entries[entryIndex]!);
+}
+
+export function matchesIndexedQuickSearchQuery<T extends QuickSearchResult>(entry: QuickSearchIndexEntry<T>, query: QuickSearchQuery): boolean {
+  return matchesQuickSearchQueryFields(entry.result, query, entry.normalized);
 }
 
 export interface QuickSearchFieldMatch {
@@ -222,8 +289,10 @@ export interface QuickSearchFieldMatch {
 
 /** Literal field matching used for comments, paths and connection context. */
 export function matchQuickSearchField(query: string, value: string): QuickSearchFieldMatch | null {
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  const normalizedValue = value.toLocaleLowerCase();
+  return matchQuickSearchFieldNormalized(query.trim().toLowerCase(), value.toLowerCase());
+}
+
+export function matchQuickSearchFieldNormalized(normalizedQuery: string, normalizedValue: string): QuickSearchFieldMatch | null {
   if (!normalizedQuery) return { kind: "exact", score: 900 };
   if (normalizedValue === normalizedQuery) return { kind: "exact", score: 5 };
   if (normalizedValue.startsWith(normalizedQuery)) return { kind: "prefix", score: 220 + Math.min(normalizedValue.length - normalizedQuery.length, 99) };

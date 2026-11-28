@@ -10211,7 +10211,7 @@ export const useConnectionStore = defineStore("connection", () => {
     currentSchema?: string,
     requestRevision = completionCacheRevision(connectionId, database),
     matchMode: CompletionAssistantMatchMode = "prefix",
-    options: { activateConnection?: boolean; allowConnection?: boolean } = {},
+    options: { activateConnection?: boolean; allowConnection?: boolean; requireComplete?: boolean } = {},
   ): Promise<SqlCompletionTable[]> {
     const oracleAssistant = isOracleCompletionDatabase(getConfig(connectionId)?.db_type);
     const effectiveSchema = globalSearch ? undefined : schema?.trim() || currentSchema?.trim() || undefined;
@@ -10232,6 +10232,7 @@ export const useConnectionStore = defineStore("connection", () => {
       requestRevision,
       options,
     );
+    if (options.requireComplete && response.incomplete) throw new Error("Completion metadata is incomplete");
     const tables = completionAssistantTables(response.candidates, preferredSchema, oracleAssistant);
     if (requestRevision === completionCacheRevision(connectionId, database)) indexCompletionTables(connectionId, database, schema, tables);
     return tables;
@@ -10250,6 +10251,7 @@ export const useConnectionStore = defineStore("connection", () => {
     caseSensitive: boolean,
     matchMode: CompletionAssistantMatchMode = "prefix",
     requestRevision = completionCacheRevision(connectionId, database),
+    options: { requireComplete?: boolean } = {},
   ): Promise<SqlCompletionObject[]> {
     const databaseType = getConfig(connectionId)?.db_type;
     const oracleAssistant = isOracleCompletionDatabase(databaseType);
@@ -10272,6 +10274,7 @@ export const useConnectionStore = defineStore("connection", () => {
       },
       requestRevision,
     );
+    if (options.requireComplete && response.incomplete) throw new Error("Completion metadata is incomplete");
     if (databaseType === "oceanbase-oracle" && response.fallback_used) throw new Error("OceanBase agent does not support filtered routine completion");
     const objects = completionAssistantObjects(response.candidates, preferredSchema, oracleAssistant).map((object) => ({
       ...object,
@@ -10288,7 +10291,7 @@ export const useConnectionStore = defineStore("connection", () => {
     schema?: string,
     context?: { tableQuoted?: boolean; schemaQuoted?: boolean },
     requestRevision = completionCacheRevision(connectionId, database),
-    options: { activateConnection?: boolean } = {},
+    options: { activateConnection?: boolean; requireComplete?: boolean } = {},
   ): Promise<SqlCompletionColumn[]> {
     const response = await completionAssistantSearch(
       {
@@ -10306,6 +10309,7 @@ export const useConnectionStore = defineStore("connection", () => {
       requestRevision,
       options,
     );
+    if (options.requireComplete && response.incomplete) throw new Error("Completion metadata is incomplete");
     const columns = completionAssistantColumns(response.candidates, table, schema, context);
     if (columns.length > 0 && requestRevision === completionCacheRevision(connectionId, database)) indexCompletionColumns(connectionId, database, table, schema, columns, undefined, context);
     return columns;
@@ -10893,7 +10897,7 @@ export const useConnectionStore = defineStore("connection", () => {
     globalSearch = false,
     currentSchema?: string,
     catalog?: string,
-    options: { activateConnection?: boolean; allowConnection?: boolean; verifySchemaMetadata?: boolean } = {},
+    options: { activateConnection?: boolean; allowConnection?: boolean; verifySchemaMetadata?: boolean; requireComplete?: boolean } = {},
   ): Promise<SqlCompletionTable[]> {
     const trimmedFilter = filter.trim();
     const normalizedFilter = trimmedFilter.toLowerCase();
@@ -10902,7 +10906,7 @@ export const useConnectionStore = defineStore("connection", () => {
     // second lookup returns the first's stale results. Local lookups below stay
     // case-insensitive because tableMatchScore normalizes internally.
     const relaxedFilter = relaxedCompletionTableFilter(trimmedFilter);
-    const cacheKey = `${connectionId}:${database}:${catalog ?? ""}:${trimmedFilter}:${limit ?? ""}:${schema ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}:${options.verifySchemaMetadata ? "verified" : "indexed"}`;
+    const cacheKey = `${connectionId}:${database}:${catalog ?? ""}:${trimmedFilter}:${limit ?? ""}:${schema ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}:${options.verifySchemaMetadata ? "verified" : "indexed"}:${options.requireComplete ? "complete" : "best-effort"}`;
     const cachedTables = completionTablesCache.value[cacheKey];
     if (cachedTables) {
       const localTables = lookupLocalCompletionTables(connectionId, database, trimmedFilter, limit, schema, catalog);
@@ -10938,7 +10942,8 @@ export const useConnectionStore = defineStore("connection", () => {
                   // Keep the prefix matches when the widened lookup is unavailable.
                 }
               }
-            } catch {
+            } catch (error) {
+              if (options.requireComplete) throw error;
               const fallbackSchema = schema?.trim() || (!globalSearch ? currentSchema?.trim() : undefined);
               if (fallbackSchema) {
                 const tables = await listCompletionTableMetadata(connectionId, database, fallbackSchema, trimmedFilter, limit, catalog);
@@ -11066,17 +11071,20 @@ export const useConnectionStore = defineStore("connection", () => {
     currentSchema?: string,
     objectKinds: CompletionAssistantObjectKind[] = ["routine"],
     caseSensitive = false,
+    options: { requireComplete?: boolean } = {},
   ): Promise<SqlCompletionObject[]> {
     const normalizedFilter = filter.trim().toLowerCase();
     const cacheFilter = caseSensitive ? filter.trim() : normalizedFilter;
     const databaseType = getConfig(connectionId)?.db_type;
     const filteredRoutineAssistant = !!databaseType && FILTERED_ROUTINE_COMPLETION_DATABASES.has(databaseType) && (!!normalizedFilter || typeof limit === "number" || !!parentName || globalSearch);
-    const cacheKey =
+    const cacheScope =
       databaseType === "oceanbase-oracle" && filteredRoutineAssistant
         ? `${connectionId}:${database}:${JSON.stringify([schema, parentName, cacheFilter, limit, globalSearch, currentSchema, [...objectKinds].sort(), caseSensitive])}`
         : filteredRoutineAssistant
           ? `${connectionId}:${database}:${schema ?? ""}:${parentName ?? ""}:${cacheFilter}:${limit ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}:${[...objectKinds].sort().join(",")}:${caseSensitive ? "case-sensitive" : "case-insensitive"}`
           : `${connectionId}:${database}:${schema ?? ""}`;
+    const cacheKey = options.requireComplete ? `${cacheScope}:complete` : cacheScope;
+    const loadMetadata = () => (isSchemaAwareDatabase(connectionId) ? listSchemaAwareCompletionObjects(connectionId, database, schema, options.requireComplete) : api.listCompletionObjects(connectionId, database, connectionDatabaseMetadataSchema(getConfig(connectionId), database, schema)));
     if (!completionObjectsCache.value[cacheKey]) {
       const requestRevision = completionCacheRevision(connectionId, database);
       await withCompletionInFlight(
@@ -11086,10 +11094,10 @@ export const useConnectionStore = defineStore("connection", () => {
           let loadedObjects: SqlCompletionObject[];
           if (filteredRoutineAssistant) {
             try {
-              let assistantObjects = await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds, caseSensitive, "prefix", requestRevision);
+              let assistantObjects = await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds, caseSensitive, "prefix", requestRevision, options);
               if (shouldWidenCompletionMatch(filter, assistantObjects.length, limit)) {
                 try {
-                  const widenedObjects = await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds, caseSensitive, "contains", requestRevision);
+                  const widenedObjects = await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds, caseSensitive, "contains", requestRevision, options);
                   assistantObjects = [...assistantObjects, ...widenedObjects];
                 } catch {
                   // Keep the prefix matches when the widened lookup is unavailable.
@@ -11100,16 +11108,12 @@ export const useConnectionStore = defineStore("connection", () => {
               if (requestRevision !== completionCacheRevision(connectionId, database)) return;
               if (databaseType === "oceanbase-oracle" && parentName) throw error;
               if (databaseType === "oceanbase-oracle" && !/does not support filtered routine completion|unknown method|method not found|not supported/i.test(String(error))) throw error;
-              if (objectKinds.length === 1 && objectKinds[0] === "sequence") {
-                const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, connectionDatabaseMetadataSchema(getConfig(connectionId), database, schema));
-                loadedObjects = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object?.type === "sequence"));
-              } else {
-                const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, connectionDatabaseMetadataSchema(getConfig(connectionId), database, schema));
-                loadedObjects = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
-              }
+              const objects = await loadMetadata();
+              const sequencesOnly = objectKinds.length === 1 && objectKinds[0] === "sequence";
+              loadedObjects = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null && (!sequencesOnly || object.type === "sequence")));
             }
           } else {
-            const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, connectionDatabaseMetadataSchema(getConfig(connectionId), database, schema));
+            const objects = await loadMetadata();
             loadedObjects = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
           }
           if (requestRevision !== completionCacheRevision(connectionId, database)) return;
@@ -11137,7 +11141,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return typeof limit === "number" ? filtered.slice(0, limit) : filtered;
   }
 
-  async function listSchemaAwareCompletionObjects(connectionId: string, database: string, schema?: string): Promise<ObjectInfo[]> {
+  async function listSchemaAwareCompletionObjects(connectionId: string, database: string, schema?: string, requireComplete = false): Promise<ObjectInfo[]> {
     const schemas = schema ? [schema] : await listCompletionSchemas(connectionId, database);
     const batchSize = COMPLETION_METADATA_CONCURRENCY;
     const results: ObjectInfo[] = [];
@@ -11147,7 +11151,8 @@ export const useConnectionStore = defineStore("connection", () => {
         batch.map(async (s) => {
           try {
             return await api.listCompletionObjects(connectionId, database, s);
-          } catch {
+          } catch (error) {
+            if (requireComplete) throw error;
             return [] as ObjectInfo[];
           }
         }),
@@ -11223,9 +11228,12 @@ export const useConnectionStore = defineStore("connection", () => {
     schema?: string,
     context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean; currentSchema?: string },
     catalog?: string,
-    options: { activateConnection?: boolean } = {},
+    options: { activateConnection?: boolean; requireComplete?: boolean } = {},
   ): Promise<SqlCompletionColumn[]> {
-    if (options.activateConnection === false && !connectedIds.value.has(connectionId)) return [];
+    if (options.activateConnection === false && !connectedIds.value.has(connectionId)) {
+      if (options.requireComplete) throw new Error("Connection closed while loading columns");
+      return [];
+    }
     const config = getConfig(connectionId);
     // Use the effective database type (e.g. a JDBC connection whose URL is
     // `jdbc:oracle:...` resolves to "oracle") rather than the raw db_type.
@@ -11246,12 +11254,13 @@ export const useConnectionStore = defineStore("connection", () => {
     const usesCurrentSchema = usesOracleCurrentSchemaCompletion(effectiveDbType, completionSchema);
     const hasCompletionSchema = completionSchema != null && (completionSchema !== "" || effectiveDbType === "spanner");
     if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(config) && !hasCompletionSchema && !usesCurrentSchema) {
+      if (options.requireComplete) throw new Error("A schema is required to load columns");
       return [];
     }
     const sessionCacheScope = usesCurrentSchema && context?.clientSessionId ? `:${context.clientSessionId}:${context.version ?? 0}` : "";
     const currentSchema = effectiveDbType === "oceanbase-oracle" && usesCurrentSchema ? context?.currentSchema : undefined;
     const contextCacheScope = currentSchema ? `:current=${JSON.stringify(currentSchema)}` : "";
-    const cacheKey = `${completionColumnsKey(connectionId, database, completionTable, completionSchema, catalog, context)}${sessionCacheScope}${contextCacheScope}`;
+    const cacheKey = `${completionColumnsKey(connectionId, database, completionTable, completionSchema, catalog, context)}${sessionCacheScope}${contextCacheScope}${options.requireComplete ? ":complete" : ""}`;
     if (!completionColumnsCache.value[cacheKey]) {
       const requestRevision = completionCacheRevision(connectionId, database);
       const outcome = await withCompletionInFlight<"cached" | "empty" | "stale" | "skipped">(
@@ -11259,8 +11268,8 @@ export const useConnectionStore = defineStore("connection", () => {
         async () => {
           if (options.activateConnection === false && !connectedIds.value.has(connectionId)) return "skipped";
           if (options.activateConnection !== false) await ensureConnected(connectionId);
-          // Use assistant metadata opportunistically, then fall back to canonical metadata.
-          if (!usesCurrentSchema && !catalog) {
+          // The completion assistant limits wide tables to 500 candidates.
+          if (!options.requireComplete && !usesCurrentSchema && !catalog) {
             try {
               const assistantColumns = await listCompletionAssistantColumns(connectionId, database, completionTable, completionSchema, context, requestRevision, options);
               if (assistantColumns.length > 0) {
@@ -11301,6 +11310,7 @@ export const useConnectionStore = defineStore("connection", () => {
         if (outcome === "stale" && options.activateConnection !== false) {
           return listCompletionColumns(connectionId, database, table, schema, context, catalog, options);
         }
+        if (options.requireComplete) throw new Error("Connection metadata changed while loading columns");
         return [];
       }
     }

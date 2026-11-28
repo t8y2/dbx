@@ -1155,6 +1155,9 @@ export async function saveEditorSettings(settings: unknown, patch?: unknown): Pr
 export interface GlobalSearchSettings {
   roots: string[];
   extensions: string[];
+  matchMode?: "precise" | "enhanced";
+  showQuickFilters?: boolean;
+  itemTypes?: Record<string, boolean>;
 }
 
 export function loadGlobalSearchSettings(): Promise<GlobalSearchSettings | null> {

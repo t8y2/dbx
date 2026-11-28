@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decodeQuickOpenMetadataCache, encodeQuickOpenMetadataCache, invalidateQuickOpenMetadataCache, quickOpenMetadataCacheGeneration, quickOpenMetadataCacheKey, quickOpenMetadataConnectionFingerprint } from "@/lib/quickOpen/quickOpenMetadataCache";
+import { isQuickOpenMetadataIndexSupported, quickOpenIndexStatus } from "@/lib/quickOpen/quickOpenIndex";
 
 const items = [
   {
@@ -31,6 +32,23 @@ describe("quick open metadata cache", () => {
     expect(decodeQuickOpenMetadataCache(payload, Date.parse("2026-06-10T12:00:00.000Z"))).toBeNull();
     expect(decodeQuickOpenMetadataCache({ ...payload, version: 2 })).toBeNull();
     expect(decodeQuickOpenMetadataCache({ ...payload, items: [{ ...items[0], columnName: 42 }] })).toBeNull();
+  });
+
+  it("reports which connection types support database metadata indexes", () => {
+    expect(isQuickOpenMetadataIndexSupported("postgres")).toBe(true);
+    expect(isQuickOpenMetadataIndexSupported("redis")).toBe(false);
+    expect(isQuickOpenMetadataIndexSupported("mongodb")).toBe(false);
+    expect(isQuickOpenMetadataIndexSupported("plugin")).toBe(false);
+  });
+
+  it("requires an explicit build state to report an index as built", () => {
+    const capturedAt = "2026-05-10T12:00:00.000Z";
+    const now = Date.parse("2026-05-11T12:00:00.000Z");
+    const payload = encodeQuickOpenMetadataCache("conn/1", "fingerprint", items, Date.parse(capturedAt));
+    expect(quickOpenIndexStatus("conn/1", payload, now)).toEqual({ connectionId: "conn/1", state: "not-built", itemCount: 0 });
+    expect(quickOpenIndexStatus("conn/1", null, now)).toMatchObject({ state: "not-built", itemCount: 0 });
+    expect(quickOpenIndexStatus("conn/1", { ...payload, state: "ready" }, now)).toMatchObject({ state: "ready", itemCount: 1, capturedAt });
+    expect(quickOpenIndexStatus("conn/1", { ...payload, state: "partial", error: "Unreachable schema" }, now)).toMatchObject({ state: "partial", itemCount: 1, capturedAt, error: "Unreachable schema" });
   });
 
   it("encodes connection ids in cache keys without prefix collisions", () => {

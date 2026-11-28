@@ -70,6 +70,7 @@ fn mysql_cross_database_query_flow_preserves_target_database() {
                     is_primary_key: true,
                     column_default: None,
                     extra: None,
+                    collation: None,
                 },
                 DataGridColumnInfo {
                     name: "name".to_string(),
@@ -78,6 +79,7 @@ fn mysql_cross_database_query_flow_preserves_target_database() {
                     is_primary_key: false,
                     column_default: None,
                     extra: None,
+                    collation: None,
                 },
             ]),
         },

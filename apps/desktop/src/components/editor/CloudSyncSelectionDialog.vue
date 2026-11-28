@@ -115,6 +115,7 @@ const editorSettingCategoryOverrides: Partial<Record<string, BackupSettingsCateg
   dataGridHideNullColumns: "data",
   dataGridHideEmptyColumns: "data",
   dataGridFreezeFirstColumn: "data",
+  dataGridConfirmColumnHeaderReorder: "data",
   dataGridBooleanDisplayMode: "data",
   numericColumnRightAlign: "data",
   globalNumberGrouping: "data",

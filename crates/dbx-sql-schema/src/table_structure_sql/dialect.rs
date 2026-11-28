@@ -293,6 +293,7 @@ pub(super) fn capabilities_for(
             rename_column: true,
             alter_existing_column: true,
             comment: true,
+            add_primary_key: true,
             ..base
         },
         Some(DatabaseType::Dameng) => TableStructureCapabilities {

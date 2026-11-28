@@ -2606,6 +2606,7 @@ function addExistingPrimaryKeyColumn() {
 // Mirrors Rust `supports_named_primary_key`: engines that persist a user-supplied
 // PK constraint name. Other dialects ignore the symbol, so the field is hidden.
 const canNamePrimaryKey = computed(() => {
+  if (databaseType.value === "saphana") return false;
   if (connection.value?.driver_profile?.toLowerCase() === "gaussdb-m") return true;
   const dialect = structureCapabilities.value.dialect;
   return dialect === "mysql" || dialect === "postgres" || dialect === "sqlserver" || dialect === "oracle";

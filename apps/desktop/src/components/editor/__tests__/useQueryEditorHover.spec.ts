@@ -51,6 +51,19 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, semanticComple
 }
 
 describe("QueryEditor hover resolution", () => {
+  it.each([false, true])("reuses Oracle column metadata for a lowercase unquoted schema on hover (semantic=%s)", async (semantic) => {
+    const modelValue = "SELECT ID, NAME FROM test.ID";
+    const { store, metadata, resolve, createHoverDom } = createHarness({ modelValue, databaseType: "oracle", dialect: "oracle" }, semantic);
+    store.listCompletionColumns.mockResolvedValueOnce([{ name: "NAME", table: "ID", schema: "TEST", dataType: "VARCHAR2" }]);
+    await metadata.ensureColumnsForTable({ name: "ID", schema: "TEST" });
+
+    const tooltip = await resolve(modelValue.indexOf("NAME") + 1);
+    expect(tooltip).not.toBeNull();
+    tooltip!.create();
+    expect(createHoverDom).toHaveBeenCalledWith("NAME", "VARCHAR2", undefined, ["TEST.ID"]);
+    expect(store.listCompletionColumns).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["oracle", "postgres", "sqlserver"] as const)("does not apply MySQL identifier rules to a %s connection with a MySQL editor fallback", async (databaseType) => {
     const modelValue = "SELECT * FROM 医疗服务（省级）";
     const { store, resolve } = createHarness({ modelValue, databaseType, dialect: "mysql" });

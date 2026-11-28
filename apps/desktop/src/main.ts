@@ -7,6 +7,9 @@ import { markStartupPhase } from "@/lib/startup/startupTiming";
 import { applyLegacyWebViewClass, isBlockingCompatFailure } from "@/lib/ui/legacyWebView";
 import { hydrateAppAppearance } from "@/lib/app/appAppearance";
 import { isFloatingPluginWindow } from "@/lib/app/windowContext";
+import { getPlatform } from "@/lib/backend/platform";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { installWebKitClipboardGuard } from "@/lib/common/webkitClipboardGuard";
 
 function startupErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -134,4 +137,7 @@ async function bootstrap() {
 installDebugLogCapture();
 installStartupErrorHandlers();
 applyLegacyWebViewClass();
+// WebKitGTK 2.54 can dispatch copy/cut twice for one keydown in CodeMirror
+// editors, cutting two lines for a single Ctrl+X. Guard Linux desktop only.
+if (getPlatform() === "linux" && isTauriRuntime()) installWebKitClipboardGuard();
 void bootstrap().catch(renderStartupError);

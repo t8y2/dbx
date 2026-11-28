@@ -30,7 +30,7 @@ import {
   buildSqlSemanticDiagnostics,
   isSqlSemanticDiagnosticInputContext,
   isSqlVirtualTableReference,
-  oceanBaseDiagnosticTableReference,
+  oracleDiagnosticTableReference,
   shouldRunSqlSemanticDiagnostics,
   sqlSemanticDiagnosticRangesForViewport,
   sqlServerRoutineDefinitionRangesForViewport,
@@ -287,7 +287,12 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
   }
 
   function semanticDiagnosticTablesForScope(tables: SqlTableReference[], scope: CompletionMetadataScope, sql: string): SqlTableReference[] {
-    if (props.databaseType === "oceanbase-oracle") return tables.map((table) => oceanBaseDiagnosticTableReference(table, sql));
+    if (props.databaseType === "oracle")
+      return tables.map((table) => {
+        const ref = oracleDiagnosticTableReference(table, sql);
+        return { ...ref, name: ref.nameQuoted ? ref.name : ref.name.toUpperCase(), schema: ref.schemaQuoted ? ref.schema : ref.schema?.toUpperCase() };
+      });
+    if (props.databaseType === "oceanbase-oracle") return tables.map((table) => oracleDiagnosticTableReference(table, sql));
     if (props.databaseType !== "sqlserver" || scope.database === props.database) return tables;
     return tables.map((table) => (table.database ? table : { ...table, database: scope.database, schema: table.schema ?? scope.schema }));
   }
@@ -309,7 +314,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       try {
         const match = await metadata.findExactSemanticDiagnosticTable(table, scope);
         if (!match) missingTables.add(tableReferenceKey(table));
-        enriched.push(match?.schema ? { ...table, schema: match.schema } : table);
+        enriched.push(match?.schema ? { ...table, schema: match.schema, ...(props.databaseType === "oracle" && !table.schema ? { schemaQuoted: true } : {}) } : table);
       } catch {
         enriched.push(table);
       }
@@ -328,8 +333,9 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       };
       if (tableWithInlineColumns.columns && tableWithInlineColumns.columns.length > 0) continue;
       const cacheKey = metadata.completionCacheKey(table, scope);
-      if (metadata.cachedColumnsByTable.has(cacheKey)) continue;
-      const normalizedKey = cacheKey.toLowerCase();
+      const cachedColumns = metadata.cachedColumnsByTable.get(cacheKey);
+      if (cachedColumns && cachedColumns.length > 0) continue;
+      const normalizedKey = props.databaseType === "oracle" ? cacheKey : cacheKey.toLowerCase();
       if (seen.has(normalizedKey)) continue;
       seen.add(normalizedKey);
       targets.push(table);

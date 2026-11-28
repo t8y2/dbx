@@ -237,6 +237,7 @@ mod tests {
             is_primary_key: matches!(category, "TIME" | "TAG"),
             column_default: None,
             extra: Some(category.to_string()),
+            collation: None,
         }
     }
 

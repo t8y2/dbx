@@ -46,7 +46,9 @@ use dbx_core::{
         is_production_database, mongo_pipeline_targets_production_database,
         sql_references_disallowed_database_for_connection, targets_production_database,
     },
-    query_execution_sql::{classify_salesforce_statement_risk, is_write_sql_for_database, SalesforceStatementRisk},
+    query_execution_sql::{
+        classify_salesforce_statement_risk, is_write_sql_for_database, supports_sql_query, SalesforceStatementRisk,
+    },
     sql_risk::{
         classify_sql_risk_for_database, is_dangerous_sql_for_database, mcp_sql_has_forbidden_database_switch, SqlRisk,
     },
@@ -630,6 +632,30 @@ impl CellWindowArgs {
     fn to_query_window(&self) -> QueryCellWindow {
         QueryCellWindow::from_options(self.cell_char_offset, self.cell_char_limit)
     }
+}
+
+/// `dbx_query` request: the same shape as [`ExecuteQueryRequest`] without
+/// `session_id`. The read-only tool deliberately cannot join an existing
+/// session or transaction; stateful and write work stays on
+/// `dbx_execute_query`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadOnlyQueryRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Database name")]
+    #[schemars(extend("type" = "string"))]
+    pub database: Option<String>,
+    #[schemars(
+        description = "Single read-only SQL statement. Only SELECT, SHOW, DESC/DESCRIBE, EXPLAIN and WITH ... SELECT are accepted; writes, DDL, multi-statement scripts, EXPLAIN ANALYZE, locking reads and SELECT ... INTO OUTFILE are rejected."
+    )]
+    pub sql: String,
+    #[serde(flatten)]
+    pub cell_window: CellWindowArgs,
+    #[schemars(
+        description = "Maximum rows returned for this call (default 100, max 1000; larger values are clamped)."
+    )]
+    #[schemars(extend("type" = "integer"))]
+    pub max_rows: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2760,8 +2786,45 @@ impl DbxMcpServer {
         cancellable_tool_call(cancellation, self.execute_query(parameters)).await
     }
 
+    #[tool(
+        name = "dbx_query",
+        description = "Run a single read-only SQL statement and return its result. Only SELECT, SHOW, DESC/DESCRIBE, EXPLAIN and WITH ... SELECT are accepted; INSERT/UPDATE/DELETE/DDL, multi-statement scripts, EXPLAIN ANALYZE, locking reads (FOR UPDATE/SHARE, LOCK IN SHARE MODE), SELECT ... INTO OUTFILE and USE/database switching are rejected. This tool has no session_id: use dbx_execute_query for stateful sessions, transactions or writes.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn query_tool(
+        &self,
+        cancellation: tokio_util::sync::CancellationToken,
+        parameters: Parameters<ReadOnlyQueryRequest>,
+    ) -> CallToolResult {
+        cancellable_tool_call(cancellation, self.execute_read_only_query(parameters)).await
+    }
+
+    /// Run the shared execute path with the read-only gate enabled.
+    /// `session_id` is intentionally dropped: a read-only query must not enter
+    /// an open transaction or inherit session database state.
+    async fn execute_read_only_query(&self, Parameters(request): Parameters<ReadOnlyQueryRequest>) -> CallToolResult {
+        let request = ExecuteQueryRequest {
+            selector: request.selector,
+            database: request.database,
+            sql: request.sql,
+            session_id: None,
+            cell_char_offset: request.cell_window.cell_char_offset,
+            cell_char_limit: request.cell_window.cell_char_limit,
+            max_rows: request.max_rows,
+        };
+        self.execute_query_impl(request, true).await
+    }
+
     async fn execute_query(&self, Parameters(request): Parameters<ExecuteQueryRequest>) -> CallToolResult {
-        if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
+        self.execute_query_impl(request, false).await
+    }
+
+    async fn execute_query_impl(&self, request: ExecuteQueryRequest, read_only: bool) -> CallToolResult {
+        // The allowlist and history are keyed by tool name, so a read-only call
+        // must be authorized as `dbx_query` and cannot inherit a grant that
+        // only covers the write-capable tool.
+        let tool_name = if read_only { "dbx_query" } else { "dbx_execute_query" };
+        if let Err(error) = self.ensure_tool_allowed(tool_name).await {
             return error;
         }
         let explicit_cell_window = (request.cell_char_offset.is_some() || request.cell_char_limit.is_some())
@@ -2771,6 +2834,37 @@ impl DbxMcpServer {
             Err(error) => return error,
         };
         let connection = &resolved.connection;
+        if read_only {
+            // The catalog advertises dbx_query only for SQL-capable
+            // connections. Reject the remaining non-SQL types explicitly so a
+            // client that already knows the tool name cannot send MongoDB
+            // shell commands, Redis commands or Salesforce DML through the
+            // read-only path.
+            if !supports_read_only_sql_query(connection.db_type) {
+                return tool_error(
+                    "READ_ONLY_QUERY_UNSUPPORTED",
+                    format!(
+                        "dbx_query supports SQL connections only; {} connections use their dedicated tools.",
+                        connection.db_type.as_str()
+                    ),
+                );
+            }
+            if let Err(error) =
+                dbx_core::query::read_only_gate::require_single_read_only_statement(&request.sql, connection.db_type)
+            {
+                return tool_error("READ_ONLY_QUERY_REJECTED", error.to_string());
+            }
+            // The classifier catches locking reads and writable CTEs; the
+            // keyword scan catches dialect-specific writes such as MySQL
+            // executable comments and SELECT ... INTO OUTFILE. Fail closed on
+            // either signal, matching validate_sql_policy.
+            if is_write_sql_for_database(&request.sql, connection.db_type) {
+                return tool_error(
+                    "READ_ONLY_QUERY_REJECTED",
+                    "The statement is not read-only; the request was rejected",
+                );
+            }
+        }
         if connection.db_type == dbx_core::models::connection::DatabaseType::Redis {
             return tool_error(
                 "REDIS_COMMAND_REQUIRED",
@@ -2885,7 +2979,7 @@ impl DbxMcpServer {
                 };
                 let approval = crate::approval::ToolApprovalRequest::new(
                     crate::approval::ToolApprovalKind::MongoCommand,
-                    "dbx_execute_query",
+                    tool_name,
                     &request.sql,
                 )
                 .with_target(Some(&connection.id), Some(target_database));
@@ -2895,7 +2989,7 @@ impl DbxMcpServer {
                     return tool_error("TOOL_BLOCKED", error);
                 }
                 mark_call_confirmation("confirmed");
-                if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
+                if let Err(error) = self.ensure_tool_allowed(tool_name).await {
                     return error;
                 }
                 let refreshed = match self
@@ -2965,7 +3059,7 @@ impl DbxMcpServer {
             Err(error) => return error,
         };
         if approval_token.is_some() {
-            if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
+            if let Err(error) = self.ensure_tool_allowed(tool_name).await {
                 return error;
             }
         }
@@ -2995,7 +3089,7 @@ impl DbxMcpServer {
             // The lease is the queue boundary. Re-read every mutable policy and
             // connection binding after waiting so queued work cannot outrun a
             // revocation or configuration refresh.
-            if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
+            if let Err(error) = self.ensure_tool_allowed(tool_name).await {
                 return error;
             }
             let refreshed = match self
@@ -3070,7 +3164,7 @@ impl DbxMcpServer {
                         })
                         .unwrap_or_else(|| format_query_result(&execution.result, max_rows as usize));
                     self.save_mcp_sql_history(
-                        "dbx_execute_query",
+                        tool_name,
                         &refreshed.connection,
                         &session.database,
                         &history_sql,
@@ -3084,7 +3178,7 @@ impl DbxMcpServer {
                 }
                 Err(error) => {
                     self.save_mcp_sql_history(
-                        "dbx_execute_query",
+                        tool_name,
                         &refreshed.connection,
                         &session.database,
                         &history_sql,
@@ -3125,17 +3219,8 @@ impl DbxMcpServer {
             self.backend.execute_query_agent_tool(connection, &database, arguments, permissions).await;
         let success = !result.is_error;
         let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
-        self.save_mcp_sql_history(
-            "dbx_execute_query",
-            connection,
-            &database,
-            &history_sql,
-            started_at,
-            success,
-            error,
-            None,
-        )
-        .await;
+        self.save_mcp_sql_history(tool_name, connection, &database, &history_sql, started_at, success, error, None)
+            .await;
         query_tool_result(result, query_result)
     }
 
@@ -6403,6 +6488,17 @@ fn sql_requires_batch_execution(sql: &str, database_type: DatabaseType) -> bool 
         return true;
     }
     dbx_core::sql::sql_execution_plan_for_database(sql, database_type).statements.len() > 1
+}
+
+/// Connection types `dbx_query` accepts. The catalog advertises `SQL_QUERY`
+/// (QueryExecution minus Redis/MongoDB/Salesforce); Plugin/MessageQueue/Mqtt
+/// are excluded for the same reason the plugin data gate excludes them.
+fn supports_read_only_sql_query(database_type: DatabaseType) -> bool {
+    supports_sql_query(database_type)
+        && !matches!(
+            database_type,
+            DatabaseType::Salesforce | DatabaseType::Plugin | DatabaseType::MessageQueue | DatabaseType::Mqtt
+        )
 }
 
 /// Maximum rows returned per statement in a `dbx_execute_batch` call. The batch
@@ -10661,9 +10757,9 @@ mod tests {
         // 22 product-provider tools (14 Nacos + 8 Consul), plus the three
         // runtime-selectable plugin meta tools retained by auto mode.
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 50);
+        assert_eq!(tools.len(), 51);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(tools.len(), 48);
+        assert_eq!(tools.len(), 49);
         assert!(names.contains(&"dbx_nacos_get_config") && names.contains(&"dbx_consul_kv_get"));
         #[cfg(feature = "mq-admin")]
         assert!(names.contains(&"dbx_peek_messages"));
@@ -11039,6 +11135,7 @@ mod tests {
             ("dbx_list_routines", &["database", "schema", "routine_type"]),
             ("dbx_get_routine_source", &["database", "schema", "signature"]),
             ("dbx_execute_query", &["database", "session_id", "cell_char_offset", "cell_char_limit", "max_rows"]),
+            ("dbx_query", &["database", "cell_char_offset", "cell_char_limit", "max_rows"]),
             (
                 "dbx_execute_batch",
                 &[
@@ -11214,9 +11311,9 @@ mod tests {
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         // Product tools stay available: they are bound to in-scope connections.
         #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 42);
+        assert_eq!(names.len(), 43);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(names.len(), 40);
+        assert_eq!(names.len(), 41);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
@@ -13723,6 +13820,37 @@ mod tests {
         assert_eq!(structured["result"]["rows"], serde_json::json!([["1", null, "NULL"]]));
         assert!(structured["result"]["rows"][0][1].is_null(), "SQL NULL must stay JSON null");
         assert_eq!(structured["result"]["rows"][0][2], serde_json::json!("NULL"), "a string 'NULL' must stay a string");
+    }
+
+    /// The read-only sibling returns the same structured result shape as
+    /// `dbx_execute_query`, so agent clients keep column types and NULLs.
+    #[tokio::test]
+    async fn dbx_query_returns_structured_content() {
+        let postgres = connection("pg", "pg", "postgres", "app");
+        let mut query_result = empty_query_result();
+        query_result.columns = vec!["i".to_string()];
+        query_result.column_types = vec!["bigint".to_string()];
+        query_result.rows = vec![vec![serde_json::json!("1")]];
+        let backend = Arc::new(FakeBackend {
+            connections: vec![postgres],
+            query_result: Some(query_result),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let result = server
+            .execute_read_only_query(Parameters(ReadOnlyQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT 1 AS i".to_string(),
+                cell_window: CellWindowArgs::default(),
+                max_rows: None,
+            }))
+            .await;
+        assert_ne!(result.is_error, Some(true), "read-only SELECT should succeed");
+        let structured = result.structured_content.as_ref().expect("structured content must be populated");
+        assert_eq!(structured["result"]["columns"], serde_json::json!(["i"]));
+        assert_eq!(structured["result"]["rows"], serde_json::json!([["1"]]));
     }
 
     #[tokio::test]

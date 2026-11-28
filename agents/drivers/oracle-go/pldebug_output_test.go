@@ -325,3 +325,25 @@ func TestPLDebugNativeCleanupAndCachedUTF16Pages(t *testing.T) {
 		t.Fatalf("byte limit split a Unicode character: %q", got)
 	}
 }
+
+func TestPLDebugNativeCaptureConfirmsEmptyOutputWithoutReadingClob(t *testing.T) {
+	block, err := plDebugWrapNativeTarget("BEGIN NULL; END;", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connector := &plDebugCaptureTestConnector{complete: 2, rollback: -1}
+	runtime, server, tx := openNativeCaptureTest(t, connector, "thin")
+	var value go_ora.Clob
+	clob := &plDebugClobOutput{
+		bind:    go_ora.Out{Dest: &value},
+		read:    func() (string, error) { t.Error("empty output should not consume a CLOB"); return "", nil },
+		release: func() error { return nil },
+	}
+	capture, err := plDebugExecuteBoundCapture(context.Background(), tx, server.plDebuggeeAllocation, false, block, nil, clob)
+	if err != nil || !capture.OutputComplete || capture.Output != "" || capture.OutputError != "" || capture.ReferencesPending {
+		t.Fatalf("empty output was not verified: %+v %v", capture, err)
+	}
+	if response, _ := runtime.handleLine(`{"id":2,"method":"close_session","params":{"agentSessionId":"a"}}`); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+}

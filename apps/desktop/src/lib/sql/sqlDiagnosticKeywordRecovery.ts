@@ -1,4 +1,4 @@
-import { buildSqlParserErrorDiagnostic, sqlTextSpanToOffsetRange, type SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
+import { buildSqlParserErrorDiagnostic, MAX_SQL_SEMANTIC_DIAGNOSTIC_STATEMENT_LENGTH, sqlTextSpanToOffsetRange, type SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import type { SqlReferenceAnalysis, SqlTextSpan } from "@/types/database";
 
@@ -29,6 +29,7 @@ export async function analyzeSqlDiagnosticReferences(sql: string, dialect: strin
   try {
     return { analysis: await analyze(sql) };
   } catch (error) {
+    if (sql.length > MAX_SQL_SEMANTIC_DIAGNOSTIC_STATEMENT_LENGTH) throw error;
     const diagnostic = buildSqlParserErrorDiagnostic(error, sql);
     const errorRange = diagnostic && sqlTextSpanToOffsetRange(sql, diagnostic.span);
     if (!diagnostic || !errorRange) throw error;

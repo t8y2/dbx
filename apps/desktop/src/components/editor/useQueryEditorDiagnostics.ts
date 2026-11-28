@@ -462,7 +462,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     for (const [index, range] of sqlServerRoutineRanges.entries()) {
       nextDiagnostics.push(...offsetSqlSemanticDiagnostics(prepared?.sqlServerRoutineDiagnostics[index] ?? buildSqlServerRoutineSyntaxDiagnostics(range.sql, props.databaseType), range, sql));
     }
-    const mysqlRoutineAnalysis = prepared ? prepared.mysqlRoutineAnalysis : props.databaseType === "mysql" && supportsMysqlRoutineSyntaxDiagnostics(sqlDriverProfile.value) ? analyzeMysqlRoutineSyntax(sql) : null;
+    const mysqlRoutineAnalysis = prepared ? prepared.mysqlRoutineAnalysis : props.databaseType === "mysql" && supportsMysqlRoutineSyntaxDiagnostics(sqlDriverProfile.value) ? analyzeMysqlRoutineSyntax(sql, runtime.executableStatementRangeCache?.ranges) : null;
     if (mysqlRoutineAnalysis) {
       nextDiagnostics.push(
         ...mysqlRoutineAnalysis.diagnostics.filter((diagnostic) => {

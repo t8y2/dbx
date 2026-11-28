@@ -1,4 +1,4 @@
-import { executableStatementRanges } from "@/lib/sql/sqlStatementRanges";
+import { executableStatementRanges, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import type { SqlTextSpan } from "@/types/database";
 
 export interface MysqlRoutineSyntaxDiagnostic {
@@ -33,11 +33,18 @@ export function supportsMysqlRoutineSyntaxDiagnostics(driverProfile?: string): b
   return !profile || profile === "mysql" || profile === "custom_mysql";
 }
 
-export function analyzeMysqlRoutineSyntax(sql: string): MysqlRoutineSyntaxAnalysis {
+const MYSQL_ROUTINE_KEYWORD_RE = /\b(?:procedure|function)\b/i;
+const MYSQL_ROUTINE_WORD_RE = /[A-Za-z_][A-Za-z0-9_]*/y;
+
+export function analyzeMysqlRoutineSyntax(sql: string, cachedStatements?: readonly SqlTextRange[]): MysqlRoutineSyntaxAnalysis {
+  if (!MYSQL_ROUTINE_KEYWORD_RE.test(sql)) {
+    return { diagnostics: [], hasRoutine: false, routineRanges: [] };
+  }
   const diagnostics: MysqlRoutineSyntaxDiagnostic[] = [];
   const routineRanges: Array<{ from: number; to: number }> = [];
 
-  for (const statement of executableStatementRanges(sql, "mysql")) {
+  for (const statement of cachedStatements ?? executableStatementRanges(sql, "mysql")) {
+    if (!MYSQL_ROUTINE_KEYWORD_RE.test(statement.sql)) continue;
     const tokens = tokenizeMysqlRoutineSql(statement.sql, statement.from);
     const declarations = findRoutineDeclarations(tokens);
 
@@ -169,7 +176,8 @@ function tokenizeMysqlRoutineSql(sql: string, baseOffset = 0): RoutineToken[] {
       continue;
     }
 
-    const word = /^[A-Za-z_][A-Za-z0-9_]*/.exec(sql.slice(index))?.[0];
+    MYSQL_ROUTINE_WORD_RE.lastIndex = index;
+    const word = MYSQL_ROUTINE_WORD_RE.exec(sql)?.[0];
     if (word) {
       tokens.push({ kind: "word", value: word.toUpperCase(), from: baseOffset + index, to: baseOffset + index + word.length });
       index += word.length;

@@ -1,5 +1,5 @@
 import type { CompletionContext } from "@codemirror/autocomplete";
-import { syntaxTreeAvailable } from "@codemirror/language";
+import { syntaxParserRunning, syntaxTreeAvailable } from "@codemirror/language";
 import { type QueryCompletionOption } from "./useQueryEditorBatchSelection";
 import { type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, statementGutterStartIndexHasStartAt } from "@/lib/sql/executableStatementRangeCache";
@@ -467,6 +467,12 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
 
   const MAX_FULL_DOCUMENT_SQL_SEMANTIC_HIGHLIGHT_LENGTH = 128_000;
 
+  const MAX_SQL_SEMANTIC_HIGHLIGHT_VISIBLE_RANGE_LENGTH = 32 * 1024;
+
+  const MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOW_LENGTH = 96 * 1024;
+
+  const MAX_SQL_SEMANTIC_HIGHLIGHT_SPANS = 1_000;
+
   const SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS = 100;
 
   const refreshSqlSemanticHighlightEffect = StateEffect.define<null>();
@@ -494,7 +500,11 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
 
           constructor(private currentView: import("@codemirror/view").EditorView) {
             this.decorations = Decoration.none;
-            this.decorations = this.buildDecorations(currentView);
+            if (boundedAnalysisEnabled()) {
+              this.scheduleRefresh(currentView);
+            } else {
+              this.decorations = this.buildDecorations(currentView);
+            }
           }
 
           update(update: import("@codemirror/view").ViewUpdate) {
@@ -548,7 +558,8 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
             const pendingWindows: Array<{ from: number; to: number }> = [];
             const rangesToHighlight = shouldPrewarmFullDocument ? [{ from: 0, to: sql.length }] : currentView.visibleRanges;
             for (const visibleRange of rangesToHighlight) {
-              const cached = this.cachedWindows.find((candidate) => candidate.from <= visibleRange.from && candidate.to >= visibleRange.to);
+              const clampedTo = shouldPrewarmFullDocument ? visibleRange.to : Math.min(visibleRange.to, visibleRange.from + MAX_SQL_SEMANTIC_HIGHLIGHT_VISIBLE_RANGE_LENGTH);
+              const cached = this.cachedWindows.find((candidate) => candidate.from <= visibleRange.from && candidate.to >= clampedTo);
               if (cached) {
                 if (!windows.includes(cached)) windows.push(cached);
                 continue;
@@ -556,7 +567,8 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
 
               // Colouring only needs the neighbourhood of what is on screen; the exact window would
               // re-lex and re-tokenize a whole 100k-value IN list or INSERT on every typing pause.
-              const next = expandToBoundedSqlStatementWindow(sql, visibleRange.from, visibleRange.to, dialectId);
+              const next = shouldPrewarmFullDocument ? visibleRange : expandToBoundedSqlStatementWindow(sql, visibleRange.from, clampedTo, dialectId);
+              if (!shouldPrewarmFullDocument && next.to - next.from > MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOW_LENGTH) continue;
               const cachedWindow = this.cachedWindows.find((candidate) => candidate.from <= next.from && candidate.to >= next.to);
               if (cachedWindow) {
                 if (!windows.includes(cachedWindow)) windows.push(cachedWindow);
@@ -564,41 +576,76 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
               }
 
               const previous = pendingWindows[pendingWindows.length - 1];
-              if (previous && next.from <= previous.to) previous.to = Math.max(previous.to, next.to);
-              else pendingWindows.push({ ...next });
+              if (previous && next.from <= previous.to && (shouldPrewarmFullDocument || Math.max(previous.to, next.to) - previous.from <= MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOW_LENGTH)) {
+                previous.to = Math.max(previous.to, next.to);
+              } else {
+                pendingWindows.push({ ...next });
+              }
             }
 
             if (pendingWindows.length > 0) {
-              const requestedTo = Math.max(...pendingWindows.map((window) => window.to));
-              const tree = boundedAnalysisEnabled() ? (syntaxTreeAvailable(currentView.state, requestedTo) ? syntaxTree(currentView.state) : null) : ensureSyntaxTree(currentView.state, requestedTo, requestedTo === sql.length ? 250 : 25);
-              if (!tree) {
-                // The Lezer parse has not reached the pending windows yet (long
-                // documents). Keep the decorations that are still valid and let
-                // the deferred refresh rebuild them once parsing catches up —
-                // returning an empty set here wiped table-name colors after
-                // scrolling stopped or when a freshly mounted editor (tab
-                // switch) had no later viewport change to trigger a rebuild.
-                this.scheduleRefresh(currentView);
-                return this.decorations;
-              }
-              if (shouldPrewarmFullDocument) this.prewarmedDoc = doc;
-              for (const window of pendingWindows) {
-                const entry = {
-                  ...window,
-                  spans: sqlSemanticTableNameSpansForSyntaxTree(sql, window, tree, {
-                    databaseType: props.databaseType,
-                    dialect: sqlBehaviorDialect(),
-                  }),
-                };
-                this.cachedWindows.push(entry);
-                windows.push(entry);
+              const highlightOptions = {
+                databaseType: props.databaseType,
+                dialect: sqlBehaviorDialect(),
+              };
+              const highlightPendingWithWindowParser = () => {
+                const parseWindowTree = codeMirrorRuntime.parseSqlWindowTree;
+                if (!parseWindowTree) return;
+                for (const window of pendingWindows) {
+                  const windowSql = sql.slice(window.from, window.to);
+                  const windowTree = parseWindowTree(windowSql);
+                  const spans = sqlSemanticTableNameSpansForSyntaxTree(windowSql, { from: 0, to: windowSql.length }, windowTree, highlightOptions).map((span) => ({
+                    start: span.start + window.from,
+                    end: span.end + window.from,
+                  }));
+                  const entry = { ...window, spans };
+                  this.cachedWindows.push(entry);
+                  windows.push(entry);
+                }
+              };
+
+              if (!syntaxParsingEnabled()) {
+                // Past the grammar budget, StreamLanguage stops at viewport.to and never builds a
+                // full SQL syntax tree. Parse only the bounded visible windows on demand instead of
+                // polling syntaxTreeAvailable in an infinite 100ms dispatch loop.
+                highlightPendingWithWindowParser();
+              } else {
+                const requestedTo = Math.max(...pendingWindows.map((window) => window.to));
+                const tree = boundedAnalysisEnabled() ? (syntaxTreeAvailable(currentView.state, requestedTo) ? syntaxTree(currentView.state) : null) : ensureSyntaxTree(currentView.state, requestedTo, requestedTo === sql.length ? 250 : 25);
+                if (!tree) {
+                  if (boundedAnalysisEnabled() && !syntaxParserRunning(currentView)) {
+                    // The background parser stopped (e.g. exhausted its chunk budget before reaching
+                    // requestedTo); fall back to bounded per-window parsing instead of spinning.
+                    highlightPendingWithWindowParser();
+                  } else {
+                    // The Lezer parse has not reached the pending windows yet (long
+                    // documents). Keep the decorations that are still valid and let
+                    // the deferred refresh rebuild them once parsing catches up —
+                    // returning an empty set here wiped table-name colors after
+                    // scrolling stopped or when a freshly mounted editor (tab
+                    // switch) had no later viewport change to trigger a rebuild.
+                    this.scheduleRefresh(currentView);
+                    return this.decorations;
+                  }
+                } else {
+                  if (shouldPrewarmFullDocument) this.prewarmedDoc = doc;
+                  for (const window of pendingWindows) {
+                    const entry = {
+                      ...window,
+                      spans: sqlSemanticTableNameSpansForSyntaxTree(sql, window, tree, highlightOptions),
+                    };
+                    this.cachedWindows.push(entry);
+                    windows.push(entry);
+                  }
+                }
               }
               if (this.cachedWindows.length > MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS) {
                 this.cachedWindows.splice(0, this.cachedWindows.length - MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS);
               }
             }
 
-            const ranges = windows.flatMap((window) => window.spans);
+            const allRanges = windows.flatMap((window) => window.spans);
+            const ranges = !shouldPrewarmFullDocument && allRanges.length > MAX_SQL_SEMANTIC_HIGHLIGHT_SPANS ? allRanges.slice(0, MAX_SQL_SEMANTIC_HIGHLIGHT_SPANS) : allRanges;
             return Decoration.set(
               ranges.map((range) =>
                 Decoration.mark({

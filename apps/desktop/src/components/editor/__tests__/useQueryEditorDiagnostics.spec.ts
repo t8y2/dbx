@@ -10,7 +10,7 @@ import type { QueryEditorProps } from "../queryEditorTypes";
 import type { QueryResult, SqlReferenceAnalysis } from "@/types/database";
 import { graphQueryDatabases } from "@/lib/graph/graphQueryProfiles";
 import { createSqlUnknownObjectHighlights, setSqlUnknownObjectSpans } from "@/lib/editor/codemirrorSqlUnknownObjectHighlights";
-import { sqlTextSpanToOffsetRange } from "@/lib/sql/semantic/diagnostics";
+import { MAX_SQL_SEMANTIC_DIAGNOSTIC_STATEMENT_LENGTH, sqlTextSpanToOffsetRange } from "@/lib/sql/semantic/diagnostics";
 import { maskSqlParametersForAnalysis, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
 
 const { analyze, buildDiagnostics } = vi.hoisted(() => ({ analyze: vi.fn(), buildDiagnostics: vi.fn() }));
@@ -434,5 +434,21 @@ describe("QueryEditor diagnostic scheduling ownership", () => {
     expect(dispatch).toHaveBeenCalledOnce();
     expect(dispatch.mock.calls[0][0]).not.toHaveProperty("selection");
     expect(currentView.state.selection.main.head).toBe(3);
+  });
+
+  it("skips oversized single statements in semantic diagnostics and unknown-object highlighting", async () => {
+    const oversizedInsert = `INSERT INTO big_table (id, payload) VALUES ${Array.from({ length: 4_000 }, (_, index) => `(${index},'value_${index}_padding_text')`).join(",")};`;
+    expect(oversizedInsert.length).toBeGreaterThan(MAX_SQL_SEMANTIC_DIAGNOSTIC_STATEMENT_LENGTH);
+
+    const { diagnostics, currentView } = createHarness({ modelValue: oversizedInsert, databaseType: "mysql", dialect: "mysql" });
+    diagnostics.scheduleSemanticDiagnostics(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(analyze).not.toHaveBeenCalled();
+    expect(diagnostics.diagnostics).toEqual([]);
+
+    const spans = await diagnostics.loadSqlUnknownObjectSpans(currentView);
+    expect(spans).toEqual([]);
+    expect(analyze).not.toHaveBeenCalled();
   });
 });

@@ -136,7 +136,7 @@ import { createInsertValueHintsExtension, requestInsertValueHintsRefresh, suppor
 import { createSqlBlockFoldService, sqlBeginEndMatching } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
 import { createSqlUnknownObjectHighlights, refreshSqlUnknownObjectHighlights } from "@/lib/editor/codemirrorSqlUnknownObjectHighlights";
-import { shouldParseQueryEditorSyntax, shouldUseQueryEditorLargeDocumentMode, shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
+import { QUERY_EDITOR_DEFERRED_COMPLETION_MAX_EDIT_CHARS, shouldParseQueryEditorSyntax, shouldUseQueryEditorLargeDocumentMode, shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
 import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
 import { createQueryEditorMultiCursorMouseSelection } from "@/lib/editor/queryEditorMultiCursorMouseSelection";
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
@@ -2340,6 +2340,17 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       doc: props.modelValue,
       selection: normalizedEditorSelection(props.initialSelection, props.modelValue.length),
       extensions: [
+        // Update large-document mode and swap to the stream tokenizer on the very transaction that
+        // crosses the budget so Lezer and unbounded extensions never process an oversized paste.
+        EditorState.transactionFilter.of((transaction) => {
+          if (!transaction.docChanged) return transaction;
+          largeDocumentMode.value = shouldUseQueryEditorLargeDocumentModeForSize(transaction.newDoc.length, transaction.newDoc.lines);
+          const parseSyntax = shouldParseQueryEditorSyntax(transaction.newDoc.length);
+          if (parseSyntax === syntaxParsingEnabled.value) return transaction;
+          syntaxParsingEnabled.value = parseSyntax;
+          if (!codeMirrorRuntime.sqlLanguageComp || !codeMirrorRuntime.buildSqlLanguageExtension) return transaction;
+          return [transaction, { effects: codeMirrorRuntime.sqlLanguageComp.reconfigure(codeMirrorRuntime.buildSqlLanguageExtension()) }];
+        }),
         EditorState.transactionFilter.of((transaction) => {
           if (props.hideExecutionControls || settingsStore.editorSettings.executeMode !== "current" || queryEditorSelectionLanguage() !== "sql" || !supportsExecutionTargetPicker(props.databaseType)) return transaction;
           return keepQueryEditorPasteCaretOnLastContentLine(transaction);
@@ -2529,14 +2540,22 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
               emitModelValue(update.view);
               invalidateSemanticDiagnosticsForDocumentChange();
               scheduleSemanticDiagnostics();
-              let insertedText = "";
-              let removedText = "";
+              let insertedLength = 0;
+              let removedLength = 0;
               update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-                insertedText += inserted.toString();
-                removedText += update.startState.doc.sliceString(fromA, toA);
+                insertedLength += inserted.length;
+                removedLength += toA - fromA;
               });
               const suppressCompletionAutoStart = consumeSqlCompletionAutoStartSuppression();
-              if (!suppressCompletionAutoStart) scheduleDeferredCompletionTrigger(update.view, insertedText, removedText);
+              if (!suppressCompletionAutoStart && insertedLength <= QUERY_EDITOR_DEFERRED_COMPLETION_MAX_EDIT_CHARS && removedLength <= QUERY_EDITOR_DEFERRED_COMPLETION_MAX_EDIT_CHARS) {
+                let insertedText = "";
+                let removedText = "";
+                update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+                  insertedText += inserted.toString();
+                  removedText += update.startState.doc.sliceString(fromA, toA);
+                });
+                scheduleDeferredCompletionTrigger(update.view, insertedText, removedText);
+              }
             }
             if (update.transactions.some((tr) => tr.isUserEvent("input.paste"))) {
               resyncCaretAfterPaste(update.view);
@@ -2951,6 +2970,8 @@ watch(
     statementBoundaries.invalidate();
     if (!view.value || !codeMirrorRuntime.sqlLanguageComp || !codeMirrorRuntime.buildSqlLanguageExtension || !codeMirrorRuntime.sqlSemanticHighlightComp || !codeMirrorRuntime.buildSqlSemanticHighlightExtension || !codeMirrorRuntime.sqlSignatureComp || !codeMirrorRuntime.buildSqlSignatureExtension)
       return;
+    largeDocumentMode.value = shouldUseQueryEditorLargeDocumentModeForSize(view.value.state.doc.length, view.value.state.doc.lines);
+    syntaxParsingEnabled.value = shouldParseQueryEditorSyntax(view.value.state.doc.length);
     // Signature tooltips depend on the external dialect, so refresh them even when the document and selection stay unchanged.
     view.value.dispatch({
       effects: [

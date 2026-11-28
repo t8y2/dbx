@@ -8715,6 +8715,7 @@ export default withEnglishFallback({
     shortcutConflictBlocksApply: "Aynı kapsamda {count} çakışma var ({pairs} yinelenen çift)",
     shortcutPressShortcut: "Kısayola basın",
     shortcutModifierDoubleTapHint: "Bir tuş birleşimine basın veya aynı değiştirici tuşa hızla iki kez basıp bırakın (Shift, Cmd, Ctrl, Alt).",
+    shortcutPresets: "Kısayol ön ayarları",
     shortcutSearchPlaceholder: "Kısayollarda ara",
     shortcutSearchNoResults: "Aramanızla eşleşen kısayol yok.",
     shortcutRecordKeys: "Tuşları kaydet",

@@ -10546,6 +10546,7 @@ export default withEnglishFallback({
     shortcutConflictBlocksApply: "Há {count} conflitos no mesmo escopo ({pairs} pares duplicados)",
     shortcutPressShortcut: "Pressione o atalho",
     shortcutModifierDoubleTapHint: "Pressione uma combinação de teclas ou pressione e solte rapidamente o mesmo modificador duas vezes (Shift, Cmd, Ctrl, Alt).",
+    shortcutPresets: "Predefinições de atalhos",
     shortcutSearchPlaceholder: "Pesquisar atalhos",
     shortcutSearchNoResults: "Nenhum atalho corresponde à pesquisa.",
     shortcutRecordKeys: "Gravar teclas",

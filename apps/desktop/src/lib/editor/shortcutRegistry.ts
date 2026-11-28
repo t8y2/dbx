@@ -1088,6 +1088,36 @@ export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>, 
   return { ...resolveNormalizedShortcutEntry(settings, platform).result };
 }
 
+export type ShortcutPreset = "dbx" | "jetbrains" | "eclipse";
+
+export function shortcutSettingsForPreset(preset: ShortcutPreset, platform = globalThis.navigator?.platform || ""): ShortcutSettings {
+  if (preset === "jetbrains") {
+    const mac = isMacShortcutPlatform(platform);
+    return normalizeShortcutSettings(
+      {
+        formatSql: "Mod+Alt+L",
+        gotoLine: mac ? "Mod+L" : "Mod+G",
+        deleteLine: mac ? "Mod+Backspace" : "Mod+Y",
+        joinLines: mac ? "Ctrl+Shift+J" : "Mod+Shift+J",
+      },
+      platform,
+    );
+  }
+  if (preset === "eclipse") {
+    return normalizeShortcutSettings(
+      {
+        gotoLine: "Mod+L",
+        deleteLine: "Mod+D",
+        duplicateLine: "",
+        copyLineUp: "Mod+Alt+ArrowUp",
+        copyLineDown: "Mod+Alt+ArrowDown",
+      },
+      platform,
+    );
+  }
+  return normalizeShortcutSettings(undefined, platform);
+}
+
 /**
  * Same table as `normalizeShortcutSettings`, without the defensive copy. The returned object is
  * shared and frozen, so it is meant for per-keystroke matching that only reads one or a few actions.

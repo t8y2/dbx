@@ -11732,6 +11732,7 @@ export default {
     shortcutConflictBlocksApply: "{count} conflicts within one scope ({pairs} duplicate pairs)",
     shortcutPressShortcut: "Press shortcut",
     shortcutModifierDoubleTapHint: "Press a key combination, or quickly press and release the same modifier twice (e.g. Shift, Cmd, Ctrl, Alt).",
+    shortcutPresets: "Shortcut presets",
     shortcutSearchPlaceholder: "Search shortcuts",
     shortcutSearchNoResults: "No shortcuts match your search.",
     shortcutRecordKeys: "Record keys",

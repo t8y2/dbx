@@ -10527,6 +10527,7 @@ export default withEnglishFallback({
     shortcutConflictBlocksApply: "同一スコープの競合が {count} 件あります（重複 {pairs} 組）",
     shortcutPressShortcut: "ショートカットを押してください",
     shortcutModifierDoubleTapHint: "キーの組み合わせ、または同じ修飾キー（Shift、Cmd、Ctrl、Alt など）を素早く2回押して離してください。",
+    shortcutPresets: "ショートカットのプリセット",
     shortcutSearchPlaceholder: "ショートカットを検索",
     shortcutSearchNoResults: "一致するショートカットはありません。",
     shortcutRecordKeys: "キーを記録",

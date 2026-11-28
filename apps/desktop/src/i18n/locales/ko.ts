@@ -3502,6 +3502,7 @@ export default withEnglishFallback({
     imageLoadFailed: "이미지를 불러오지 못했습니다",
     geometryPreview: "지오메트리 미리보기",
     layerPreview: "레이어 미리보기",
+    layerPreviewAttributeFilter: "속성 값으로 필터링",
     layerPreviewMaximize: "최대화",
     layerPreviewRestore: "복원",
     layerPreviewCustomBasemap: "사용자 지정 기본 지도",

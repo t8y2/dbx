@@ -3906,6 +3906,7 @@ export default withEnglishFallback({
     layerPreviewSkipped: "已跳过 {count} 个要素",
     layerPreviewNoSupportedCrs: "无法预览：缺少或不支持坐标系",
     layerPreviewNoGeometryData: "无法预览：没有有效的几何数据",
+    layerPreviewAttributeFilter: "按属性值筛选",
     layerPreviewLabel: "标签",
     layerPreviewExport: "导出图片",
     layerPreviewMaximize: "最大化",

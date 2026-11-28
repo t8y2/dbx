@@ -3768,6 +3768,7 @@ export default withEnglishFallback({
     layerPreviewSkipped: "ข้าม Feature แล้ว {count} รายการ",
     layerPreviewNoSupportedCrs: "ดูตัวอย่างไม่ได้: ไม่มีระบบพิกัดหรือไม่รองรับ",
     layerPreviewNoGeometryData: "ดูตัวอย่างไม่ได้: ไม่มีข้อมูล Geometry ที่ถูกต้อง",
+    layerPreviewAttributeFilter: "กรองตามค่าแอตทริบิวต์",
     layerPreviewLabel: "ป้ายกำกับ",
     layerPreviewExport: "ส่งออกรูปภาพ",
     layerPreviewMaximize: "ขยายใหญ่สุด",

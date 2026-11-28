@@ -3373,6 +3373,7 @@ export default withEnglishFallback({
     layerPreviewSkipped: "{count} elemento/i ignorato/i",
     layerPreviewNoSupportedCrs: "Impossibile visualizzare: sistema di coordinate mancante o non supportato",
     layerPreviewNoGeometryData: "Impossibile visualizzare: nessun dato geometrico valido",
+    layerPreviewAttributeFilter: "Filtra per valore dell’attributo",
     layerPreviewLabel: "Etichetta",
     layerPreviewExport: "Esporta immagine",
     layerPreviewMaximize: "Massimizza",

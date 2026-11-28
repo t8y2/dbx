@@ -2624,6 +2624,7 @@ export default withEnglishFallback({
     layerPreviewSkipped: "{count} obyekt ötürüldü",
     layerPreviewNoSupportedCrs: "Önbaxış mümkün deyil: koordinat sistemi yoxdur və ya dəstəklənmir",
     layerPreviewNoGeometryData: "Önbaxış mümkün deyil: etibarlı həndəsi verilənlər yoxdur",
+    layerPreviewAttributeFilter: "Atribut dəyərinə görə süzün",
     layerPreviewLabel: "Etiket",
     layerPreviewExport: "Şəkli ixrac et",
     layerPreviewMaximize: "Böyüt",

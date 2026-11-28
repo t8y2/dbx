@@ -3364,6 +3364,7 @@ export default withEnglishFallback({
     layerPreviewSkipped: "已略過 {count} 個圖徵",
     layerPreviewNoSupportedCrs: "無法預覽：缺少或不支援座標系",
     layerPreviewNoGeometryData: "無法預覽：沒有有效的幾何資料",
+    layerPreviewAttributeFilter: "依屬性值篩選",
     layerPreviewLabel: "標籤",
     layerPreviewExport: "匯出圖片",
     layerPreviewMaximize: "最大化",

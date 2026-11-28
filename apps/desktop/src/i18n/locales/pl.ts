@@ -2975,6 +2975,7 @@ export default withEnglishFallback({
     layerPreviewSkipped: "Pominięto elementy: {count}",
     layerPreviewNoSupportedCrs: "Nie można wyświetlić podglądu: brak układu współrzędnych lub jest nieobsługiwany",
     layerPreviewNoGeometryData: "Nie można wyświetlić podglądu: brak prawidłowych danych geometrycznych",
+    layerPreviewAttributeFilter: "Filtruj według wartości atrybutu",
     layerPreviewLabel: "Etykieta",
     layerPreviewExport: "Eksportuj obraz",
     layerPreviewMaximize: "Maksymalizuj",

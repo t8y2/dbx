@@ -2618,6 +2618,7 @@ export default withEnglishFallback({
     layerPreviewSkipped: "{count} öğe atlandı",
     layerPreviewNoSupportedCrs: "Önizlenemiyor: koordinat sistemi eksik veya desteklenmiyor",
     layerPreviewNoGeometryData: "Önizlenemiyor: geçerli geometri verisi yok",
+    layerPreviewAttributeFilter: "Öznitelik değerine göre filtrele",
     layerPreviewLabel: "Etiket",
     layerPreviewExport: "Görseli dışa aktar",
     layerPreviewMaximize: "Ekranı kapla",

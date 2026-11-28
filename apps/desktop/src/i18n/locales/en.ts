@@ -3979,6 +3979,7 @@ export default {
     layerPreviewSkipped: "Skipped {count} feature(s)",
     layerPreviewNoSupportedCrs: "Unable to preview: coordinate system missing or unsupported",
     layerPreviewNoGeometryData: "Unable to preview: no valid geometry data",
+    layerPreviewAttributeFilter: "Filter by attribute value",
     layerPreviewLabel: "Label",
     layerPreviewExport: "Export image",
     layerPreviewMaximize: "Maximize",

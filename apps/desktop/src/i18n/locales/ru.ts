@@ -10640,6 +10640,7 @@ export default withEnglishFallback({
     sqlFormatterFormMode: "Форма",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "Регистр ключевых слов",
+    sqlFormatterAutoCaseKeywordsOnSpace: "Автоматически менять регистр",
     sqlFormatterFunctionCase: "Регистр функций",
     sqlFormatterDataTypeCase: "Регистр типов данных",
     sqlFormatterIdentifierCase: "Регистр идентификаторов",

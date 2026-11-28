@@ -8863,6 +8863,7 @@ export default withEnglishFallback({
     sqlFormatterFormMode: "Formularz",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "Wielkość liter słów kluczowych",
+    sqlFormatterAutoCaseKeywordsOnSpace: "Automatycznie zmieniaj słowa kluczowe",
     sqlFormatterFunctionCase: "Wielkość liter funkcji",
     sqlFormatterDataTypeCase: "Wielkość liter typów danych",
     sqlFormatterIdentifierCase: "Wielkość liter identyfikatorów",

@@ -616,12 +616,14 @@ describe("settingsTransfer", () => {
     const legacy: Record<string, unknown> = { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter };
     delete legacy.commaPosition;
     delete legacy.layoutStyle;
+    delete legacy.autoCaseKeywordsOnSpace;
     const result = parseSettingsTransferFile(fileWith({ sqlFormatter: legacy }));
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.editorSettings.sqlFormatter?.layoutStyle).toBe("dbx");
     expect(result.value.editorSettings.sqlFormatter?.commaPosition).toBe("after");
+    expect(result.value.editorSettings.sqlFormatter?.autoCaseKeywordsOnSpace).toBe(false);
   });
 
   it("imports a pre-custom-rules application backup without dropping existing settings", () => {

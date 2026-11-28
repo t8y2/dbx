@@ -2,8 +2,10 @@
 
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import * as langSql from "@codemirror/lang-sql";
 import { reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { createQueryEditorCodeMirrorRuntime } from "../queryEditorCodeMirrorRuntime";
 import { useQueryEditorCompletionKeys } from "../useQueryEditorCompletionKeys";
 import type { QueryEditorProps } from "../queryEditorTypes";
@@ -18,6 +20,25 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
+
+function sqlEditor(doc: string, databaseType: "postgres" | "mysql" | "sqlserver" = "postgres", cursor = doc.length) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const dialectName = databaseType === "sqlserver" ? "sqlserver" : databaseType === "mysql" ? "mysql" : "postgres";
+  const view = new EditorView({
+    parent: host,
+    state: EditorState.create({
+      doc,
+      selection: { anchor: cursor },
+      extensions: [langSql.sql({ dialect: createDbxCodeMirrorSqlDialect(langSql, dialectName, databaseType) })],
+    }),
+  });
+  cleanups.push(() => {
+    view.destroy();
+    host.remove();
+  });
+  return view;
+}
 
 function createHarness(overrides: Partial<QueryEditorProps> = {}) {
   const props = reactive<QueryEditorProps>({ modelValue: "abc", databaseType: "postgres", ...overrides });
@@ -45,7 +66,15 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
     codeMirrorSelectFirstCompletion: vi.fn(() => false),
     codeMirrorInsertNewlineKeepIndent: newline,
   });
-  const settings = reactive({ editorSettings: { sqlFormatter: { useTabs: false, tabWidth: 2 }, shortcuts: { acceptCompletion: "Tab" }, selectFirstCompletionOnOpen: false, sqlServerSpaceConfirmsCompletion: true, snippetTriggerKey: "tab" as const } });
+  const settings = reactive({
+    editorSettings: {
+      sqlFormatter: { useTabs: false, tabWidth: 2, keywordCase: "upper" as "upper" | "lower" | "preserve", autoCaseKeywordsOnSpace: false },
+      shortcuts: { acceptCompletion: "Tab" },
+      selectFirstCompletionOnOpen: false,
+      sqlServerSpaceConfirmsCompletion: true,
+      snippetTriggerKey: "tab" as const,
+    },
+  });
   const completion = { suppressAutoStartUntil: 0 };
   const keys = useQueryEditorCompletionKeys({ props, settingsStore: settings as Options["settingsStore"], runtime, completion, batchSelection: { applySelectedBatchColumnSelection: batch }, isEditorComposing: composing, retryDelayMs: 5, tabMaxWaitMs: 40, enterMaxWaitMs: 20 });
   cleanups.push(() => {
@@ -362,6 +391,108 @@ describe("QueryEditor completion-key ownership", () => {
 
     expect(keys.handleSpace(view)).toBe(false);
     expect(accept).not.toHaveBeenCalled();
+  });
+
+  it("recases a finished keyword on Space when auto-case is enabled", () => {
+    const { keys, settings } = createHarness({ databaseType: "postgres" });
+    settings.editorSettings.sqlFormatter.autoCaseKeywordsOnSpace = true;
+    const view = sqlEditor("select");
+
+    expect(keys.handleSpace(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("SELECT ");
+    expect(view.state.selection.main.head).toBe(7);
+  });
+
+  it("lowercases a finished keyword when keyword case is lower", () => {
+    const { keys, settings } = createHarness({ databaseType: "mysql" });
+    settings.editorSettings.sqlFormatter.keywordCase = "lower";
+    settings.editorSettings.sqlFormatter.autoCaseKeywordsOnSpace = true;
+    const view = sqlEditor("CREATE", "mysql");
+
+    expect(keys.handleSpace(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("create ");
+  });
+
+  it("leaves Space alone when auto-case is off, case is preserved, or the word is already cased", () => {
+    const off = createHarness({ databaseType: "postgres" });
+    const offView = sqlEditor("select");
+    expect(off.keys.handleSpace(offView)).toBe(false);
+    expect(offView.state.doc.toString()).toBe("select");
+
+    const preserved = createHarness({ databaseType: "postgres" });
+    preserved.settings.editorSettings.sqlFormatter.keywordCase = "preserve";
+    preserved.settings.editorSettings.sqlFormatter.autoCaseKeywordsOnSpace = true;
+    const preservedView = sqlEditor("select");
+    expect(preserved.keys.handleSpace(preservedView)).toBe(false);
+    expect(preservedView.state.doc.toString()).toBe("select");
+
+    const ready = createHarness({ databaseType: "postgres" });
+    ready.settings.editorSettings.sqlFormatter.autoCaseKeywordsOnSpace = true;
+    const readyView = sqlEditor("SELECT");
+    expect(ready.keys.handleSpace(readyView)).toBe(false);
+    expect(readyView.state.doc.toString()).toBe("SELECT");
+  });
+
+  it("does not recase names, qualified words, strings, or comments", () => {
+    const { keys, settings } = createHarness({ databaseType: "postgres" });
+    settings.editorSettings.sqlFormatter.autoCaseKeywordsOnSpace = true;
+
+    const samples: Array<[string, number]> = [
+      ["select name", "select name".length],
+      ["select t.order", "select t.order".length],
+      ["select 'select'", "select 'select".length],
+      ['select "select"', 'select "select'.length],
+      ["-- select", "-- select".length],
+      ["/* select */", "/* select ".length],
+    ];
+    for (const [source, cursor] of samples) {
+      const view = sqlEditor(source, "postgres", cursor);
+      expect(keys.handleSpace(view), source).toBe(false);
+      expect(view.state.doc.toString(), source).toBe(source);
+    }
+  });
+
+  it("keeps the SQL Server space-confirm recase when the new switch is off", () => {
+    const { keys, settings, props } = createHarness({ databaseType: "sqlserver" });
+    props.databaseType = "sqlserver";
+    settings.editorSettings.sqlServerSpaceConfirmsCompletion = true;
+    settings.editorSettings.sqlFormatter.autoCaseKeywordsOnSpace = false;
+    const view = sqlEditor("select", "sqlserver");
+
+    expect(keys.handleSpace(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("SELECT ");
+  });
+
+  it("does not recase on SQL Server once space-confirm and the new switch are both off", () => {
+    const { keys, settings } = createHarness({ databaseType: "sqlserver" });
+    settings.editorSettings.sqlServerSpaceConfirmsCompletion = false;
+    const view = sqlEditor("select", "sqlserver");
+
+    expect(keys.handleSpace(view)).toBe(false);
+    expect(view.state.doc.toString()).toBe("select");
+  });
+
+  it("lets an open SQL Server completion consume Space before keyword recasing", () => {
+    const { keys, settings, status, runtime, accept } = createHarness({ databaseType: "sqlserver", modelValue: "select" });
+    settings.editorSettings.sqlFormatter.autoCaseKeywordsOnSpace = true;
+    const view = sqlEditor("select", "sqlserver");
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletion = () => ({ label: "SELECT", type: "keyword" });
+    accept.mockReturnValue(true);
+
+    expect(keys.handleSpace(view)).toBe(true);
+    expect(accept).toHaveBeenCalledOnce();
+    expect(view.state.doc.toString()).toBe("select ");
+  });
+
+  it("ignores Space for keyword recasing while an IME composition is active", () => {
+    const { keys, settings, composing } = createHarness({ databaseType: "postgres" });
+    settings.editorSettings.sqlFormatter.autoCaseKeywordsOnSpace = true;
+    composing.mockReturnValue(true);
+    const view = sqlEditor("select");
+
+    expect(keys.handleSpace(view)).toBe(false);
+    expect(view.state.doc.toString()).toBe("select");
   });
 
   it("ignores Space for snippet completion while an IME composition is active", () => {

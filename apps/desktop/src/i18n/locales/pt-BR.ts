@@ -9418,6 +9418,7 @@ export default withEnglishFallback({
     sqlFormatterFormMode: "Formulário",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "Maiúsculas/minúsculas de palavras-chave",
+    sqlFormatterAutoCaseKeywordsOnSpace: "Converter palavras-chave",
     sqlFormatterFunctionCase: "Maiúsculas/minúsculas de funções",
     sqlFormatterDataTypeCase: "Maiúsculas/minúsculas de tipos de dados",
     sqlFormatterIdentifierCase: "Maiúsculas/minúsculas de identificadores",

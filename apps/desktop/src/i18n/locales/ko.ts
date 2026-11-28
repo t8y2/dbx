@@ -9186,6 +9186,7 @@ export default withEnglishFallback({
     sqlFormatterFormMode: "양식",
     sqlFormatterJsonMode: "JSON",
     sqlFormatterKeywordCase: "키워드 대소문자",
+    sqlFormatterAutoCaseKeywordsOnSpace: "키워드 자동 변환",
     sqlFormatterFunctionCase: "함수 대소문자",
     sqlFormatterDataTypeCase: "데이터 타입 대소문자",
     sqlFormatterIdentifierCase: "식별자 대소문자",

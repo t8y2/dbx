@@ -97,6 +97,19 @@ describe("sqlFormatterConfig layout style", () => {
     expect(config.options.layoutStyle).toBe("dbx");
     // layoutStyle is DBX-private: handing it to sql-formatter would throw.
     expect("layoutStyle" in sqlFormatterOptions({ layoutStyle: "dbx" })).toBe(false);
+    expect(DEFAULT_SQL_FORMATTER_SETTINGS.autoCaseKeywordsOnSpace).toBe(false);
+    expect("autoCaseKeywordsOnSpace" in sqlFormatterOptions({ autoCaseKeywordsOnSpace: true })).toBe(false);
+  });
+
+  it("defaults auto keyword casing off and round-trips an explicit opt-in", () => {
+    const missing = parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: { keywordCase: "lower" } }));
+    expect(missing).toEqual(expect.objectContaining({ ok: true }));
+    if (missing.ok) expect(missing.settings.autoCaseKeywordsOnSpace).toBe(false);
+
+    const enabled = parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: { autoCaseKeywordsOnSpace: true } }));
+    expect(enabled).toEqual(expect.objectContaining({ ok: true }));
+    if (enabled.ok) expect(enabled.settings.autoCaseKeywordsOnSpace).toBe(true);
+    expect(JSON.parse(serializeSqlFormatterConfig({ autoCaseKeywordsOnSpace: true })).options.autoCaseKeywordsOnSpace).toBe(true);
   });
 
   it("round-trips the classic layout style", () => {

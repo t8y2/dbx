@@ -2982,6 +2982,7 @@ export default withEnglishFallback({
     pie: "วงกลม",
     noNumericData: "ไม่มีข้อมูลตัวเลขสำหรับสร้างแผนภูมิ",
     showLabels: "แสดงค่า",
+    columnsAsXAxis: "ใช้ชื่อคอลัมน์บนแกน X",
   },
   grid: {
     setTablePageSizeDefault: "ตั้งค่าเริ่มต้นสำหรับตารางนี้",

@@ -3127,6 +3127,7 @@ export default {
     pie: "Pie",
     noNumericData: "No numeric data available for charting",
     showLabels: "Show Values",
+    columnsAsXAxis: "Column names on X axis",
   },
   grid: {
     setTablePageSizeDefault: "Set default for this table",

@@ -2836,6 +2836,7 @@ export default withEnglishFallback({
     pie: "Circular",
     noNumericData: "No hay datos numéricos disponibles para graficar",
     showLabels: "Mostrar valores",
+    columnsAsXAxis: "Nombres de columnas en el eje X",
   },
   grid: {
     setTablePageSizeDefault: "Fijar valor predeterminado para esta tabla",

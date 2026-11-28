@@ -2208,6 +2208,7 @@ export default withEnglishFallback({
     pie: "Pai",
     noNumericData: "Tidak ada data numerik yang tersedia untuk membuat chart",
     showLabels: "Tampilkan Nilai",
+    columnsAsXAxis: "Nama kolom pada sumbu X",
   },
   grid: {
     showStatusSql: "Tampilkan SQL di Bagian Bawah",

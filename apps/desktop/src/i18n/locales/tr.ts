@@ -1945,6 +1945,7 @@ export default withEnglishFallback({
     pie: "Pasta",
     noNumericData: "Grafik için sayısal veri yok",
     showLabels: "Değerleri Göster",
+    columnsAsXAxis: "X ekseninde sütun adları",
   },
   grid: {
     setTablePageSizeDefault: "Bu tablo için varsayılan yap",

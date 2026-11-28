@@ -2277,6 +2277,7 @@ export default withEnglishFallback({
     pie: "Kołowy",
     noNumericData: "Brak danych liczbowych do przedstawienia na wykresie",
     showLabels: "Pokaż wartości",
+    columnsAsXAxis: "Nazwy kolumn na osi X",
   },
   grid: {
     rows: "Wiersze: {count}",

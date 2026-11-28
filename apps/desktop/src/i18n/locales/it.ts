@@ -2736,6 +2736,7 @@ export default withEnglishFallback({
     pie: "Torta",
     noNumericData: "Nessun dato numerico disponibile per il grafico",
     showLabels: "Mostra valori",
+    columnsAsXAxis: "Nomi delle colonne sull’asse X",
   },
   grid: {
     setTablePageSizeDefault: "Imposta come predefinito per questa tabella",

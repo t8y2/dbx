@@ -2718,6 +2718,7 @@ export default withEnglishFallback({
     pie: "餅圖",
     noNumericData: "沒有可用於圖表的數值資料",
     showLabels: "顯示數值",
+    columnsAsXAxis: "欄名作為橫軸",
   },
   grid: {
     setTablePageSizeDefault: "設為此資料表的預設值",

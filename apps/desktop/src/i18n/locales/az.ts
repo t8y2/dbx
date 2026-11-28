@@ -1947,6 +1947,7 @@ export default withEnglishFallback({
     pie: "Dairəvi",
     noNumericData: "Diaqram qurmaq üçün ədədi verilənlər yoxdur",
     showLabels: "Dəyərləri göstər",
+    columnsAsXAxis: "X oxunda sütun adları",
   },
   grid: {
     showStatusSql: "Alt paneldə SQL göstər",

@@ -3055,6 +3055,7 @@ export default withEnglishFallback({
     pie: "饼图",
     noNumericData: "没有可用于图表的数值数据",
     showLabels: "显示数值",
+    columnsAsXAxis: "列名作为横轴",
   },
   grid: {
     setTablePageSizeDefault: "设为此表的默认值",

@@ -36,6 +36,7 @@ function readShowLabelsPreference(): boolean {
 const chartType = ref<ChartType>("bar");
 const xColumnIndex = ref(0);
 const yColumnIndexes = ref<number[]>([]);
+const columnsAsXAxis = ref(false);
 const showLabels = ref(readShowLabelsPreference());
 
 watch(showLabels, (val) => {
@@ -47,6 +48,8 @@ watch(showLabels, (val) => {
 });
 
 const numericColumnIndexes = computed(() => chartableColumnIndexes(props.result));
+const canPlotColumns = computed(() => chartType.value === "line" && props.result.rows.length === 1 && numericColumnIndexes.value.length > 1);
+const plotColumns = computed(() => canPlotColumns.value && columnsAsXAxis.value);
 
 const allColumnOptions = computed(() => props.result.columns.map((_, index) => ({ index, label: axisColumnLabel(props.result.columns, index) })));
 const numericColumnOptions = computed(() => numericColumnIndexes.value.map((index) => ({ index, label: axisColumnLabel(props.result.columns, index) })));
@@ -69,6 +72,7 @@ const yColumnLabel = computed(() => {
 watch(
   () => props.result,
   () => {
+    columnsAsXAxis.value = false;
     const cols = props.result.columns;
     const numCols = numericColumnIndexes.value;
     xColumnIndex.value = cols.findIndex((_, index) => !numCols.includes(index));
@@ -88,13 +92,28 @@ function toggleYColumn(index: number) {
 }
 
 const chartOption = computed(() => {
-  return buildQueryChartOption(props.result, {
+  const config = {
     chartType: chartType.value,
     xColumnIndex: xColumnIndex.value,
     yColumnIndexes: yColumnIndexes.value,
     showLabels: showLabels.value,
     isDark: isDark.value,
-  });
+  };
+  if (!plotColumns.value) return buildQueryChartOption(props.result, config);
+
+  const indexes = numericColumnIndexes.value.filter((index) => yColumnIndexes.value.includes(index));
+  if (!indexes.length) return null;
+
+  const result = props.result;
+  const row = result.rows[0]!;
+  return buildQueryChartOption(
+    {
+      ...result,
+      columns: [t("grid.columnVisibility"), t("grid.value")],
+      rows: indexes.map((index) => [axisColumnLabel(result.columns, index), row[index] ?? null]),
+    },
+    { ...config, xColumnIndex: 0, yColumnIndexes: [1] },
+  );
 });
 
 const hasData = computed(() => props.result.rows.length > 0 && numericColumnIndexes.value.length > 0);
@@ -107,7 +126,7 @@ const hasData = computed(() => props.result.rows.length > 0 && numericColumnInde
       <span>{{ t("chart.noNumericData") }}</span>
     </div>
     <template v-else>
-      <div class="h-9 shrink-0 border-b bg-muted/20 px-3 flex items-center gap-3 text-xs">
+      <div class="shrink-0 border-b bg-muted/20 px-3 flex items-center gap-x-3 text-xs" :class="canPlotColumns ? 'min-h-9 flex-wrap gap-y-1 py-1' : 'h-9'">
         <div class="flex items-center gap-1.5">
           <span class="text-muted-foreground">{{ t("chart.type") }}</span>
           <div class="flex gap-0.5">
@@ -117,7 +136,7 @@ const hasData = computed(() => props.result.rows.length > 0 && numericColumnInde
           </div>
         </div>
         <span class="h-4 w-px bg-border" />
-        <div class="flex items-center gap-1.5">
+        <div v-if="!plotColumns" class="flex items-center gap-1.5">
           <span class="text-muted-foreground">X</span>
           <Select v-model="xColumnValue">
             <SelectTrigger class="h-6 w-auto max-w-40 border-0 bg-transparent px-1 text-xs shadow-none focus:ring-0">
@@ -128,9 +147,9 @@ const hasData = computed(() => props.result.rows.length > 0 && numericColumnInde
             </SelectContent>
           </Select>
         </div>
-        <span class="h-4 w-px bg-border" />
+        <span v-if="!plotColumns" class="h-4 w-px bg-border" />
         <div class="flex items-center gap-1.5">
-          <span class="text-muted-foreground">Y</span>
+          <span class="text-muted-foreground">{{ plotColumns ? t("grid.columnVisibility") : "Y" }}</span>
           <DropdownMenu>
             <DropdownMenuTrigger as-child>
               <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
@@ -157,6 +176,9 @@ const hasData = computed(() => props.result.rows.length > 0 && numericColumnInde
           </DropdownMenu>
         </div>
         <span class="h-4 w-px bg-border" />
+        <Button v-if="canPlotColumns" size="sm" :variant="plotColumns ? 'secondary' : 'ghost'" :aria-pressed="plotColumns" class="h-6 px-2 text-xs" @click="columnsAsXAxis = !columnsAsXAxis">
+          {{ t("chart.columnsAsXAxis") }}
+        </Button>
         <Button size="sm" :variant="showLabels ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs" data-testid="query-chart-show-labels-btn" @click="showLabels = !showLabels">
           {{ t("chart.showLabels") }}
         </Button>

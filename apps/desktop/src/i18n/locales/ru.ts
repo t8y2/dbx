@@ -1596,6 +1596,7 @@ export default withEnglishFallback({
     postgresClientCertBrowse: "Выбрать клиентский сертификат",
     postgresClientKeyBrowse: "Выбрать закрытый ключ клиента",
     connectionUrlOptional: "URL (необязательно)",
+    generatedConnectionUrl: "Сформированный URL подключения",
     parseConnectionUrl: "Разобрать URL подключения",
     parseConnectionUrlApplied: "URL подключения применён",
     parseConnectionUrlFailed: "Не удалось разобрать URL подключения: {message}",

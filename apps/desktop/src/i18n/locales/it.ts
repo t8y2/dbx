@@ -1580,6 +1580,7 @@ export default withEnglishFallback({
     postgresClientCertBrowse: "Scegli certificato client",
     postgresClientKeyBrowse: "Scegli chiave privata client",
     connectionUrlOptional: "URL (opzionale)",
+    generatedConnectionUrl: "URL di connessione generato",
     parseConnectionUrl: "Analizza URL di connessione",
     parseConnectionUrlApplied: "URL di connessione applicato",
     parseConnectionUrlFailed: "Impossibile analizzare l'URL di connessione: {message}",

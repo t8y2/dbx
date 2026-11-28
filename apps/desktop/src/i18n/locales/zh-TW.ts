@@ -1564,6 +1564,7 @@ export default withEnglishFallback({
     postgresClientCertBrowse: "選擇用戶端憑證",
     postgresClientKeyBrowse: "選擇用戶端私鑰",
     connectionUrlOptional: "URL（可選）",
+    generatedConnectionUrl: "產生的連線 URL",
     parseConnectionUrl: "解析連線 URL",
     parseConnectionUrlApplied: "已套用連線 URL",
     parseConnectionUrlFailed: "解析連線 URL 失敗：{message}",

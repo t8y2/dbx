@@ -94,10 +94,13 @@ objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSDockTile", "NSEvent", "NSImage", "NSResponder", "NSView", "NSWindow", "NSWorkspace"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSBundle", "NSData", "NSString"] }
 
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW for folder-handle writes; shared by macOS and Linux.
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libloading = "0.8"
 gtk = "0.18"
-libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # 与 vendored wry / tauri-runtime-wry 同版本（Cargo.lock 只有一份 0.38.x），用于在

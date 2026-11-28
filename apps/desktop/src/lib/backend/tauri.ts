@@ -3398,6 +3398,70 @@ export async function closePluginLocalFile(pluginId: string, handleId: string): 
   return invoke("plugin_file_close", { pluginId, handleId });
 }
 
+export async function pickPluginLocalFolder(pluginId: string, readOnly?: boolean, defaultRef?: string): Promise<{ folderHandleId: string; name: string; id?: string; label: string } | null> {
+  return invoke("plugin_file_pick_folder", {
+    pluginId,
+    readOnly: readOnly === true,
+    defaultRef: defaultRef || null,
+  });
+}
+
+/** Recently granted project folders as opaque ids plus masked labels; paths stay in the host. */
+export async function recentPluginLocalFolders(pluginId: string): Promise<Array<{ id: string; name: string; label: string }>> {
+  return invoke("plugin_file_recent_folders", { pluginId });
+}
+
+/** Reopen a previously granted folder by opaque id without a dialog; the host re-validates the grant. */
+export async function openPluginLocalFolderByRef(pluginId: string, reference: string): Promise<{ folderHandleId: string; name: string; id?: string; label: string } | null> {
+  return invoke("plugin_file_open_folder_ref", { pluginId, reference });
+}
+
+/** Release every folder grant held by a plugin (workbench close / uninstall). */
+export async function closeAllPluginLocalFolders(pluginId: string): Promise<number> {
+  return invoke("plugin_file_folder_close_all", { pluginId });
+}
+
+export async function listPluginLocalFolder(pluginId: string, folderHandleId: string, options?: { subPath?: string; extensions?: string[] }): Promise<{ entries: Array<{ name: string; relativePath: string; kind: "file" | "directory"; size?: number; modifiedAt?: number }>; truncated: boolean }> {
+  return invoke("plugin_file_folder_list", {
+    pluginId,
+    folderHandleId,
+    subPath: options?.subPath ?? null,
+    extensions: options?.extensions ?? null,
+  });
+}
+
+export async function readPluginLocalFolderText(pluginId: string, folderHandleId: string, relativePath: string): Promise<string> {
+  return invoke("plugin_file_folder_read_text", { pluginId, folderHandleId, relativePath });
+}
+
+export async function readPluginLocalFolderBinary(pluginId: string, folderHandleId: string, relativePath: string): Promise<string> {
+  return invoke("plugin_file_folder_read_binary", { pluginId, folderHandleId, relativePath });
+}
+
+export async function resolvePluginLocalFolderEntry(pluginId: string, folderHandleId: string, relativePath: string): Promise<string> {
+  return invoke("plugin_file_folder_resolve_entry", { pluginId, folderHandleId, relativePath });
+}
+
+export async function writePluginLocalFolderText(pluginId: string, folderHandleId: string, relativePath: string, content: string, create = true): Promise<void> {
+  return invoke("plugin_file_folder_write_text", { pluginId, folderHandleId, relativePath, content, create });
+}
+
+export async function writePluginLocalFolderBinary(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, create = true, offset?: number): Promise<void> {
+  // An offset means a chunked append for large files; without one the whole file is replaced atomically.
+  return invoke("plugin_file_folder_write_binary", {
+    pluginId,
+    folderHandleId,
+    relativePath,
+    dataBase64,
+    create,
+    ...(offset === undefined ? {} : { offset }),
+  });
+}
+
+export async function closePluginLocalFolder(pluginId: string, folderHandleId: string): Promise<void> {
+  return invoke("plugin_file_folder_close", { pluginId, folderHandleId });
+}
+
 export async function openPluginMedia(pluginId: string, method: string, params: Record<string, unknown>): Promise<string> {
   return invoke("plugin_media_open", { pluginId, method, params });
 }

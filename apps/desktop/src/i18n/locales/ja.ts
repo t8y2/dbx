@@ -11186,6 +11186,7 @@ export default withEnglishFallback({
     mcpToolListRoutines: "ルーチン一覧",
     mcpToolGetRoutineSource: "ルーチンソース",
     mcpToolGetSchemaContext: "Schema コンテキスト",
+    mcpToolSearchSchema: "スキーマのメタデータを検索",
     mcpToolExecuteQuery: "SQL / Mongo コマンドを実行",
     mcpToolExecuteBatch: "SQL バッチを実行",
     mcpToolOpenSession: "クエリセッションを開く",

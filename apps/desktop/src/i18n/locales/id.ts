@@ -10273,6 +10273,7 @@ export default withEnglishFallback({
     mcpToolListRoutines: "Daftar rutin",
     mcpToolGetRoutineSource: "Sumber rutin",
     mcpToolGetSchemaContext: "Konteks skema",
+    mcpToolSearchSchema: "Cari metadata skema",
     mcpToolExecuteQuery: "Eksekusi SQL / perintah Mongo",
     mcpToolExecuteBatch: "Eksekusi batch SQL",
     mcpToolOpenSession: "Buka sesi kueri",

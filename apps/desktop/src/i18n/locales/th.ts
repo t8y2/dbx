@@ -12865,6 +12865,7 @@ export default withEnglishFallback({
     mcpToolListRoutines: "แสดงรายการ Routine",
     mcpToolGetRoutineSource: "ต้นฉบับ Routine",
     mcpToolGetSchemaContext: "บริบท Schema",
+    mcpToolSearchSchema: "ค้นหาข้อมูลเมตาของสคีมา",
     mcpToolExecuteQuery: "เรียกใช้คำสั่ง SQL / Mongo",
     mcpToolExecuteBatch: "เรียกใช้ SQL Batch",
     mcpToolOpenSession: "เปิดเซสชัน Query",

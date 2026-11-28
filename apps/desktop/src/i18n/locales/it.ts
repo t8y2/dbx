@@ -10833,6 +10833,7 @@ export default withEnglishFallback({
     mcpToolListRoutines: "Elenca routine",
     mcpToolGetRoutineSource: "Sorgente routine",
     mcpToolGetSchemaContext: "Contesto Schema",
+    mcpToolSearchSchema: "Cerca nei metadati dello schema",
     mcpToolExecuteQuery: "Esegui SQL / comandi Mongo",
     mcpToolExecuteBatch: "Esegui batch SQL",
     mcpToolOpenSession: "Apri sessione di query",

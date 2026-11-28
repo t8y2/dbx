@@ -9951,6 +9951,7 @@ export default withEnglishFallback({
     mcpToolListRoutines: "預存程序列表",
     mcpToolGetRoutineSource: "預存程序原始碼",
     mcpToolGetSchemaContext: "Schema 上下文",
+    mcpToolSearchSchema: "搜尋 Schema 中繼資料",
     mcpToolExecuteQuery: "執行 SQL / Mongo 命令",
     mcpToolExecuteBatch: "批次執行 SQL",
     mcpToolOpenSession: "開啟查詢工作階段",

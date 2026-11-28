@@ -10334,6 +10334,7 @@ export default withEnglishFallback({
     mcpToolListRoutines: "Lista procedur i funkcji",
     mcpToolGetRoutineSource: "Kod źródłowy procedury/funkcji",
     mcpToolGetSchemaContext: "Kontekst schematu",
+    mcpToolSearchSchema: "Szukaj w metadanych schematu",
     mcpToolExecuteQuery: "Wykonaj SQL / polecenia Mongo",
     mcpToolExecuteBatch: "Wykonaj partię SQL",
     mcpToolOpenSession: "Otwórz sesję zapytania",

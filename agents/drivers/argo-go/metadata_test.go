@@ -201,6 +201,47 @@ func TestListTablesPreservesViewTypeCommentAndWindow(t *testing.T) {
 	}
 }
 
+func TestListTablesFillsMissingCommentsFromSystemTablesView(t *testing.T) {
+	const viewQuery = "SELECT table_name, commentstring FROM system.tables_v WHERE database_name = 'analytics'"
+	behavior := &scriptedBehavior{
+		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {
+			// ArgoDB answers GetTables without REMARKS.
+			return metadataResult(
+				[]string{"TABLE_NAME", "TABLE_TYPE", "REMARKS"},
+				[]driver.Value{"events", "TABLE", ""},
+				[]driver.Value{"events_view", "VIEW", nil},
+			), nil
+		},
+		query: func(ctx context.Context, sql string) (driver.Rows, error) {
+			if sql != viewQuery {
+				t.Fatalf("unexpected query: %q", sql)
+			}
+			return newScriptedRows(
+				ctx,
+				[]string{"table_name", "commentstring"},
+				[]string{"STRING", "STRING"},
+				[][]driver.Value{{"events", "事件表"}, {"events_view", "事件视图"}},
+			), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	defer server.disconnect()
+
+	values, err := server.listTables("analytics", metadataListConstraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tableComment := "事件表"
+	viewComment := "事件视图"
+	expected := []tableInfo{
+		{Name: "events", TableType: "TABLE", Comment: &tableComment},
+		{Name: "events_view", TableType: "VIEW", Comment: &viewComment},
+	}
+	if !reflect.DeepEqual(values, expected) {
+		t.Fatalf("unexpected tables: %#v", values)
+	}
+}
+
 func TestGetColumnsUsesHiveServerMetadataFields(t *testing.T) {
 	behavior := &scriptedBehavior{
 		getColumns: func(_ context.Context, schema, table, column string) (gohive.MetadataResult, error) {

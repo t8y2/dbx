@@ -1,3 +1,5 @@
+import { installUiStallMonitor, supportsLongTaskEntries } from "./uiStallMonitor";
+
 const DEBUG_LOG_ENABLED_KEY = "dbx-debug-logging-enabled";
 const DEBUG_LOG_ENTRIES_KEY = "dbx-debug-log-entries";
 const MAX_DEBUG_LOG_ENTRIES = 1500;
@@ -345,7 +347,15 @@ export function installDebugLogCapture() {
 }
 
 function installPerformanceCapture() {
-  if (typeof PerformanceObserver === "undefined") return;
+  // WebKit (WKWebView, WebKitGTK) accepts a `longtask` observer but never fires
+  // it, so a stall there would go unrecorded; measure timer drift instead.
+  if (!supportsLongTaskEntries()) {
+    installUiStallMonitor({
+      isEnabled: isDebugLoggingEnabled,
+      onStall: (report) => appendDebugLog("warn", "[performance:ui-stall]", report),
+    });
+    return;
+  }
   try {
     const observer = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
@@ -360,7 +370,7 @@ function installPerformanceCapture() {
     });
     observer.observe({ entryTypes: ["longtask"] });
   } catch {
-    // Long task entries are not available in every WebView.
+    // The entry type was advertised but the observer could not be created.
   }
 }
 

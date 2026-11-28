@@ -1476,6 +1476,159 @@ SELECT @value AS Message;`;
     expect(executeCurrentSql).toHaveBeenCalledWith(resolvedSql, { tabId: "tab-1", openInNewResultTab: true });
   });
 
+  it("refuses a second parameterized run while a parameter request is pending", async () => {
+    const firstSql = "SELECT * FROM users WHERE id = :id";
+    const secondSql = "SELECT * FROM orders WHERE id = :id";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql: firstSql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["id"], rows: [[7]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const onDeferredExecutionSettled = vi.fn();
+    const onExecutionCancelled = vi.fn();
+    toast.mockClear();
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => activeTab.value?.sql ?? ""),
+      activeOutputView,
+      onDeferredExecutionSettled,
+      onExecutionCancelled,
+    });
+
+    await execution.tryExecute(undefined, { editorViewportRequestId: 11 });
+    expect(execution.showSqlParameterDialog.value).toBe(true);
+    expect(execution.sqlParameterSourceSql.value).toBe(firstSql);
+    expect(onDeferredExecutionSettled).not.toHaveBeenCalled();
+
+    // The editor stays editable while the modeless dialog is open, but a
+    // second parameterized run must not replace the parked request.
+    activeTab.value!.sql = secondSql;
+    const outcome = await execution.tryExecute(undefined, { editorViewportRequestId: 12 });
+
+    expect(outcome).toEqual({ status: "not-started", reason: "blocked", tabId: "tab-1" });
+    expect(execution.showSqlParameterDialog.value).toBe(true);
+    expect(execution.sqlParameterSourceSql.value).toBe(firstSql);
+    expect(onDeferredExecutionSettled).not.toHaveBeenCalled();
+    expect(onExecutionCancelled).not.toHaveBeenCalledWith(11);
+    expect(onExecutionCancelled).toHaveBeenCalledWith(12);
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith("sqlParameters.requestPending", 5000);
+
+    // The parked request is still the one pending and executes normally.
+    await execution.onSqlParametersConfirm("SELECT * FROM users WHERE id = 7");
+    expect(executeCurrentSql).toHaveBeenCalledWith("SELECT * FROM users WHERE id = 7", expect.objectContaining({ tabId: "tab-1" }));
+    expect(onDeferredExecutionSettled).toHaveBeenCalledTimes(1);
+    expect(onDeferredExecutionSettled).toHaveBeenCalledWith(expect.objectContaining({ status: "started", ok: true }));
+  });
+
+  it("cancels a pending parameter request when the execution target changes while the dialog is open", async () => {
+    const sql = "SELECT * FROM users WHERE id = :id";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockResolvedValue(undefined);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const onDeferredExecutionSettled = vi.fn();
+    const onExecutionCancelled = vi.fn();
+    toast.mockClear();
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+      onDeferredExecutionSettled,
+      onExecutionCancelled,
+    });
+
+    await execution.tryExecute(undefined, { editorViewportRequestId: 21 });
+    expect(execution.showSqlParameterDialog.value).toBe(true);
+
+    // Sidebar database picker while the modeless dialog is open.
+    activeTab.value!.database = "other_db";
+    await nextTick();
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+    expect(onDeferredExecutionSettled).toHaveBeenCalledWith({ status: "not-started", reason: "cancelled", tabId: "tab-1" });
+    expect(onExecutionCancelled).toHaveBeenCalledWith(21);
+    expect(toast).toHaveBeenCalledWith("sqlParameters.targetChanged", 5000);
+  });
+
+  it("refuses to execute captured SQL when the target changes in the same tick as Execute", async () => {
+    const sql = "SELECT * FROM users WHERE id = :id";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockResolvedValue(undefined);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const onDeferredExecutionSettled = vi.fn();
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+      onDeferredExecutionSettled,
+    });
+
+    await execution.tryExecute();
+    expect(execution.showSqlParameterDialog.value).toBe(true);
+
+    activeTab.value!.database = "other_db";
+    await execution.onSqlParametersConfirm("SELECT * FROM users WHERE id = 7");
+    await nextTick();
+
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+    expect(onDeferredExecutionSettled).toHaveBeenCalledWith({ status: "not-started", reason: "cancelled", tabId: "tab-1" });
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+  });
+
+  it("keeps a parameter request's new-result intent while a dangerous run is confirmed", async () => {
+    useSettingsStore().editorSettings.confirmDangerousSqlExecution = true;
+    const sql = "SELECT * FROM users WHERE id = :id";
+    const dangerousSql = "DELETE FROM users WHERE id = 1";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => activeTab.value?.sql ?? ""),
+      activeOutputView,
+    });
+
+    await execution.tryExecuteInNewResultTab();
+    expect(execution.showSqlParameterDialog.value).toBe(true);
+
+    // A second, non-parameterized dangerous run parks on the (modal) danger
+    // dialog while the parameter request is still pending.
+    activeTab.value!.sql = dangerousSql;
+    await execution.tryExecute();
+    expect(execution.showDangerDialog.value).toBe(true);
+    expect(execution.showSqlParameterDialog.value).toBe(true);
+
+    await execution.onDangerConfirm();
+    expect(executeCurrentSql).toHaveBeenCalledWith(dangerousSql, expect.objectContaining({ tabId: "tab-1" }));
+    expect(execution.showSqlParameterDialog.value).toBe(true);
+
+    await execution.onSqlParametersConfirm("SELECT * FROM users WHERE id = 7");
+    expect(executeCurrentSql).toHaveBeenCalledWith("SELECT * FROM users WHERE id = 7", expect.objectContaining({ tabId: "tab-1", openInNewResultTab: true }));
+  });
+
   it("settles a failed execution after accepting a SQL parameter dialog", async () => {
     const sql = "SELECT * FROM users WHERE id = :id";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });

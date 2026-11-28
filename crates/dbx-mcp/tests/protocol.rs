@@ -484,9 +484,9 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     // Includes the 22 product-provider tools (14 Nacos + 8 Consul).
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 47);
+    assert_eq!(names.len(), 48);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 45);
+    assert_eq!(names.len(), 46);
     #[cfg(feature = "mq-admin")]
     assert!(names.contains(&"dbx_peek_messages"));
     #[cfg(not(feature = "mq-admin"))]
@@ -500,6 +500,7 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     assert!(names.contains(&"dbx_salesforce_apply_write"));
     assert!(names.contains(&"dbx_execute_and_show"));
     assert!(names.contains(&"dbx_execute_batch"));
+    assert!(names.contains(&"dbx_query"));
     assert!(names.contains(&"dbx_list_routines"));
     assert!(names.contains(&"dbx_get_routine_source"));
     assert!(names.contains(&"dbx_open_session"));
@@ -895,6 +896,93 @@ async fn read_only_policy_allows_read_only_show_statements() {
         client.cancel().await.expect("close MCP client");
         server_task.abort();
     }
+}
+
+/// `dbx_query` is the read-only sibling of `dbx_execute_query`: its gate must
+/// reject writes even when the MCP policy permits them, before the backend is
+/// reached.
+#[tokio::test]
+async fn dbx_query_rejects_writes_before_dispatch_even_when_writes_are_allowed() {
+    for sql in [
+        "INSERT INTO users (id) VALUES (1)",
+        "UPDATE users SET name = 'x'",
+        "DELETE FROM users",
+        "DROP TABLE users",
+        "SELECT 1; SELECT 2",
+        "SELECT 1; DELETE FROM users",
+        "EXPLAIN ANALYZE SELECT 1",
+        "EXPLAIN (ANALYZE, BUFFERS) SELECT 1",
+        "SELECT * FROM users FOR UPDATE",
+        "SELECT * FROM users LOCK IN SHARE MODE",
+        "USE other_db",
+    ] {
+        let backend = PolicyBackend {
+            // Writes are explicitly allowed here, so only the dbx_query gate
+            // can stop these statements.
+            policy: McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, ..Default::default() },
+            connections: vec![mysql_connection("mysql", "reporting")],
+            group_paths: Ok(HashMap::new()),
+        };
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+        let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+        let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+        let result = client
+            .peer()
+            .call_tool(CallToolRequestParams::new("dbx_query").with_arguments(
+                json!({ "connection_id": "mysql", "sql": sql }).as_object().cloned().unwrap_or_else(Map::new),
+            ))
+            .await
+            .expect("call dbx_query");
+        let text = result.content[0].as_text().expect("tool result text").text.clone();
+        assert_eq!(result.is_error, Some(true), "{sql} reached the backend");
+        assert!(text.contains("READ_ONLY_QUERY_REJECTED"), "expected READ_ONLY_QUERY_REJECTED for {sql}, got: {text}");
+        assert!(!text.contains("query should have been blocked"), "{sql} reached the backend");
+
+        client.cancel().await.expect("close MCP client");
+        server_task.abort();
+    }
+}
+
+/// `dbx_query` must advertise the MCP read-only annotation clients use to skip
+/// plan-mode prompts, and a valid SELECT must reach the backend unchanged.
+#[tokio::test]
+async fn dbx_query_advertises_read_only_annotation_and_runs_select() {
+    let backend = Arc::new(CapturingBackend {
+        policy: McpGlobalPolicy::default(),
+        connections: vec![mysql_connection("mysql", "reporting")],
+        calls: Mutex::new(Vec::new()),
+    });
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+    let tools = client.peer().list_tools(None).await.expect("list tools");
+    let dbx_query = tools.tools.iter().find(|tool| tool.name == "dbx_query").expect("dbx_query tool");
+    assert_eq!(
+        dbx_query.annotations.as_ref().and_then(|annotations| annotations.read_only_hint),
+        Some(true),
+        "dbx_query must advertise readOnlyHint"
+    );
+
+    let result = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("dbx_query").with_arguments(
+            json!({ "connection_id": "mysql", "sql": "SELECT 1" }).as_object().cloned().unwrap_or_else(Map::new),
+        ))
+        .await
+        .expect("call dbx_query");
+    assert_ne!(result.is_error, Some(true), "read-only SELECT should reach the backend");
+    // Snapshot the captures so the lock is released before the closing await
+    // (clippy::await_holding_lock does not accept an explicit `drop` here).
+    let captured = backend.calls.lock().expect("lock captures").clone();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0]["sql"], json!("SELECT 1"));
+
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
 }
 
 #[tokio::test]

@@ -78,6 +78,7 @@ export function createQueryEditorHoverContent(options: QueryEditorHoverContentOp
           editorFontSize,
           (size) => {
             sqlContainer.style.fontSize = `${clampEditorFontSize(size)}px`;
+            layoutController?.refresh();
           },
           { immediate: true },
         );

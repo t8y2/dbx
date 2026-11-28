@@ -21,7 +21,7 @@ import {
   type PluginWorkbenchContext,
   type PluginAiRecommendationHostUpdate,
 } from "@/lib/plugins/pluginHostBridge";
-import { getCachedPluginUiHtml, getOrLoadPluginUiHtml, pluginUiAssetBaseUrl } from "@/lib/plugins/pluginUiHtmlCache";
+import { getCachedPluginUiHtml, getOrLoadPluginUiHtml, getSandboxDocument, invalidatePluginUiHtml, pluginUiAssetBaseUrl, type PluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
 import { declaresAnyObservationPermission } from "@/lib/plugins/pluginObservation";
 import { isPluginGraphicsEngineEnabled } from "@/lib/plugins/pluginGraphicsEngine";
 import { beginFloatingWindowDrag, closeFloatingWindows, endFloatingWindowDrag, openFloatingWindow, setFloatingWindowSize } from "@/lib/plugins/pluginFloatingWindow";
@@ -816,7 +816,7 @@ async function loadWorkbench() {
   try {
     if (!props.plugin.compatibility.compatible) throw new Error((props.plugin.compatibility.errors || []).join("; ") || t("pluginPlatform.pluginIncompatible"));
     // The read/decode/inline pipeline over a multi-megabyte ui build dominates
-    // workbench open time; cache the inlined html per plugin id+version so
+    // workbench open time; cache the processed ui per plugin id+version so
     // reopening panels (new dock entries, workbench reloads) skips it. Theme
     // is applied per load via the sandbox document, so the cache never pins a
     // stale appearance. getOrLoadPluginUiHtml coalesces with an in-flight
@@ -828,20 +828,30 @@ async function loadWorkbench() {
       cachedHtml = await getOrLoadPluginUiHtml(htmlCacheKey, props.plugin.manifest.id);
       if (disposed || generation !== loadGeneration) return;
     }
-    const { html, entryDirectory } = cachedHtml;
-    // The final sandbox document is cached alongside the html: generating it
-    // re-runs megabyte-scale string surgery on every boot.
+    // The final sandbox document is cached in place of the inlined html:
+    // generating it re-runs megabyte-scale string surgery on every boot, and
+    // keeping both would hold two copies of a tens-of-MB string per plugin.
     const allowUnsafeEval = graphicsEngineEnabled.value;
-    if (!cachedHtml.sandboxDoc || cachedHtml.sandboxDoc.allowUnsafeEval !== allowUnsafeEval) {
-      cachedHtml.sandboxDoc = {
-        allowUnsafeEval,
-        doc: pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
-          baseUrl: pluginUiAssetBaseUrl(props.plugin.manifest.id, entryDirectory),
+    const sandboxDocumentOf = (entry: PluginUiHtml) =>
+      getSandboxDocument(entry, allowUnsafeEval, (html) =>
+        pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
+          baseUrl: pluginUiAssetBaseUrl(props.plugin.manifest.id, entry.entryDirectory),
           allowUnsafeEval,
         }),
-      };
+      );
+    let sandboxDoc = sandboxDocumentOf(cachedHtml);
+    if (sandboxDoc === undefined) {
+      // The unsafe-eval grant flipped after the html was released, so the cached
+      // document carries the wrong CSP. Re-read the build instead of keeping the
+      // html resident for a setting that rarely changes.
+      invalidatePluginUiHtml(htmlCacheKey);
+      bootCacheHit = false;
+      cachedHtml = await getOrLoadPluginUiHtml(htmlCacheKey, props.plugin.manifest.id);
+      if (disposed || generation !== loadGeneration) return;
+      sandboxDoc = sandboxDocumentOf(cachedHtml);
+      if (sandboxDoc === undefined) throw new Error(`Plugin ui document for ${htmlCacheKey} is unavailable`);
     }
-    source.value = cachedHtml.sandboxDoc.doc;
+    source.value = sandboxDoc;
     await nextTick();
     if (disposed || generation !== loadGeneration) return;
     createBridge();

@@ -1,16 +1,33 @@
 package com.dbx.agent.firebird;
 
 import com.dbx.agent.ObjectSource;
+import com.dbx.agent.StandardJdbcMetadata;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.StringJoiner;
 import java.util.function.UnaryOperator;
 
-/** Read-only catalog source: stored routine bodies are never advertised as executable DDL. */
+/** Builds object source from Firebird catalog metadata. */
 final class FirebirdObjectSource {
+    private static final String VIEW_SOURCE_SQL = """
+        SELECT TRIM(TRAILING FROM V.RDB$RELATION_NAME), V.RDB$VIEW_SOURCE, TRIM(TRAILING FROM F.RDB$FIELD_NAME)
+        FROM (
+            SELECT FIRST 1 RDB$RELATION_NAME, RDB$VIEW_SOURCE
+            FROM RDB$RELATIONS
+            WHERE RDB$RELATION_NAME IN (?, UPPER(?)) AND RDB$VIEW_BLR IS NOT NULL
+            ORDER BY CASE WHEN RDB$RELATION_NAME = ? THEN 0 ELSE 1 END
+        ) V
+        LEFT JOIN RDB$RELATION_FIELDS F ON F.RDB$RELATION_NAME = V.RDB$RELATION_NAME
+        ORDER BY F.RDB$FIELD_POSITION
+        """;
+
     static ObjectSource read(Connection connection, String schema, String name, String type,
                              UnaryOperator<String> decode) throws SQLException {
+        if ("VIEW".equals(type)) {
+            return readView(connection, schema, name == null ? "" : name, decode);
+        }
         String targetName = name != null ? name.trim() : "";
         if (targetName.startsWith("\"") && targetName.endsWith("\"") && targetName.length() > 1) {
             targetName = targetName.substring(1, targetName.length() - 1);
@@ -20,7 +37,6 @@ final class FirebirdObjectSource {
             case "TRIGGER" -> "SELECT RDB$TRIGGER_SOURCE, TRIM(RDB$RELATION_NAME), RDB$TRIGGER_TYPE, RDB$TRIGGER_SEQUENCE, RDB$TRIGGER_INACTIVE FROM RDB$TRIGGERS WHERE (TRIM(RDB$TRIGGER_NAME) = ? OR TRIM(RDB$TRIGGER_NAME) = UPPER(?))";
             case "PACKAGE", "PACKAGE_BODY" -> "SELECT RDB$PACKAGE_HEADER_SOURCE, RDB$PACKAGE_BODY_SOURCE FROM RDB$PACKAGES WHERE (TRIM(RDB$PACKAGE_NAME) = ? OR TRIM(RDB$PACKAGE_NAME) = UPPER(?))";
             case "SEQUENCE" -> "SELECT RDB$GENERATOR_NAME, RDB$INITIAL_VALUE, RDB$GENERATOR_INCREMENT FROM RDB$GENERATORS WHERE RDB$GENERATOR_NAME = ?";
-            case "VIEW" -> "SELECT RDB$VIEW_SOURCE FROM RDB$RELATIONS WHERE (TRIM(RDB$RELATION_NAME) = ? OR TRIM(RDB$RELATION_NAME) = UPPER(?)) AND RDB$VIEW_BLR IS NOT NULL";
             default -> throw new IllegalArgumentException("Unsupported Firebird object type: " + type);
         };
         boolean legacy = connection.getMetaData().getDatabaseMajorVersion() < 3;
@@ -45,13 +61,39 @@ final class FirebirdObjectSource {
                         case "SEQUENCE" -> legacy ? "-- Generator: " + quoted
                             : "CREATE SEQUENCE " + quoted + " START WITH " + result.getLong(2)
                                 + " INCREMENT BY " + result.getLong(3) + ";";
-                        case "VIEW" -> "-- Stored view query\n" + text(decode.apply(result.getString(1)));
                         default -> "";
                     };
                 }
             }
         }
         return new ObjectSource(targetName, type, schema, source, false);
+    }
+
+    private static ObjectSource readView(Connection connection, String schema, String name,
+                                         UnaryOperator<String> decode) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(VIEW_SOURCE_SQL)) {
+            statement.setString(1, name);
+            statement.setString(2, name);
+            statement.setString(3, name);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) return new ObjectSource(name, "VIEW", schema, "", false);
+
+                String catalogName = result.getString(1);
+                String body = text(decode.apply(result.getString(2)));
+                String column = result.getString(3);
+                if (body.isBlank() || column == null) return new ObjectSource(catalogName, "VIEW", schema, body, false);
+
+                // The stored query may rely on explicit view aliases for its column names.
+                StringJoiner columns = new StringJoiner(", ");
+                columns.add(StandardJdbcMetadata.quoteIdentifier(column, "\""));
+                while (result.next()) {
+                    columns.add(StandardJdbcMetadata.quoteIdentifier(result.getString(3), "\""));
+                }
+                String quotedName = StandardJdbcMetadata.quoteIdentifier(catalogName, "\"");
+                String ddl = "CREATE OR ALTER VIEW " + quotedName + " (" + columns + ") AS\n" + body + ";";
+                return new ObjectSource(catalogName, "VIEW", schema, ddl, true);
+            }
+        }
     }
 
     private static String triggerSource(ResultSet result, String name, UnaryOperator<String> decode) throws SQLException {

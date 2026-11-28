@@ -38,12 +38,6 @@ interface MongoRegexLiteral {
   options: string;
 }
 
-function mongoRegexLiteralAt(source: string, index: number): MongoRegexLiteral | null {
-  if (source[index] !== "/" || !isMongoRegexValuePosition(source, index)) return null;
-
-  return readMongoRegexLiteral(source, index);
-}
-
 function readMongoRegexLiteral(source: string, index: number): MongoRegexLiteral | null {
   let cursor = index + 1;
   let pattern = "";
@@ -92,7 +86,7 @@ function readMongoRegexLiteral(source: string, index: number): MongoRegexLiteral
 // Shell arguments are data. Only a substitution-free template has a value here.
 function readMongoTemplate(source: string, start: number): { value: string; end: number } | null {
   let value = "";
-  const escapes: Record<string, string> = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", v: "\v", "\\": "\\", "`": "`", "$": "$", "'": "'", '"': '"', "/": "/" };
+  const escapes: Record<string, string> = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", v: "\v", "\\": "\\", "`": "`", $: "$", "'": "'", '"': '"', "/": "/" };
   for (let i = start + 1; i < source.length; i++) {
     const ch = source[i]!;
     if (ch === "`") return { value, end: i + 1 };
@@ -118,6 +112,8 @@ function readMongoTemplate(source: string, start: number): { value: string; end:
 function replaceMongoRegexLiterals(source: string): string | null {
   let result = "";
   let index = 0;
+  const hasSlash = source.includes("/");
+  let expectsValue = true;
 
   while (index < source.length) {
     const char = source[index] ?? "";
@@ -126,6 +122,7 @@ function replaceMongoRegexLiterals(source: string): string | null {
       if (!template) return null;
       result += JSON.stringify(template.value);
       index = template.end;
+      expectsValue = false;
       continue;
     }
     if (char === '"' || char === "'") {
@@ -141,6 +138,7 @@ function replaceMongoRegexLiterals(source: string): string | null {
         else if (current === quote) break;
       }
       result += source.slice(start, index);
+      expectsValue = false;
       continue;
     }
 
@@ -151,66 +149,26 @@ function replaceMongoRegexLiterals(source: string): string | null {
       continue;
     }
 
-    if (char !== "/" || !isMongoRegexValuePosition(source, index)) {
+    if (char !== "/" || !expectsValue) {
+      if (hasSlash && !/\s/.test(char)) expectsValue = startsMongoValueAfter(char);
       result += char;
       index += 1;
       continue;
     }
 
-    const literal = mongoRegexLiteralAt(source, index);
+    const literal = readMongoRegexLiteral(source, index);
     if (!literal) return null;
     result += JSON.stringify({ $regularExpression: { pattern: literal.pattern, options: literal.options } });
     index = literal.end;
+    expectsValue = false;
   }
 
   return result;
 }
 
-function isMongoRegexValuePosition(source: string, index: number): boolean {
-  let previousSignificant: string | null = null;
-  let cursor = 0;
-
-  while (cursor < index) {
-    const char = source[cursor] ?? "";
-    if (char === '"' || char === "'" || char === "`") {
-      const quote = char;
-      cursor += 1;
-      let escaped = false;
-      while (cursor < index) {
-        const current = source[cursor] ?? "";
-        cursor += 1;
-        if (escaped) escaped = false;
-        else if (current === "\\") escaped = true;
-        else if (current === quote) break;
-      }
-      previousSignificant = "value";
-      continue;
-    }
-
-    const commentEnd = mongoCommentEndAt(source, cursor);
-    if (commentEnd !== null) {
-      cursor = Math.min(commentEnd, index);
-      continue;
-    }
-
-    if (char === "/" && isMongoRegexValuePrefix(previousSignificant)) {
-      const literal = readMongoRegexLiteral(source, cursor);
-      if (literal && literal.end <= index) {
-        previousSignificant = "value";
-        cursor = literal.end;
-        continue;
-      }
-    }
-
-    if (!/\s/.test(char)) previousSignificant = char;
-    cursor += 1;
-  }
-
-  return isMongoRegexValuePrefix(previousSignificant);
-}
-
-function isMongoRegexValuePrefix(previousSignificant: string | null): boolean {
-  return previousSignificant === null || previousSignificant === ":" || previousSignificant === "[" || previousSignificant === "," || previousSignificant === "(";
+// Comments and whitespace leave the previous token's value position unchanged.
+function startsMongoValueAfter(char: string): boolean {
+  return char === ":" || char === "[" || char === "," || char === "(";
 }
 
 /** Object-shaped shell arg (options documents, etc.). */
@@ -262,9 +220,11 @@ export function splitTopLevel(source: string): string[] {
   let depth = 0;
   let quote: string | null = null;
   let escaped = false;
+  const hasSlash = source.includes("/");
+  let expectsValue = true;
 
   for (let i = 0; i < source.length; i += 1) {
-    const char = source[i];
+    const char = source[i]!;
     if (quote) {
       if (escaped) escaped = false;
       else if (char === "\\") escaped = true;
@@ -278,12 +238,14 @@ export function splitTopLevel(source: string): string[] {
       continue;
     }
 
-    const regexLiteral = mongoRegexLiteralAt(source, i);
+    const regexLiteral = char === "/" && expectsValue ? readMongoRegexLiteral(source, i) : null;
     if (regexLiteral) {
+      expectsValue = false;
       i = regexLiteral.end - 1;
       continue;
     }
 
+    if (hasSlash && !/\s/.test(char)) expectsValue = startsMongoValueAfter(char);
     if (char === '"' || char === "'" || char === "`") quote = char;
     else if (char === "{" || char === "[" || char === "(") depth += 1;
     else if (char === "}" || char === "]" || char === ")") depth -= 1;
@@ -302,9 +264,11 @@ export function findMatchingParen(source: string, openIndex: number): number {
   let depth = 0;
   let quote: string | null = null;
   let escaped = false;
+  const hasSlash = source.includes("/");
+  let expectsValue = true;
 
   for (let i = openIndex; i < source.length; i += 1) {
-    const char = source[i];
+    const char = source[i]!;
     if (quote) {
       if (escaped) escaped = false;
       else if (char === "\\") escaped = true;
@@ -318,12 +282,14 @@ export function findMatchingParen(source: string, openIndex: number): number {
       continue;
     }
 
-    const regexLiteral = mongoRegexLiteralAt(source, i);
+    const regexLiteral = char === "/" && expectsValue ? readMongoRegexLiteral(source, i) : null;
     if (regexLiteral) {
+      expectsValue = false;
       i = regexLiteral.end - 1;
       continue;
     }
 
+    if (hasSlash && !/\s/.test(char)) expectsValue = startsMongoValueAfter(char);
     if (char === '"' || char === "'" || char === "`") quote = char;
     else if (char === "(") depth += 1;
     else if (char === ")") {
@@ -340,6 +306,8 @@ export function hasUnclosedMongoDelimiters(source: string): boolean {
   const stack: string[] = [];
   let quote: string | null = null;
   let escaped = false;
+  const hasSlash = source.includes("/");
+  let expectsValue = true;
   for (let i = 0; i < source.length; i += 1) {
     const char = source[i] ?? "";
     if (quote) {
@@ -353,11 +321,13 @@ export function hasUnclosedMongoDelimiters(source: string): boolean {
       i = commentEnd - 1;
       continue;
     }
-    const regexLiteral = mongoRegexLiteralAt(source, i);
+    const regexLiteral = char === "/" && expectsValue ? readMongoRegexLiteral(source, i) : null;
     if (regexLiteral) {
+      expectsValue = false;
       i = regexLiteral.end - 1;
       continue;
     }
+    if (hasSlash && !/\s/.test(char)) expectsValue = startsMongoValueAfter(char);
     if (char === '"' || char === "'" || char === "`") {
       quote = char;
       continue;

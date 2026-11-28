@@ -62,6 +62,23 @@ interface SqlExecutionContext {
   connection: ConnectionConfig | undefined;
 }
 
+/**
+ * Execution target a pending SQL-parameter request was captured against. The
+ * parameter dialog is modeless, so the tab's target can change while a request
+ * is parked on it (sidebar database/catalog picker, a `USE` statement from a
+ * second run, a connection rebind); the captured SQL must never execute
+ * against a target other than the one the request started on.
+ */
+interface SqlParameterRequestTarget {
+  connectionId?: string;
+  catalog?: string;
+  database?: string;
+  schema?: string;
+}
+
+/** Result of asking the SQL-parameter dialog to park a request. */
+type SqlParameterPromptOutcome = "parked" | "blocked" | "skip";
+
 interface TargetSqlExecutionInput {
   tab: QueryTab;
   connection: ConnectionConfig;
@@ -225,10 +242,15 @@ export function useSqlExecution(deps: {
   const pendingDangerKind = ref<"sql" | "redis">("sql");
   const pendingDangerSourceOffset = ref<number | undefined>();
   const pendingOpenInNewResultTab = ref(false);
+  // Separate from the danger/redis parking's flag: the parameter dialog is
+  // modeless, so a dangerous run can park and settle while a parameter request
+  // is still pending, and each must keep its own new-result-tab intent.
+  const pendingSqlParameterOpenInNewResultTab = ref(false);
   const pendingSqlParameterEditorViewportRequestId = ref<number | undefined>();
   const pendingDangerEditorViewportRequestId = ref<number | undefined>();
   const pendingDangerTabId = ref<string | undefined>();
   const pendingSqlParameterTabId = ref<string | undefined>();
+  const pendingSqlParameterTarget = ref<SqlParameterRequestTarget | undefined>();
   let pendingSqlParameterContinuation: ((sql: string, sourceOffset?: number) => Promise<void> | void) | undefined;
 
   function cancelEditorViewportRequest(editorViewportRequestId?: number) {
@@ -361,8 +383,16 @@ export function useSqlExecution(deps: {
       const state = queryStore.oracleTriggerSourceState(tab.id);
       return ok || (state?.result !== previousResult && state?.result?.steps.some((step) => step.receipt !== undefined)) ? { status: "started", ok, tabId: tab.id, errorMessage: state?.error } : notStarted("blocked", tab.id);
     }
-    if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, executionOptions)) {
-      return deferred("parameters", context.tabId);
+    if (supportsSqlTemplateParameters(context.connection, sql)) {
+      const parameterPrompt = prepareSqlParameterDialog(sql, sourceOffset, executionOptions);
+      if (parameterPrompt === "parked") {
+        return deferred("parameters", context.tabId);
+      }
+      if (parameterPrompt === "blocked") {
+        // Refused by the one-pending-request gate; prepare already toasted.
+        cancelEditorViewportRequest(editorViewportRequestId);
+        return notStarted("blocked", context.tabId);
+      }
     }
     return continueExecute(context, sql, sourceOffset, executionOptions);
   }
@@ -452,7 +482,14 @@ export function useSqlExecution(deps: {
     return doExecute(sql, sourceOffset, options);
   }
 
-  function prepareSqlParameterDialog(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}, continuation?: (sql: string, sourceOffset?: number) => Promise<void> | void): boolean {
+  /** True while the pending request's tab still points at the target it captured. */
+  function pendingSqlParameterTargetIntact(tabId: string | undefined, target: SqlParameterRequestTarget): boolean {
+    const tab = resolveExecutionTab(tabId);
+    if (!tab) return false;
+    return tab.connectionId === target.connectionId && tab.catalog === target.catalog && tab.database === target.database && tab.schema === target.schema;
+  }
+
+  function prepareSqlParameterDialog(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}, continuation?: (sql: string, sourceOffset?: number) => Promise<void> | void): SqlParameterPromptOutcome {
     const connection = resolveExecutionConnection(options.tabId);
     const databaseType = effectiveDatabaseTypeForConnection(connection) ?? connection?.db_type;
     const tab = resolveExecutionTab(options.tabId);
@@ -462,19 +499,32 @@ export function useSqlExecution(deps: {
     const parameterDatabaseType = kingbaseSqlDatabaseType(connection) ?? databaseType;
     const parameters = extractSqlParameterDescriptors(sql, { databaseType: parameterDatabaseType, compatibilityMode, enabledSyntaxes });
     if (!parameters.length) {
-      return false;
+      return "skip";
+    }
+    // One pending parameter request at a time: the dialog is modeless, so
+    // Run/Explain stay available while parameters are pending, but a second
+    // parameterized run must not replace the parked SQL, values and
+    // continuation — it is refused, and the parked request stays the only
+    // pending one until the user executes or cancels it. Runs without
+    // parameters are unaffected: they never touch the parked request.
+    if (showSqlParameterDialog.value) {
+      toast(t("sqlParameters.requestPending"), 5000);
+      return "blocked";
     }
     sqlParameterSourceSql.value = sql;
     sqlParameterNames.value = parameters;
     sqlParameterDatabaseType.value = parameterDatabaseType;
     sqlParameterEnabledSyntaxes.value = enabledSyntaxes;
     pendingSourceOffset.value = sourceOffset;
-    pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
+    pendingSqlParameterOpenInNewResultTab.value = options.openInNewResultTab === true;
     pendingSqlParameterEditorViewportRequestId.value = options.editorViewportRequestId;
-    pendingSqlParameterTabId.value = options.tabId;
+    pendingSqlParameterTabId.value = tab?.id ?? options.tabId;
+    // Capture the target the request started against; the drift watcher and
+    // the resume check keep the captured SQL from ever running elsewhere.
+    pendingSqlParameterTarget.value = tab ? { connectionId: tab.connectionId, catalog: tab.catalog, database: tab.database, schema: tab.schema } : undefined;
     pendingSqlParameterContinuation = continuation;
     showSqlParameterDialog.value = true;
-    return true;
+    return "parked";
   }
 
   async function prepareMultiExecute(onReady: (sql: string, sourceOffset?: number) => Promise<void> | void): Promise<boolean> {
@@ -484,8 +534,15 @@ export function useSqlExecution(deps: {
     }
     const { sql, sourceOffset } = await resolvedExecutableSql(undefined, context);
     if (!sql.trim()) return false;
-    if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, { tabId: context.tabId }, onReady)) {
-      return true;
+    if (supportsSqlTemplateParameters(context.connection, sql)) {
+      const parameterPrompt = prepareSqlParameterDialog(sql, sourceOffset, { tabId: context.tabId }, onReady);
+      if (parameterPrompt === "parked") {
+        return true;
+      }
+      if (parameterPrompt === "blocked") {
+        // Refused by the one-pending-request gate; prepare already toasted.
+        return false;
+      }
     }
     await onReady(sql, sourceOffset);
     return false;
@@ -1067,8 +1124,11 @@ export function useSqlExecution(deps: {
     }
     // Resolve SQL template variables exactly like tryExecute so EXPLAIN never runs the raw
     // placeholders (e.g. `EXPLAIN (FORMAT JSON) SELECT :var;` fails on PostgreSQL).
-    if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, { tabId: context.tabId }, (resolvedSql) => runExplain(resolvedSql, context))) {
-      return;
+    if (supportsSqlTemplateParameters(context.connection, sql)) {
+      const parameterPrompt = prepareSqlParameterDialog(sql, sourceOffset, { tabId: context.tabId }, (resolvedSql) => runExplain(resolvedSql, context));
+      // "parked": waiting on the dialog; "blocked": the one-pending-request
+      // gate refused it and prepare already toasted. Either way, no explain now.
+      if (parameterPrompt !== "skip") return;
     }
     await runExplain(sql, context);
   }
@@ -1109,9 +1169,19 @@ export function useSqlExecution(deps: {
   }
 
   async function onSqlParametersConfirm(sql: string) {
-    const openInNewResultTab = pendingOpenInNewResultTab.value;
+    const openInNewResultTab = pendingSqlParameterOpenInNewResultTab.value;
     const editorViewportRequestId = pendingSqlParameterEditorViewportRequestId.value;
     const tabId = pendingSqlParameterTabId.value;
+    // Backstop for the drift watcher below: even if the target change and this
+    // Execute click land in the same tick, the captured SQL must not run
+    // against a target that differs from the one the request started on. The
+    // pending state is left in place on purpose so the dismissal watcher
+    // settles the request as cancelled and releases its viewport request.
+    if (pendingSqlParameterTarget.value && !pendingSqlParameterTargetIntact(tabId, pendingSqlParameterTarget.value)) {
+      toast(t("sqlParameters.targetChanged"), 5000);
+      showSqlParameterDialog.value = false;
+      return;
+    }
     showSqlParameterDialog.value = false;
     sqlParameterSourceSql.value = "";
     sqlParameterNames.value = [];
@@ -1119,9 +1189,10 @@ export function useSqlExecution(deps: {
     sqlParameterEnabledSyntaxes.value = [];
     const sourceOffset = pendingSourceOffset.value;
     pendingSourceOffset.value = undefined;
-    pendingOpenInNewResultTab.value = false;
+    pendingSqlParameterOpenInNewResultTab.value = false;
     pendingSqlParameterEditorViewportRequestId.value = undefined;
     pendingSqlParameterTabId.value = undefined;
+    pendingSqlParameterTarget.value = undefined;
     const continuation = pendingSqlParameterContinuation;
     pendingSqlParameterContinuation = undefined;
     if (continuation) {
@@ -1153,13 +1224,35 @@ export function useSqlExecution(deps: {
     sqlParameterDatabaseType.value = undefined;
     sqlParameterEnabledSyntaxes.value = [];
     pendingSourceOffset.value = undefined;
-    pendingOpenInNewResultTab.value = false;
+    pendingSqlParameterOpenInNewResultTab.value = false;
     pendingSqlParameterEditorViewportRequestId.value = undefined;
     pendingSqlParameterTabId.value = undefined;
+    pendingSqlParameterTarget.value = undefined;
     pendingSqlParameterContinuation = undefined;
     cancelEditorViewportRequest(editorViewportRequestId);
     if (abandonedTabId) reportDeferredExecution(notStarted("cancelled", abandonedTabId));
   });
+
+  // Modeless parameter dialog: the tab's execution target can change while a
+  // request is parked on it (sidebar database/catalog picker, a `USE` statement
+  // from a second run, a connection rebind). Closing the dialog on drift makes
+  // the dismissal watcher above settle the request as cancelled — the captured
+  // SQL never executes against a target the user did not see when the request
+  // started. `onSqlParametersConfirm` re-checks at resume in case the drift and
+  // the Execute click land in the same tick.
+  watch(
+    () => {
+      if (!showSqlParameterDialog.value) return false;
+      const target = pendingSqlParameterTarget.value;
+      if (!target) return false;
+      return !pendingSqlParameterTargetIntact(pendingSqlParameterTabId.value, target);
+    },
+    (drifted) => {
+      if (!drifted) return;
+      toast(t("sqlParameters.targetChanged"), 5000);
+      showSqlParameterDialog.value = false;
+    },
+  );
 
   watch(showDangerDialog, (open) => {
     if (open) return;

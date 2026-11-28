@@ -317,7 +317,7 @@ func (server *server) listTables(schema string, constraints metadataListConstrai
 			})
 		}
 		sort.Slice(values, func(first, second int) bool { return values[first].Name < values[second].Name })
-		return applyMetadataWindow(values, constraints.Offset, constraints.Limit), nil
+		return applyMetadataWindow(server.fillTableComments(schema, values), constraints.Offset, constraints.Limit), nil
 	}
 	type fallbackQuery struct {
 		operation  string
@@ -372,6 +372,48 @@ func (server *server) listTables(schema string, constraints metadataListConstrai
 	}
 	sort.Slice(values, func(first, second int) bool { return values[first].Name < values[second].Name })
 	return applyMetadataWindow(values, constraints.Offset, constraints.Limit), nil
+}
+
+// fillTableComments fills table comments that HiveServer2 metadata left empty.
+// ArgoDB answers GetTables without REMARKS, so the sidebar shows no table
+// comments unless they come from system.tables_v, which carries commentstring.
+// Best effort: any failure keeps the comments that are already known.
+func (server *server) fillTableComments(schema string, tables []tableInfo) []tableInfo {
+	missing := false
+	for _, table := range tables {
+		if table.Comment == nil || strings.TrimSpace(*table.Comment) == "" {
+			missing = true
+			break
+		}
+	}
+	if !missing {
+		return tables
+	}
+	statement := "SELECT table_name, commentstring FROM system.tables_v WHERE database_name = '" +
+		strings.ReplaceAll(schema, "'", "''") + "'"
+	result, err := server.executeQuery(queryOptions{SQL: statement, MaxRows: metadataQueryLimit})
+	if err != nil {
+		return tables
+	}
+	comments := make(map[string]string, len(result.Rows))
+	for _, row := range result.Rows {
+		name := firstRowValue(row)
+		comment := rowString(row, 1)
+		if name == "" || comment == "" {
+			continue
+		}
+		comments[name] = comment
+	}
+	for index := range tables {
+		if tables[index].Comment != nil && strings.TrimSpace(*tables[index].Comment) != "" {
+			continue
+		}
+		if comment, ok := comments[tables[index].Name]; ok {
+			value := comment
+			tables[index].Comment = &value
+		}
+	}
+	return tables
 }
 
 func showViewsUnsupported(err error) bool {

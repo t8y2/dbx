@@ -149,3 +149,13 @@ END F;`
 		t.Fatalf("anonymous nested block lost its owning routine: %+v", got)
 	}
 }
+
+func TestPLDebugNativeRoutineIdentityMatchesSysRefCursor(t *testing.T) {
+	code := "PROCEDURE P(O_RESULT OUT SYS_REFCURSOR) AS\nBEGIN\n OPEN O_RESULT FOR SELECT 1 FROM DUAL;\nEND P;"
+	source := plDebugNativeRoutineFixture(code, "PROCEDURE", "P")
+	name := "O_RESULT"
+	target := plDebugNativeCandidate{Schema: "OWNER", ObjectName: "P", ObjectType: "PROCEDURE", Arguments: []plDebugNativeArgument{{Name: &name, Position: 1, Mode: "OUT", Type: "REF CURSOR"}}}
+	if got := plDebugNativeIdentifyRoutine(source, target, 3); got.State != "verified" {
+		t.Fatalf("cursor procedure source identity: %+v", got)
+	}
+}

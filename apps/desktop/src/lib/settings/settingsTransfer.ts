@@ -7,6 +7,7 @@ import { EDITOR_MAX_FONT_SIZE, EDITOR_MIN_FONT_SIZE } from "@/lib/editor/editorZ
 import { DATA_GRID_TYPE_COLOR_KEYS, DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { SHORTCUT_DEFINITIONS } from "@/lib/editor/shortcutRegistry";
 import { DEFAULT_SQL_FORMATTER_RULE_SETTINGS, DEFAULT_SQL_FORMATTER_SETTINGS, isCompleteSqlFormatterSettings, type SqlFormatterOptionSettings, type SqlFormatterRuleSettings } from "@/lib/sql/sqlFormatterConfig";
+import { normalizePreferredTableAlias } from "@/lib/sql/sqlIdentifier";
 import { SQL_VARIABLE_SYNTAX_KEYS } from "@/lib/sql/sqlVariableSyntax";
 
 /**
@@ -166,6 +167,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "showInsertValueHints",
     "showConnectionGroupPath",
     "autoAliasTables",
+    "preferredTableAlias",
     "qualifyColumnCompletions",
     "batchColumnSelectionIncludeComments",
     "tableCompletionSchemaQualification",
@@ -683,6 +685,7 @@ const NESTED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: un
  * inside `customThemes`).
  */
 const RAW_STRUCTURED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
+  preferredTableAlias: (value) => typeof value === "string" && (!value.trim() || !!normalizePreferredTableAlias(value)),
   customThemes: (value) => isArrayOfShape(value, isCustomThemeItem),
   dataGridTypeColorSchemes: (value) => isArrayOfShape(value, isDataGridTypeColorSchemeItem),
   tableColumnTemplateFields: isStringArray,

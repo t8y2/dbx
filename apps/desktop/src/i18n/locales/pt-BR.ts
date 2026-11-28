@@ -8156,6 +8156,7 @@ export default withEnglishFallback({
     preserveQuotedBracedParameters: "Preservar os placeholders de modelo em strings entre aspas simples",
   },
   transfer: {
+    preparingReview: "Preparando o plano de transferência",
     reviewBeforeStart: "Selecione Iniciar transferência para revisar o plano e confirmar antes de gravar dados.",
     log: {
       title: "Registro de execução",

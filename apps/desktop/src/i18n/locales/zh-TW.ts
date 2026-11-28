@@ -6958,6 +6958,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    preparingReview: "正在產生傳輸計畫",
     reviewBeforeStart: "按一下「開始傳輸」先檢閱傳輸計畫，確認後才會寫入資料。",
     log: {
       title: "執行日誌",

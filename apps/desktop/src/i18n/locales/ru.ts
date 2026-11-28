@@ -9331,6 +9331,7 @@ export default withEnglishFallback({
     preserveQuotedBracedParameters: "Сохранять шаблонные заполнители в строках в одинарных кавычках",
   },
   transfer: {
+    preparingReview: "Подготовка плана переноса",
     reviewBeforeStart: "Нажмите «Начать перенос», чтобы проверить план и подтвердить перенос перед записью данных.",
     log: {
       title: "Журнал выполнения",

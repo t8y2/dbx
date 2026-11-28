@@ -6490,6 +6490,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    preparingReview: "Aktarım planı hazırlanıyor",
     reviewBeforeStart: "Aktarımı Başlat'ı seçerek veriler yazılmadan önce aktarım planını inceleyip onaylayın.",
     log: {
       title: "Yürütme günlüğü",

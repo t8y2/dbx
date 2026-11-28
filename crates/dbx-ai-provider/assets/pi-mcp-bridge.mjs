@@ -7,6 +7,16 @@ const MCP_ARGS_ENV = "DBX_PI_MCP_ARGS";
 const ENABLED_TOOLS_ENV = "DBX_PI_ENABLED_TOOLS";
 const READY_FILE_ENV = "DBX_PI_BRIDGE_READY_FILE";
 const REQUEST_TIMEOUT_MS = 30_000;
+// These entries in the application's allowlist depend on the capabilities of
+// the connections exposed by the MCP server. Only discovery is unconditional.
+const CONNECTION_SPECIFIC_TOOLS = new Set([
+  "dbx_list_tables",
+  "dbx_describe_table",
+  "dbx_get_schema_context",
+  "dbx_execute_query",
+  "dbx_execute_redis_command",
+  "dbx_salesforce_current_user",
+]);
 
 function parseJsonEnv(name, fallback) {
   const value = process.env[name];
@@ -159,7 +169,8 @@ export default async function registerDbxMcpBridge(pi) {
 
   const toolList = await request("tools/list");
   const tools = (toolList?.tools ?? []).filter((tool) => enabledTools.has(tool.name));
-  const missing = [...enabledTools].filter((name) => !tools.some((tool) => tool.name === name));
+  // The server advertises these tools only for matching connections in scope.
+  const missing = [...enabledTools].filter((name) => !CONNECTION_SPECIFIC_TOOLS.has(name) && !tools.some((tool) => tool.name === name));
   if (missing.length > 0) {
     throw new Error(`DBX MCP did not expose required tools: ${missing.join(", ")}`);
   }

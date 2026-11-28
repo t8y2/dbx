@@ -189,7 +189,8 @@ pub async fn validate_mq_adapter_after_build(build: &MqBuildResult) -> Result<()
 fn adapter_fingerprint(mqc: &MqAdminConfig, agent_launch: Option<&AgentLaunchSpec>) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     format!("{mqc:?}").hash(&mut hasher);
-    format!("{agent_launch:?}").hash(&mut hasher);
+    // Debug omits configured arguments and environment values.
+    agent_launch.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -228,6 +229,23 @@ async fn build_adapter(
 #[cfg(test)]
 mod proxy_config_tests {
     use super::*;
+
+    #[test]
+    fn hidden_agent_launch_settings_invalidate_adapter_fingerprint() {
+        let config: MqAdminConfig = serde_json::from_value(serde_json::json!({
+            "systemKind": "rocketmq", "adminUrl": "",
+            "extra": { "namesrvAddr": "ns.internal:9876" }
+        }))
+        .unwrap();
+        let launch = |arg: &str, env: &str| {
+            AgentLaunchSpec::new("agent").with_args([arg]).with_env([("DBX_TEST_OPTION".to_owned(), env.to_owned())])
+        };
+        let original = launch("first-arg", "first-env");
+        for changed in [launch("second-arg", "first-env"), launch("first-arg", "second-env")] {
+            assert_eq!(format!("{original:?}"), format!("{changed:?}"));
+            assert_ne!(adapter_fingerprint(&config, Some(&original)), adapter_fingerprint(&config, Some(&changed)));
+        }
+    }
 
     #[test]
     fn rocketmq_transport_changes_invalidate_adapter_fingerprint() {

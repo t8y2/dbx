@@ -25,6 +25,14 @@ enum RuntimeCallPolicy {
     PlDebug,
 }
 
+/// The read that failed, without its reason: the reason is [`AGENT_STARTUP_EOF_TAIL`].
+const AGENT_STARTUP_EOF_PREFIX: &str = "Failed to read startup line from agent: ";
+/// How long the retry veto waits for the stderr collector thread, mirroring the
+/// grace the rendered report gives the process.
+const AGENT_STDERR_DRAIN_GRACE_MS: u64 = 1_000;
+/// The half of the premature-EOF wording both the producer and the classifier use.
+const AGENT_STARTUP_EOF_TAIL: &str = "end of stream";
+
 const PL_DEBUG_REQUEST_QUEUED: u8 = 0;
 const PL_DEBUG_REQUEST_SENDING: u8 = 1;
 const PL_DEBUG_REQUEST_ABANDONED: u8 = 2;
@@ -78,8 +86,45 @@ pub struct AgentRuntimeClient {
     pl_debug_in_flight: Arc<tokio::sync::Semaphore>,
 }
 
+pub(crate) enum AgentRuntimeStartupError {
+    Startup(String),
+    UnsupportedProtocol(String),
+}
+
+impl From<String> for AgentRuntimeStartupError {
+    fn from(message: String) -> Self {
+        Self::Startup(message)
+    }
+}
+
+impl From<AgentRuntimeStartupError> for String {
+    fn from(error: AgentRuntimeStartupError) -> Self {
+        match error {
+            AgentRuntimeStartupError::Startup(message) | AgentRuntimeStartupError::UnsupportedProtocol(message) => {
+                message
+            }
+        }
+    }
+}
+
+impl AgentRuntimeStartupError {
+    fn unsupported_protocol(launch: &AgentLaunchSpec) -> Self {
+        Self::UnsupportedProtocol(with_launch_command(
+            "Agent runtime does not support multi_session protocol v2".to_owned(),
+            &launch_display(launch),
+        ))
+    }
+}
+
 impl AgentRuntimeClient {
     pub async fn spawn(launch: AgentLaunchSpec, app_version: &str) -> Result<Arc<Self>, String> {
+        Self::spawn_classified(launch, app_version).await.map_err(Into::into)
+    }
+
+    pub(crate) async fn spawn_classified(
+        launch: AgentLaunchSpec,
+        app_version: &str,
+    ) -> Result<Arc<Self>, AgentRuntimeStartupError> {
         Self::spawn_internal(launch, app_version, None, None).await
     }
 
@@ -88,7 +133,7 @@ impl AgentRuntimeClient {
         app_version: &str,
         deadline: Instant,
     ) -> Result<Arc<Self>, String> {
-        Self::spawn_internal(launch, app_version, Some(deadline), None).await
+        Self::spawn_internal(launch, app_version, Some(deadline), None).await.map_err(Into::into)
     }
 
     pub(crate) async fn spawn_before_observed(
@@ -97,7 +142,7 @@ impl AgentRuntimeClient {
         deadline: Instant,
         startup: &StartupCleanupGuard,
     ) -> Result<Arc<Self>, String> {
-        Self::spawn_internal(launch, app_version, Some(deadline), Some(startup)).await
+        Self::spawn_internal(launch, app_version, Some(deadline), Some(startup)).await.map_err(Into::into)
     }
 
     async fn spawn_internal(
@@ -105,7 +150,7 @@ impl AgentRuntimeClient {
         app_version: &str,
         deadline: Option<Instant>,
         startup: Option<&StartupCleanupGuard>,
-    ) -> Result<Arc<Self>, String> {
+    ) -> Result<Arc<Self>, AgentRuntimeStartupError> {
         let ReadyAgentProcess { child, stdin, stdout, stderr_tail, startup_exit } = match deadline {
             Some(deadline) => spawn_ready_agent_process_before(&launch, deadline, startup).await?,
             None => spawn_ready_agent_process(&launch).await?,
@@ -134,7 +179,9 @@ impl AgentRuntimeClient {
         let mut startup_guard = RuntimeStartupGuard(deadline.map(|_| runtime.clone()));
         runtime.start_response_reader(stdout);
         let handshake_timeout = match deadline {
-            Some(deadline) => startup_remaining(deadline)?.min(Duration::from_secs(RPC_TIMEOUT_SECS)),
+            Some(deadline) => startup_remaining(deadline)
+                .map_err(|cause| with_launch_command(cause, &launch_display(&launch)))?
+                .min(Duration::from_secs(RPC_TIMEOUT_SECS)),
             None => Duration::from_secs(RPC_TIMEOUT_SECS),
         };
         let handshake = match runtime
@@ -147,26 +194,31 @@ impl AgentRuntimeClient {
             .await
         {
             Ok(handshake) => handshake,
-            Err(error) if is_unsupported_handshake_error(&error.to_string()) => {
+            Err(AgentCallError::Structured { message, .. } | AgentCallError::Legacy { message, .. })
+                if is_unsupported_handshake_error(&message) =>
+            {
                 runtime.kill();
-                return Err("Agent runtime does not support multi_session protocol v2".to_string());
+                return Err(AgentRuntimeStartupError::unsupported_protocol(&launch));
             }
             Err(error) => {
                 runtime.kill();
-                return Err(error.into_legacy_string());
+                return Err(with_launch_command(error.into_legacy_string(), &launch_display(&launch)).into());
             }
         };
         if handshake.protocol_version < 2 || !handshake.supports(AgentCapability::MultiSession) {
             runtime.kill();
-            return Err("Agent runtime does not support multi_session protocol v2".to_string());
+            return Err(AgentRuntimeStartupError::unsupported_protocol(&launch));
         }
         if let Some(deadline) = deadline {
-            startup_remaining(deadline)?;
+            startup_remaining(deadline).map_err(|cause| with_launch_command(cause, &launch_display(&launch)))?;
         }
         startup_guard.0.take();
         let runtime = Arc::try_unwrap(runtime).map_err(|runtime| {
             runtime.kill();
-            "Agent runtime initialization is still referenced".to_string()
+            with_launch_command(
+                "Agent runtime initialization is still referenced".to_string(),
+                &launch_display(&launch),
+            )
         })?;
         Ok(Arc::new(Self { handshake, ..runtime }))
     }
@@ -1275,19 +1327,28 @@ impl PooledAgentClient {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct AgentLaunchSpec {
     pub program: PathBuf,
-    pub args: Vec<String>,
+    args: Vec<String>,
+    // Only the Java builder knows which arguments DBX produced. Generic
+    // launches are opaque, including values that look like a JAR or JVM flag.
+    configured_java_args: Option<std::ops::Range<usize>>,
     pub working_dir: Option<PathBuf>,
     /// Extra environment variables handed to the agent process.
     ///
     /// This is part of the launch *identity*, not just the launch mechanics:
-    /// [`crate::agent_runtime::shared_runtime_key`] hashes it, so two launches
+    /// [`crate::agent_runtime::shared_runtime_key`] includes it, so two launches
     /// that differ only in `env` get separate agent processes. That is what
     /// makes process-scoped Oracle Client settings (`NLS_LANG`) safe to set per
     /// connection instead of leaking across connections that share a process.
     pub env: Vec<(String, String)>,
+}
+
+impl fmt::Debug for AgentLaunchSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("AgentLaunchSpec").field(&launch_display(self)).finish()
+    }
 }
 
 /// The Java launcher cannot open a jar through a verbatim path: `java -jar
@@ -1346,7 +1407,7 @@ fn java_compatible_path(path: &Path) -> PathBuf {
 
 impl AgentLaunchSpec {
     pub fn new(program: impl Into<PathBuf>) -> Self {
-        Self { program: program.into(), args: Vec::new(), working_dir: None, env: Vec::new() }
+        Self { program: program.into(), ..Self::default() }
     }
 
     pub fn java_jar(java_path: impl Into<PathBuf>, jar_path: impl AsRef<Path>) -> Self {
@@ -1360,9 +1421,15 @@ impl AgentLaunchSpec {
     ) -> Self {
         let jar_path = jar_path.as_ref();
         let launch_jar_path = java_compatible_path(jar_path);
+        let (args, configured_java_args) = build_agent_java_args(
+            &launch_jar_path.to_string_lossy(),
+            std::env::var(AGENT_JAVA_OPTS_ENV).ok().as_deref(),
+            extra_java_args,
+        );
         Self {
             program: java_path.into(),
-            args: agent_java_args_with_extra_args(&launch_jar_path.to_string_lossy(), extra_java_args),
+            args,
+            configured_java_args: Some(configured_java_args),
             working_dir: jar_path.parent().map(Path::to_path_buf),
             env: Vec::new(),
         }
@@ -1370,7 +1437,12 @@ impl AgentLaunchSpec {
 
     pub fn with_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.args = args.into_iter().map(Into::into).collect();
+        self.configured_java_args = None;
         self
+    }
+
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
     }
 
     pub fn with_working_dir(mut self, working_dir: impl Into<PathBuf>) -> Self {
@@ -2004,6 +2076,7 @@ impl AgentKvMethod {
 struct StderrTail {
     lines: VecDeque<String>,
     capacity: usize,
+    finished: bool,
 }
 
 impl Default for StderrTail {
@@ -2014,7 +2087,17 @@ impl Default for StderrTail {
 
 impl StderrTail {
     fn with_capacity(capacity: usize) -> Self {
-        Self { lines: VecDeque::with_capacity(capacity), capacity }
+        Self { lines: VecDeque::with_capacity(capacity), capacity, finished: false }
+    }
+
+    /// Marks the tail as drained: the collector reached EOF, so no line can
+    /// arrive later and a snapshot is final.
+    fn mark_finished(&mut self) {
+        self.finished = true;
+    }
+
+    fn finished(&self) -> bool {
+        self.finished
     }
 
     fn push_line(&mut self, line: String) {
@@ -2098,35 +2181,42 @@ async fn spawn_ready_agent_process_before(
     deadline: Instant,
     startup: Option<&StartupCleanupGuard>,
 ) -> Result<ReadyAgentProcess, String> {
-    startup_remaining(deadline)?;
+    startup_remaining(deadline).map_err(|cause| with_launch_command(cause, &launch_display(launch)))?;
     match spawn_ready_agent_process_once_internal(launch, Some(deadline), startup).await {
         Ok(process) => Ok(process),
-        Err(error) if is_retryable_agent_startup_error(&error) => {
+        Err(failure) if failure.retryable => {
             let delay = Duration::from_millis(AGENT_STARTUP_RETRY_DELAY_MS);
-            if startup_remaining(deadline)? <= delay {
-                return Err("Agent startup deadline exceeded".to_string());
+            if startup_remaining(deadline).map_err(|cause| with_launch_command(cause, &launch_display(launch)))?
+                <= delay
+            {
+                return Err(with_launch_command(
+                    "Agent startup deadline exceeded".to_string(),
+                    &launch_display(launch),
+                ));
             }
             tokio::time::sleep(delay).await;
-            startup_remaining(deadline)?;
-            spawn_ready_agent_process_once_internal(launch, Some(deadline), startup).await
+            startup_remaining(deadline).map_err(|cause| with_launch_command(cause, &launch_display(launch)))?;
+            spawn_ready_agent_process_once_internal(launch, Some(deadline), startup)
+                .await
+                .map_err(|failure| failure.message)
         }
-        Err(error) => Err(error),
+        Err(failure) => Err(failure.message),
     }
 }
 
 async fn spawn_ready_agent_process(launch: &AgentLaunchSpec) -> Result<ReadyAgentProcess, String> {
     match spawn_ready_agent_process_once(launch).await {
         Ok(process) => Ok(process),
-        Err(error) if is_retryable_agent_startup_error(&error) => {
-            log::warn!("[agent] process exited before startup handshake; retrying once: {error}");
+        Err(failure) if failure.retryable => {
+            log::warn!("[agent] process exited before startup handshake; retrying once: {}", failure.message);
             tokio::time::sleep(Duration::from_millis(AGENT_STARTUP_RETRY_DELAY_MS)).await;
-            spawn_ready_agent_process_once(launch).await
+            spawn_ready_agent_process_once(launch).await.map_err(|failure| failure.message)
         }
-        Err(error) => Err(error),
+        Err(failure) => Err(failure.message),
     }
 }
 
-async fn spawn_ready_agent_process_once(launch: &AgentLaunchSpec) -> Result<ReadyAgentProcess, String> {
+async fn spawn_ready_agent_process_once(launch: &AgentLaunchSpec) -> Result<ReadyAgentProcess, AgentStartupFailure> {
     spawn_ready_agent_process_once_internal(launch, None, None).await
 }
 
@@ -2134,9 +2224,9 @@ async fn spawn_ready_agent_process_once_internal(
     launch: &AgentLaunchSpec,
     deadline: Option<Instant>,
     startup: Option<&StartupCleanupGuard>,
-) -> Result<ReadyAgentProcess, String> {
+) -> Result<ReadyAgentProcess, AgentStartupFailure> {
     if let Some(deadline) = deadline {
-        startup_remaining(deadline)?;
+        startup_remaining(deadline).map_err(|cause| startup_deadline_failure(cause, launch))?;
     }
     let mut child = ChildStartupGuard {
         child: Some(spawn_agent_process(launch)?),
@@ -2150,7 +2240,9 @@ async fn spawn_ready_agent_process_once_internal(
     start_stderr_collector(child_stderr, stderr_tail.clone());
 
     let startup_timeout = match deadline {
-        Some(deadline) => startup_remaining(deadline)?.min(Duration::from_secs(STARTUP_TIMEOUT_SECS)),
+        Some(deadline) => startup_remaining(deadline)
+            .map_err(|cause| startup_deadline_failure(cause, launch))?
+            .min(Duration::from_secs(STARTUP_TIMEOUT_SECS)),
         None => Duration::from_secs(STARTUP_TIMEOUT_SECS),
     };
     let mut stdout = BufReader::new(child_stdout);
@@ -2173,24 +2265,33 @@ async fn spawn_ready_agent_process_once_internal(
 
     let stdout = match startup_result {
         Ok(Ok(Ok(stdout))) => stdout,
-        Ok(Ok(Err(error))) => return Err(child.startup_error(error, &stderr_tail)),
+        Ok(Ok(Err(cause))) => {
+            // Drain first: the veto and the report must read the same tail, and
+            // `startup_error` only waits for the collector when no deadline is
+            // armed.
+            let retryable = agent_startup_is_retryable_after_draining(&cause, &stderr_tail).await;
+            let message = child.startup_error(cause, &stderr_tail);
+            return Err(startup_failure(retryable, message, launch));
+        }
         Ok(Err(error)) => {
-            return Err(child.startup_error(format!("Agent startup task failed: {error}"), &stderr_tail));
+            let message = child.startup_error(format!("Agent startup task failed: {error}"), &stderr_tail);
+            return Err(startup_failure(false, message, launch));
         }
         Err(_) => {
-            return Err(child.startup_error(
+            let message = child.startup_error(
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     "Agent startup deadline exceeded".to_string()
                 } else {
                     format!("Agent startup timed out ({STARTUP_TIMEOUT_SECS}s)")
                 },
                 &stderr_tail,
-            ));
+            );
+            return Err(startup_failure(false, message, launch));
         }
     };
 
     if let Some(deadline) = deadline {
-        startup_remaining(deadline)?;
+        startup_remaining(deadline).map_err(|cause| startup_deadline_failure(cause, launch))?;
     }
     Ok(ReadyAgentProcess {
         child: child.child.take().expect("startup child already transferred"),
@@ -2211,8 +2312,82 @@ fn clean_up_failed_agent_startup(error: String, child: &mut Child, stderr_tail: 
 }
 
 fn is_retryable_agent_startup_error(error: &str) -> bool {
-    error.contains("Failed to read startup line from agent: end of stream")
-        && !error.contains(AGENT_JAVA_TOO_OLD_MESSAGE)
+    // Anchored to the producer's own wording: a cause such as `Agent did not send
+    // ready signal, got: {"detail": "… end of stream"}` embeds agent output and
+    // must not read as a premature EOF.
+    error.strip_prefix(AGENT_STARTUP_EOF_PREFIX).is_some_and(|rest| rest.starts_with(AGENT_STARTUP_EOF_TAIL))
+}
+
+/// Decides whether one more spawn could succeed.
+///
+/// The cause decides: only a premature EOF may be retried. The stderr tail can
+/// veto that decision when it names a deterministic failure (an old runtime),
+/// but it can never turn a non-retryable cause into a retry — the tail, like the
+/// rendered command, is text the agent process controls.
+fn agent_startup_is_retryable(cause: &str, stderr_tail: &Arc<Mutex<StderrTail>>) -> bool {
+    if !is_retryable_agent_startup_error(cause) {
+        return false;
+    }
+    agent_process_error_hint(&stderr_tail_snapshot(stderr_tail).snapshot()).is_none()
+}
+
+/// Decides whether one more spawn could succeed, after the stderr collector
+/// has finished filling the tail.
+///
+/// `start_stderr_collector` owns its own thread and `startup_error` waits for it
+/// only when no deadline is armed — and the retry path always arms one. Without
+/// this bounded wait a deterministic failure (an old runtime) would be classified
+/// from a tail that is still empty and retried once, which is exactly what the
+/// veto exists to prevent. The collector marks the tail finished at EOF, so this
+/// waits for that signal rather than for a fixed grace period, and yields to the
+/// executor while it waits.
+async fn agent_startup_is_retryable_after_draining(cause: &str, stderr_tail: &Arc<Mutex<StderrTail>>) -> bool {
+    // A cause that can never be retried does not need the tail: a live agent keeps
+    // its stderr open, so waiting would burn the whole grace period for a `false`
+    // that is already known.
+    if !is_retryable_agent_startup_error(cause) {
+        return false;
+    }
+    let grace_deadline = Instant::now() + Duration::from_millis(AGENT_STDERR_DRAIN_GRACE_MS);
+    while !stderr_tail_finished(stderr_tail) && Instant::now() < grace_deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    agent_startup_is_retryable(cause, stderr_tail)
+}
+
+/// A startup failure, classified before any diagnostic text is appended.
+///
+/// The cause is the only thing that can *grant* a retry: the rendered command
+/// contains argv that a custom `agent-launch.json` controls, so a path that
+/// happens to read "end of stream" must not decide whether the agent is
+/// respawned. The stderr tail may still veto a retry it can prove pointless.
+struct AgentStartupFailure {
+    message: String,
+    retryable: bool,
+}
+
+/// A startup failure is only actionable when the report says which program and
+/// which jar actually ran: a stale jar, a custom launch config and a second data
+/// directory all look identical from the stderr tail alone.
+fn startup_failure(retryable: bool, message: String, launch: &AgentLaunchSpec) -> AgentStartupFailure {
+    AgentStartupFailure { retryable, message: with_launch_command(message, &launch_display(launch)) }
+}
+
+/// A deadline miss is never retried, but it still names the command that ran.
+fn startup_deadline_failure(cause: String, launch: &AgentLaunchSpec) -> AgentStartupFailure {
+    AgentStartupFailure { retryable: false, message: with_launch_command(cause, &launch_display(launch)) }
+}
+
+impl From<String> for AgentStartupFailure {
+    fn from(message: String) -> Self {
+        Self { retryable: false, message }
+    }
+}
+
+impl From<&str> for AgentStartupFailure {
+    fn from(message: &str) -> Self {
+        Self { retryable: false, message: message.to_string() }
+    }
 }
 
 /// Outcome of one blocking agent RPC read: the restored stdout reader, the
@@ -4065,8 +4240,13 @@ fn agent_java_args_with_extra(jar_path: &str, extra_opts: Option<&str>) -> Vec<S
     agent_java_args_with_extra_opts(jar_path, extra_opts, &[])
 }
 
-fn agent_java_args_with_extra_args(jar_path: &str, extra_java_args: &[String]) -> Vec<String> {
-    agent_java_args_with_extra_opts(jar_path, std::env::var(AGENT_JAVA_OPTS_ENV).ok().as_deref(), extra_java_args)
+#[cfg(test)]
+fn agent_java_args_with_extra_opts(
+    jar_path: &str,
+    extra_opts: Option<&str>,
+    extra_java_args: &[String],
+) -> Vec<String> {
+    build_agent_java_args(jar_path, extra_opts, extra_java_args).0
 }
 
 pub fn validate_dameng_java_system_properties(options: &[String]) -> Result<(), String> {
@@ -4090,11 +4270,11 @@ fn java_system_property_error(index: usize) -> String {
     )
 }
 
-fn agent_java_args_with_extra_opts(
+fn build_agent_java_args(
     jar_path: &str,
     extra_opts: Option<&str>,
     extra_java_args: &[String],
-) -> Vec<String> {
+) -> (Vec<String>, std::ops::Range<usize>) {
     // Java 8 and older reject the module flags below while starting up
     // ("Unrecognized option: --add-opens=..."), so the agent dies before it can
     // load a class and the real diagnosis (agent bytecode needs Java 21) is
@@ -4154,16 +4334,18 @@ fn agent_java_args_with_extra_opts(
 
     // Hive/Kerberos JDBC drivers read JAAS and krb5 settings during JVM startup,
     // so users need a process-level escape hatch before the agent jar is loaded.
+    let configured_start = args.len();
     if let Some(extra) = extra_opts {
         args.extend(parse_agent_java_opts(extra));
     }
     args.extend(extra_java_args.iter().map(|arg| arg.trim()).filter(|arg| !arg.is_empty()).map(str::to_string));
+    let configured_end = args.len();
 
     args.push("--add-opens=java.sql/java.sql=ALL-UNNAMED".to_string());
 
     args.extend(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-jar", jar_path].into_iter().map(str::to_string));
 
-    args
+    (args, configured_start..configured_end)
 }
 
 fn parse_agent_java_opts(opts: &str) -> Vec<String> {
@@ -4207,13 +4389,53 @@ fn agent_jar_path_matches_key(jar_path: &str, key: &str) -> bool {
     Path::new(jar_path).components().any(|component| component.as_os_str().to_string_lossy() == key)
 }
 
+/// Renders declared paths and DBX-generated arguments, never arbitrary argv.
 fn launch_display(launch: &AgentLaunchSpec) -> String {
-    let mut parts = vec![launch.program.to_string_lossy().to_string()];
-    parts.extend(launch.args.iter().cloned());
-    parts.join(" ")
+    let mut command = quote_launch_argument(&launch.program.to_string_lossy());
+    for (index, argument) in launch.args.iter().enumerate() {
+        command.push(' ');
+        if launch.configured_java_args.as_ref().is_some_and(|configured| !configured.contains(&index)) {
+            command.push_str(&quote_launch_argument(argument));
+        } else {
+            command.push_str("***");
+        }
+    }
+    if let Some(working_dir) = &launch.working_dir {
+        use std::fmt::Write as _;
+        let _ = write!(command, " (working directory: {})", quote_launch_argument(&working_dir.to_string_lossy()));
+    }
+    command
+}
+
+/// Quotes an argument and escapes control characters so one diagnostic is one line.
+fn quote_launch_argument(value: &str) -> String {
+    let escaped: String = value
+        .chars()
+        .map(|character| match character {
+            '"' => "\\\"".to_string(),
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            character if character.is_control() => format!("\\u{{{:x}}}", character as u32),
+            character => character.to_string(),
+        })
+        .collect();
+    let needs_quotes = value.is_empty()
+        || value.chars().any(|character| character.is_whitespace() || character.is_control() || character == '"');
+    if needs_quotes {
+        format!("\"{escaped}\"")
+    } else {
+        escaped
+    }
 }
 
 fn spawn_agent_process(launch: &AgentLaunchSpec) -> Result<Child, String> {
+    // Record the resolved command even on the happy path: when a user reports a
+    // startup failure, this line says which program and which jar were used.
+    // Building it is only worth it when the line is actually recorded.
+    if log::log_enabled!(log::Level::Debug) {
+        log::debug!("[agent] launching {}", launch_display(launch));
+    }
     match agent_command(launch).spawn() {
         Ok(child) => Ok(child),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -4292,6 +4514,11 @@ fn read_agent_line<R: BufRead>(reader: &mut R, context: &str) -> Result<String, 
     read_agent_line_with_limit(reader, context, MAX_AGENT_RESPONSE_BYTES)
 }
 
+/// The error of a stream that ended before the agent said anything.
+fn agent_eof_error(context: &str) -> String {
+    format!("Failed to read {context} from agent: {AGENT_STARTUP_EOF_TAIL}")
+}
+
 fn read_agent_line_with_limit<R: BufRead>(
     reader: &mut R,
     context: &str,
@@ -4316,7 +4543,7 @@ fn read_agent_line_with_limit<R: BufRead>(
         }
     }
     if bytes.is_empty() {
-        return Err(format!("Failed to read {context} from agent: end of stream"));
+        return Err(agent_eof_error(context));
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -4385,7 +4612,15 @@ fn start_stderr_collector(stderr: ChildStderr, stderr_tail: Arc<Mutex<StderrTail
                 }
             }
         }
+        if let Ok(mut tail) = stderr_tail.lock() {
+            tail.mark_finished();
+        }
     });
+}
+
+/// Reports whether the stderr collector already reached EOF.
+fn stderr_tail_finished(stderr_tail: &Arc<Mutex<StderrTail>>) -> bool {
+    stderr_tail.lock().map(|tail| tail.finished()).unwrap_or(true)
 }
 
 fn child_exit_status(child: &mut Child) -> Option<String> {
@@ -4434,6 +4669,15 @@ fn format_agent_process_error(base: &str, exit_status: Option<String>, stderr_ta
         parts.push(format!("recent stderr:\n{stderr}"));
     }
     parts.join(". ")
+}
+
+/// Append the resolved command line to a startup failure.
+///
+/// The JVM reports "could not find or load main class" without naming the jar or
+/// the runtime it was handed, and a driver directory override can change both.
+/// Repeating the command line makes the failure self-explanatory.
+fn with_launch_command(error: String, command: &str) -> String {
+    format!("{error}. launch command: {command}")
 }
 
 fn is_agent_rpc_response_error(message: &str) -> bool {
@@ -4509,20 +4753,21 @@ mod tests {
     #[cfg(target_os = "windows")]
     use super::java_compatible_path;
     use super::{
-        agent_close_query_session_params, agent_error_from_legacy, agent_handshake_params, agent_java_args,
-        agent_java_args_with_extra, agent_java_args_with_extra_opts, agent_object_source_params,
+        agent_close_query_session_params, agent_eof_error, agent_error_from_legacy, agent_handshake_params,
+        agent_java_args, agent_java_args_with_extra, agent_java_args_with_extra_opts, agent_object_source_params,
         agent_object_source_params_with_identity, agent_object_source_params_with_relation, agent_process_error_hint,
-        agent_proxy_env_vars, agent_schema_params, agent_schema_table_params, agent_supports_capability,
-        agent_transaction_params, append_legacy_error_context, decode_agent_response, format_agent_process_error,
-        format_agent_startup_error, is_agent_rpc_response_error, is_retryable_agent_startup_error,
-        is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params, mongo_database_params,
-        mongo_document_id_params, parse_agent_java_opts, read_agent_json_response, read_agent_line,
-        read_agent_line_with_limit, start_stderr_collector, validate_dameng_java_system_properties, AgentCallError,
+        agent_proxy_env_vars, agent_schema_params, agent_schema_table_params, agent_startup_is_retryable,
+        agent_supports_capability, agent_transaction_params, append_legacy_error_context, decode_agent_response,
+        format_agent_process_error, format_agent_startup_error, is_agent_rpc_response_error,
+        is_retryable_agent_startup_error, is_unsupported_handshake_error, launch_display, legacy_agent_call_error,
+        mongo_collection_params, mongo_database_params, mongo_document_id_params, parse_agent_java_opts,
+        read_agent_json_response, read_agent_line, read_agent_line_with_limit, start_stderr_collector,
+        stderr_tail_finished, validate_dameng_java_system_properties, with_launch_command, AgentCallError,
         AgentCapability, AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake,
         AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient,
         AgentSessionDisposition, AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams,
         MongoAgentMethod, StderrTail, AGENT_JAVA_TOO_OLD_MESSAGE, AGENT_PROTOCOL_VERSION,
-        AGENT_STDOUT_NOISE_SAMPLE_CHARS, MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES,
+        AGENT_STDOUT_NOISE_SAMPLE_CHARS, MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES, STDERR_TAIL_LINES,
     };
     use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
     use std::io::Cursor;
@@ -5435,10 +5680,87 @@ for line in sys.stdin:
         assert!(is_retryable_agent_startup_error(
             "Failed to read startup line from agent: end of stream. agent process exited with exit code: 2"
         ));
+        // The launch command is appended to startup failures; it must not hide
+        // the premature-EOF marker the retry decision is based on.
+        assert!(is_retryable_agent_startup_error(&with_launch_command(
+            "Failed to read startup line from agent: end of stream".to_string(),
+            "java -jar agent.jar",
+        )));
         assert!(!is_retryable_agent_startup_error("Agent startup timed out (15s)"));
+        // Tied to the producer, not to a copy of its wording.
+        assert!(is_retryable_agent_startup_error(&agent_eof_error("startup line")));
         assert!(!is_retryable_agent_startup_error(&format!(
             "{AGENT_JAVA_TOO_OLD_MESSAGE}. details: Failed to read startup line from agent: end of stream"
         )));
+    }
+
+    #[tokio::test]
+    async fn stderr_collector_marks_the_tail_finished_at_eof() {
+        let mut child = test_shell_command(
+            "echo agent-stderr-line >&2; exit 1",
+            "[Console]::Error.WriteLine('agent-stderr-line'); exit 1",
+        )
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+        let stderr_tail = Arc::new(Mutex::new(StderrTail::with_capacity(STDERR_TAIL_LINES)));
+        start_stderr_collector(child.stderr.take().unwrap(), stderr_tail.clone());
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !stderr_tail_finished(&stderr_tail) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(stderr_tail_finished(&stderr_tail), "the collector must signal EOF");
+        let snapshot = stderr_tail.lock().unwrap().snapshot();
+        assert!(snapshot.contains("agent-stderr-line"), "{snapshot}");
+        let _ = child.wait();
+    }
+
+    #[tokio::test]
+    async fn armed_startup_failure_reports_the_runtime_hint_that_vetoed_the_retry() {
+        // Production always spawns with a deadline, and there `startup_error`
+        // does not wait for the stderr tail: the report only names the old
+        // runtime if the drain ran before it was rendered.
+        let test_id = uuid::Uuid::new_v4();
+        let script = std::env::temp_dir().join(format!("dbx-agent-armed-startup-{test_id}.py"));
+        let counter = std::env::temp_dir().join(format!("dbx-agent-armed-startup-{test_id}.count"));
+        std::fs::write(
+            &script,
+            "import pathlib, sys\n\
+             counter = pathlib.Path(sys.argv[1])\n\
+             counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1')\n\
+             sys.stderr.write('java.lang.UnsupportedClassVersionError: class file version 65.0')\n\
+             sys.stderr.flush()\n\
+             sys.exit(1)\n",
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(&counter);
+        let launch = AgentLaunchSpec::new(test_python())
+            .with_args(vec![script.to_string_lossy().to_string(), counter.to_string_lossy().to_string()]);
+
+        let error = AgentRuntimeClient::spawn_before(launch, "test", Instant::now() + Duration::from_secs(30))
+            .await
+            .err()
+            .unwrap();
+
+        let attempts = std::fs::read_to_string(&counter).unwrap().trim().to_string();
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&counter);
+        assert!(error.contains(AGENT_JAVA_TOO_OLD_MESSAGE), "{error}");
+        assert!(error.contains("launch command:"), "{error}");
+        assert_eq!(attempts, "1", "a deterministic JVM failure must not be retried: {error}");
+    }
+
+    #[test]
+    fn startup_is_not_retried_when_the_tail_reports_an_old_runtime() {
+        let tail = Arc::new(Mutex::new(StderrTail::with_capacity(STDERR_TAIL_LINES)));
+        tail.lock().unwrap().push_line(
+            "java.lang.UnsupportedClassVersionError: com/dbx/agent/iris/IrisAgent has been compiled by a more recent version of the Java Runtime".to_string(),
+        );
+
+        assert!(is_retryable_agent_startup_error(&agent_eof_error("startup line")));
+        assert!(!agent_startup_is_retryable(&agent_eof_error("startup line"), &tail));
     }
 
     #[tokio::test]
@@ -5613,7 +5935,186 @@ for line in sys.stdin:
         .await
         .err()
         .unwrap();
-        assert_eq!(error, "Agent startup deadline exceeded");
+        assert!(error.starts_with("Agent startup deadline exceeded"), "{error}");
+        assert!(error.contains("launch command:"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn startup_failure_reports_the_command_that_ran() {
+        let launch = AgentLaunchSpec::new(test_python()).with_args([
+            "-u",
+            "-c",
+            "import sys\nsys.stderr.write('Error: Could not find or load main class com.dbx.agent.iris.IrisAgent\\n')\nsys.exit(1)\n",
+        ]);
+        let error = AgentRuntimeClient::spawn(launch, "test").await.err().expect("startup should fail");
+        let (_, command) = error.split_once("launch command: ").expect("startup error should name the command");
+        assert!(command.starts_with(test_python()), "command should start with the agent program: {command}");
+        assert!(!command.contains("-c"), "command must hide configured arguments: {command}");
+        assert!(error.contains("com.dbx.agent.iris.IrisAgent"), "stderr tail should still be reported: {error}");
+    }
+
+    #[test]
+    fn launch_display_hides_both_sources_of_configured_java_options() {
+        let jar = "drivers/dameng/agent.jar";
+        let (args, configured) = super::build_agent_java_args(
+            jar,
+            Some("'-Dservice.key=env-configured' -jar env-configured.jar"),
+            &["--add-opens=java.base/connection-configured=ALL-UNNAMED".to_owned()],
+        );
+        assert_eq!(
+            &args[configured.clone()],
+            [
+                "-Dservice.key=env-configured",
+                "-jar",
+                "env-configured.jar",
+                "--add-opens=java.base/connection-configured=ALL-UNNAMED",
+            ]
+        );
+        let launch = AgentLaunchSpec { args, configured_java_args: Some(configured), ..AgentLaunchSpec::new("java") };
+        let display = launch_display(&launch);
+        assert!(display.contains("-jar drivers/dameng/agent.jar"), "{display}");
+        assert!(display.contains("--add-opens=java.base/java.net=ALL-UNNAMED"), "{display}");
+        assert!(!display.contains("env-configured") && !display.contains("connection-configured"), "{display}");
+    }
+
+    #[test]
+    fn launch_display_does_not_trust_replacements_for_dbx_generated_arguments() {
+        let launch = AgentLaunchSpec::java_jar("java", "drivers/oracle/agent.jar")
+            .with_args(["-jar", "private.jar", "--add-opens=java.base/private=ALL-UNNAMED"])
+            .with_env([("KEY".to_string(), "private-env".to_string())]);
+
+        assert_eq!(launch_display(&launch), "java *** *** *** (working directory: drivers/oracle)");
+        assert!(!format!("{launch:?}").contains("private"));
+    }
+
+    #[test]
+    fn launch_display_escapes_control_characters() {
+        let launch = AgentLaunchSpec::new("java\nbin").with_working_dir("drivers\ntab\tdir");
+        let display = launch_display(&launch);
+
+        assert_eq!(display, "\"java\\nbin\" (working directory: \"drivers\\ntab\\tdir\")");
+    }
+
+    #[tokio::test]
+    async fn startup_failure_does_not_retry_when_java_is_too_old() {
+        // The JVM fix is deterministic, so a premature EOF caused by it must not
+        // be retried: the hint lives in the stderr tail, not in the cause.
+        let test_id = uuid::Uuid::new_v4();
+        let script = std::env::temp_dir().join(format!("dbx-agent-java-old-{test_id}.py"));
+        let counter = std::env::temp_dir().join(format!("dbx-agent-java-old-{test_id}.count"));
+        std::fs::write(
+            &script,
+            "import pathlib, sys\n\
+             counter = pathlib.Path(sys.argv[1])\n\
+             counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1')\n\
+             sys.stderr.write('java.lang.UnsupportedClassVersionError: com/dbx/agent/Agent has been compiled by a more recent version of the Java Runtime (class file version 65.0), this version of the Java Runtime only recognizes class file versions up to 52.0\\n')\n\
+             sys.exit(1)\n",
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(&counter);
+        let launch = AgentLaunchSpec::new(test_python())
+            .with_args(vec![script.to_string_lossy().to_string(), counter.to_string_lossy().to_string()]);
+
+        let error = match AgentDriverClient::spawn(launch).await {
+            Ok(_) => panic!("a java-too-old agent must not start"),
+            Err(error) => error,
+        };
+
+        let attempts = std::fs::read_to_string(&counter).unwrap().trim().to_string();
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&counter);
+        assert!(error.contains(AGENT_JAVA_TOO_OLD_MESSAGE), "{error}");
+        assert!(error.contains("launch command:"), "{error}");
+        assert_eq!(attempts, "1", "a deterministic JVM failure must not be retried: {error}");
+    }
+
+    #[tokio::test]
+    async fn startup_failure_does_not_retry_because_stderr_contains_the_marker() {
+        let test_id = uuid::Uuid::new_v4();
+        let script = std::env::temp_dir().join(format!("dbx-agent-stderr-marker-{test_id}.py"));
+        let counter = std::env::temp_dir().join(format!("dbx-agent-stderr-marker-{test_id}.count"));
+        std::fs::write(
+            &script,
+            "import pathlib, sys\n\
+             counter = pathlib.Path(sys.argv[1])\n\
+             counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1')\n\
+             sys.stderr.write('Failed to read startup line from agent: end of stream\\n')\n\
+             sys.stderr.flush()\n\
+             print('{\"ready\": false}', flush=True)\n\
+             sys.stdin.read()\n",
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(&counter);
+        let launch = AgentLaunchSpec::new(test_python())
+            .with_args(vec![script.to_string_lossy().to_string(), counter.to_string_lossy().to_string()]);
+
+        let error = match AgentDriverClient::spawn(launch).await {
+            Ok(_) => panic!("a not-ready agent must not start"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("launch command:"), "{error}");
+        let attempts = std::fs::read_to_string(&counter).unwrap().trim().to_string();
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&counter);
+        assert_eq!(attempts, "1", "only the cause may decide whether the agent is retried: {error}");
+    }
+
+    #[tokio::test]
+    async fn startup_failure_does_not_retry_because_the_command_contains_the_marker() {
+        // The command is appended to a startup failure only for display. A jar
+        // path that a custom launch config fills with the retry marker must not
+        // turn a non-retryable cause into a retried spawn.
+        let test_id = uuid::Uuid::new_v4();
+        let script_path = std::env::temp_dir().join(format!("dbx-agent-startup-marker-{test_id}.py"));
+        let counter_path = std::env::temp_dir().join(format!("dbx-agent-startup-marker-{test_id}.count"));
+        std::fs::write(
+            &script_path,
+            r#"import json, pathlib, sys
+counter_path = pathlib.Path(sys.argv[1])
+attempt = int(counter_path.read_text()) + 1 if counter_path.exists() else 1
+counter_path.write_text(str(attempt))
+print(json.dumps({'ready': False}), flush=True)
+sys.stdin.read()
+"#,
+        )
+        .unwrap();
+
+        let launch = AgentLaunchSpec::new(test_python()).with_args(vec![
+            script_path.to_string_lossy().to_string(),
+            counter_path.to_string_lossy().to_string(),
+            "-jar".to_string(),
+            "Failed to read startup line from agent: end of stream.jar".to_string(),
+        ]);
+
+        let error = match AgentDriverClient::spawn(launch).await {
+            Ok(_) => panic!("the launch should fail: the agent never reports ready"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("launch command:"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&counter_path).unwrap(),
+            "1",
+            "a command that looks like a premature EOF must not trigger a retry: {error}"
+        );
+        let _ = std::fs::remove_file(script_path);
+        let _ = std::fs::remove_file(counter_path);
+    }
+
+    #[test]
+    fn launch_display_quotes_paths_with_spaces_and_names_the_working_directory() {
+        let launch = AgentLaunchSpec::java_jar("java path/bin", "data dir/agent.jar");
+        let display = launch_display(&launch);
+        assert!(display.starts_with("\"java path/bin\" "), "{display}");
+        assert!(display.ends_with(" -jar \"data dir/agent.jar\" (working directory: \"data dir\")"), "{display}");
+    }
+
+    #[test]
+    fn launch_display_names_the_working_directory_of_a_relative_jar() {
+        let launch = AgentLaunchSpec::java_jar("java", "agent.jar").with_working_dir("drivers/iris");
+        let display = launch_display(&launch);
+        assert!(display.ends_with(" -jar agent.jar (working directory: drivers/iris)"), "{display}");
     }
 
     #[tokio::test]
@@ -6674,7 +7175,10 @@ for line in sys.stdin:
             Err(error) => error,
         };
 
-        assert_eq!(error, "Agent runtime does not support multi_session protocol v2");
+        // A jar too old for the current protocol is the failure this diagnostic
+        // exists for, so it names the command too.
+        assert!(error.starts_with("Agent runtime does not support multi_session protocol v2"), "{error}");
+        assert!(error.contains("launch command:"), "{error}");
         let _ = std::fs::remove_file(script_path);
     }
 

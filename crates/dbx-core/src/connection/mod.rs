@@ -28,6 +28,7 @@ use crate::agent_connection::{
 };
 use crate::agent_manager::{AgentManager, JavaRuntimeMode, DEFAULT_JRE_KEY};
 use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
+use crate::agent_runtime::{SharedConnectionOpenError, SharedConnectionOpenErrorKind};
 use crate::database_capabilities;
 use crate::db;
 use crate::db::agent_driver::{AgentCallError, AgentMethod};
@@ -2136,14 +2137,15 @@ impl AppState {
         self.session_credentials.pool_owner_mismatch(pool_key, &owner)
     }
 
+    /// Applies runtime replacement once, retaining the classification and message for the caller.
     async fn handle_shared_connection_open_error(
         &self,
-        error: crate::agent_runtime::SharedConnectionOpenError,
-    ) -> String {
-        if let Some(runtime) = error.runtime.as_ref() {
-            self.pool_routing_control().replace_runtime_after_open_failure(runtime).await;
+        mut error: SharedConnectionOpenError,
+    ) -> SharedConnectionOpenError {
+        if let Some(runtime) = error.runtime.take() {
+            self.pool_routing_control().replace_runtime_after_open_failure(&runtime).await;
         }
-        error.message
+        error
     }
 
     /// Resolves the agent-process environment a connection needs.
@@ -2198,7 +2200,7 @@ impl AppState {
         agent_session_id: String,
         connect_params: serde_json::Value,
         connect_timeout: Duration,
-    ) -> Result<db::agent_driver::AgentDriverClient, String> {
+    ) -> Result<db::agent_driver::AgentDriverClient, SharedConnectionOpenError> {
         match self
             .agent_manager
             .spawn_shared_connection_client(
@@ -4249,7 +4251,7 @@ impl AppState {
                         .await;
                     if initial_result.as_ref().is_err_and(|err| {
                         normalize_client_session_id(client_session_id).is_some()
-                            && is_connection_slot_exhausted_error(err)
+                            && err.open_session_message().is_some_and(is_connection_slot_exhausted_error)
                     }) && self.reclaim_idle_base_pool_for_session(connection_id, &base_pool_key).await
                     {
                         log::warn!(
@@ -4274,7 +4276,9 @@ impl AppState {
                                     agent_connect_timeout(&db_config),
                                 )
                                 .await;
-                            if !initial_result.as_ref().is_err_and(|err| is_connection_slot_exhausted_error(err)) {
+                            if !initial_result.as_ref().is_err_and(|err| {
+                                err.open_session_message().is_some_and(is_connection_slot_exhausted_error)
+                            }) {
                                 break;
                             }
                         }
@@ -4282,9 +4286,11 @@ impl AppState {
                     let mut client = match initial_result {
                         Ok(client) => client,
                         Err(err) => {
-                            let alternate_configs = oracle_alternate_connect_configs(&db_config, &err);
+                            let alternate_configs = err.open_session_message()
+                                .map(|message| oracle_alternate_connect_configs(&db_config, message))
+                                .unwrap_or_default();
                             if alternate_configs.is_empty() {
-                                if err.contains("does not support multi_session protocol v2") {
+                                if err.kind == SharedConnectionOpenErrorKind::UnsupportedProtocol {
                                     let mut client = crate::agent_runtime::spawn_connection_client_with_env(
                                         &self.agent_manager,
                                         &db_config.db_type,
@@ -4308,7 +4314,10 @@ impl AppState {
                                         .await?;
                                     client
                                 } else {
-                                    return Err(oracle_error_with_driver_hint(&db_config, &err));
+                                    return Err(match err.open_session_message() {
+                                        Some(message) => oracle_error_with_driver_hint(&db_config, message),
+                                        None => err.message,
+                                    });
                                 }
                             } else {
                                 let mut fallback_errors = Vec::new();
@@ -16050,6 +16059,119 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn launch_diagnostics_do_not_trigger_legacy_fallback() {
+        assert_launch_diagnostics_do_not_trigger_recovery("does not support multi_session protocol v2").await;
+    }
+
+    #[tokio::test]
+    async fn launch_diagnostics_do_not_trigger_alternate_oracle_descriptors() {
+        assert_launch_diagnostics_do_not_trigger_recovery("ORA-12514").await;
+    }
+
+    #[tokio::test]
+    async fn launch_diagnostics_do_not_trigger_pool_reclamation() {
+        assert_launch_diagnostics_do_not_trigger_recovery("ORA-00018").await;
+    }
+
+    async fn assert_launch_diagnostics_do_not_trigger_recovery(marker: &str) {
+        let (state, directory, base_pool_key) = launch_diagnostics_fixture(marker, false).await;
+        let result = state.get_or_create_pool_for_session("conn", Some("testdb"), Some("query-tab")).await;
+        let kept_base_pool = state.connections.read().await.contains_key(&base_pool_key);
+        let requests = std::fs::read_to_string(directory.path().join(marker).join("requests"));
+        state.shutdown(Duration::from_secs(2)).await;
+
+        let error = result.expect_err("an ordinary handshake failure must not fall back to the legacy protocol");
+        let requests =
+            requests.unwrap_or_else(|trace_error| panic!("{marker}: {trace_error}; connection failed: {error}"));
+        assert_eq!(requests.lines().collect::<Vec<_>>(), ["handshake"], "{marker}: {error}");
+        assert!(kept_base_pool, "an idle pool was reclaimed because of {marker} in the launch diagnostic");
+        assert!(!error.contains("Fallback with alternate Oracle connection descriptors"), "{error}");
+        assert!(error.contains("fixture handshake failure"), "{error}");
+        assert!(error.contains("launch command:") && error.contains(marker), "{error}");
+        assert!(!error.contains("fixture-private-argument"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn launch_diagnostics_preserve_genuine_legacy_fallback() {
+        let (state, directory, _) = launch_diagnostics_fixture("legacy agent", true).await;
+        let result = state.get_or_create_pool_for_session("conn", Some("testdb"), Some("query-tab")).await;
+        let requests = std::fs::read_to_string(directory.path().join("legacy agent").join("requests"));
+        state.shutdown(Duration::from_secs(2)).await;
+
+        assert!(result.is_ok(), "{result:?}");
+        // The dedicated legacy process also probes the optional handshake before connect.
+        assert_eq!(
+            requests.expect("legacy fallback must issue requests").lines().collect::<Vec<_>>(),
+            ["handshake", "handshake", "connect"]
+        );
+    }
+
+    async fn launch_diagnostics_fixture(marker: &str, legacy: bool) -> (AppState, tempfile::TempDir, String) {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            directory.path().join("plugins"),
+            directory.path().join("agents"),
+            "test",
+        );
+        let working_dir = directory.path().join(marker);
+        std::fs::create_dir(&working_dir).unwrap();
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        std::fs::write(
+            working_dir.join("agent.py"),
+            r#"import json, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request['method']
+    if method in ('handshake', 'connect', 'open_session'):
+        with open('requests', 'a') as requests:
+            requests.write(method + '\n')
+    reply = {'jsonrpc': '2.0', 'id': request['id']}
+    if method == 'handshake':
+        message = 'Unknown method: handshake' if sys.argv[1] == 'legacy' else 'fixture handshake failure'
+        reply['error'] = {'code': -32000, 'message': message}
+    else:
+        reply['result'] = {}
+    print(json.dumps(reply), flush=True)
+"#,
+        )
+        .unwrap();
+        let manager = &state.agent_manager;
+        std::fs::create_dir_all(manager.driver_dir("oracle")).unwrap();
+        std::fs::write(
+            manager.driver_launch_config_path("oracle"),
+            serde_json::json!({
+                "command": python,
+                "args": ["agent.py", if legacy { "legacy" } else { "ordinary" }, "fixture-private-argument"],
+                "working_dir": working_dir,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut config = mysql_config(Some("testdb"));
+        config.db_type = DatabaseType::Oracle;
+        config.host = "127.0.0.1".into();
+        config.port = 1521;
+        config.keepalive_interval_secs = 0;
+        let base_pool_key = super::base_pool_key_for_config(Some(&config), "conn", Some("testdb"), None, false);
+        state.configs.write().await.insert("conn".into(), config);
+        let idle_dir = directory.path().join("idle agent");
+        std::fs::create_dir(&idle_dir).unwrap();
+        let script_path = working_dir.join("agent.py");
+        let idle_agent = crate::db::agent_driver::AgentDriverClient::spawn(
+            crate::db::agent_driver::AgentLaunchSpec::new(python)
+                .with_args([script_path.to_str().unwrap(), "idle"])
+                .with_working_dir(idle_dir),
+        )
+        .await
+        .expect("start an idle metadata agent that can acknowledge disconnect");
+        state.connections.write().await.insert(base_pool_key.clone(), PoolKind::agent(idle_agent));
+        (state, directory, base_pool_key)
+    }
+
+    #[tokio::test]
     async fn open_session_replace_runtime_error_detaches_existing_shared_runtime_pools() {
         let (state, dir) = test_app_state().await;
         let (runtime, first_client, second_client) = replace_runtime_on_error_clients(&dir, "unused").await;
@@ -16059,13 +16181,14 @@ for line in sys.stdin:
             connections.insert("conn:billing".to_string(), PoolKind::Agent(second_client));
         }
         let error = crate::agent_runtime::SharedConnectionOpenError {
+            kind: crate::agent_runtime::SharedConnectionOpenErrorKind::OpenSession,
             message: "open session requested runtime replacement".to_string(),
             runtime: Some(runtime.clone()),
         };
 
-        let message = state.handle_shared_connection_open_error(error).await;
+        let error = state.handle_shared_connection_open_error(error).await;
 
-        assert_eq!(message, "open session requested runtime replacement");
+        assert_eq!(error.open_session_message(), Some("open session requested runtime replacement"));
         assert!(state.connections.read().await.is_empty());
         assert!(runtime.is_failed());
         let _ = std::fs::remove_dir_all(dir);

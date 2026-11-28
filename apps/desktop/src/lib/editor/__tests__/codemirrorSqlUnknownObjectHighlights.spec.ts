@@ -83,6 +83,63 @@ describe("createSqlUnknownObjectHighlights", () => {
     expect(highlightedText(current)).toEqual(["USER_ID"]);
   });
 
+  it("keeps a highlight across typing inside it and across deletions", () => {
+    const current = mount(DOC);
+    current.dispatch({ effects: setSqlUnknownObjectSpans.of([{ from: 7, to: 14 }]) });
+
+    // Typing in the middle of the flagged word extends it without a rescan.
+    current.dispatch({ changes: { from: 12, insert: "X" } });
+    expect(highlightedText(current)).toEqual(["USER_XID"]);
+
+    // Backspacing inside it shrinks the span rather than dropping it.
+    current.dispatch({ changes: { from: 12, to: 13 } });
+    expect(highlightedText(current)).toEqual(["USER_ID"]);
+  });
+
+  it("does not paint text that replaces a highlighted word (completion accepted over a typo)", () => {
+    const current = mount("sel");
+    current.dispatch({ effects: setSqlUnknownObjectSpans.of([{ from: 0, to: 3 }]) });
+    expect(highlightedText(current)).toEqual(["sel"]);
+
+    current.dispatch({ changes: { from: 0, to: 3, insert: "SELECT *\nFROM tab232le\nLIMIT 100;" }, userEvent: "input.complete" });
+
+    expect(highlightedText(current)).toEqual([]);
+  });
+
+  it("drops only the highlights a replacement touches", () => {
+    const current = mount("AAA BBB CCC");
+    current.dispatch({
+      effects: setSqlUnknownObjectSpans.of([
+        { from: 0, to: 3 },
+        { from: 4, to: 7 },
+        { from: 8, to: 11 },
+      ]),
+    });
+
+    // Replace the middle word and the first character of its neighbours' gap.
+    current.dispatch({ changes: { from: 4, to: 7, insert: "DDDDDD" } });
+
+    expect(highlightedText(current)).toEqual(["AAA", "CCC"]);
+  });
+
+  it("drops a highlight when a partial replacement overlaps it", () => {
+    const current = mount(DOC);
+    current.dispatch({ effects: setSqlUnknownObjectSpans.of([{ from: 7, to: 14 }]) });
+
+    current.dispatch({ changes: { from: 12, to: 16, insert: "ZZZZZZ" } });
+
+    expect(highlightedText(current)).toEqual([]);
+  });
+
+  it("keeps a neighbouring highlight when the replacement only touches its boundary", () => {
+    const current = mount("AAA BBB");
+    current.dispatch({ effects: setSqlUnknownObjectSpans.of([{ from: 0, to: 3 }]) });
+
+    current.dispatch({ changes: { from: 3, to: 4, insert: "_____" } });
+
+    expect(highlightedText(current)).toEqual(["AAA"]);
+  });
+
   it("runs load on mount and applies the resolved spans", async () => {
     const load = vi.fn(async () => [{ from: 7, to: 14 }]);
     const current = mount(DOC, { load });

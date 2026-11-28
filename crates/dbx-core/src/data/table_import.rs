@@ -7266,6 +7266,20 @@ fn validated_prepared_import_source(
     })
 }
 
+/// Picks the row sample a create-table import infers column types from.
+///
+/// The wizard has already previewed this exact file, and [`validated_prepared_import_source`]
+/// proved the fingerprint still matches, so those rows are a trustworthy sample. Re-parsing only
+/// to widen the sample from the preview limit to [`CREATE_TABLE_INFERENCE_ROWS`] costs an extra
+/// full scan of the file — for a SQL script that is a second sqlparser pass over every INSERT
+/// before the import even starts, which is what made create-table imports of large dumps pay
+/// three passes (issue #15047). The sample only drives type inference for columns the user left
+/// without a concrete target type, and the wizard derives its own suggestions from these same
+/// preview rows, so reusing them is also the consistent choice.
+fn prepared_create_table_sample(prepared: Option<&ParsedImportFile>) -> Option<ParsedImportFile> {
+    prepared.filter(|prepared| !prepared.columns.is_empty() && !prepared.rows.is_empty()).cloned()
+}
+
 async fn preview_table_import_file_with_context(
     request: TableImportPreviewRequest,
     duckdb_context: Option<&DuckDbImportContext>,
@@ -8006,20 +8020,9 @@ where
                 "Cannot truncate a table that is being created by the import",
             ));
         }
-        let required_sample_rows = if prepared_source_total_exact {
-            prepared_source
-                .as_ref()
-                .map(|prepared| prepared.total_rows.min(CREATE_TABLE_INFERENCE_ROWS))
-                .unwrap_or(CREATE_TABLE_INFERENCE_ROWS)
-        } else {
-            CREATE_TABLE_INFERENCE_ROWS
-        };
-        let parsed = if let Some(prepared) =
-            prepared_source.as_ref().filter(|prepared| prepared.rows.len() >= required_sample_rows).cloned()
-        {
-            prepared
-        } else {
-            match parse_import_preview_file_with_context(
+        let parsed = match prepared_create_table_sample(prepared_source.as_ref()) {
+            Some(prepared) => prepared,
+            None => match parse_import_preview_file_with_context(
                 &request.file_path,
                 source_format,
                 &import_parse_options,
@@ -8032,7 +8035,7 @@ where
                 Err(error) => {
                     return Err(emit_import_error(&mut progress_callback, request, 0, 0, started_at, error));
                 }
-            }
+            },
         };
         let total_rows = parsed.total_rows;
         let plan = match build_import_create_table_plan_with_identifier_quote(
@@ -9665,6 +9668,32 @@ mod tests {
         std::fs::write(&path, b"id,name\n1,Ada\n2,Grace\n").unwrap();
         assert!(validated_prepared_import_source(&request, TableImportSourceFormat::Csv).is_none());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn prepared_preview_rows_are_reused_for_create_table_inference() {
+        // The wizard previews a file and then imports it; the preview keeps only the first few
+        // rows. Those rows must drive create-table type inference, otherwise the import pays a
+        // second full parse of the source just to widen the sample to
+        // `CREATE_TABLE_INFERENCE_ROWS` (issue #15047, three passes per SQL import).
+        let parsed = ParsedImportFile {
+            columns: vec!["id".to_string(), "name".to_string()],
+            rows: vec![vec![serde_json::json!(1), serde_json::json!("Ada")]],
+            total_rows: 5_000,
+            effective_encoding: Some(TableImportTextEncoding::Utf8),
+        };
+        let sample = prepared_create_table_sample(Some(&parsed)).expect("preview rows are reused as the sample");
+        assert_eq!(sample.rows.len(), 1);
+        assert_eq!(sample.total_rows, 5_000);
+        assert_eq!(sample.columns, vec!["id", "name"]);
+        assert_eq!(sample.effective_encoding, Some(TableImportTextEncoding::Utf8));
+
+        // Without usable preview rows the import has to read the file itself.
+        let no_rows = ParsedImportFile { rows: Vec::new(), ..parsed.clone() };
+        assert!(prepared_create_table_sample(Some(&no_rows)).is_none());
+        let no_columns = ParsedImportFile { columns: Vec::new(), ..parsed.clone() };
+        assert!(prepared_create_table_sample(Some(&no_columns)).is_none());
+        assert!(prepared_create_table_sample(None).is_none());
     }
 
     fn write_xlsx_test_entry<W: Write + std::io::Seek>(zip: &mut zip::ZipWriter<W>, path: &str, content: &str) {

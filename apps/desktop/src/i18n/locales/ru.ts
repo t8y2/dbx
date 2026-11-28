@@ -3903,6 +3903,7 @@ export default withEnglishFallback({
     disableAllFilterRules: "Отключить правила этой группы",
     copyExtractorSingleColumnFormat: "Формат одного столбца для Smart Copy",
     copyExtractorUseSmartDefaults: "Использовать формат Smart Copy по умолчанию",
+    layerPreviewExportGeoJson: "Экспорт GeoJSON",
     tableQueryDefaults: "Фильтры и сортировка по умолчанию для этой таблицы",
     tableQueryDefaultsSave: "Сохранить текущие фильтры и сортировку",
     tableQueryDefaultsClear: "Очистить сохраненные условия по умолчанию",

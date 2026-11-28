@@ -4080,6 +4080,7 @@ export default withEnglishFallback({
     disableAllFilterRules: "ปิดใช้กฎของกลุ่มนี้",
     copyExtractorSingleColumnFormat: "รูปแบบคอลัมน์เดียวของการคัดลอกอัจฉริยะ",
     copyExtractorUseSmartDefaults: "ใช้รูปแบบเริ่มต้นของการคัดลอกอัจฉริยะ",
+    layerPreviewExportGeoJson: "ส่งออก GeoJSON",
     tableQueryDefaults: "ตัวกรองและเรียงลำดับเริ่มต้นของตารางนี้",
     tableQueryDefaultsSave: "บันทึกตัวกรองและเรียงลำดับปัจจุบัน",
     tableQueryDefaultsClear: "ล้างเงื่อนไขเริ่มต้นที่บันทึกไว้",

@@ -3906,6 +3906,7 @@ export default withEnglishFallback({
     layerPreviewNoGeometryData: "无法预览：没有有效的几何数据",
     layerPreviewLabel: "标签",
     layerPreviewExport: "导出图片",
+    layerPreviewExportGeoJson: "导出 GeoJSON",
     layerPreviewMaximize: "最大化",
     layerPreviewRestore: "还原",
     layerPreviewLoading: "正在加载地图...",

@@ -3910,6 +3910,7 @@ export default withEnglishFallback({
     disableAllFilterRules: "Desativar as regras deste grupo",
     copyExtractorSingleColumnFormat: "Formato de coluna única do Smart Copy",
     copyExtractorUseSmartDefaults: "Usar o formato padrão do Smart Copy",
+    layerPreviewExportGeoJson: "Exportar GeoJSON",
     tableOperationFailed: "Falha na operação da tabela: {message}",
     copyExtractorQuoteIdentifiers: "Colocar nomes de tabelas e colunas entre aspas",
     copyExtractorTemporalFormat: "Valores de data e hora",

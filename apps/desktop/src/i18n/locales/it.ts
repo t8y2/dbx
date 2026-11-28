@@ -3812,6 +3812,7 @@ export default withEnglishFallback({
     disableAllFilterRules: "Disabilita le regole di questo gruppo",
     copyExtractorSingleColumnFormat: "Formato a colonna singola di Copia intelligente",
     copyExtractorUseSmartDefaults: "Usa il formato predefinito di Copia intelligente",
+    layerPreviewExportGeoJson: "Esporta GeoJSON",
     tableQueryDefaults: "Filtri e ordinamento predefiniti per questa tabella",
     tableQueryDefaultsSave: "Salva i filtri e l'ordinamento correnti",
     tableQueryDefaultsClear: "Cancella le condizioni predefinite salvate",

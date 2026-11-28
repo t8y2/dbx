@@ -3772,6 +3772,7 @@ export default withEnglishFallback({
     disableAllFilterRules: "이 그룹의 조건 비활성화",
     copyExtractorSingleColumnFormat: "스마트 복사 단일 열 형식",
     copyExtractorUseSmartDefaults: "스마트 복사 기본 형식 사용",
+    layerPreviewExportGeoJson: "GeoJSON 내보내기",
     tableQueryDefaults: "이 테이블의 기본 필터 및 정렬",
     tableQueryDefaultsSave: "현재 필터 및 정렬 저장",
     tableQueryDefaultsClear: "저장된 기본 조건 지우기",

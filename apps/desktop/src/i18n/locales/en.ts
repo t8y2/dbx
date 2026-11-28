@@ -3979,6 +3979,7 @@ export default {
     layerPreviewNoGeometryData: "Unable to preview: no valid geometry data",
     layerPreviewLabel: "Label",
     layerPreviewExport: "Export image",
+    layerPreviewExportGeoJson: "Export GeoJSON",
     layerPreviewMaximize: "Maximize",
     layerPreviewRestore: "Restore",
     layerPreviewLoading: "Loading map...",

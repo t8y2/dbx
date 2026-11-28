@@ -4123,6 +4123,7 @@ export default withEnglishFallback({
     disableAllFilterRules: "このグループの条件を無効化",
     copyExtractorSingleColumnFormat: "スマートコピーの単一列形式",
     copyExtractorUseSmartDefaults: "スマートコピーのデフォルト形式を使用",
+    layerPreviewExportGeoJson: "GeoJSON をエクスポート",
     tableQueryDefaults: "このテーブルの既定のフィルターと並べ替え",
     tableQueryDefaultsSave: "現在のフィルターと並べ替えを保存",
     tableQueryDefaultsClear: "保存済みの既定条件をクリア",

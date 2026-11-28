@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed, ref, watch, onBeforeUnmount, nextTick } from "vue";
+import { computed, ref, shallowRef, watch, onBeforeUnmount, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
-import { Camera, Loader2, Map, Maximize2, Minimize2, X } from "@lucide/vue";
+import { Camera, FileDown, Loader2, Map, Maximize2, Minimize2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
+import { useToast } from "@/composables/useToast";
+import { formatError } from "@/lib/backend/errorUtils";
+import { saveTextFile } from "@/lib/export/saveTextFile";
 import { renderGeometryFeaturesIndependently } from "@/lib/dataGrid/geometryLayerPreview";
 import { prepareCoordsToLatLng, type CoordinateToLatLng } from "@/lib/dataGrid/geometryProjection";
 import { getSpatialReference, SHORTLIST_SRIDS } from "@/lib/dataGrid/spatialReferenceCatalog";
@@ -24,10 +27,12 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const { toast } = useToast();
 const mapContainer = ref<HTMLDivElement>();
 const mapError = ref<string>("");
 const isLoadingMap = ref(false);
 const isExporting = ref(false);
+const isExportingGeoJson = ref(false);
 const skippedFeatureCount = ref(0);
 
 // ── Effective SRID (detected default + manual override) ─────────────────────
@@ -109,7 +114,7 @@ function onResizePointerUp() {
 // ── Leaflet ───────────────────────────────────────────────────────────────
 let _L: typeof L | null = null;
 let map: L.Map | null = null;
-let geoLayer: L.FeatureGroup | null = null;
+const geoLayer = shallowRef<L.FeatureGroup | null>(null);
 let labelLayer: L.LayerGroup | null = null;
 let tileLayer: L.TileLayer | null = null;
 let overlayTileLayer: L.TileLayer | null = null;
@@ -391,7 +396,7 @@ async function initMap() {
 }
 
 async function addGeoJsonToMap(generation: number) {
-  if (!map || geoLayer) return;
+  if (!map || geoLayer.value) return;
   try {
     _geojsonData = JSON.parse(props.geojson);
   } catch {
@@ -445,7 +450,8 @@ async function renderLayer(generation: number) {
     }
     coordinateConverters = converters;
 
-    geoLayer = leaflet.featureGroup().addTo(map);
+    const group = leaflet.featureGroup().addTo(map);
+    geoLayer.value = group;
     const summary = renderGeometryFeaturesIndependently(
       features,
       (feature) => {
@@ -469,7 +475,7 @@ async function renderLayer(generation: number) {
         });
         return { layer, srid };
       },
-      (layer) => layer.addTo(geoLayer!),
+      (layer) => layer.addTo(group),
       (error) => console.warn("[LayerPreview] skipped invalid feature", error),
     );
     skippedFeatureCount.value = summary.skipped;
@@ -478,7 +484,7 @@ async function renderLayer(generation: number) {
       return;
     }
 
-    const bounds = geoLayer.getBounds();
+    const bounds = group.getBounds();
     if (bounds.isValid()) {
       map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
     }
@@ -496,9 +502,9 @@ async function applySrid(next: number) {
   if (!map) return;
   mapGeneration++;
   const generation = mapGeneration;
-  if (geoLayer) {
-    map.removeLayer(geoLayer);
-    geoLayer = null;
+  if (geoLayer.value) {
+    map.removeLayer(geoLayer.value);
+    geoLayer.value = null;
   }
   if (labelLayer) {
     map.removeLayer(labelLayer);
@@ -600,7 +606,7 @@ function cleanupMap() {
   mapResizeObserver?.disconnect();
   mapResizeObserver = null;
   labelLayer = null;
-  geoLayer = null;
+  geoLayer.value = null;
   tileLayer = null;
   overlayTileLayer = null;
   if (map) {
@@ -620,6 +626,20 @@ function cleanupMap() {
 
 function close() {
   emit("update:open", false);
+}
+
+async function saveAsGeoJson() {
+  if (!geoLayer.value || mapError.value || isLoadingMap.value || isExporting.value || isExportingGeoJson.value) return;
+  isExportingGeoJson.value = true;
+  try {
+    // Leaflet exports the already projected layers, including the original feature properties.
+    const content = JSON.stringify(geoLayer.value.toGeoJSON(false), null, 2);
+    await saveTextFile(content, `map-${Date.now()}.geojson`, "GeoJSON", "geojson");
+  } catch (error) {
+    toast(t("grid.exportFailed", { message: formatError(error) }), 5000);
+  } finally {
+    isExportingGeoJson.value = false;
+  }
 }
 
 async function saveAsImage() {
@@ -756,8 +776,21 @@ onBeforeUnmount(() => cleanupMap());
         </Popover>
 
         <!-- Save as image -->
-        <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-accent-foreground" :title="t('grid.layerPreviewExport')" :disabled="isExporting" @click="saveAsImage">
+        <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-accent-foreground" :title="t('grid.layerPreviewExport')" :disabled="isExporting || isExportingGeoJson" @click="saveAsImage">
           <Camera v-if="!isExporting" class="h-3.5 w-3.5" />
+          <Loader2 v-else class="h-3.5 w-3.5 animate-spin" />
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="icon"
+          class="h-7 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+          :title="t('grid.layerPreviewExportGeoJson')"
+          :aria-label="t('grid.layerPreviewExportGeoJson')"
+          :disabled="!geoLayer || !!mapError || isLoadingMap || isExporting || isExportingGeoJson"
+          @click="saveAsGeoJson"
+        >
+          <FileDown v-if="!isExportingGeoJson" class="h-3.5 w-3.5" />
           <Loader2 v-else class="h-3.5 w-3.5 animate-spin" />
         </Button>
 

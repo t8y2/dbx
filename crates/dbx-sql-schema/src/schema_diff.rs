@@ -5082,6 +5082,14 @@ fn default_literal(default: &str, data_type: &str, source: DialectKind, extra: O
         return normalized.to_string();
     }
 
+    // MariaDB reports an explicit `DEFAULT NULL` as the bare token `NULL`,
+    // while the string default `'NULL'` arrives quoted and is handled above.
+    // Keep the keyword unquoted so a comment-only sync does not rewrite
+    // `DEFAULT NULL` as the string `'NULL'`.
+    if normalized.eq_ignore_ascii_case("null") {
+        return "NULL".to_string();
+    }
+
     let base_type = data_type.split('(').next().unwrap_or(data_type).trim().to_ascii_lowercase();
     let takes_text_literal =
         ["char", "text", "string", "clob", "enum", "set"].iter().any(|kind| base_type.contains(kind));
@@ -12839,9 +12847,34 @@ mod tests {
         // Untouched on MySQL: already quoted and numeric values.
         assert_eq!(default_literal("'guest'", "varchar(50)", Mysql, None), "'guest'");
         assert_eq!(default_literal("0", "bigint", Mysql, None), "0");
-        assert_eq!(default_literal("NULL", "varchar(10)", Mysql, None), "'NULL'");
-        assert_eq!(default_literal("null", "text", Mysql, None), "'null'");
+        // A bare `NULL` is the SQL keyword (MariaDB reports `DEFAULT NULL`
+        // this way); only the quoted form is the string `'NULL'`.
+        assert_eq!(default_literal("NULL", "varchar(10)", Mysql, None), "NULL");
+        assert_eq!(default_literal("null", "text", Mysql, None), "NULL");
+        assert_eq!(default_literal("'NULL'", "varchar(10)", Mysql, None), "'NULL'");
         assert_eq!(default_literal("  spaced  ", "varchar(32)", Mysql, None), "'  spaced  '");
+    }
+
+    #[test]
+    fn mysql_comment_only_change_keeps_default_null_unquoted() {
+        // MariaDB reports `DEFAULT NULL` as the bare token `NULL`. A
+        // comment-only sync must keep the keyword, not rewrite it as the
+        // string `'NULL'`.
+        let source = vec![ColumnInfo {
+            is_nullable: true,
+            column_default: Some("NULL".into()),
+            ..column("null_varchar", "varchar(30)", Some("new comment only"))
+        }];
+        let target = vec![ColumnInfo {
+            is_nullable: true,
+            column_default: Some("NULL".into()),
+            ..column("null_varchar", "varchar(30)", Some("old comment only"))
+        }];
+        let diffs = diff_columns_with_options(&source, &target, false, false, false, 0.5);
+        let sql = gen_sql(wrap_table_diff("t_null_demo", diffs), DatabaseType::Mysql, None);
+        assert!(sql.contains("DEFAULT NULL"), "comment-only sync: {sql}");
+        assert!(sql.contains("COMMENT 'new comment only'"), "comment-only sync: {sql}");
+        assert!(!sql.contains("DEFAULT 'NULL'"), "NULL must stay unquoted: {sql}");
     }
 
     #[test]

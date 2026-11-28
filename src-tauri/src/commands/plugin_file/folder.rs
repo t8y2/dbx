@@ -32,8 +32,47 @@ const RECENT_FOLDERS_FILE: &str = "recent-folders.json";
 /// Keeps the dropdown short while covering day-to-day project switching.
 const MAX_RECENT_FOLDERS: usize = 10;
 
+/// Stable identity of a directory. A canonical path string alone cannot tell
+/// two directories that occupy the same path apart; Unix uses (device, inode)
+/// and Windows uses (volume serial, file index) to anchor a consent to the
+/// actual directory the user picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct DirIdentity {
+    a: u64,
+    b: u64,
+}
+
+fn identity_from(meta: &std::fs::Metadata) -> DirIdentity {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        DirIdentity { a: meta.dev(), b: meta.ino() }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        DirIdentity { a: meta.volume_serial_number().unwrap_or(0) as u64, b: meta.file_index() }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        DirIdentity { a: 0, b: 0 }
+    }
+}
+
+/// Reads a directory identity without following links. Both a symlink and a
+/// non-directory are refused: the consent anchor must be a real directory.
+fn dir_identity(path: &Path) -> Result<DirIdentity, String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|_| "cannot inspect directory".to_string())?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err("path is not a real directory".to_string());
+    }
+    Ok(identity_from(&meta))
+}
+
 /// Persisted recent grant. The canonical `path` stays in the host: plugins only
-/// receive `id`, so a path can never become a reusable credential.
+/// receive `id`, so a path can never become a reusable credential. `identity`
+/// binds the consent to the directory that was actually selected; records
+/// written before this field existed have `None` and require re-consent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RecentFolderRecord {
@@ -42,6 +81,8 @@ pub(super) struct RecentFolderRecord {
     pub(super) path: String,
     #[serde(default)]
     pub(super) read_only: bool,
+    #[serde(default)]
+    pub(super) identity: Option<DirIdentity>,
 }
 
 /// Plugin-facing entry for a recent project: opaque id, display name and a
@@ -52,6 +93,10 @@ pub(crate) struct RecentFolderMeta {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) label: String,
+    /// True when the recorded directory identity no longer matches (or the
+    /// record predates identity tracking). The plugin must call `pickFolder`
+    /// with this id as `defaultRef` to obtain fresh consent.
+    pub(crate) needs_confirmation: bool,
 }
 
 /// Display-only label derived from the canonical path: the home directory is
@@ -107,6 +152,7 @@ fn load_recent_folders(data_dir: &Path) -> Vec<RecentFolderRecord> {
             name: folder_display_name(Path::new(&path)),
             path,
             read_only: false,
+            identity: None,
         })
         .collect();
     if !migrated.is_empty() {
@@ -141,17 +187,66 @@ pub(super) fn remember_recent_folder(data_dir: &Path, root: &Path, read_only: bo
     let id = existing.as_ref().map(|record| record.id.clone()).unwrap_or_else(|| Uuid::new_v4().to_string());
     let name = existing.map(|record| record.name).unwrap_or_else(|| folder_display_name(root));
     records.retain(|record| record.path != canonical);
-    records.insert(0, RecentFolderRecord { id: id.clone(), name, path: canonical, read_only });
+    // Anchor the consent to the directory the user just confirmed. An
+    // inaccessible directory gets `None` and will require re-consent later.
+    let identity = dir_identity(root).ok();
+    records.insert(0, RecentFolderRecord { id: id.clone(), name, path: canonical, read_only, identity });
     records.truncate(MAX_RECENT_FOLDERS);
     // History is a convenience: a failed write must not fail the grant.
     let _ = write_recent_folders(data_dir, &records);
     id
 }
 
+/// Moves an existing record to the front without recomputing or overwriting
+/// its identity. `openFolderRef` uses this after verification so a race during
+/// the reorder cannot re-anchor the grant to a different directory.
+pub(super) fn touch_recent_folder(data_dir: &Path, id: &str) {
+    let mut records = load_recent_folders(data_dir);
+    if let Some(index) = records.iter().position(|record| record.id == id) {
+        let record = records.remove(index);
+        records.insert(0, record);
+        let _ = write_recent_folders(data_dir, &records);
+    }
+}
+
 /// Resolves an opaque id to a recorded grant; callers validate the directory
 /// still exists before opening it.
 pub(super) fn find_recent_folder(data_dir: &Path, id: &str) -> Option<RecentFolderRecord> {
     load_recent_folders(data_dir).into_iter().find(|record| record.id == id)
+}
+
+fn grant_identity_matches(record: &RecentFolderRecord) -> bool {
+    let Some(expected) = record.identity else {
+        return false;
+    };
+    dir_identity(Path::new(&record.path)).map(|actual| actual == expected).unwrap_or(false)
+}
+
+/// Why a persisted grant cannot be reopened silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RecentGrantError {
+    /// The id is not in this plugin's history.
+    Missing,
+    /// The directory was replaced, became a link, or the record predates
+    /// identity tracking; native re-consent is required.
+    NeedsConfirmation,
+}
+
+/// Verifies that a persisted grant still points at the exact directory the
+/// user consented to before any handle is issued. Kept free of Tauri types so
+/// the identity rules are directly unit-testable.
+pub(super) fn verify_recent_grant(
+    data_dir: &Path,
+    id: &str,
+) -> Result<(RecentFolderRecord, PathBuf, DirIdentity), RecentGrantError> {
+    let record = find_recent_folder(data_dir, id).ok_or(RecentGrantError::Missing)?;
+    let expected = record.identity.ok_or(RecentGrantError::NeedsConfirmation)?;
+    let actual = dir_identity(Path::new(&record.path)).map_err(|_| RecentGrantError::NeedsConfirmation)?;
+    if actual != expected {
+        return Err(RecentGrantError::NeedsConfirmation);
+    }
+    let path = PathBuf::from(&record.path);
+    Ok((record, path, actual))
 }
 
 /// Lists recent projects, dropping folders that were deleted or moved.
@@ -164,10 +259,14 @@ pub(crate) fn recent_folder_metas(data_dir: &Path) -> Vec<RecentFolderMeta> {
     }
     stored
         .into_iter()
-        .map(|record| RecentFolderMeta {
-            label: display_label(Path::new(&record.path)),
-            id: record.id,
-            name: record.name,
+        .map(|record| {
+            let needs_confirmation = !grant_identity_matches(&record);
+            RecentFolderMeta {
+                label: display_label(Path::new(&record.path)),
+                id: record.id,
+                name: record.name,
+                needs_confirmation,
+            }
         })
         .collect()
 }
@@ -179,6 +278,8 @@ pub(crate) fn recent_folder_metas(data_dir: &Path) -> Vec<RecentFolderMeta> {
 pub(crate) struct OpenFolder {
     /// Canonical absolute path captured at `open_folder`. Immutable.
     root: PathBuf,
+    /// Identity of the directory behind `root` at consent time. Immutable.
+    identity: DirIdentity,
     plugin_id: String,
     read_only: bool,
 }
@@ -228,6 +329,29 @@ pub(super) fn open_folder(
     root: &Path,
     read_only: bool,
 ) -> Result<FolderHandleMeta, String> {
+    open_folder_impl(state, plugin_id, root, None, read_only)
+}
+
+/// Opens a folder whose identity was already checked by `verify_recent_grant`.
+/// Refusing a mismatch here closes the gap between verifying a persisted grant
+/// and issuing the session handle.
+pub(super) fn open_folder_with_identity(
+    state: &PluginFileState,
+    plugin_id: &str,
+    root: &Path,
+    expected: DirIdentity,
+    read_only: bool,
+) -> Result<FolderHandleMeta, String> {
+    open_folder_impl(state, plugin_id, root, Some(expected), read_only)
+}
+
+fn open_folder_impl(
+    state: &PluginFileState,
+    plugin_id: &str,
+    root: &Path,
+    expected: Option<DirIdentity>,
+    read_only: bool,
+) -> Result<FolderHandleMeta, String> {
     if plugin_id.trim().is_empty() {
         return Err("plugin id is required".to_string());
     }
@@ -236,12 +360,19 @@ pub(super) fn open_folder(
     if !meta.is_dir() {
         return Err("path is not a directory".to_string());
     }
+    let identity = dir_identity(&canonical)?;
+    if expected.is_some_and(|expected| expected != identity) {
+        log::warn!("plugin folder: persisted grant changed between verification and open");
+        return Err("granted folder was modified on disk".to_string());
+    }
     let name = canonical.file_name().and_then(|value| value.to_str()).unwrap_or("project").to_string();
     let label = display_label(&canonical);
     let folder_handle_id = Uuid::new_v4().to_string();
     let mut folders = state.folders.lock().map_err(|_| "plugin folder registry poisoned".to_string())?;
-    folders
-        .insert(folder_handle_id.clone(), OpenFolder { root: canonical, plugin_id: plugin_id.to_string(), read_only });
+    folders.insert(
+        folder_handle_id.clone(),
+        OpenFolder { root: canonical, identity, plugin_id: plugin_id.to_string(), read_only },
+    );
     Ok(FolderHandleMeta { folder_handle_id, name, id: None, label })
 }
 
@@ -266,12 +397,19 @@ fn lookup<'a>(
 /// what `open_folder` captured. A grant root swapped with a symlink or renamed
 /// out from under us means the consent anchor is gone — refuse immediately.
 fn check_root_unchanged(open: &OpenFolder) -> Result<PathBuf, String> {
-    let current = open.root.canonicalize().map_err(|_| "granted folder is no longer accessible".to_string())?;
-    if current != open.root {
-        log::warn!("plugin folder: grant root was replaced (was {}, now {})", open.root.display(), current.display());
+    let meta =
+        std::fs::symlink_metadata(&open.root).map_err(|_| "granted folder is no longer accessible".to_string())?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        log::warn!("plugin folder: grant root is no longer a real directory");
         return Err("granted folder was modified on disk".to_string());
     }
-    Ok(current)
+    if identity_from(&meta) != open.identity {
+        log::warn!("plugin folder: grant root identity changed at {}", open.root.display());
+        return Err("granted folder was modified on disk".to_string());
+    }
+    // `root` is already canonical and was just verified without following
+    // links; re-canonicalizing would reintroduce the symlink race.
+    Ok(open.root.clone())
 }
 
 /// Joins `relative` onto the grant root after lexical validation.
@@ -295,19 +433,106 @@ fn join_under_root(root: &Path, relative: &str) -> Result<PathBuf, String> {
     Ok(root.join(rel))
 }
 
+/// Walks every component below `root` using `symlink_metadata` (no-follow).
+/// Parent components must be real directories; the final component may be a
+/// regular file or missing, but a symlink is rejected at any position.
+/// Encountering a missing component means the rest of the suffix is missing
+/// too, so there is nothing left to inspect.
+fn assert_no_symlink_components(root: &Path, candidate: &Path) -> Result<(), String> {
+    let relative = candidate.strip_prefix(root).map_err(|_| "relative path resolves outside grant".to_string())?;
+    let components: Vec<_> = relative.components().collect();
+    let mut current = root.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        if matches!(component, Component::CurDir) {
+            continue;
+        }
+        current.push(component);
+        let is_leaf = index + 1 == components.len();
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                log::warn!("plugin folder: symlink component rejected at {}", current.display());
+                return Err("path crosses a symbolic link inside the grant".to_string());
+            }
+            Ok(meta) if !is_leaf && !meta.is_dir() => {
+                return Err("path component is not a directory".to_string());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err("cannot inspect path".to_string()),
+        }
+    }
+    Ok(())
+}
+
+/// Creates missing parent directories one level at a time. `create_dir` never
+/// follows a link, and an already-existing component is re-checked with
+/// `symlink_metadata` before it is accepted as a safe parent.
+fn create_dirs_verified(root: &Path, parent: &Path) -> Result<(), String> {
+    let relative = parent.strip_prefix(root).map_err(|_| "relative path resolves outside grant".to_string())?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        if matches!(component, Component::CurDir) {
+            continue;
+        }
+        current.push(component);
+        match std::fs::create_dir(&current) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let meta = std::fs::symlink_metadata(&current).map_err(|_| "cannot inspect path".to_string())?;
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    return Err("path crosses a symbolic link inside the grant".to_string());
+                }
+            }
+            Err(_) => return Err("cannot create parent directory".to_string()),
+        }
+    }
+    Ok(())
+}
+
+/// Opens a writable file without following a symlink at the final component.
+/// `O_NOFOLLOW` closes the Unix race between the metadata walk and the open;
+/// non-Unix platforms rely on the preceding no-follow walk.
+fn open_no_follow(path: &Path, truncate: bool) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(truncate);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(::libc::O_NOFOLLOW);
+    }
+    #[cfg(not(unix))]
+    {
+        if std::fs::symlink_metadata(path).map(|meta| meta.file_type().is_symlink()).unwrap_or(false) {
+            return Err("target is a symbolic link".to_string());
+        }
+    }
+    options.open(path).map_err(|error| format!("cannot open target file: {error}"))
+}
+
 /// Canonicalizes the nearest existing ancestor of `path` and rebuilds the
 /// remaining (not-yet-created) suffix, then verifies the result stays under
-/// `canonical_root`. Used for writes where the target may not exist yet.
+/// `canonical_root`. Every probe uses `symlink_metadata`: a dangling symlink
+/// is "present" as a link and is rejected instead of being treated as a
+/// missing segment that can be recreated by `create_dir_all`.
 fn resolve_allowing_missing(path: &Path, canonical_root: &Path) -> Result<PathBuf, String> {
     let mut probe = path;
     let mut missing: Vec<std::ffi::OsString> = Vec::new();
     let existing = loop {
-        if probe.exists() {
-            break probe.to_path_buf();
+        match std::fs::symlink_metadata(probe) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    log::warn!("plugin folder: symlink component rejected near {}", probe.display());
+                    return Err("path crosses a symbolic link inside the grant".to_string());
+                }
+                break probe.to_path_buf();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = probe.file_name().ok_or_else(|| "relative path resolves outside grant".to_string())?;
+                missing.push(name.to_os_string());
+                probe = probe.parent().ok_or_else(|| "relative path resolves outside grant".to_string())?;
+            }
+            Err(_) => return Err("cannot resolve path".to_string()),
         }
-        let name = probe.file_name().ok_or_else(|| "relative path resolves outside grant".to_string())?;
-        missing.push(name.to_os_string());
-        probe = probe.parent().ok_or_else(|| "relative path resolves outside grant".to_string())?;
     };
     let canonical_existing = existing.canonicalize().map_err(|_| "cannot resolve path".to_string())?;
     if !canonical_existing.starts_with(canonical_root) {
@@ -321,6 +546,7 @@ fn resolve_allowing_missing(path: &Path, canonical_root: &Path) -> Result<PathBu
     for segment in missing.iter().rev() {
         rebuilt.push(segment);
     }
+    assert_no_symlink_components(canonical_root, &rebuilt)?;
     Ok(rebuilt)
 }
 
@@ -330,6 +556,10 @@ fn resolve_allowing_missing(path: &Path, canonical_root: &Path) -> Result<PathBu
 /// [`OpenFolder`] — this function trusts the root that was validated there.
 fn resolve_relative(canonical_root: &Path, relative: &str) -> Result<PathBuf, String> {
     let joined = join_under_root(canonical_root, relative)?;
+    // Single no-follow choke point shared by reads, listings and writes: a
+    // link at any position (including a dangling one) is rejected before
+    // canonicalize can resolve it away.
+    assert_no_symlink_components(canonical_root, &joined)?;
     if joined.exists() {
         let canonical = joined.canonicalize().map_err(|_| "cannot resolve path".to_string())?;
         if !canonical.starts_with(canonical_root) {
@@ -544,6 +774,11 @@ fn prepare_write_target(
     if !create && !target.exists() {
         return Err("target file does not exist".to_string());
     }
+    // Parents were only inspected, not created. Create them one level at a
+    // time so a link cannot appear between the walk and the directory creation.
+    if let Some(parent) = target.parent() {
+        create_dirs_verified(&canonical_root, parent)?;
+    }
     Ok(target)
 }
 
@@ -551,16 +786,19 @@ fn prepare_write_target(
 /// fsync, and rename. A crash or write failure at any point leaves the
 /// previous contents intact — no mid-write truncation, no partial file.
 fn write_file_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = target.parent() {
-        create_dir_all(parent).map_err(|error| format!("cannot create parent directory: {error}"))?;
-    }
     // Temp file in the same directory so rename stays within one filesystem
-    // (the only thing that makes rename truly atomic).
+    // (the only thing that makes rename truly atomic). `create_new` refuses a
+    // pre-planted link at the temp path instead of following it; `rename`
+    // replaces the target entry itself, so it never follows a target link.
     let suffix = Uuid::new_v4();
     let temp =
         target.with_extension(format!("{}.tmp.{suffix}", target.extension().and_then(|s| s.to_str()).unwrap_or("")));
     {
-        let mut file = File::create(&temp).map_err(|_| "cannot create temp file".to_string())?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|_| "cannot create temp file".to_string())?;
         file.write_all(bytes).map_err(|_| "cannot write temp file".to_string())?;
         file.sync_all().map_err(|_| "cannot flush temp file".to_string())?;
     }
@@ -612,16 +850,8 @@ pub(super) fn folder_write_bytes_chunk(
     offset: u64,
 ) -> Result<(), String> {
     let target = prepare_write_target(state, plugin_id, folder_handle_id, relative_path, create)?;
-    if let Some(parent) = target.parent() {
-        create_dir_all(parent).map_err(|error| format!("cannot create parent directory: {error}"))?;
-    }
     // Truncation is explicit: only the first chunk (offset 0) clears the file, later chunks keep existing bytes.
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&target)
-        .map_err(|error| format!("cannot open target file: {error}"))?;
+    let mut file = open_no_follow(&target, false)?;
     if offset == 0 {
         // Truncate the previous contents on the first chunk so a shorter export cannot leave a stale tail.
         file.set_len(0).map_err(|error| format!("cannot truncate target file: {error}"))?;
@@ -815,6 +1045,105 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn dangling_symlink_parent_rejects_text_write() {
+        let dir = temp_dir("dangling-parent-text");
+        let outside = std::env::temp_dir().join(format!("dbx-plugin-dangling-outside-text-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+
+        let state = PluginFileState::default();
+        let meta = open_folder(&state, OWNER, &dir, false).unwrap();
+        let result = folder_write_text(&state, OWNER, &meta.folder_handle_id, "link/a/b.txt", "hacked", true);
+        assert!(result.is_err(), "writing below a dangling symlink must be refused");
+        assert!(!outside.exists(), "the symlink target must not be created");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dangling_symlink_parent_rejects_chunked_write() {
+        let dir = temp_dir("dangling-parent-chunk");
+        let outside = std::env::temp_dir().join(format!("dbx-plugin-dangling-outside-chunk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+
+        let state = PluginFileState::default();
+        let meta = open_folder(&state, OWNER, &dir, false).unwrap();
+        // Both chunks pass create=true: with create=false the later chunk would
+        // fail simply because the target is missing and the test would pass
+        // even with the symlink bug still present.
+        let first = folder_write_bytes_chunk(&state, OWNER, &meta.folder_handle_id, "link/a/b.bin", b"hello ", true, 0);
+        assert!(first.is_err(), "the first chunk below a dangling symlink must be refused");
+        let rest = folder_write_bytes_chunk(&state, OWNER, &meta.folder_handle_id, "link/a/b.bin", b"world", true, 6);
+        assert!(rest.is_err(), "a later chunk below a dangling symlink must be refused");
+        assert!(!outside.exists(), "the symlink target must not be created");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_file_target_rejects_write() {
+        let dir = temp_dir("symlink-file-target");
+        let outside = std::env::temp_dir().join(format!("dbx-plugin-symlink-file-outside-{}", std::process::id()));
+        std::fs::write(&outside, "original").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("victim.txt")).unwrap();
+
+        let state = PluginFileState::default();
+        let meta = open_folder(&state, OWNER, &dir, false).unwrap();
+        let atomic = folder_write_text(&state, OWNER, &meta.folder_handle_id, "victim.txt", "hacked", true);
+        assert!(atomic.is_err(), "atomic writes must not follow a symlink target");
+        let chunk = folder_write_bytes_chunk(&state, OWNER, &meta.folder_handle_id, "victim.txt", b"hacked", true, 0);
+        assert!(chunk.is_err(), "chunked writes must not follow a symlink target");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"original", "external file must remain untouched");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_intermediate_component_rejected() {
+        let dir = temp_dir("symlink-intermediate");
+        let inside = dir.join("real");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::os::unix::fs::symlink(&inside, dir.join("alias")).unwrap();
+
+        let state = PluginFileState::default();
+        let meta = open_folder(&state, OWNER, &dir, false).unwrap();
+        let result = folder_write_text(&state, OWNER, &meta.folder_handle_id, "alias/x.txt", "hacked", true);
+        assert!(result.is_err(), "an in-grant symlink component must be refused even without escape");
+        assert!(!inside.join("x.txt").exists(), "the symlink target directory must not be written to");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn folder_list_does_not_follow_symlinked_directories() {
+        let dir = temp_dir("list-symlink");
+        let outside = std::env::temp_dir().join(format!("dbx-plugin-list-symlink-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(outside.join("nested")).unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("escape")).unwrap();
+
+        let state = PluginFileState::default();
+        let meta = open_folder(&state, OWNER, &dir, false).unwrap();
+        let listed = folder_list(&state, OWNER, &meta.folder_handle_id, None, None).unwrap();
+        let names: Vec<&str> = listed.entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert!(!names.contains(&"secret.txt"), "listing must not follow a symlinked directory");
+        assert!(!names.contains(&"escape"), "symlink entries must be skipped");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn replaced_grant_root_is_refused() {
         // 授权目录被整体替换成指向外部的 symlink → check_root_unchanged
         // 检测到 canonical path 变化 → 所有操作立即拒绝。
@@ -959,6 +1288,10 @@ mod tests {
         // re-reads the file) keeps the same opaque id and `openFolderRef` works.
         let second = recent_folder_metas(&data);
         assert_eq!(second[0].id, first[0].id);
+        // A legacy record has no identity to compare against, so it must ask
+        // for native re-consent instead of silently re-granting access.
+        assert!(second[0].needs_confirmation);
+        assert_eq!(verify_recent_grant(&data, &second[0].id).unwrap_err(), RecentGrantError::NeedsConfirmation);
         assert!(find_recent_folder(&data, &second[0].id).is_some());
 
         let _ = std::fs::remove_dir_all(&data);
@@ -1010,5 +1343,95 @@ mod tests {
         assert_eq!(metas[0].name, "alive");
 
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn same_path_replacement_rejects_live_handle() {
+        let dir = temp_dir("identity-live");
+        std::fs::write(dir.join("keep.erm"), "original").unwrap();
+        let moved = dir.with_extension("moved");
+        let _ = std::fs::remove_dir_all(&moved);
+
+        let state = PluginFileState::default();
+        let meta = open_folder(&state, OWNER, &dir, false).unwrap();
+
+        // Same canonical path, different directory instance.
+        std::fs::rename(&dir, &moved).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("keep.erm"), "replacement").unwrap();
+
+        let expected = "granted folder was modified on disk";
+        assert_eq!(folder_read_text(&state, OWNER, &meta.folder_handle_id, "keep.erm").unwrap_err(), expected);
+        assert!(folder_list(&state, OWNER, &meta.folder_handle_id, None, None).is_err());
+        assert!(folder_file_size(&state, OWNER, &meta.folder_handle_id, "keep.erm").is_err());
+        assert!(folder_write_text(&state, OWNER, &meta.folder_handle_id, "hacked.txt", "x", true).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&moved);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn persisted_grant_rejects_replaced_directory() {
+        let data = temp_dir("identity-data");
+        let dir = temp_dir("identity-persisted");
+        let id = remember_recent_folder(&data, &dir, false);
+        assert!(verify_recent_grant(&data, &id).is_ok());
+
+        let moved = dir.with_extension("moved");
+        let _ = std::fs::remove_dir_all(&moved);
+        std::fs::rename(&dir, &moved).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(verify_recent_grant(&data, &id).unwrap_err(), RecentGrantError::NeedsConfirmation);
+        let metas = recent_folder_metas(&data);
+        assert_eq!(metas.len(), 1);
+        assert!(metas[0].needs_confirmation, "a replaced directory must require re-consent");
+
+        let _ = std::fs::remove_dir_all(&data);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&moved);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn persisted_grant_rejects_symlink_replacement() {
+        let data = temp_dir("identity-symlink-data");
+        let dir = temp_dir("identity-symlink-target");
+        let id = remember_recent_folder(&data, &dir, false);
+        assert!(verify_recent_grant(&data, &id).is_ok());
+
+        let moved = dir.with_extension("moved");
+        let _ = std::fs::remove_dir_all(&moved);
+        std::fs::rename(&dir, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &dir).unwrap();
+
+        // symlink_metadata sees the link itself and refuses it, even though the
+        // link points at the original directory.
+        assert_eq!(verify_recent_grant(&data, &id).unwrap_err(), RecentGrantError::NeedsConfirmation);
+        assert!(recent_folder_metas(&data)[0].needs_confirmation);
+
+        let _ = std::fs::remove_file(&dir);
+        let _ = std::fs::remove_dir_all(&data);
+        let _ = std::fs::remove_dir_all(&moved);
+    }
+
+    #[test]
+    fn legacy_record_without_identity_requires_consent() {
+        let data = temp_dir("identity-legacy-data");
+        let dir = temp_dir("identity-legacy-target");
+        let legacy = serde_json::json!([{
+            "id": "legacy-id",
+            "name": "legacy-target",
+            "path": dir.to_string_lossy().into_owned(),
+        }]);
+        std::fs::write(recent_folders_path(&data), serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        assert_eq!(verify_recent_grant(&data, "legacy-id").unwrap_err(), RecentGrantError::NeedsConfirmation);
+        assert!(recent_folder_metas(&data)[0].needs_confirmation);
+
+        let _ = std::fs::remove_dir_all(&data);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

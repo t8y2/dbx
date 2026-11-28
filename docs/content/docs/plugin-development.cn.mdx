@@ -725,13 +725,13 @@ await ft.closeFolderHandle(folderHandleId);
 | `openFolderFile(folderHandleId, relativePath, target)` | 在插件之外打开条目：`"app"` 把 SQL/脚本文件以编辑器标签打开，`"system"` 交给系统默认程序。不返回值；绝对路径只保留在宿主内部。                                            |
 | `folderWriteText(folderHandleId, relativePath, content, { create? })` | 通过 temp+fsync+rename 原子替换文件内容，失败时原文件保持完好。自动创建缺失的父目录。不返回值；渲染层永远不会获知绝对路径。对同一文件的并发保存由 rename 串行化：最后完成的写入生效，读方不会看到写了一半的文件。 |
 | `folderWriteBinary(folderHandleId, relativePath, dataBase64, { create?, offset? })` | 以包含性校验写入 base64 原始字节（PNG/XLSX 导出）。单请求上限 8 MiB base64（约 6 MiB 原始字节）；传入 `offset` 可分块追加，`offset: 0` 先截断、后续块顺序追加；不传 `offset` 时整文件原子替换。 |
-| `recentFolders()`                                  | 返回 `[{ id, name, label }]`，最新的在前，去重且最多 10 条；目录被删除或移动的条目会被剔除。`label` 是脱敏路径（主目录内显示 `~/Projects/demo`，主目录外显示 `…/` 加最后 6 级），绝对路径不会离开宿主。 |
-| `openFolderRef(id)`                                | 免对话框重开此前授权过的目录；返回 `{ folderHandleId, name, id, label }`，目录已不存在时为 `null`。只接受本插件拿到过的 id，无法用它访问任意目录。                        |
+| `recentFolders()`                                  | 返回 `[{ id, name, label, needsConfirmation? }]`，最新的在前，去重且最多 10 条；目录被删除或移动的条目会被剔除。`label` 是脱敏路径（主目录内显示 `~/Projects/demo`，主目录外显示 `…/` 加最后 6 级），绝对路径不会离开宿主。`needsConfirmation: true` 表示该目录已被替换或记录早于身份追踪，需调用 `pickFolder({ defaultRef: id })` 重新授权。 |
+| `openFolderRef(id)`                                | 免对话框重开此前授权过的目录；返回 `{ folderHandleId, name, id, label }`，目录已不存在时为 `null`。只接受本插件拿到过的 id，无法用它访问任意目录。目录身份变化（同路径替换、持久化记录被换成 symlink、旧格式记录）时以 `grant_needs_confirmation` 失败，插件应改用 `pickFolder({ defaultRef: id })` 重新选择。 |
 | `closeFolderHandle(folderHandleId)`                | 释放授权。插件卸载、工作台关闭时宿主会清扫残留句柄。                                                                                                                        |
 
-绝对路径不会进入插件沙箱：句柄与历史条目都是不透明 id，句柄操作一律使用相对路径，`openFolderFile` 仅在宿主内部解析目标路径。授权根目录在 pick 时一次性 canonicalize 并 **冻结**，每次调用前重新校验——如果用户从外面把授权目录换成了符号链接，后续所有读写都会被拒绝。每个相对路径先做词法校验（禁止绝对路径与 `..` 组件），再通过最近已存在祖先进行规范化，确保符号链接无法逃出冻结的根目录。写入使用原子 temp+fsync+rename，失败时原工程文件完好无损；句柄被撤销后，后续读、写、列举与取大小都会失败。这是单文件句柄模型的增量扩展：`pick` / `beginSave` / `onDrop` 保持原有的一次性语义。
+绝对路径不会进入插件沙箱：句柄与历史条目都是不透明 id，句柄操作一律使用相对路径，`openFolderFile` 仅在宿主内部解析目标路径。授权根目录在 pick 时一次性 canonicalize 并 **冻结**，每次调用前按稳定目录身份重新校验（Unix 为 device/inode，Windows 为卷序列号/文件索引）——同路径换成另一个目录或换成符号链接都会被拒绝。每个相对路径先做词法校验（禁止绝对路径与 `..` 组件），再用 `symlink_metadata` 逐组件 no-follow 走查：任何位置的符号链接都会被拒绝，包括会被误当成"缺失父目录"重建的悬空链接。缺失父目录逐级创建，分块写入也不会跟随末端符号链接。写入使用原子 temp+fsync+rename，失败时原工程文件完好无损；句柄被撤销后，后续读、写、列举与取大小都会失败。这是单文件句柄模型的增量扩展：`pick` / `beginSave` / `onDrop` 保持原有的一次性语义。
 
-授权生命周期：活动句柄由 `closeFolderHandle` 释放，也会在工作台关闭、插件卸载或应用退出时释放。历史列表本身会持久化，因此重启后可凭 `openFolderRef` 免对话框重新授权同一目录——它只回放用户此前对该目录已给出的同意。
+授权生命周期：活动句柄由 `closeFolderHandle` 释放，也会在工作台关闭、插件卸载或应用退出时释放。历史列表连同目录身份一起持久化，因此重启后可凭 `openFolderRef` 免对话框重新授权同一目录——它只回放用户此前对该目录已给出的同意。若身份发生变化，`openFolderRef` 以 `grant_needs_confirmation` 失败，且 `recentFolders()` 会标记该条目；插件必须改用 `pickFolder({ defaultRef: id })` 让用户重新原生选择，而不能静默授权到新位置。
 
 ### 持久化 UI 状态
 

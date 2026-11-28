@@ -346,9 +346,9 @@ export interface PluginHostBridgeApi {
   folderWriteBinary?(pluginId: string, folderHandleId: string, relativePath: string, dataBase64: string, options?: { create?: boolean; offset?: number }): Promise<void>;
   /** Close a directory handle, releasing the grant. */
   closeFolderHandle?(pluginId: string, folderHandleId: string): Promise<void>;
-  /** Recently granted project folders as opaque ids plus a masked display label; absolute paths never reach the plugin. */
-  recentFolders?(pluginId: string): Promise<Array<{ id: string; name: string; label: string }>>;
-  /** Reopen a folder granted earlier by its opaque id without a dialog; ids this plugin never received are rejected. */
+  /** Recently granted project folders as opaque ids plus a masked display label; absolute paths never reach the plugin. Entries flagged `needsConfirmation` require a fresh `pickFolder({ defaultRef: id })`. */
+  recentFolders?(pluginId: string): Promise<Array<{ id: string; name: string; label: string; needsConfirmation?: boolean }>>;
+  /** Reopen a folder granted earlier by its opaque id without a dialog; ids this plugin never received are rejected. Rejects with `grant_needs_confirmation` when the directory identity changed. */
   openFolderRef?(pluginId: string, reference: string): Promise<{ folderHandleId: string; name: string; id?: string; label: string } | null>;
   /** Whether this host receives OS file drops on the plugin's behalf (desktop only). */
   receiveOsDrops?: boolean;

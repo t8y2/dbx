@@ -267,7 +267,8 @@ use drop::open_dropped_plugin_files;
 pub(crate) use folder::close_all_plugin_folders;
 use folder::{
     close_folder, folder_file_size, folder_list, folder_read_binary, folder_read_text, folder_resolve_entry,
-    folder_write_bytes, folder_write_bytes_chunk, folder_write_text, open_folder, FolderHandleMeta, FolderListResult,
+    folder_write_bytes, folder_write_bytes_chunk, folder_write_text, open_folder, open_folder_with_identity,
+    FolderHandleMeta, FolderListResult,
 };
 pub use registry::close_all_plugin_files;
 use registry::{
@@ -511,17 +512,16 @@ pub async fn plugin_file_open_folder_ref(
     }
     let data_dir = state.plugins.plugin_data_dir(&plugin_id);
     tauri::async_runtime::spawn_blocking(move || {
-        let Some(record) = folder::find_recent_folder(&data_dir, &reference) else {
-            return Err("folder is not in this plugin's recent grants".to_string());
-        };
-        let path = PathBuf::from(&record.path);
-        if !path.is_dir() {
-            return Err("granted folder is no longer accessible".to_string());
-        }
-        // Reopening counts as recent use, so move it back to the front.
-        folder::remember_recent_folder(&data_dir, &path, record.read_only);
+        let (record, path, identity) =
+            folder::verify_recent_grant(&data_dir, &reference).map_err(|error| match error {
+                folder::RecentGrantError::Missing => "folder is not in this plugin's recent grants".to_string(),
+                folder::RecentGrantError::NeedsConfirmation => "grant_needs_confirmation".to_string(),
+            })?;
+        // Reopening counts as recent use. Reorder without recomputing the
+        // identity: a race here must not re-anchor the grant elsewhere.
+        folder::touch_recent_folder(&data_dir, &reference);
         let state = app.state::<PluginFileState>();
-        let mut meta = open_folder(state.inner(), &plugin_id, &path, record.read_only)?;
+        let mut meta = open_folder_with_identity(state.inner(), &plugin_id, &path, identity, record.read_only)?;
         meta.id = Some(reference.clone());
         Ok(Some(meta))
     })

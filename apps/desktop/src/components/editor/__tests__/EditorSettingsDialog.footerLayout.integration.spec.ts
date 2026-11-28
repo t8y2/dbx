@@ -13,7 +13,12 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/backend/api")>();
   return {
     ...actual,
-    loadEditorSettings: async () => backend.saved,
+    loadEditorSettings: async () => {
+      if (backend.saved && typeof backend.saved === "object" && !Array.isArray(backend.saved)) {
+        return { ...(backend.saved as Record<string, unknown>) };
+      }
+      return { completionAutoActivationDelayMs: 500 };
+    },
     saveEditorSettings: async () => undefined,
     loadHistoryRetentionLimit: async () => 5000,
     loadMcpHistoryRetentionLimit: async () => 5000,

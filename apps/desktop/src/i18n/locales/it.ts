@@ -5298,6 +5298,7 @@ export default withEnglishFallback({
     createDatabaseCharsetSearchPlaceholder: "Cerca o digita un set di caratteri",
     createDatabaseCharsetEmpty: "Nessun set di caratteri trovato",
     createDatabaseCharsetLoading: "Caricamento set di caratteri...",
+    createPostgresDatabaseEncodingHint: "La codifica selezionata usa template0 e deve essere compatibile con le sue impostazioni locali.",
     createDatabaseCharsetCustomOption: 'Usa "{value}"',
     createDatabaseCollation: "Collation",
     createDatabaseCollationPlaceholder: "es. utf8mb4_unicode_ci",

@@ -303,7 +303,16 @@ import { savedSqlClipboardFileIds, savedSqlPasteTargetForNode } from "@/lib/save
 import { exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
 import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import { flattenTree } from "@/composables/useFlatTree";
-import { createDatabaseCollationOptionsForCharset, DEFAULT_GBASE8S_DATABASE_LOCALE, defaultGbase8sDatabaseLocale, GBASE8S_DATABASE_LOCALES, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import {
+  createDatabaseCollationOptionsForCharset,
+  DEFAULT_GBASE8S_DATABASE_LOCALE,
+  defaultGbase8sDatabaseLocale,
+  GBASE8S_DATABASE_LOCALES,
+  nextCreateDatabaseCollation,
+  normalizeCreateDatabaseCharset,
+  parseCreateDatabaseCharsetMetadata,
+  POSTGRES_DATABASE_ENCODINGS,
+} from "@/lib/database/createDatabaseCharsetOptions";
 import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
@@ -885,6 +894,7 @@ function routeTreeItemDialogController(node = activeNode.value) {
   });
   routedController.pasteTableDataCopySupported = pasteTableDataCopySupported.value;
   routedController.canSetCreateDatabaseCharset = routedCanSetCreateDatabaseCharset(canSetCreateDatabaseCharset.value, canSetCreateDatabaseLocale.value);
+  routedController.canSetCreatePostgresEncoding = canSetCreatePostgresEncoding.value;
   routedController.canEditDatabaseCharsetCollation = canEditDatabaseCharsetCollation.value;
   routedController.canEditDatabaseComment = canEditDatabaseComment.value;
   emit("open-dialog-controller", routedController);
@@ -5619,6 +5629,11 @@ const canSetCreateDatabaseLocale = computed(() => {
   return connectionNamespaceCreationTarget(config) === "database" && supportsCreateDatabaseLocale(config?.db_type);
 });
 
+const canSetCreatePostgresEncoding = computed(() => {
+  const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+  return config?.db_type === "postgres" && effectiveDatabaseTypeForConnection(config) === "postgres" && connectionNamespaceCreationTarget(config) === "database";
+});
+
 const canDropDatabase = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
   return canDropDatabaseNode(activeNode.value, config);
@@ -5937,7 +5952,12 @@ function openCreateDatabaseDialog() {
   createDatabaseCharsetOptions.value = fallbackCreateDatabaseCharset.charsets;
   createDatabaseCollationsByCharset.value = fallbackCreateDatabaseCharset.collationsByCharset;
   showCreateDatabaseDialog.value = true;
-  if (canSetCreateDatabaseLocale.value) {
+  if (canSetCreatePostgresEncoding.value) {
+    createDatabaseCharsetOptions.value = ["", ...POSTGRES_DATABASE_ENCODINGS];
+    createDatabaseCollationsByCharset.value = {};
+    createDatabaseCharset.value = "";
+    createDatabaseCollation.value = "";
+  } else if (canSetCreateDatabaseLocale.value) {
     // GBase 8s / Informix: the "charset" control selects the new database's DB_LOCALE, which the
     // agent applies by opening the CREATE DATABASE session with it. Seed a UTF-8 default, then
     // repopulate the options with the collations already present on the connected instance.
@@ -7604,6 +7624,7 @@ function databaseDialogCapabilities() {
     showCreateDatabaseDialog,
     createDatabaseName,
     canSetCreateDatabaseCharset: routedCanSetCreateDatabaseCharset(canSetCreateDatabaseCharset.value, canSetCreateDatabaseLocale.value),
+    canSetCreatePostgresEncoding: canSetCreatePostgresEncoding.value,
     createDatabaseCharset,
     createDatabaseCharsetOptions,
     createDatabaseCharsetLoading,

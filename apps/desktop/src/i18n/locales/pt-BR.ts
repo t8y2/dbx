@@ -5461,6 +5461,7 @@ export default withEnglishFallback({
     createDatabaseCharsetSearchPlaceholder: "Pesquise ou digite um conjunto de caracteres",
     createDatabaseCharsetEmpty: "Nenhum conjunto de caracteres encontrado",
     createDatabaseCharsetLoading: "Carregando conjuntos de caracteres...",
+    createPostgresDatabaseEncodingHint: "Ao escolher uma codificação, use template0. A codificação precisa ser compatível com a configuração regional do modelo.",
     createDatabaseCharsetCustomOption: 'Usar "{value}"',
     createDatabaseCollation: "Collation",
     createDatabaseCollationPlaceholder: "por exemplo, utf8mb4_unicode_ci",

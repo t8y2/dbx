@@ -5859,6 +5859,7 @@ export default {
     createDatabaseCharsetSearchPlaceholder: "Search or type a character set",
     createDatabaseCharsetEmpty: "No character sets found",
     createDatabaseCharsetLoading: "Loading character sets...",
+    createPostgresDatabaseEncodingHint: "An explicit encoding uses template0 and must be compatible with its locale.",
     createDatabaseCharsetCustomOption: 'Use "{value}"',
     createDatabaseCollation: "Collation",
     createDatabaseCollationPlaceholder: "e.g. utf8mb4_unicode_ci",

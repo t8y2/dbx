@@ -5249,6 +5249,7 @@ export default withEnglishFallback({
     createDatabaseCharsetSearchPlaceholder: "문자셋 검색 또는 입력",
     createDatabaseCharsetEmpty: "문자셋이 없습니다",
     createDatabaseCharsetLoading: "문자셋을 불러오는 중...",
+    createPostgresDatabaseEncodingHint: "인코딩을 선택하면 template0을 사용합니다. template0의 로캘과 호환되는 인코딩을 선택하세요.",
     createDatabaseCharsetCustomOption: '"{value}" 사용',
     createDatabaseCollation: "정렬",
     createDatabaseCollationPlaceholder: "예: utf8mb4_unicode_ci",

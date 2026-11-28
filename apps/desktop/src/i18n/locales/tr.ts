@@ -4252,6 +4252,7 @@ export default withEnglishFallback({
     createDatabaseCharsetSearchPlaceholder: "Bir karakter kümesi arayın veya yazın",
     createDatabaseCharsetEmpty: "Karakter kümesi bulunamadı",
     createDatabaseCharsetLoading: "Karakter kümeleri yükleniyor...",
+    createPostgresDatabaseEncodingHint: "Bir kodlama seçildiğinde template0 kullanılır. Kodlama, şablonun yerel ayarıyla uyumlu olmalıdır.",
     createDatabaseCharsetCustomOption: '"{value}" kullan',
     createDatabaseCollation: "Karşılaştırma (collation)",
     createDatabaseCollationPlaceholder: "örn. utf8mb4_unicode_ci",

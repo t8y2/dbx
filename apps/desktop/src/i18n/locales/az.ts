@@ -4278,6 +4278,7 @@ export default withEnglishFallback({
     createDatabaseCharsetSearchPlaceholder: "Simvol dəsti axtarın və ya yazın",
     createDatabaseCharsetEmpty: "Simvol dəsti tapılmadı",
     createDatabaseCharsetLoading: "Simvol dəstləri yüklənir...",
+    createPostgresDatabaseEncodingHint: "Kodlaşdırma seçildikdə template0 istifadə olunur. Kodlaşdırma şablonun regional parametrlərinə uyğun olmalıdır.",
     createDatabaseCharsetCustomOption: '"{value}" dəyərindən istifadə et',
     createDatabaseCollation: "Müqayisə qaydası",
     createDatabaseCollationPlaceholder: "məsələn, utf8mb4_unicode_ci",

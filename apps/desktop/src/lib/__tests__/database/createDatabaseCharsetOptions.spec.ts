@@ -1,10 +1,65 @@
 import { describe, expect, it } from "vitest";
-import { CREATE_DATABASE_CHARSET_OPTIONS, createDatabaseCollationOptionsForCharset, defaultCreateDatabaseCollationForCharset, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata, nextCreateDatabaseCollation } from "@/lib/database/createDatabaseCharsetOptions";
+import {
+  CREATE_DATABASE_CHARSET_OPTIONS,
+  createDatabaseCollationOptionsForCharset,
+  defaultCreateDatabaseCollationForCharset,
+  normalizeCreateDatabaseCharset,
+  parseCreateDatabaseCharsetMetadata,
+  nextCreateDatabaseCollation,
+  POSTGRES_DATABASE_ENCODINGS,
+} from "@/lib/database/createDatabaseCharsetOptions";
 
 describe("createDatabaseCharsetOptions", () => {
   it("offers common MySQL character sets with utf8mb4 first", () => {
     expect(CREATE_DATABASE_CHARSET_OPTIONS.slice(0, 4)).toEqual(["utf8mb4", "utf8", "gbk", "latin1"]);
     expect(CREATE_DATABASE_CHARSET_OPTIONS).toEqual(expect.arrayContaining(["ascii", "big5", "gb2312", "utf16", "utf32"]));
+  });
+
+  it("includes the PostgreSQL server encodings", () => {
+    expect(POSTGRES_DATABASE_ENCODINGS).toEqual([
+      "BIG5",
+      "EUC_CN",
+      "EUC_JP",
+      "EUC_JIS_2004",
+      "EUC_KR",
+      "EUC_TW",
+      "GB18030",
+      "GBK",
+      "ISO_8859_5",
+      "ISO_8859_6",
+      "ISO_8859_7",
+      "ISO_8859_8",
+      "JOHAB",
+      "KOI8R",
+      "KOI8U",
+      "LATIN1",
+      "LATIN2",
+      "LATIN3",
+      "LATIN4",
+      "LATIN5",
+      "LATIN6",
+      "LATIN7",
+      "LATIN8",
+      "LATIN9",
+      "LATIN10",
+      "MULE_INTERNAL",
+      "SJIS",
+      "SHIFT_JIS_2004",
+      "SQL_ASCII",
+      "UHC",
+      "UTF8",
+      "WIN866",
+      "WIN874",
+      "WIN1250",
+      "WIN1251",
+      "WIN1252",
+      "WIN1253",
+      "WIN1254",
+      "WIN1255",
+      "WIN1256",
+      "WIN1257",
+      "WIN1258",
+    ]);
   });
 
   it("normalizes typed custom values without changing their case", () => {

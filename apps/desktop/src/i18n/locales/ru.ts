@@ -5473,6 +5473,7 @@ export default withEnglishFallback({
     createDatabaseCharsetSearchPlaceholder: "Найдите или введите набор символов",
     createDatabaseCharsetEmpty: "Наборы символов не найдены",
     createDatabaseCharsetLoading: "Загрузка наборов символов...",
+    createPostgresDatabaseEncodingHint: "При явном выборе кодировки используется template0. Кодировка должна быть совместима с его локалью.",
     createDatabaseCharsetCustomOption: "Использовать «{value}»",
     createDatabaseCollation: "Сопоставление",
     createDatabaseCollationPlaceholder: "например utf8mb4_unicode_ci",

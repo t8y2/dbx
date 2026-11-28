@@ -5649,6 +5649,7 @@ export default withEnglishFallback({
     createDatabaseCharsetSearchPlaceholder: "ค้นหาหรือพิมพ์ Character Set",
     createDatabaseCharsetEmpty: "ไม่พบ Character Set",
     createDatabaseCharsetLoading: "กำลังโหลด Character Set...",
+    createPostgresDatabaseEncodingHint: "เมื่อเลือกการเข้ารหัส จะใช้ template0 และการเข้ารหัสต้องเข้ากันได้กับโลแคลของเทมเพลต",
     createDatabaseCharsetCustomOption: "ใช้ “{value}”",
     createDatabaseCollation: "Collation",
     createDatabaseCollationPlaceholder: "เช่น utf8mb4_unicode_ci",

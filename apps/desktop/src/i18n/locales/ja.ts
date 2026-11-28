@@ -5627,6 +5627,7 @@ export default withEnglishFallback({
     createDatabaseCharsetSearchPlaceholder: "文字セットを検索または入力",
     createDatabaseCharsetEmpty: "文字セットが見つかりません",
     createDatabaseCharsetLoading: "文字セットを読み込み中...",
+    createPostgresDatabaseEncodingHint: "文字セットを指定すると template0 が使われます。template0 のロケールと互換性のある文字セットを選択してください。",
     createDatabaseCharsetCustomOption: "「{value}」を使用",
     createDatabaseCollation: "照合順序",
     createDatabaseCollationPlaceholder: "例: utf8mb4_unicode_ci",

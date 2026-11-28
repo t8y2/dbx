@@ -1086,6 +1086,7 @@ export default withEnglishFallback({
     logoutConfirm: "ログアウトしてもよろしいですか？",
   },
   toolbar: {
+    connectOrReconnect: "接続 / 再接続",
     independentWindow: "独立ウィンドウ",
     fileEncoding: "ファイルの文字コード",
     encodingAuto: "自動",

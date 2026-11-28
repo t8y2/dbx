@@ -889,6 +889,7 @@ export default withEnglishFallback({
     logoutConfirm: "Вы действительно хотите выйти?",
   },
   toolbar: {
+    connectOrReconnect: "Подключиться / Переподключиться",
     fileEncoding: "Кодировка файла",
     encodingAuto: "Автоматически",
     immediateSync: "Синхронизировать сейчас",

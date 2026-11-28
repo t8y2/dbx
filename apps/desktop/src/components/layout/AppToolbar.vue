@@ -22,7 +22,9 @@ import {
   LogOut,
   CloudDownload,
   Package,
+  Plug,
   PlugZap,
+  Unplug,
   FileDown,
   FolderTree,
   Pin,
@@ -90,6 +92,7 @@ const props = defineProps<{
   agentDriverUpdateCount: number;
   hasMcpUpdateAvailable: boolean;
   hasConnections: boolean;
+  connectionActions?: { name: string; connected: boolean; busy: boolean };
   hasClosedTabs?: boolean;
   canNewQuery: boolean;
   hasSqlFileConnections: boolean;
@@ -100,6 +103,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   "expand-sidebar": [];
   "new-connection": [];
+  "connect-or-reconnect": [];
+  "disconnect-connection": [];
   "new-query": [];
   "open-sql-editor-file": [];
   "set-theme-mode": [mode: AppThemeMode];
@@ -831,6 +836,30 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
     });
   }
 
+  const connection = props.connectionActions;
+  if (props.hasConnections && toolbarItems.value.connectOrReconnect) {
+    const label = t("toolbar.connectOrReconnect");
+    items.push({
+      value: "connectOrReconnect",
+      label,
+      title: connection ? `${label} · ${connection.name}` : undefined,
+      icon: Plug,
+      disabled: !connection || connection.busy,
+      action: () => emit("connect-or-reconnect"),
+    });
+  }
+  if (props.hasConnections && toolbarItems.value.disconnectConnection) {
+    const label = t("contextMenu.closeConnection");
+    items.push({
+      value: "disconnectConnection",
+      label,
+      title: connection ? `${label} · ${connection.name}` : undefined,
+      icon: Unplug,
+      disabled: !connection?.connected || connection.busy,
+      action: () => emit("disconnect-connection"),
+    });
+  }
+
   if (toolbarItems.value.newConnection === false) items.push({ value: "new-connection", label: t("toolbar.newConnection"), icon: DatabaseZap, action: () => emit("new-connection"), disabled: false });
   if (toolbarItems.value.newQuery === false && props.canNewQuery) items.push({ value: "new-query", label: t("toolbar.newQuery"), icon: FilePlus2, action: () => emit("new-query"), disabled: false });
   if (toolbarItems.value.settings === false) items.push({ value: "settings", label: t("settings.title"), icon: Settings, action: () => emit("open-settings"), disabled: false });
@@ -964,7 +993,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
         </Button>
         <PluginShortcutToolbar v-if="showPluginCenterShortcuts" dropdown-only :menu-anchor="pluginCenterGroup" @layout-change="handlePluginToolbarLayout" />
       </div>
-      <Button v-if="menuAction && !toolbarCollapsed" :data-toolbar-item="toolbarKey" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :disabled="menuAction.disabled" :title="menuAction.label" :aria-label="menuAction.label" @click="menuAction.action">
+      <Button v-if="menuAction && !toolbarCollapsed" :data-toolbar-item="toolbarKey" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :disabled="menuAction.disabled" :title="menuAction.title ?? menuAction.label" :aria-label="menuAction.label" @click="menuAction.action">
         <component :is="menuAction.icon" class="size-3.5" />
       </Button>
     </template>

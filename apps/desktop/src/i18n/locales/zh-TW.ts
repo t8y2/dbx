@@ -894,6 +894,7 @@ export default withEnglishFallback({
     logoutConfirm: "確定要登出嗎？",
   },
   toolbar: {
+    connectOrReconnect: "連線 / 重新連線",
     independentWindow: "獨立視窗",
     fileEncoding: "檔案編碼",
     encodingAuto: "自動",

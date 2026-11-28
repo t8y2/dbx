@@ -488,6 +488,7 @@ export default withEnglishFallback({
     logoutConfirm: "Czy na pewno chcesz się wylogować?",
   },
   toolbar: {
+    connectOrReconnect: "Połącz / Połącz ponownie",
     fileEncoding: "Kodowanie pliku",
     encodingAuto: "Automatycznie",
     immediateSync: "Synchronizuj teraz",

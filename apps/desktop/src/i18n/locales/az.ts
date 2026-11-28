@@ -279,6 +279,7 @@ export default withEnglishFallback({
     logoutConfirm: "Çıxış etmək istədiyinizdən əminsiniz?",
   },
   toolbar: {
+    connectOrReconnect: "Qoşul / Yenidən qoşul",
     fileEncoding: "Fayl kodlaşdırması",
     encodingAuto: "Avtomatik",
     commitOutcomeUnknown: "Təsdiqləmə nəticəsi məlum deyil və sessiya artıq mövcud deyil. SQL-i yenidən icra etməzdən əvvəl məlumatları yoxlayın.",

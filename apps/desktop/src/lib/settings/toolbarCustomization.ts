@@ -1,6 +1,6 @@
 export const TOOLBAR_ITEM_GROUPS = {
   primary: ["newConnection", "newQuery", "dataTransfer", "driverManager", "pluginCenter"],
-  menu: ["recentClosedTabs", "openSql", "sqlFile", "schemaDiff", "dataCompare", "databaseBackups", "mcpSettings"],
+  menu: ["recentClosedTabs", "openSql", "sqlFile", "schemaDiff", "dataCompare", "databaseBackups", "mcpSettings", "connectOrReconnect", "disconnectConnection"],
   right: ["checkUpdates", "immediateSync", "alwaysOnTop", "exportProgress", "sqlLibrary", "sqlFileTree", "history", "ai", "theme", "github"],
   controls: ["settings", "logout"],
 } as const;

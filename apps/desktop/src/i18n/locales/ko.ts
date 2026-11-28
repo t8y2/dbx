@@ -1373,6 +1373,9 @@ export default withEnglishFallback({
     displayModeConnection: "연결별 그룹화",
   },
   connection: {
+    defaultSqlSaveDirectory: "기본 SQL 저장 폴더",
+    chooseSqlSaveDirectory: "SQL 저장 폴더 선택",
+    clearSqlSaveDirectory: "SQL 저장 폴더 지우기",
     batchTestConnections: "연결 테스트 ({count}개)",
     batchTestTitle: "연결 일괄 테스트",
     batchTestProgress: "연결 {total}개 중 {completed}개 테스트 완료",

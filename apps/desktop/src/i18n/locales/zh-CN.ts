@@ -1518,6 +1518,9 @@ export default withEnglishFallback({
   },
 
   connection: {
+    defaultSqlSaveDirectory: "SQL 默认保存目录",
+    chooseSqlSaveDirectory: "选择 SQL 保存目录",
+    clearSqlSaveDirectory: "清除 SQL 保存目录",
     batchTestConnections: "测试连接（{count}）",
     batchTestTitle: "批量测试连接",
     batchTestProgress: "已测试 {completed} / {total} 个连接",

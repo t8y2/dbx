@@ -1,4 +1,4 @@
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 export const SQL_FILE_FOLDERS_UI_STATE_STORAGE_KEY = "dbx-sql-file-folders-ui-state";
 export const SQL_FILE_DISPLAY_MODE_STORAGE_KEY = "dbx-sql-file-display-mode";
@@ -64,4 +64,16 @@ export function getSqlFileFoldersUiState(): Record<string, SqlFileFolderUiState>
  */
 export function saveSqlFileFoldersUiState(state: Record<string, SqlFileFolderUiState>): void {
   safeLocalStorageSet(SQL_FILE_FOLDERS_UI_STATE_STORAGE_KEY, JSON.stringify(state));
+}
+
+const DEFAULT_SAVE_DIRECTORY_PREFIX = "dbx-sql-file-default-save-directory:";
+
+export function getSqlFileDefaultSaveDirectory(connectionId?: string): string | undefined {
+  return connectionId ? safeLocalStorageGet(DEFAULT_SAVE_DIRECTORY_PREFIX + connectionId) || undefined : undefined;
+}
+
+export function saveSqlFileDefaultSaveDirectory(connectionId: string, directory: string): void {
+  const key = DEFAULT_SAVE_DIRECTORY_PREFIX + connectionId;
+  if (directory) safeLocalStorageSet(key, directory);
+  else safeLocalStorageRemove(key);
 }

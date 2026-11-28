@@ -925,6 +925,9 @@ export default withEnglishFallback({
   },
 
   connection: {
+    defaultSqlSaveDirectory: "Domyślny folder zapisu SQL",
+    chooseSqlSaveDirectory: "Wybierz folder zapisu SQL",
+    clearSqlSaveDirectory: "Wyczyść folder zapisu SQL",
     batchTestConnections: "Testuj połączenia ({count})",
     batchTestTitle: "Testowanie połączeń",
     batchTestProgress: "Przetestowano {completed} z {total} połączeń",

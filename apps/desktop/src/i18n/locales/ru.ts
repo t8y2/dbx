@@ -1347,6 +1347,9 @@ export default withEnglishFallback({
     displayModeConnection: "По подключениям",
   },
   connection: {
+    defaultSqlSaveDirectory: "Папка сохранения SQL по умолчанию",
+    chooseSqlSaveDirectory: "Выбрать папку для сохранения SQL",
+    clearSqlSaveDirectory: "Очистить путь к папке сохранения SQL",
     batchTestConnections: "Проверить подключения ({count})",
     batchTestTitle: "Проверка подключений",
     batchTestProgress: "Проверено подключений: {completed} из {total}",

@@ -668,6 +668,9 @@ export default withEnglishFallback({
   },
 
   connection: {
+    defaultSqlSaveDirectory: "SQL faylları üçün standart qovluq",
+    chooseSqlSaveDirectory: "SQL faylları üçün qovluq seçin",
+    clearSqlSaveDirectory: "SQL faylları üçün qovluğu təmizləyin",
     batchTestConnections: "Bağlantıları yoxla ({count})",
     batchTestTitle: "Bağlantıları yoxla",
     batchTestProgress: "{total} bağlantıdan {completed} yoxlanılıb",

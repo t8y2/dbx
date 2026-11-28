@@ -10367,6 +10367,8 @@ export default withEnglishFallback({
     newDatabaseFailed: "ไม่สามารถสร้างฐานข้อมูล: {message}",
   },
   sqlFileTree: {
+    moveDockLeft: "ย้ายแผงไฟล์ SQL ไปด้านซ้าย",
+    moveDockRight: "ย้ายแผงไฟล์ SQL ไปด้านขวา",
     changeConnectionForFiles: "ตั้งค่าแหล่งข้อมูล ({count} ไฟล์)",
     changeConnectionForFilesDescription: "เลือกการเชื่อมต่อและฐานข้อมูลเริ่มต้นสำหรับการเปิดไฟล์ SQL ในเครื่องที่เลือกครั้งถัดไป",
     changeConnectionCloseFiles: "ปิดไฟล์ที่เลือกซึ่งเปิดอยู่ก่อน",

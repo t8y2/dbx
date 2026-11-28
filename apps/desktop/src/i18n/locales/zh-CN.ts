@@ -9791,6 +9791,8 @@ export default withEnglishFallback({
     completedWithErrors: "执行完成：成功 {succeeded} 条，失败 {failed} 条",
   },
   sqlFileTree: {
+    moveDockLeft: "将 SQL 文件面板移到左侧",
+    moveDockRight: "将 SQL 文件面板移到右侧",
     changeConnectionForFiles: "设置数据源（{count} 个文件）",
     changeConnectionForFilesDescription: "为所选本地 SQL 文件设置下次打开时使用的连接和默认数据库。",
     changeConnectionCloseFiles: "请先关闭已打开的所选文件。",

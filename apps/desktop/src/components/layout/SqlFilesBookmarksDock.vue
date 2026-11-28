@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { defineAsyncComponent } from "vue";
 import { useI18n } from "vue-i18n";
-import { Bookmark, FolderTree, X } from "@lucide/vue";
+import { Bookmark, FolderTree, PanelLeft, PanelRight, X } from "@lucide/vue";
 import WorkspaceBookmarksPanel from "./WorkspaceBookmarksPanel.vue";
 
 const SqlFilePanel = defineAsyncComponent(() => import("./SqlFilePanel.vue"));
 const active = defineModel<"files" | "bookmarks">({ default: "files" });
-defineProps<{ locateRequest?: { id: number; path: string } | null }>();
-const emit = defineEmits<{ close: []; locateHandled: [id: number] }>();
+defineProps<{ locateRequest?: { id: number; path: string } | null; left: boolean }>();
+const emit = defineEmits<{ close: []; locateHandled: [id: number]; move: [] }>();
 const { t } = useI18n();
 </script>
 
@@ -40,6 +40,10 @@ const { t } = useI18n();
           <Bookmark class="h-3.5 w-3.5" />{{ t("editor.bookmarks.workspaceTitle") }}
         </button>
       </div>
+      <button type="button" class="shrink-0 p-1 rounded hover:bg-accent" :aria-label="t(left ? 'sqlFileTree.moveDockRight' : 'sqlFileTree.moveDockLeft')" :title="t(left ? 'sqlFileTree.moveDockRight' : 'sqlFileTree.moveDockLeft')" @click="emit('move')">
+        <PanelRight v-if="left" class="h-3.5 w-3.5" />
+        <PanelLeft v-else class="h-3.5 w-3.5" />
+      </button>
       <button type="button" class="p-1 rounded hover:bg-accent" :aria-label="t('common.close')" @click="emit('close')"><X class="h-3.5 w-3.5" /></button>
     </div>
     <div v-show="active === 'files'" id="sql-files-dock-panel" role="tabpanel" aria-labelledby="sql-files-dock-tab" class="flex-1 min-h-0">

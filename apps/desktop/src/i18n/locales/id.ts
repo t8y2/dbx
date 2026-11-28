@@ -7896,6 +7896,8 @@ export default withEnglishFallback({
     completedWithErrors: "Eksekusi selesai: {succeeded} berhasil, {failed} gagal",
   },
   sqlFileTree: {
+    moveDockLeft: "Pindahkan panel file SQL ke kiri",
+    moveDockRight: "Pindahkan panel file SQL ke kanan",
     changeConnectionForFiles: "Tetapkan sumber data ({count} file)",
     changeConnectionForFilesDescription: "Pilih koneksi dan basis data bawaannya untuk digunakan saat file SQL lokal yang dipilih dibuka kembali.",
     changeConnectionCloseFiles: "Tutup file terpilih yang sedang terbuka.",

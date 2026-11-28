@@ -574,24 +574,48 @@ watch(
 const sqlFileLocateRequest = ref<{ id: number; path: string } | null>(null);
 let sqlFileLocateRequestId = 0;
 const showSqlFilePanel = ref(safeLocalStorageGet("dbx-sql-file-panel-open") === "true");
+const sqlFilesDockOnLeft = ref(safeLocalStorageGet("dbx-sql-files-dock-side") === "left");
+const showLeftSqlFilesDock = ref(sqlFilesDockOnLeft.value && showSqlFilePanel.value);
+if (sqlFilesDockOnLeft.value) showSqlFilePanel.value = false;
+const sqlFilesDockOpen = computed(() => showSqlFilePanel.value || showLeftSqlFilesDock.value);
+const leftSqlFilesDockTarget = ref<HTMLDivElement | null>(null);
+const rightSqlFilesDockTarget = ref<HTMLDivElement | null>(null);
+const sqlFilesDockTarget = computed(() => (sqlFilesDockOnLeft.value ? leftSqlFilesDockTarget.value : rightSqlFilesDockTarget.value));
 const sqlFilesDockTab = ref<"files" | "bookmarks">(safeLocalStorageGet("dbx-sql-files-dock-tab") === "bookmarks" ? "bookmarks" : "files");
 watch(sqlFilesDockTab, (tab) => safeLocalStorageSet("dbx-sql-files-dock-tab", tab));
+function setSqlFilesDockOpen(open: boolean) {
+  if (!sqlFilesDockOnLeft.value) {
+    setRightSidebarPanelOpen("sqlFile", open);
+    return;
+  }
+  if (open) {
+    if (isSpecialPageActive.value) activateQuerySurface();
+    if (!sidebarOpen.value) setSidebarOpen(true);
+  }
+  showLeftSqlFilesDock.value = open;
+}
+function moveSqlFilesDock() {
+  sqlFilesDockOnLeft.value = !sqlFilesDockOnLeft.value;
+  safeLocalStorageSet("dbx-sql-files-dock-side", sqlFilesDockOnLeft.value ? "left" : "right");
+  setSqlFilesDockOpen(true);
+  if (sqlFilesDockOnLeft.value) closeRightSidebarPanel("sqlFile");
+  else showLeftSqlFilesDock.value = false;
+}
 function openBookmarksPanel() {
   sqlFilesDockTab.value = "bookmarks";
   isZenMode.value = false;
-  openRightSidebarPanel("sqlFile");
+  setSqlFilesDockOpen(true);
 }
 function toggleSqlFilesPanel() {
-  if (showSqlFilePanel.value && sqlFilesDockTab.value === "bookmarks") {
-    sqlFilesDockTab.value = "files";
-    return;
-  }
+  const visible = sqlFilesDockOpen.value && (!sqlFilesDockOnLeft.value || sidebarOpen.value);
+  const wasViewingBookmarks = sqlFilesDockTab.value === "bookmarks";
   sqlFilesDockTab.value = "files";
-  toggleRightSidebarPanel("sqlFile");
+  setSqlFilesDockOpen(!visible || wasViewingBookmarks);
 }
 watch(
-  showSqlFilePanel,
+  sqlFilesDockOpen,
   (open) => {
+    if (!isDetachedWindowContext) safeLocalStorageSet("dbx-sql-file-panel-open", String(open));
     if (!open) sqlFileLocateRequest.value = null;
   },
   { flush: "sync" },
@@ -605,7 +629,6 @@ const rightSidebarPanelRefs: Record<RightSidebarPanelId, typeof showAiPanel> = {
 const rightSidebarPanelStorageKeys: Partial<Record<RightSidebarPanelId, string>> = {
   ai: "dbx-ai-panel-open",
   sqlLibrary: "dbx-sql-library-open",
-  sqlFile: "dbx-sql-file-panel-open",
 };
 let lastOpenedRightSidebarPanel = RIGHT_SIDEBAR_PANEL_IDS.find((panelId) => rightSidebarPanelRefs[panelId].value);
 const sidebarOpen = ref(safeLocalStorageGet("dbx-sidebar-open") !== "false");
@@ -3959,7 +3982,7 @@ function locateSqlFile(tab: QueryTab) {
   const path = queryTabExternalFilePath(tab);
   if (!path || isDetachedWindowContext) return;
   isZenMode.value = false;
-  openRightSidebarPanel("sqlFile");
+  setSqlFilesDockOpen(true);
   sqlFileLocateRequest.value = { id: ++sqlFileLocateRequestId, path };
   sqlFilesDockTab.value = "files";
 }
@@ -5776,7 +5799,7 @@ onUnmounted(() => {
           :has-closed-tabs="queryStore.canReopenClosedTab"
           :show-sql-library="showSqlLibraryPanel"
           :sql-library-save-feedback-id="sqlLibrarySaveFeedbackId"
-          :show-sql-file-panel="showSqlFilePanel"
+          :show-sql-file-panel="sqlFilesDockOpen"
           :show-driver-store="showDriverStore"
           :show-plugin-center="showPluginCenter"
           :show-settings-page="showSettingsPage"
@@ -5825,21 +5848,25 @@ onUnmounted(() => {
         <div class="relative" :class="isDetachedWindowContext ? 'flex-1 flex min-h-0' : isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
           <PluginShortcutBar v-if="!isDetachedWindowContext && !isZenMode && settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position.startsWith('left-')" :position="settingsStore.editorSettings.pluginShortcuts.position" />
           <SidebarReveal v-if="!isDetachedWindowContext" ref="sidebarRevealRef" :pinned="sidebarOpen" :hover-enabled="settingsStore.editorSettings.sidebarHoverEnabled" :hover-delay="settingsStore.editorSettings.sidebarHoverDelay" :enabled="!isZenMode" :classic-layout="isClassicLayout">
-            <AppSidebar
-              ref="appSidebarRef"
-              :sidebar-width="sidebarWidth"
-              :classic-layout="isClassicLayout"
-              @import="dialogs.onImportClick"
-              @export="dialogs.onExportClick"
-              @start-resize="startSidebarResize"
-              @collapse="setSidebarOpen(false)"
-              @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
-              @open-connection-settings="(connectionId) => openConnectionSettings(connectionId, 'advanced')"
-              @add-to-ai="addToAi"
-              @open-dependency-object="onOpenDependencyObject"
-              @mousedown="rememberSidebarSearchSurface"
-              @focusin="rememberSidebarSearchSurface"
-            />
+            <div class="flex h-full min-h-0 flex-col">
+              <AppSidebar
+                ref="appSidebarRef"
+                class="min-h-0 flex-1"
+                :sidebar-width="sidebarWidth"
+                :classic-layout="isClassicLayout"
+                @import="dialogs.onImportClick"
+                @export="dialogs.onExportClick"
+                @start-resize="startSidebarResize"
+                @collapse="setSidebarOpen(false)"
+                @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
+                @open-connection-settings="(connectionId) => openConnectionSettings(connectionId, 'advanced')"
+                @add-to-ai="addToAi"
+                @open-dependency-object="onOpenDependencyObject"
+                @mousedown="rememberSidebarSearchSurface"
+                @focusin="rememberSidebarSearchSurface"
+              />
+              <div v-show="showLeftSqlFilesDock && !isSpecialPageActive && !isAiPanelMaximized && !isHistoryPanelMaximized" ref="leftSqlFilesDockTarget" class="h-2/5 min-h-0 shrink-0 overflow-hidden border-t bg-background" />
+            </div>
           </SidebarReveal>
 
           <div
@@ -6212,16 +6239,17 @@ onUnmounted(() => {
           </div>
 
           <div
-            v-if="!isDetachedWindowContext && showSqlFilePanel"
-            v-show="!isSpecialPageActive && !isAiPanelMaximized && !isHistoryPanelMaximized && !isZenMode"
+            v-if="!isDetachedWindowContext"
+            v-show="showSqlFilePanel && !isSpecialPageActive && !isAiPanelMaximized && !isHistoryPanelMaximized && !isZenMode"
             :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate dbx-panel bg-background'"
             :style="{ width: sqlFilePanelWidth + 'px' }"
           >
-            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
-              <SqlFilesBookmarksDock v-model="sqlFilesDockTab" :locate-request="sqlFileLocateRequest" @locate-handled="finishSqlFileLocate" @close="closeRightSidebarPanel('sqlFile')" />
-            </div>
+            <div ref="rightSqlFilesDockTarget" class="h-full min-h-0 overflow-hidden rounded-[inherit]" />
             <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlFilePanelResize" />
           </div>
+          <Teleport v-if="sqlFilesDockOpen && sqlFilesDockTarget" :to="sqlFilesDockTarget">
+            <SqlFilesBookmarksDock v-model="sqlFilesDockTab" :locate-request="sqlFileLocateRequest" :left="sqlFilesDockOnLeft" @locate-handled="finishSqlFileLocate" @move="moveSqlFilesDock" @close="setSqlFilesDockOpen(false)" />
+          </Teleport>
           <PluginShortcutBar v-if="!isDetachedWindowContext && !isZenMode && settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position.startsWith('right-')" :position="settingsStore.editorSettings.pluginShortcuts.position" />
         </div>
 

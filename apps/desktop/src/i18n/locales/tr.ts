@@ -7083,6 +7083,8 @@ export default withEnglishFallback({
     completedWithErrors: "Çalıştırma tamamlandı: {succeeded} başarılı, {failed} başarısız",
   },
   sqlFileTree: {
+    moveDockLeft: "SQL dosyaları panelini sola taşı",
+    moveDockRight: "SQL dosyaları panelini sağa taşı",
     changeConnectionForFiles: "Veri kaynağını ayarla ({count} dosya)",
     changeConnectionForFilesDescription: "Seçili yerel SQL dosyaları bir sonraki açıldığında kullanılacak bağlantıyı ve varsayılan veritabanını seçin.",
     changeConnectionCloseFiles: "Seçili dosyalardan açık olanları kapatın.",

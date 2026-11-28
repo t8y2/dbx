@@ -10025,6 +10025,8 @@ export default withEnglishFallback({
     newDatabaseFailed: "Не удалось создать базу данных: {message}",
   },
   sqlFileTree: {
+    moveDockLeft: "Переместить панель SQL-файлов влево",
+    moveDockRight: "Переместить панель SQL-файлов вправо",
     changeConnectionForFiles: "Задать источник данных ({count} файлов)",
     changeConnectionForFilesDescription: "Выберите подключение и его базу данных по умолчанию для следующего открытия выбранных локальных файлов SQL.",
     changeConnectionCloseFiles: "Закройте выбранные файлы, которые уже открыты.",

@@ -9830,6 +9830,8 @@ export default {
     completedWithErrors: "Execution completed: {succeeded} succeeded, {failed} failed",
   },
   sqlFileTree: {
+    moveDockLeft: "Move SQL files dock to the left",
+    moveDockRight: "Move SQL files dock to the right",
     changeConnectionForFiles: "Set data source ({count} files)",
     changeConnectionForFilesDescription: "Choose the connection and its default database to use the next time the selected local SQL files open.",
     changeConnectionCloseFiles: "Close any selected files that are already open.",

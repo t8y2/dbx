@@ -8570,6 +8570,8 @@ export default withEnglishFallback({
     newDatabaseFailed: "데이터베이스를 생성할 수 없습니다: {message}",
   },
   sqlFileTree: {
+    moveDockLeft: "SQL 파일 패널을 왼쪽으로 이동",
+    moveDockRight: "SQL 파일 패널을 오른쪽으로 이동",
     changeConnectionForFiles: "데이터 소스 설정 (파일 {count}개)",
     changeConnectionForFilesDescription: "선택한 로컬 SQL 파일을 다음에 열 때 사용할 연결과 기본 데이터베이스를 설정합니다.",
     changeConnectionCloseFiles: "선택한 파일 중 이미 열려 있는 파일을 먼저 닫으세요.",

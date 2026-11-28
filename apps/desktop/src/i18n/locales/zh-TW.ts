@@ -11895,6 +11895,8 @@ export default withEnglishFallback({
     actionSuccess: "已完成對「{name}」的{action}。",
   },
   sqlFileTree: {
+    moveDockLeft: "將 SQL 檔案面板移到左側",
+    moveDockRight: "將 SQL 檔案面板移到右側",
     changeConnectionForFiles: "設定資料來源（{count} 個檔案）",
     changeConnectionForFilesDescription: "為所選的本機 SQL 檔案設定下次開啟時使用的連線和預設資料庫。",
     changeConnectionCloseFiles: "請先關閉已開啟的所選檔案。",

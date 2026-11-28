@@ -365,6 +365,8 @@ interface StructurePeekPanelState {
   id: string;
   target: SqlObjectNavigationTarget;
   columns: ColumnInfo[];
+  ddl?: string;
+  minimized?: boolean;
   loading: boolean;
   error: string;
   zIndex: number;
@@ -429,14 +431,19 @@ async function loadStructurePeekColumns(panelId: string, requestId: number, targ
   }
 }
 
-async function openTableStructurePeek(target: SqlObjectNavigationTarget) {
+async function openTableStructurePeek(target: SqlObjectNavigationTarget, preview?: { ddl: string; catalog?: string }) {
   if (!props.connectionId) return;
   const database = target.database || props.database || "";
   const schema = target.schema ?? props.schema ?? "";
-  const id = structurePeekPanelId(props.connectionId, database, schema, target.name, props.catalog);
+  const id = preview ? JSON.stringify([props.connectionId, preview.catalog ?? "", database, schema, target.name]) : structurePeekPanelId(props.connectionId, database, schema, target.name, props.catalog);
   const existing = structurePeekPanels.value.find((item) => item.id === id);
   if (existing) {
     bringStructurePeekToFront(existing.id);
+    if (preview) {
+      existing.ddl = preview.ddl;
+      existing.minimized = false;
+      return;
+    }
     // Retry when a previous open left the panel in an error state.
     if (existing.error && !existing.loading) {
       const requestId = ++structurePeekRequestSeq;
@@ -455,7 +462,8 @@ async function openTableStructurePeek(target: SqlObjectNavigationTarget) {
     id,
     target: { ...target, database, schema: schema || target.schema },
     columns: [],
-    loading: true,
+    ddl: preview?.ddl,
+    loading: !preview,
     error: "",
     zIndex: 0,
     cascadeIndex,
@@ -463,7 +471,7 @@ async function openTableStructurePeek(target: SqlObjectNavigationTarget) {
   };
   structurePeekPanels.value = [...structurePeekPanels.value, panel];
   restackStructurePeekPanels();
-  await loadStructurePeekColumns(id, requestId, panel.target, database, schema);
+  if (!preview) await loadStructurePeekColumns(id, requestId, panel.target, database, schema);
 }
 
 function syncQueryEditorInsertContext(currentView: EditorViewType | null = view.value) {
@@ -622,7 +630,20 @@ const {
   refreshCompletionCache,
 } = completionMetadata;
 const hoverContent = createQueryEditorHoverContent({ isDark, t, toast });
-const { resolveSqlHoverTooltip } = useQueryEditorHover({ props, contextMenuOpen, settingsStore, connectionStore, metadata: completionMetadata, createHoverDom: hoverContent.createHoverDom, semanticCompletionEnabled: SEMANTIC_SQL_COMPLETION_ENABLED, maxCompletionTables: MAX_COMPLETION_TABLES });
+const { resolveSqlHoverTooltip } = useQueryEditorHover({
+  props,
+  contextMenuOpen,
+  settingsStore,
+  connectionStore,
+  metadata: completionMetadata,
+  createHoverDom: hoverContent.createHoverDom,
+  pinTablePreview: (target, preview) => {
+    void openTableStructurePeek(target, preview);
+    dismissHoverTooltip();
+  },
+  semanticCompletionEnabled: SEMANTIC_SQL_COMPLETION_ENABLED,
+  maxCompletionTables: MAX_COMPLETION_TABLES,
+});
 const pointerInteractions = useQueryEditorPointer({ props, clearTableNavigationHover: () => clearTableNavigationHover(), emit });
 const { registerEditorScrollbarPointerGuard, registerEditorNativeSelectionDragGuard, registerEditorNativeSelectionScrollGuard, startEditorSelectionDrag } = pointerInteractions;
 const tableDrop = useQueryEditorTableDrop({ props, view, editorRef, settingsStore });
@@ -3415,6 +3436,9 @@ defineExpose({
     <TableStructurePeekDialog
       v-for="panel in structurePeekPanels"
       :key="panel.id"
+      v-model:minimized="panel.minimized"
+      :ddl="panel.ddl"
+      :insert-enabled="!panel.ddl"
       :table-name="panel.target.name"
       :schema="panel.target.schema"
       :columns="panel.columns"

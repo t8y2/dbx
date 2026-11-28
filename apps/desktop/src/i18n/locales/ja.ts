@@ -2829,6 +2829,9 @@ export default withEnglishFallback({
       selectFirst: "リストテキストを選択してください",
     },
     structurePeek: {
+      pinPreview: "テーブルのプレビューを固定",
+      minimizePreview: "テーブルのプレビューを最小化",
+      restorePreview: "テーブルのプレビューを復元",
       title: "構造: {name}",
       hint: "セルをダブルクリックするとエディターに挿入されます",
       doubleClickInsert: "ダブルクリックで挿入",

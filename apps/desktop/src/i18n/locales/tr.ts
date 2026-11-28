@@ -1725,6 +1725,9 @@ export default withEnglishFallback({
       selectFirst: "Lütfen liste metnini seçin",
     },
     structurePeek: {
+      pinPreview: "Tablo önizlemesini sabitle",
+      minimizePreview: "Tablo önizlemesini küçült",
+      restorePreview: "Tablo önizlemesini geri yükle",
       title: "Yapı: {name}",
       hint: "Bir hücreye çift tıklayarak değerini düzenleyiciye ekleyin",
       doubleClickInsert: "Eklemek için çift tıklayın",

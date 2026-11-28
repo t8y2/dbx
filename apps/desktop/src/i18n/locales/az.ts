@@ -1727,6 +1727,9 @@ export default withEnglishFallback({
       selectFirst: "Siyahı mətnini seçin",
     },
     structurePeek: {
+      pinPreview: "Cədvəl önizləməsini bərkidin",
+      minimizePreview: "Cədvəl önizləməsini yığın",
+      restorePreview: "Cədvəl önizləməsini bərpa edin",
       title: "Struktur: {name}",
       hint: "Dəyəri redaktora daxil etmək üçün xanaya iki dəfə klikləyin",
       doubleClickInsert: "Daxil etmək üçün iki dəfə klikləyin",

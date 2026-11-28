@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { GripVertical, KeyRound, Loader2, X } from "@lucide/vue";
+import { GripVertical, KeyRound, Loader2, Maximize2, Minus, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,6 +19,7 @@ const props = defineProps<{
   tableName: string;
   schema?: string;
   columns: ColumnInfo[];
+  ddl?: string;
   loading: boolean;
   error?: string;
   zIndex?: number;
@@ -39,6 +40,8 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const minimized = defineModel<boolean>("minimized", { default: false });
+const collapsed = computed(() => Boolean(props.ddl && minimized.value));
 const searchQuery = ref("");
 
 const panelLeft = ref(0);
@@ -87,7 +90,7 @@ const panelStyle = computed(() => {
     left: `${panelLeft.value}px`,
     top: `${panelTop.value}px`,
     width: `${panelWidth.value}px`,
-    height: `${panelHeight.value}px`,
+    height: collapsed.value ? "auto" : `${panelHeight.value}px`,
     zIndex: String(props.zIndex ?? STRUCTURE_PEEK_MAX_Z_INDEX),
   };
   if (interacting.value) style.transition = "none";
@@ -260,7 +263,7 @@ function startResize(event: PointerEvent, edge: StructurePeekResizeEdge) {
 function onPanelActivate(event?: PointerEvent) {
   emit("activate");
   // Keep the focused editor's caret so dblclick can insert across editors.
-  if (event && shouldPreserveEditorFocusOnPeekPointerDown(event.target)) {
+  if (event && !props.ddl && shouldPreserveEditorFocusOnPeekPointerDown(event.target)) {
     event.preventDefault();
   }
 }
@@ -292,6 +295,7 @@ watch(
   <Teleport to="body">
     <div
       data-structure-peek-panel
+      :data-pinned-sql-preview="props.ddl ? '' : undefined"
       role="dialog"
       aria-modal="false"
       :aria-label="t('editor.structurePeek.title', { name: title })"
@@ -315,17 +319,34 @@ watch(
           <div class="truncate text-sm font-medium">{{ t("editor.structurePeek.title", { name: title }) }}</div>
           <div v-if="insertEnabled" class="truncate text-xs text-muted-foreground">{{ t("editor.structurePeek.hint") }}</div>
         </div>
+        <Button
+          v-if="props.ddl"
+          type="button"
+          variant="ghost"
+          size="sm"
+          data-no-drag
+          class="h-7 w-7 shrink-0 p-0"
+          :title="t(collapsed ? 'editor.structurePeek.restorePreview' : 'editor.structurePeek.minimizePreview')"
+          :aria-label="t(collapsed ? 'editor.structurePeek.restorePreview' : 'editor.structurePeek.minimizePreview')"
+          :aria-expanded="!collapsed"
+          @pointerdown.stop
+          @click="minimized = !minimized"
+        >
+          <Maximize2 v-if="collapsed" class="h-4 w-4" />
+          <Minus v-else class="h-4 w-4" />
+        </Button>
         <Button type="button" variant="ghost" size="sm" data-no-drag class="h-7 w-7 shrink-0 p-0" :title="t('common.close')" :aria-label="t('common.close')" @pointerdown.stop @click="closePanel">
           <X class="h-4 w-4" />
         </Button>
       </div>
 
-      <div data-no-drag class="shrink-0 border-b border-border px-3 py-2" @pointerdown.stop="onPanelActivate">
+      <div v-if="!props.ddl" data-no-drag class="shrink-0 border-b border-border px-3 py-2" @pointerdown.stop="onPanelActivate">
         <Input v-model="searchQuery" class="h-8 text-xs" :placeholder="t('structureEditor.searchColumns')" :disabled="props.loading" />
       </div>
 
-      <div data-no-drag class="min-h-0 flex-1 overflow-auto" @pointerdown.stop="onPanelActivate">
-        <div v-if="props.loading" class="flex h-40 items-center justify-center">
+      <div v-show="!collapsed" data-no-drag class="min-h-0 flex-1 overflow-auto" @pointerdown.stop="onPanelActivate">
+        <pre v-if="props.ddl" class="m-0 px-4 py-3 font-mono text-xs leading-relaxed">{{ props.ddl }}</pre>
+        <div v-else-if="props.loading" class="flex h-40 items-center justify-center">
           <Loader2 class="h-4 w-4 animate-spin text-muted-foreground" />
         </div>
         <div v-else-if="props.error" class="p-4 text-xs text-destructive">{{ props.error }}</div>
@@ -385,7 +406,7 @@ watch(
         </table>
       </div>
 
-      <div v-for="edge in resizeEdges" :key="edge" data-no-drag class="dbx-structure-peek-resize" :class="`dbx-structure-peek-resize--${edge}`" @pointerdown.stop="startResize($event, edge)" />
+      <div v-for="edge in collapsed ? [] : resizeEdges" :key="edge" data-no-drag class="dbx-structure-peek-resize" :class="`dbx-structure-peek-resize--${edge}`" @pointerdown.stop="startResize($event, edge)" />
     </div>
   </Teleport>
 </template>

@@ -2450,6 +2450,9 @@ export default withEnglishFallback({
       selectFirst: "목록 텍스트를 먼저 선택하세요",
     },
     structurePeek: {
+      pinPreview: "테이블 미리보기 고정",
+      minimizePreview: "테이블 미리보기 최소화",
+      restorePreview: "테이블 미리보기 복원",
       title: "구조: {name}",
       hint: "셀을 더블클릭하면 에디터에 삽입됩니다",
       doubleClickInsert: "더블클릭하여 삽입",

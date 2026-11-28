@@ -17,7 +17,7 @@ export function createQueryEditorHoverContent(options: QueryEditorHoverContentOp
   const { isDark, t, toast } = options;
   let hoverSqlHighlighter: SqlHighlighter | null = null;
 
-  function createHoverDom(title: string, detail: string, sqlContent?: string, rows: string[] = []): { dom: HTMLElement; mount?: () => void; destroy?: () => void } {
+  function createHoverDom(title: string, detail: string, sqlContent?: string, rows: string[] = [], onPin?: () => void): { dom: HTMLElement; mount?: () => void; destroy?: () => void } {
     const dom = document.createElement("div");
     dom.className = "rounded-md border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md";
 
@@ -37,32 +37,45 @@ export function createQueryEditorHoverContent(options: QueryEditorHoverContentOp
 
     if (sqlContent) {
       heading.className = "flex items-center justify-between gap-3 font-medium";
+      const headingText = document.createElement("span");
+      headingText.className = "min-w-0 truncate";
+      headingText.textContent = title;
+      heading.replaceChildren(headingText);
 
-      const copyButton = document.createElement("button");
-      copyButton.type = "button";
-      copyButton.className = "rounded border border-border/60 px-1.5 py-0.5 text-[11px] leading-none text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
-      copyButton.textContent = t("grid.copyDdl");
-      copyButton.title = t("grid.copyDdl");
-      copyButton.setAttribute("aria-label", t("grid.copyDdl"));
-      copyButton.addEventListener("pointerdown", (event) => {
-        // Keep CodeMirror's editor gestures from dismissing the tooltip before
-        // the click can reach the copy action.
-        event.preventDefault();
-        event.stopPropagation();
+      const actions = document.createElement("div");
+      actions.className = "flex shrink-0 items-center gap-1";
+      heading.appendChild(actions);
+
+      function addAction(label: string, activate: () => void) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "rounded border border-border/60 px-1.5 py-0.5 text-[11px] leading-none text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+        button.textContent = label;
+        button.title = label;
+        button.setAttribute("aria-label", label);
+        button.addEventListener("pointerdown", (event) => {
+          // Keep CodeMirror's editor gestures from dismissing the tooltip
+          // before the action receives its click.
+          event.preventDefault();
+          event.stopPropagation();
+        });
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          activate();
+        });
+        actions.appendChild(button);
+      }
+
+      addAction(t("grid.copyDdl"), async () => {
+        try {
+          await copyToClipboard(normalizeAlignedSqlWhitespace(sqlContent));
+          toast(t("contextMenu.ddlCopied"), 2000);
+        } catch (error: any) {
+          toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000);
+        }
       });
-      copyButton.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        void (async () => {
-          try {
-            await copyToClipboard(normalizeAlignedSqlWhitespace(sqlContent));
-            toast(t("contextMenu.ddlCopied"), 2000);
-          } catch (error: any) {
-            toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000);
-          }
-        })();
-      });
-      heading.appendChild(copyButton);
+      if (onPin) addAction(t("editor.structurePeek.pinPreview"), onPin);
 
       const separator = document.createElement("div");
       separator.className = "mt-2 border-t border-border/60";

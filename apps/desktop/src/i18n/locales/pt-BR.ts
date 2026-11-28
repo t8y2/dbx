@@ -2417,6 +2417,9 @@ export default withEnglishFallback({
       revealRaw: "Mostrar texto original",
       apply: "Aplicar",
     },
+    sshTotpSecret: "Segredo TOTP",
+    sshTotpSecretPlaceholder: "Segredo Base32, por exemplo JBSWY3DPEHPK3PXP",
+    sshTotpSecretHint: "Opcional. Depois de preenchido, o DBX calculará automaticamente o código dinâmico de 6 dígitos, sem precisar inseri-lo manualmente a cada vez. Obrigatório para conexões MCP que exigem um bastion host com verificação em duas etapas.",
     polarDbPostgresPickerHint: "Se você estiver usando a edição PolarDB PostgreSQL, selecione PostgreSQL.",
   },
   editor: {

@@ -158,7 +158,7 @@ import { createQueryEditorExecutionShortcutBindings, createQueryEditorExecutionS
 import { supportsPlDebugRoutine, supportsQueryEditorBlockComments, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { launchPlDebug, launchPlDebugAnonymous } from "@/components/debug/plDebugLaunch";
-import { queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
+import { normalizeLocateCandidate, queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isMacOS } from "@/lib/backend/platform";
@@ -1032,7 +1032,10 @@ function syncContextMenuStateAtEvent(currentView: EditorViewType, event: MouseEv
   }
 
   // Right-click must stay instant: resolve from completion/tree caches and keep the legacy table fallback when metadata is unavailable.
-  const candidate = resolveQueryContextCandidateDatabase(parsedCandidate, connectionStore.lookupLocalCompletionDatabases(parsedCandidate.connectionId, parsedCandidate.database, MAX_COMPLETION_TABLES));
+  // Connection-root-schema engines (Oracle) key those caches by schema while the tab carries the
+  // service name as its database, so align the candidate first or views resolve as tables (#15752).
+  const databaseCandidate = resolveQueryContextCandidateDatabase(parsedCandidate, connectionStore.lookupLocalCompletionDatabases(parsedCandidate.connectionId, parsedCandidate.database, MAX_COMPLETION_TABLES));
+  const candidate = normalizeLocateCandidate(databaseCandidate, connectionStore.treeNodes, connectionStore.getConfig(props.connectionId));
   const tables = connectionStore.lookupLocalCompletionTables(candidate.connectionId, candidate.database, candidate.tableName, MAX_COMPLETION_TABLES, candidate.schema, props.catalog);
   const preferredSchema = props.schema ?? connectionStore.getConfig(props.connectionId)?.default_schema;
   contextObjectTarget.value = resolveQueryContextObjectTarget(candidate, tables, preferredSchema);

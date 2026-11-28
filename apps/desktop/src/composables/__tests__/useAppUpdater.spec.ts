@@ -303,6 +303,40 @@ describe("silent update lifecycle", () => {
     expect(mocks.downloadUpdate).toHaveBeenCalledTimes(raced ? 1 : 0);
   });
 
+  it("does not retry the originating window after another window cancels the shared download", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<typeof cache>();
+    const active = { state: "downloading" as const, attempt_id: "originating-window", version: cache.version, progress: null };
+    let sharedState: typeof active | { state: "idle" } = { state: "idle" };
+    mocks.downloadUpdate.mockReturnValue(pending.promise);
+    mocks.getUpdateDownloadState.mockImplementation(async () => sharedState);
+
+    const originatingUpdater = mount();
+    const originatingDownload = originatingUpdater.checkUpdates({ silent: true });
+    await vi.waitFor(() => expect(mocks.downloadUpdate).toHaveBeenCalledOnce());
+
+    sharedState = active;
+    const observingUpdater = mount();
+    const observingCheck = observingUpdater.checkUpdates();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(observingUpdater.isDownloadingUpdate.value).toBe(true);
+
+    mocks.cancelUpdateDownload.mockImplementation(async (attemptId: string) => {
+      expect(attemptId).toBe(active.attempt_id);
+      sharedState = { state: "idle" };
+      pending.reject(new Error("Download canceled by user."));
+    });
+    await observingUpdater.cancelDownload();
+    await vi.advanceTimersByTimeAsync(500);
+    await observingCheck;
+    await originatingDownload;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mocks.downloadUpdate).toHaveBeenCalledOnce();
+    expect(originatingUpdater.phase.value).toBe("idle");
+    expect(originatingUpdater.updateCheckFailed.value).toBe(false);
+  });
+
   it("follows a native download without relying on the release feed or prior update information", async () => {
     vi.useFakeTimers();
     settings.autoUpdateApp = false;

@@ -19,6 +19,11 @@ function updateProgressPercent(progress: UpdateDownloadProgress | null): number 
   return progress?.total && progress.total > 0 ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100)) : null;
 }
 
+function isDownloadCancellationError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower === "canceled" || lower === "cancelled" || lower.includes("download canceled") || lower.includes("download cancelled");
+}
+
 interface UseAppUpdaterOptions {
   getActiveTaskCount?: () => number;
   prepareForUpdate?: () => Promise<() => void>;
@@ -514,6 +519,14 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
           return;
         }
         phase.value = "idle";
+        if (isDownloadCancellationError(message)) {
+          // Another window can cancel this attempt, so this window's generation
+          // is unchanged. Treat the backend cancellation as terminal instead of
+          // scheduling a retry that silently starts the download again.
+          clearError();
+          clearRetry();
+          return;
+        }
         fail(error);
         if ((message.includes("VERSION_CHANGED") || message.toLowerCase().includes("version changed")) && !versionRecheckPending) {
           versionRecheckPending = true;

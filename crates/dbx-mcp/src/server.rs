@@ -2776,7 +2776,7 @@ impl DbxMcpServer {
     #[tool(
         name = "dbx_execute_query",
         description = "Execute a SQL query on a database connection (default 100 rows; pass max_rows to return up to 1000 rows; larger values are clamped; MongoDB shell commands and multi-statement scripts routed through the batch executor stay at 100 rows). For backwards compatibility, multi-statement scripts and stored-procedure scripts are routed through the dialect-aware batch executor.",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
     )]
     async fn execute_query_tool(
         &self,
@@ -3227,7 +3227,7 @@ impl DbxMcpServer {
     #[tool(
         name = "dbx_execute_batch",
         description = "Execute a SQL script containing multiple statements in one call and return a result per statement. Statements are split with a database-dialect-aware parser, so semicolons inside strings, comments and stored procedures are handled. Stops at the first failing statement unless continue_on_error is true. Pass session_id (from dbx_open_session) when statements must share one connection (e.g. temporary tables, USE/SET). Pass cell_char_offset/cell_char_limit to expand long string cells in every statement's result, exactly like dbx_execute_query. When use_transaction is true and the script has multiple statements, the whole script runs in one transaction and the call returns a single merged result instead of one result per statement (single-statement scripts run normally and return that one result); use_transaction cannot be combined with session_id or continue_on_error, and is rejected when the backend cannot provide a rollbackable transaction or for MySQL-family DDL scripts (DDL implicitly commits and cannot be rolled back).",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
     )]
     async fn execute_batch_tool(
         &self,
@@ -4649,7 +4649,7 @@ impl DbxMcpServer {
     #[tool(
         name = "dbx_execute_and_show",
         description = "Execute a SQL query in DBX desktop app UI and show results there. Requires DBX to be running.",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
     )]
     async fn execute_and_show(&self, Parameters(request): Parameters<ExecuteAndShowRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_execute_and_show").await {
@@ -10825,6 +10825,16 @@ mod tests {
             let annotations = tool.annotations.as_ref().unwrap();
             assert_eq!(annotations.read_only_hint, Some(false), "{name} should not be read-only");
             assert_eq!(annotations.destructive_hint, Some(true), "{name} should be destructive");
+        }
+
+        // SQL execution tools stay non-read-only because they can run
+        // writes, but they are not destructive: SELECTs are the primary
+        // use, and write or dangerous SQL stays gated by MCP policy.
+        for name in ["dbx_execute_query", "dbx_execute_batch", "dbx_execute_and_show"] {
+            let tool = tools.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("tool {name} not found"));
+            let annotations = tool.annotations.as_ref().unwrap();
+            assert_eq!(annotations.read_only_hint, Some(false), "{name} should not be read-only");
+            assert_eq!(annotations.destructive_hint, Some(false), "{name} should not be destructive");
         }
     }
 

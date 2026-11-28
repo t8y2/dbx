@@ -90,6 +90,13 @@ struct MySqlMetadataCapabilities {
     omit_completion_escape: AtomicBool,
     routine_use_dtd_identifier: AtomicBool,
     statistics_columns: AtomicU8,
+    /// 0 = unknown, 1 = no, 2 = yes (MariaDB >= 10.2.7 quotes string literals in
+    /// information_schema.COLUMNS.COLUMN_DEFAULT and leaves expression defaults unquoted
+    /// without emitting DEFAULT_GENERATED in EXTRA).
+    mariadb_quoted_defaults: AtomicU8,
+    /// Serializes the cold-start `SELECT VERSION()` probe so concurrent `get_columns`
+    /// calls on a fresh pool only send one probe.
+    mariadb_version_probe_lock: tokio::sync::Mutex<()>,
 }
 
 impl MySqlMetadataCapabilities {
@@ -115,6 +122,18 @@ impl MySqlMetadataCapabilities {
 
     fn record_statistics_columns(&self, columns: MySqlStatisticsColumns) {
         self.statistics_columns.fetch_max(columns as u8, Ordering::Relaxed);
+    }
+
+    fn mariadb_quoted_defaults(&self) -> Option<bool> {
+        match self.mariadb_quoted_defaults.load(Ordering::Relaxed) {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
+    }
+
+    fn record_mariadb_quoted_defaults(&self, value: bool) {
+        self.mariadb_quoted_defaults.store(if value { 2 } else { 1 }, Ordering::Relaxed);
     }
 
     fn set_doris_defaults(&self) {
@@ -246,6 +265,17 @@ pub trait MySqlPoolAccess {
     fn checkout_timeout(&self) -> Duration {
         super::connection_timeout()
     }
+
+    /// Cached check for MariaDB >= 10.2.7 quoted `COLUMN_DEFAULT` semantics.
+    fn mariadb_quoted_defaults(&self) -> Option<bool> {
+        None
+    }
+
+    fn record_mariadb_quoted_defaults(&self, _value: bool) {}
+
+    fn mariadb_version_probe_lock(&self) -> Option<&tokio::sync::Mutex<()>> {
+        None
+    }
 }
 
 /// Connections that passed a `PING` this recently skip the next liveness
@@ -352,6 +382,18 @@ impl MySqlPoolAccess for MySqlPool {
 
     fn checkout_timeout(&self) -> Duration {
         self.checkout_timeout
+    }
+
+    fn mariadb_quoted_defaults(&self) -> Option<bool> {
+        self.metadata_capabilities.mariadb_quoted_defaults()
+    }
+
+    fn record_mariadb_quoted_defaults(&self, value: bool) {
+        self.metadata_capabilities.record_mariadb_quoted_defaults(value);
+    }
+
+    fn mariadb_version_probe_lock(&self) -> Option<&tokio::sync::Mutex<()>> {
+        Some(&self.metadata_capabilities.mariadb_version_probe_lock)
     }
 }
 
@@ -5807,6 +5849,207 @@ fn apply_mysql_generated_column_expressions(columns: &mut [ColumnInfo], expressi
     }
 }
 
+/// MariaDB 10.2.7+ (MDEV-13132) quotes string literals in
+/// `information_schema.COLUMNS.COLUMN_DEFAULT` (`'old'`, `''`, `'uuid()'`) while
+/// returning expression defaults unquoted (`uuid()`, `concat('v','1')`) without
+/// setting `DEFAULT_GENERATED` in `EXTRA`.
+const MARIADB_QUOTED_DEFAULTS_MIN_VERSION: (u16, u16, u16) = (10, 2, 7);
+
+fn parse_three_part_version(segment: &str) -> Option<(u16, u16, u16)> {
+    let mut parts = segment.split('.');
+    let major = parts.next()?.parse::<u16>().ok()?;
+    let minor = parts.next()?.parse::<u16>().ok()?;
+    let patch_part = parts.next()?;
+    let patch_len = patch_part.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if patch_len == 0 {
+        return None;
+    }
+    let patch = patch_part[..patch_len].parse::<u16>().ok()?;
+    Some((major, minor, patch))
+}
+
+fn parse_mariadb_version(version: &str) -> Option<(u16, u16, u16)> {
+    let trimmed = version.trim();
+    if !contains_ascii_case_insensitive(trimmed, "mariadb") {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.split('-').collect();
+    if let Some(mariadb_idx) = parts
+        .iter()
+        .position(|segment| segment.as_bytes().get(..7).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"mariadb")))
+    {
+        for segment in parts[..mariadb_idx].iter().rev() {
+            if let Some(parsed) = parse_three_part_version(segment) {
+                return Some(parsed);
+            }
+        }
+    }
+    parse_three_part_version(parts.first().copied().unwrap_or_default())
+}
+
+fn is_mariadb_quoted_defaults_version(version: &str) -> bool {
+    parse_mariadb_version(version).is_some_and(|parsed| parsed >= MARIADB_QUOTED_DEFAULTS_MIN_VERSION)
+}
+
+fn has_default_generated_extra(extra: &str) -> bool {
+    extra.split_ascii_whitespace().any(|token| token.eq_ignore_ascii_case("DEFAULT_GENERATED"))
+}
+
+fn is_generated_column_extra(extra: &str) -> bool {
+    mysql_generated_column_storage(extra).is_some() || contains_ascii_case_insensitive(extra, "GENERATED ALWAYS AS")
+}
+
+fn scan_sql_single_quoted_literal_end(input: &str, backslash_escapes: bool) -> Option<usize> {
+    if !input.starts_with('\'') {
+        return None;
+    }
+    let mut i = 1;
+    let bytes = input.as_bytes();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if backslash_escapes => {
+                i += 1;
+                let escaped = input[i..].chars().next()?;
+                i += escaped.len_utf8();
+            }
+            b'\'' => {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                } else {
+                    return Some(i + 1);
+                }
+            }
+            _ => {
+                let ch = input[i..].chars().next()?;
+                i += ch.len_utf8();
+            }
+        }
+    }
+    None
+}
+
+/// Whether `input` is a single SQL single-quoted string literal (`'...'`) spanning
+/// the entire slice (handling both `''` and `\'`/`\\`, as well as trailing
+/// backslashes under `NO_BACKSLASH_ESCAPES` such as `'C:\'`).
+fn is_single_sql_string_literal(input: &str) -> bool {
+    if !input.starts_with('\'') || input.len() < 2 || !input.ends_with('\'') {
+        return false;
+    }
+    if scan_sql_single_quoted_literal_end(input, true) == Some(input.len()) {
+        return true;
+    }
+    input.ends_with("\\'") && scan_sql_single_quoted_literal_end(input, false) == Some(input.len())
+}
+
+fn is_plain_numeric_literal(input: &str) -> bool {
+    let unsigned = input.strip_prefix(['+', '-']).unwrap_or(input);
+    if unsigned.is_empty() {
+        return false;
+    }
+    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
+        Some(pos) => (&unsigned[..pos], Some(&unsigned[pos + 1..])),
+        None => (unsigned, None),
+    };
+    let mut saw_digit = false;
+    let mut saw_dot = false;
+    for byte in mantissa.bytes() {
+        if byte.is_ascii_digit() {
+            saw_digit = true;
+        } else if byte == b'.' && !saw_dot {
+            saw_dot = true;
+        } else {
+            return false;
+        }
+    }
+    if !saw_digit {
+        return false;
+    }
+    if let Some(exp) = exponent {
+        let exp = exp.strip_prefix(['+', '-']).unwrap_or(exp);
+        if exp.is_empty() || !exp.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_mariadb_literal_default(trimmed: &str) -> bool {
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("null")
+        || trimmed.eq_ignore_ascii_case("true")
+        || trimmed.eq_ignore_ascii_case("false")
+    {
+        return true;
+    }
+    if is_single_sql_string_literal(trimmed) {
+        return true;
+    }
+    if matches!(trimmed.as_bytes().first(), Some(b'b' | b'B' | b'x' | b'X' | b'n' | b'N'))
+        && trimmed.as_bytes().get(1) == Some(&b'\'')
+        && is_single_sql_string_literal(&trimmed[1..])
+    {
+        return true;
+    }
+    if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        if !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return true;
+        }
+    }
+    is_plain_numeric_literal(trimmed)
+}
+
+fn is_mariadb_expression_default_column(column: &ColumnInfo) -> bool {
+    if column
+        .extra
+        .as_deref()
+        .is_some_and(|extra| has_default_generated_extra(extra) || is_generated_column_extra(extra))
+    {
+        return false;
+    }
+    let Some(raw) = column.column_default.as_deref() else {
+        return false;
+    };
+    let trimmed = raw.trim();
+    !trimmed.is_empty() && !is_mariadb_literal_default(trimmed)
+}
+
+fn mark_mariadb_generated_defaults(columns: &mut [ColumnInfo]) {
+    for column in columns {
+        if !is_mariadb_expression_default_column(column) {
+            continue;
+        }
+        column.extra = match column.extra.as_deref().map(str::trim) {
+            None | Some("") => Some("DEFAULT_GENERATED".to_string()),
+            Some(existing) => Some(format!("DEFAULT_GENERATED {existing}")),
+        };
+    }
+}
+
+async fn is_mariadb_quoted_defaults_server<P>(pool: &P, conn: &mut mysql_async::Conn) -> bool
+where
+    P: MySqlPoolAccess + ?Sized,
+{
+    if let Some(cached) = pool.mariadb_quoted_defaults() {
+        return cached;
+    }
+    let _probe_guard = match pool.mariadb_version_probe_lock() {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
+    if let Some(cached) = pool.mariadb_quoted_defaults() {
+        return cached;
+    }
+    // Always probe `SELECT VERSION()` rather than trusting `conn.server_version()`
+    // from the handshake: proxies such as ProxySQL advertise a MySQL handshake
+    // version (e.g. 8.0.11) even when forwarding queries to a MariaDB backend.
+    let Some(version) = query_first_nonblank_string(conn, "SELECT VERSION()").await else {
+        return false;
+    };
+    let is_mariadb = is_mariadb_quoted_defaults_version(&version);
+    pool.record_mariadb_quoted_defaults(is_mariadb);
+    is_mariadb
+}
+
 /// Attempt to reverse CP1252→UTF-8 double-encoding.
 ///
 /// When Chinese text is written to MySQL through a connection with the wrong
@@ -6031,6 +6274,12 @@ where
                 );
             }
         }
+    }
+
+    if columns.iter().any(is_mariadb_expression_default_column)
+        && is_mariadb_quoted_defaults_server(pool, &mut conn).await
+    {
+        mark_mariadb_generated_defaults(&mut columns);
     }
 
     enrich_mysql_generated_column_expressions(&mut conn, database, table, &mut columns).await;
@@ -10713,6 +10962,163 @@ mod tests {
     }
 
     #[test]
+    fn mariadb_quoted_defaults_version_detection_covers_mariadb_and_excludes_mysql() {
+        assert_eq!(parse_mariadb_version("10.5.16-MariaDB"), Some((10, 5, 16)));
+        assert_eq!(parse_mariadb_version("5.5.5-10.5.16-MariaDB-1:10.5.16+maria~focal"), Some((10, 5, 16)));
+        assert_eq!(parse_mariadb_version("10.2.7-MariaDB"), Some((10, 2, 7)));
+        assert_eq!(parse_mariadb_version("10.2.6-MariaDB"), Some((10, 2, 6)));
+        assert_eq!(parse_mariadb_version("11.4.2-MariaDB-ubu2404"), Some((11, 4, 2)));
+        assert_eq!(parse_mariadb_version("10.11.6-customé-MariaDB"), Some((10, 11, 6)));
+        assert_eq!(parse_mariadb_version("5.5.5-10.11.6-customé-MariaDB"), Some((10, 11, 6)));
+        assert_eq!(parse_mariadb_version("8.0.36"), None);
+        assert_eq!(parse_mariadb_version("10.0.0-CustomProxy"), None);
+
+        assert!(is_mariadb_quoted_defaults_version("10.5.16-MariaDB"));
+        assert!(is_mariadb_quoted_defaults_version("5.5.5-10.5.16-MariaDB"));
+        assert!(is_mariadb_quoted_defaults_version("10.2.7-MariaDB"));
+        assert!(is_mariadb_quoted_defaults_version("11.4.2-MariaDB-ubu2404"));
+        assert!(!is_mariadb_quoted_defaults_version("10.2.6-MariaDB"));
+        assert!(!is_mariadb_quoted_defaults_version("10.1.48-MariaDB"));
+        assert!(!is_mariadb_quoted_defaults_version("8.0.36"));
+        assert!(!is_mariadb_quoted_defaults_version("10.0.0-MySQL"));
+    }
+
+    #[test]
+    fn mariadb_expression_defaults_are_marked_default_generated_without_touching_literals() {
+        let mut columns = vec![
+            ColumnInfo {
+                name: "expr_uuid".to_string(),
+                data_type: "varchar(36)".to_string(),
+                column_default: Some("uuid()".to_string()),
+                extra: Some(String::new()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "expr_concat".to_string(),
+                data_type: "varchar(40)".to_string(),
+                column_default: Some("concat('v','1')".to_string()),
+                extra: Some(String::new()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "expr_math".to_string(),
+                data_type: "int(11)".to_string(),
+                column_default: Some("1 + 2".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "expr_pipe".to_string(),
+                data_type: "varchar(20)".to_string(),
+                column_default: Some("'a' || 'b'".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "updated_at".to_string(),
+                data_type: "timestamp".to_string(),
+                column_default: Some("current_timestamp()".to_string()),
+                extra: Some("on update current_timestamp()".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "literal_str".to_string(),
+                data_type: "varchar(36)".to_string(),
+                column_default: Some("'old'".to_string()),
+                extra: Some(String::new()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "literal_fn_text".to_string(),
+                data_type: "varchar(36)".to_string(),
+                column_default: Some("'uuid()'".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "literal_escaped_quote".to_string(),
+                data_type: "varchar(36)".to_string(),
+                column_default: Some("'it''s'".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "literal_backslash_quote".to_string(),
+                data_type: "varchar(36)".to_string(),
+                column_default: Some(r"'it\'s'".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "literal_no_backslash_escape".to_string(),
+                data_type: "varchar(36)".to_string(),
+                column_default: Some(r"'C:\'".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "literal_empty".to_string(),
+                data_type: "varchar(36)".to_string(),
+                column_default: Some("''".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "literal_null".to_string(),
+                data_type: "varchar(36)".to_string(),
+                column_default: Some("NULL".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "literal_num".to_string(),
+                data_type: "decimal(10,2)".to_string(),
+                column_default: Some("-3.14".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "literal_bit".to_string(),
+                data_type: "bit(4)".to_string(),
+                column_default: Some("b'101'".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "literal_hex".to_string(),
+                data_type: "binary(2)".to_string(),
+                column_default: Some("0x1f".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "already_marked".to_string(),
+                data_type: "varchar(36)".to_string(),
+                column_default: Some("uuid()".to_string()),
+                extra: Some("DEFAULT_GENERATED".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "virtual_col".to_string(),
+                data_type: "varchar(36)".to_string(),
+                column_default: Some("uuid()".to_string()),
+                extra: Some("VIRTUAL GENERATED".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        mark_mariadb_generated_defaults(&mut columns);
+
+        let extra_of = |name: &str| columns.iter().find(|c| c.name == name).unwrap().extra.as_deref();
+        assert_eq!(extra_of("expr_uuid"), Some("DEFAULT_GENERATED"));
+        assert_eq!(extra_of("expr_concat"), Some("DEFAULT_GENERATED"));
+        assert_eq!(extra_of("expr_math"), Some("DEFAULT_GENERATED"));
+        assert_eq!(extra_of("expr_pipe"), Some("DEFAULT_GENERATED"));
+        assert_eq!(extra_of("updated_at"), Some("DEFAULT_GENERATED on update current_timestamp()"));
+        assert_eq!(extra_of("literal_str"), Some(""));
+        assert_eq!(extra_of("literal_fn_text"), None);
+        assert_eq!(extra_of("literal_escaped_quote"), None);
+        assert_eq!(extra_of("literal_backslash_quote"), None);
+        assert_eq!(extra_of("literal_no_backslash_escape"), None);
+        assert_eq!(extra_of("literal_empty"), None);
+        assert_eq!(extra_of("literal_null"), None);
+        assert_eq!(extra_of("literal_num"), None);
+        assert_eq!(extra_of("literal_bit"), None);
+        assert_eq!(extra_of("literal_hex"), None);
+        assert_eq!(extra_of("already_marked"), Some("DEFAULT_GENERATED"));
+        assert_eq!(extra_of("virtual_col"), Some("VIRTUAL GENERATED"));
+    }
+
+    #[test]
     fn mysql_nullable_metadata_uses_optional_string_conversion() {
         let collation = mysql_async::from_value_opt::<Option<String>>(mysql_async::Value::NULL)
             .expect("Option<String> must accept NULL MySQL metadata values");
@@ -12407,6 +12813,523 @@ mod tests {
             queries.iter().any(|sql| sql.contains("DTD_IDENTIFIER AS data_type")),
             "Doris-seeded pool must query ROUTINES.DTD_IDENTIFIER directly: {queries:?}"
         );
+    }
+
+    fn mysql_test_text_row(values: &[Option<&str>]) -> Vec<u8> {
+        let mut row = Vec::new();
+        for value in values {
+            match value {
+                Some(text) => mysql_test_lenenc_str(&mut row, text.as_bytes()),
+                None => row.push(0xfb),
+            }
+        }
+        row
+    }
+
+    async fn mysql_columns_metadata_test_server(
+        listener: tokio::net::TcpListener,
+        handshake_version: &'static str,
+        select_version_reply: &'static str,
+        column_rows: Vec<[Option<&'static str>; 13]>,
+    ) -> Vec<String> {
+        use mysql_async::consts::CapabilityFlags as Caps;
+        use mysql_common::proto::MySerialize;
+
+        const COLUMN_NAMES: [&str; 13] = [
+            "COLUMN_NAME",
+            "DATA_TYPE",
+            "COLUMN_TYPE",
+            "IS_NULLABLE",
+            "COLUMN_DEFAULT",
+            "EXTRA",
+            "COLUMN_COMMENT",
+            "COLUMN_KEY",
+            "NUMERIC_PRECISION",
+            "NUMERIC_SCALE",
+            "CHARACTER_MAXIMUM_LENGTH",
+            "CHARACTER_SET_NAME",
+            "COLLATION_NAME",
+        ];
+
+        let mut recorded_queries = Vec::new();
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let greeting = mysql_common::packets::HandshakePacket::new(
+            10,
+            handshake_version.as_bytes(),
+            1,
+            *b"12345678",
+            Some(&b"abcdefghijkl\0"[..]),
+            Caps::CLIENT_PROTOCOL_41
+                | Caps::CLIENT_SECURE_CONNECTION
+                | Caps::CLIENT_PLUGIN_AUTH
+                | Caps::CLIENT_DEPRECATE_EOF,
+            33,
+            StatusFlags::SERVER_STATUS_AUTOCOMMIT,
+            Some(&b"mysql_native_password"[..]),
+        );
+        let mut payload = Vec::new();
+        greeting.serialize(&mut payload);
+        mysql_tls_test_write(&mut socket, 0, &payload).await;
+        let auth = mysql_tls_test_packet(&mut socket).await;
+        let caps = Caps::from_bits_truncate(u32::from_le_bytes(auth[..4].try_into().unwrap()));
+        let deprecate_eof = caps.contains(Caps::CLIENT_DEPRECATE_EOF);
+        mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+
+        loop {
+            let command = mysql_tls_test_packet(&mut socket).await;
+            match command.as_slice().first().copied() {
+                None | Some(0x01) => break, // COM_QUIT
+                Some(0x03) => {
+                    let sql = String::from_utf8_lossy(&command[1..]).to_string();
+                    recorded_queries.push(sql.clone());
+                    let upper = sql.to_ascii_uppercase();
+                    if upper.contains("INFORMATION_SCHEMA.COLUMNS") {
+                        let mut seq = 1u8;
+                        mysql_tls_test_write(&mut socket, seq, &[COLUMN_NAMES.len() as u8]).await;
+                        seq += 1;
+                        for col_name in COLUMN_NAMES {
+                            mysql_tls_test_write(&mut socket, seq, &mysql_test_column_def(col_name)).await;
+                            seq += 1;
+                        }
+                        if !deprecate_eof {
+                            mysql_tls_test_write(&mut socket, seq, &[0xfe, 0, 0, 2, 0]).await;
+                            seq += 1;
+                        }
+                        for row in &column_rows {
+                            mysql_tls_test_write(&mut socket, seq, &mysql_test_text_row(row)).await;
+                            seq += 1;
+                        }
+                        if deprecate_eof {
+                            mysql_tls_test_write(&mut socket, seq, &[0xfe, 0, 0, 2, 0, 0, 0]).await;
+                        } else {
+                            mysql_tls_test_write(&mut socket, seq, &[0xfe, 0, 0, 2, 0]).await;
+                        }
+                    } else if upper.trim() == "SELECT VERSION()" {
+                        let mut seq = 1u8;
+                        mysql_tls_test_write(&mut socket, seq, &[1]).await;
+                        seq += 1;
+                        mysql_tls_test_write(&mut socket, seq, &mysql_test_column_def("VERSION()")).await;
+                        seq += 1;
+                        if !deprecate_eof {
+                            mysql_tls_test_write(&mut socket, seq, &[0xfe, 0, 0, 2, 0]).await;
+                            seq += 1;
+                        }
+                        mysql_tls_test_write(&mut socket, seq, &mysql_test_text_row(&[Some(select_version_reply)]))
+                            .await;
+                        seq += 1;
+                        if deprecate_eof {
+                            mysql_tls_test_write(&mut socket, seq, &[0xfe, 0, 0, 2, 0, 0, 0]).await;
+                        } else {
+                            mysql_tls_test_write(&mut socket, seq, &[0xfe, 0, 0, 2, 0]).await;
+                        }
+                    } else {
+                        mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    }
+                }
+                _ => {
+                    mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                }
+            }
+        }
+        recorded_queries
+    }
+
+    #[tokio::test]
+    async fn mariadb_get_columns_marks_expression_defaults_and_caches_version_probe() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let rows = vec![
+            [
+                Some("id"),
+                Some("int"),
+                Some("int(11)"),
+                Some("NO"),
+                None,
+                Some(""),
+                Some(""),
+                Some("PRI"),
+                Some("10"),
+                Some("0"),
+                None,
+                None,
+                None,
+            ],
+            [
+                Some("expr_uuid"),
+                Some("varchar"),
+                Some("varchar(36)"),
+                Some("YES"),
+                Some("uuid()"),
+                Some(""),
+                Some(""),
+                Some(""),
+                None,
+                None,
+                Some("36"),
+                Some("utf8mb4"),
+                Some("utf8mb4_general_ci"),
+            ],
+            [
+                Some("expr_concat"),
+                Some("varchar"),
+                Some("varchar(40)"),
+                Some("YES"),
+                Some("concat('v','1')"),
+                Some(""),
+                Some(""),
+                Some(""),
+                None,
+                None,
+                Some("40"),
+                Some("utf8mb4"),
+                Some("utf8mb4_general_ci"),
+            ],
+            [
+                Some("literal_old"),
+                Some("varchar"),
+                Some("varchar(36)"),
+                Some("YES"),
+                Some("'old'"),
+                Some(""),
+                Some(""),
+                Some(""),
+                None,
+                None,
+                Some("36"),
+                Some("utf8mb4"),
+                Some("utf8mb4_general_ci"),
+            ],
+            [
+                Some("literal_fn"),
+                Some("varchar"),
+                Some("varchar(36)"),
+                Some("YES"),
+                Some("'uuid()'"),
+                Some(""),
+                Some(""),
+                Some(""),
+                None,
+                None,
+                Some("36"),
+                Some("utf8mb4"),
+                Some("utf8mb4_general_ci"),
+            ],
+            [
+                Some("nullable_col"),
+                Some("varchar"),
+                Some("varchar(36)"),
+                Some("YES"),
+                Some("NULL"),
+                Some(""),
+                Some(""),
+                Some(""),
+                None,
+                None,
+                Some("36"),
+                Some("utf8mb4"),
+                Some("utf8mb4_general_ci"),
+            ],
+        ];
+        let server = tokio::spawn(mysql_columns_metadata_test_server(
+            listener,
+            "5.5.5-10.5.16-MariaDB",
+            "10.5.16-MariaDB",
+            rows,
+        ));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+
+        let first = get_columns(&pool, "dbx_expr_repro_src", "t08_expression").await.unwrap();
+        let second = get_columns(&pool, "dbx_expr_repro_src", "t08_expression").await.unwrap();
+
+        for cols in [&first, &second] {
+            let extra_of = |name: &str| cols.iter().find(|c| c.name == name).unwrap().extra.as_deref();
+            assert_eq!(extra_of("id"), Some(""));
+            assert_eq!(extra_of("expr_uuid"), Some("DEFAULT_GENERATED"));
+            assert_eq!(extra_of("expr_concat"), Some("DEFAULT_GENERATED"));
+            assert_eq!(extra_of("literal_old"), Some(""));
+            assert_eq!(extra_of("literal_fn"), Some(""));
+            assert_eq!(extra_of("nullable_col"), Some(""));
+        }
+
+        pool.disconnect().await.unwrap();
+        let queries = server.await.unwrap();
+        let version_probes = queries.iter().filter(|sql| sql.eq_ignore_ascii_case("SELECT VERSION()")).count();
+        assert_eq!(version_probes, 1, "MariaDB version probe must be cached per pool: {queries:?}");
+    }
+
+    #[tokio::test]
+    async fn mysql_get_columns_leaves_unmarked_function_like_default_as_literal() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let rows = vec![[
+            Some("literal_like_fn"),
+            Some("varchar"),
+            Some("varchar(36)"),
+            Some("YES"),
+            Some("uuid()"),
+            Some(""),
+            Some(""),
+            Some(""),
+            None,
+            None,
+            Some("36"),
+            Some("utf8mb4"),
+            Some("utf8mb4_0900_ai_ci"),
+        ]];
+        let server = tokio::spawn(mysql_columns_metadata_test_server(listener, "8.0.36", "8.0.36", rows));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+
+        let first = get_columns(&pool, "app", "t").await.unwrap();
+        let second = get_columns(&pool, "app", "t").await.unwrap();
+        for cols in [&first, &second] {
+            assert_eq!(cols[0].column_default.as_deref(), Some("uuid()"));
+            assert_eq!(cols[0].extra.as_deref(), Some(""));
+        }
+
+        pool.disconnect().await.unwrap();
+        let queries = server.await.unwrap();
+        let version_probes = queries.iter().filter(|sql| sql.eq_ignore_ascii_case("SELECT VERSION()")).count();
+        assert_eq!(version_probes, 1, "MySQL 8.0 version check must be cached after a single probe: {queries:?}");
+    }
+
+    #[tokio::test]
+    async fn proxied_mariadb_get_columns_marks_expression_defaults_despite_mysql_handshake() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let rows = vec![
+            [
+                Some("expr_uuid"),
+                Some("varchar"),
+                Some("varchar(36)"),
+                Some("YES"),
+                Some("uuid()"),
+                Some(""),
+                Some(""),
+                Some(""),
+                None,
+                None,
+                Some("36"),
+                Some("utf8mb4"),
+                Some("utf8mb4_general_ci"),
+            ],
+            [
+                Some("expr_concat"),
+                Some("varchar"),
+                Some("varchar(40)"),
+                Some("YES"),
+                Some("concat('v','1')"),
+                Some(""),
+                Some(""),
+                Some(""),
+                None,
+                None,
+                Some("40"),
+                Some("utf8mb4"),
+                Some("utf8mb4_general_ci"),
+            ],
+            [
+                Some("literal_old"),
+                Some("varchar"),
+                Some("varchar(36)"),
+                Some("YES"),
+                Some("'old'"),
+                Some(""),
+                Some(""),
+                Some(""),
+                None,
+                None,
+                Some("36"),
+                Some("utf8mb4"),
+                Some("utf8mb4_general_ci"),
+            ],
+        ];
+        // ProxySQL advertises 8.0.11 in the handshake while forwarding SELECT VERSION()
+        // to the underlying MariaDB 10.5.16 backend.
+        let server = tokio::spawn(mysql_columns_metadata_test_server(listener, "8.0.11", "10.5.16-MariaDB", rows));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+
+        let cols = get_columns(&pool, "dbx_expr_repro_src", "t08_expression").await.unwrap();
+        let extra_of = |name: &str| cols.iter().find(|c| c.name == name).unwrap().extra.as_deref();
+        assert_eq!(extra_of("expr_uuid"), Some("DEFAULT_GENERATED"));
+        assert_eq!(extra_of("expr_concat"), Some("DEFAULT_GENERATED"));
+        assert_eq!(extra_of("literal_old"), Some(""));
+
+        pool.disconnect().await.unwrap();
+        let queries = server.await.unwrap();
+        let version_probes = queries.iter().filter(|sql| sql.eq_ignore_ascii_case("SELECT VERSION()")).count();
+        assert_eq!(version_probes, 1, "proxied MariaDB should probe SELECT VERSION() once: {queries:?}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_cold_get_columns_probes_mariadb_version_once_per_pool() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let rows = vec![[
+            Some("expr_uuid"),
+            Some("varchar"),
+            Some("varchar(36)"),
+            Some("YES"),
+            Some("uuid()"),
+            Some(""),
+            Some(""),
+            Some(""),
+            None,
+            None,
+            Some("36"),
+            Some("utf8mb4"),
+            Some("utf8mb4_general_ci"),
+        ]];
+
+        // Serve concurrent client connections from the same pool until shutdown.
+        let shutdown = CancellationToken::new();
+        let server_shutdown = shutdown.clone();
+        let server = tokio::spawn(async move {
+            use std::sync::Arc;
+            let queries = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let mut handles = Vec::new();
+            loop {
+                let accepted = tokio::select! {
+                    _ = server_shutdown.cancelled() => break,
+                    res = listener.accept() => res.unwrap(),
+                };
+                let (mut socket, _) = accepted;
+                let rows = rows.clone();
+                let queries = Arc::clone(&queries);
+                handles.push(tokio::spawn(async move {
+                    use mysql_async::consts::CapabilityFlags as Caps;
+                    use mysql_common::proto::MySerialize;
+
+                    const COLUMN_NAMES: [&str; 13] = [
+                        "COLUMN_NAME",
+                        "DATA_TYPE",
+                        "COLUMN_TYPE",
+                        "IS_NULLABLE",
+                        "COLUMN_DEFAULT",
+                        "EXTRA",
+                        "COLUMN_COMMENT",
+                        "COLUMN_KEY",
+                        "NUMERIC_PRECISION",
+                        "NUMERIC_SCALE",
+                        "CHARACTER_MAXIMUM_LENGTH",
+                        "CHARACTER_SET_NAME",
+                        "COLLATION_NAME",
+                    ];
+
+                    let greeting = mysql_common::packets::HandshakePacket::new(
+                        10,
+                        b"5.5.5-10.5.16-MariaDB",
+                        1,
+                        *b"12345678",
+                        Some(&b"abcdefghijkl\0"[..]),
+                        Caps::CLIENT_PROTOCOL_41
+                            | Caps::CLIENT_SECURE_CONNECTION
+                            | Caps::CLIENT_PLUGIN_AUTH
+                            | Caps::CLIENT_DEPRECATE_EOF,
+                        33,
+                        StatusFlags::SERVER_STATUS_AUTOCOMMIT,
+                        Some(&b"mysql_native_password"[..]),
+                    );
+                    let mut payload = Vec::new();
+                    greeting.serialize(&mut payload);
+                    mysql_tls_test_write(&mut socket, 0, &payload).await;
+                    let auth = mysql_tls_test_packet(&mut socket).await;
+                    let caps = Caps::from_bits_truncate(u32::from_le_bytes(auth[..4].try_into().unwrap()));
+                    let deprecate_eof = caps.contains(Caps::CLIENT_DEPRECATE_EOF);
+                    mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+
+                    loop {
+                        let command = mysql_tls_test_packet(&mut socket).await;
+                        match command.as_slice().first().copied() {
+                            None | Some(0x01) => break,
+                            Some(0x03) => {
+                                let sql = String::from_utf8_lossy(&command[1..]).to_string();
+                                queries.lock().await.push(sql.clone());
+                                let upper = sql.to_ascii_uppercase();
+                                if upper.contains("INFORMATION_SCHEMA.COLUMNS") {
+                                    // Brief delay ensures both callers overlap on distinct connections.
+                                    tokio::time::sleep(Duration::from_millis(15)).await;
+                                    let mut seq = 1u8;
+                                    mysql_tls_test_write(&mut socket, seq, &[COLUMN_NAMES.len() as u8]).await;
+                                    seq += 1;
+                                    for col_name in COLUMN_NAMES {
+                                        mysql_tls_test_write(&mut socket, seq, &mysql_test_column_def(col_name)).await;
+                                        seq += 1;
+                                    }
+                                    if !deprecate_eof {
+                                        mysql_tls_test_write(&mut socket, seq, &[0xfe, 0, 0, 2, 0]).await;
+                                        seq += 1;
+                                    }
+                                    for row in &rows {
+                                        mysql_tls_test_write(&mut socket, seq, &mysql_test_text_row(row)).await;
+                                        seq += 1;
+                                    }
+                                    if deprecate_eof {
+                                        mysql_tls_test_write(&mut socket, seq, &[0xfe, 0, 0, 2, 0, 0, 0]).await;
+                                    } else {
+                                        mysql_tls_test_write(&mut socket, seq, &[0xfe, 0, 0, 2, 0]).await;
+                                    }
+                                } else if upper.trim() == "SELECT VERSION()" {
+                                    // Hold the probe briefly so the second connection hits the mutex.
+                                    tokio::time::sleep(Duration::from_millis(25)).await;
+                                    let mut seq = 1u8;
+                                    mysql_tls_test_write(&mut socket, seq, &[1]).await;
+                                    seq += 1;
+                                    mysql_tls_test_write(&mut socket, seq, &mysql_test_column_def("VERSION()")).await;
+                                    seq += 1;
+                                    if !deprecate_eof {
+                                        mysql_tls_test_write(&mut socket, seq, &[0xfe, 0, 0, 2, 0]).await;
+                                        seq += 1;
+                                    }
+                                    mysql_tls_test_write(
+                                        &mut socket,
+                                        seq,
+                                        &mysql_test_text_row(&[Some("10.5.16-MariaDB")]),
+                                    )
+                                    .await;
+                                    seq += 1;
+                                    if deprecate_eof {
+                                        mysql_tls_test_write(&mut socket, seq, &[0xfe, 0, 0, 2, 0, 0, 0]).await;
+                                    } else {
+                                        mysql_tls_test_write(&mut socket, seq, &[0xfe, 0, 0, 2, 0]).await;
+                                    }
+                                } else {
+                                    mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                                }
+                            }
+                            _ => {
+                                mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                            }
+                        }
+                    }
+                }));
+            }
+            for handle in handles {
+                handle.await.unwrap();
+            }
+            let guard = queries.lock().await;
+            guard.clone()
+        });
+
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 2, &[]).await.unwrap();
+
+        let (a, b) = tokio::join!(
+            get_columns(&pool, "dbx_expr_repro_src", "t1"),
+            get_columns(&pool, "dbx_expr_repro_src", "t2"),
+        );
+        let a = a.unwrap();
+        let b = b.unwrap();
+        assert_eq!(a[0].extra.as_deref(), Some("DEFAULT_GENERATED"));
+        assert_eq!(b[0].extra.as_deref(), Some("DEFAULT_GENERATED"));
+
+        pool.disconnect().await.unwrap();
+        shutdown.cancel();
+        let queries = server.await.unwrap();
+        let version_probes = queries.iter().filter(|sql| sql.eq_ignore_ascii_case("SELECT VERSION()")).count();
+        assert_eq!(version_probes, 1, "concurrent cold get_columns must probe SELECT VERSION() once: {queries:?}");
     }
 
     #[tokio::test]

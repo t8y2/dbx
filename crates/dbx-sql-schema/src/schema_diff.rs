@@ -3523,14 +3523,34 @@ fn diff_columns_with_identifier_options(
                     if source_column.is_nullable { "YES" } else { "NO" }
                 ));
             }
-            if source_column.column_default.as_deref().unwrap_or_default()
-                != target_column.column_default.as_deref().unwrap_or_default()
-            {
+            let source_default = source_column.column_default.as_deref();
+            let target_default = target_column.column_default.as_deref();
+            if source_default.unwrap_or_default() != target_default.unwrap_or_default() {
                 changes.push(format!(
                     "default: {} → {}",
-                    target_column.column_default.as_deref().unwrap_or("NULL"),
-                    source_column.column_default.as_deref().unwrap_or("NULL")
+                    target_default.unwrap_or("NULL"),
+                    source_default.unwrap_or("NULL")
                 ));
+            } else if let (Some(src_val), Some(tgt_val)) = (source_default, target_default) {
+                // On MySQL/MariaDB, an expression default (`DEFAULT (uuid())`, marked
+                // `DEFAULT_GENERATED`) and a string literal (`DEFAULT 'uuid()'`, unmarked)
+                // can carry the exact same raw `column_default` text (`uuid()`). Compare
+                // their rendered SQL semantics so the change is not silently dropped.
+                let src_dialect = source_dialect.unwrap_or(DialectKind::Mysql);
+                let tgt_dialect = target_dialect.unwrap_or(src_dialect);
+                if src_dialect == DialectKind::Mysql
+                    && tgt_dialect == DialectKind::Mysql
+                    && (has_mysql_default_generated(source_column.extra.as_deref())
+                        || has_mysql_default_generated(target_column.extra.as_deref()))
+                {
+                    let src_rendered =
+                        default_literal(src_val, &source_type, src_dialect, source_column.extra.as_deref());
+                    let tgt_rendered =
+                        default_literal(tgt_val, &target_type, tgt_dialect, target_column.extra.as_deref());
+                    if src_rendered != tgt_rendered {
+                        changes.push(format!("default: {tgt_rendered} → {src_rendered}"));
+                    }
+                }
             }
             if compare_charset
                 && mysql_charset_values_differ(
@@ -5048,6 +5068,12 @@ fn effective_source_dialect(source_dialect: Option<DialectKind>, db_type: Databa
 /// `table_structure_sql::util::format_default_for_sql` and
 /// `transfer::format_mysql_default_literal` do the same job on their own paths;
 /// both are private to their modules.
+fn has_mysql_default_generated(extra: Option<&str>) -> bool {
+    extra.is_some_and(|value| {
+        value.split_ascii_whitespace().any(|token| token.eq_ignore_ascii_case("DEFAULT_GENERATED"))
+    })
+}
+
 fn default_literal(default: &str, data_type: &str, source: DialectKind, extra: Option<&str>) -> String {
     let normalized = default.trim();
 
@@ -5062,7 +5088,7 @@ fn default_literal(default: &str, data_type: &str, source: DialectKind, extra: O
     // MySQL 8.0.13 and later flag an expression default in `EXTRA`. That marker
     // is authoritative, so consult it before looking at the value at all: a
     // default is a literal unless the server says it was generated.
-    if extra.is_some_and(|value| value.to_ascii_uppercase().contains("DEFAULT_GENERATED")) {
+    if has_mysql_default_generated(extra) {
         return mysql_defaults::generated_default(normalized, data_type);
     }
 
@@ -12793,6 +12819,175 @@ mod tests {
                 Parser::parse_sql(&MySqlDialect {}, &sql).expect("generated ADD/CREATE must be valid MySQL syntax");
             }
         }
+    }
+
+    #[test]
+    fn mariadb_expression_defaults_preserve_function_syntax_in_schema_diff() {
+        use sqlparser::{dialect::MySqlDialect, parser::Parser};
+
+        let source = vec![
+            ColumnInfo { is_primary_key: true, ..column("id", "int(11)", None) },
+            ColumnInfo {
+                is_nullable: true,
+                column_default: Some("uuid()".into()),
+                extra: Some("DEFAULT_GENERATED".into()),
+                ..column("expr_uuid", "varchar(36)", None)
+            },
+            ColumnInfo {
+                is_nullable: true,
+                column_default: Some("concat('v','1')".into()),
+                extra: Some("DEFAULT_GENERATED".into()),
+                ..column("expr_concat", "varchar(40)", None)
+            },
+            ColumnInfo {
+                is_nullable: true,
+                column_default: Some("'uuid()'".into()),
+                ..column("literal_like_fn", "varchar(36)", None)
+            },
+        ];
+        let target = vec![
+            ColumnInfo { is_primary_key: true, ..column("id", "int(11)", None) },
+            ColumnInfo {
+                is_nullable: true,
+                column_default: Some("'old'".into()),
+                ..column("expr_uuid", "varchar(36)", None)
+            },
+            ColumnInfo {
+                is_nullable: true,
+                column_default: Some("'old'".into()),
+                ..column("expr_concat", "varchar(40)", None)
+            },
+            ColumnInfo {
+                is_nullable: true,
+                column_default: Some("'old'".into()),
+                ..column("literal_like_fn", "varchar(36)", None)
+            },
+        ];
+
+        let diffs = diff_columns_with_options(&source, &target, false, false, false, 0.5);
+        assert_eq!(diffs.len(), 3);
+
+        let plan = generate_schema_sync_sql_plan(
+            &[wrap_table_diff("t08_expression", diffs)],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            Some("dbx_expr_repro_tgt"),
+            false,
+            None,
+            &[],
+            true,
+            false,
+        );
+
+        assert!(plan.sync_sql.contains("MODIFY COLUMN `expr_uuid` varchar(36) DEFAULT (uuid())"), "{}", plan.sync_sql);
+        assert!(
+            plan.sync_sql.contains("MODIFY COLUMN `expr_concat` varchar(40) DEFAULT (concat('v','1'))"),
+            "{}",
+            plan.sync_sql
+        );
+        assert!(
+            plan.sync_sql.contains("MODIFY COLUMN `literal_like_fn` varchar(36) DEFAULT 'uuid()'"),
+            "{}",
+            plan.sync_sql
+        );
+        assert!(!plan.sync_sql.contains("MODIFY COLUMN `expr_uuid` varchar(36) DEFAULT 'uuid()'"), "{}", plan.sync_sql);
+        assert!(!plan.sync_sql.contains("DEFAULT 'concat("), "{}", plan.sync_sql);
+        Parser::parse_sql(&MySqlDialect {}, &plan.sync_sql).expect("generated MariaDB sync SQL must parse");
+
+        let rollback = plan.rollback_sync_sql.as_deref().expect("rollback SQL expected");
+        assert!(rollback.contains("MODIFY COLUMN `expr_uuid` varchar(36) DEFAULT 'old'"), "{rollback}");
+        assert!(rollback.contains("MODIFY COLUMN `expr_concat` varchar(40) DEFAULT 'old'"), "{rollback}");
+        Parser::parse_sql(&MySqlDialect {}, rollback).expect("generated MariaDB rollback SQL must parse");
+    }
+
+    #[test]
+    fn mysql_diff_detects_expression_vs_literal_default_with_same_raw_text() {
+        use sqlparser::{dialect::MySqlDialect, parser::Parser};
+
+        let expr_col = vec![ColumnInfo {
+            is_nullable: true,
+            column_default: Some("uuid()".into()),
+            extra: Some("DEFAULT_GENERATED".into()),
+            ..column("token", "varchar(36)", None)
+        }];
+        let literal_col = vec![ColumnInfo {
+            is_nullable: true,
+            column_default: Some("uuid()".into()),
+            ..column("token", "varchar(36)", None)
+        }];
+
+        // Expression source -> literal target
+        let forward_diffs = diff_columns_with_options(&expr_col, &literal_col, false, false, false, 0.5);
+        assert_eq!(forward_diffs.len(), 1);
+        assert_eq!(forward_diffs[0].changes, vec!["default: 'uuid()' → (uuid())"]);
+        let forward_plan = generate_schema_sync_sql_plan(
+            &[wrap_table_diff("t", forward_diffs)],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            None,
+            false,
+            None,
+            &[],
+            true,
+            false,
+        );
+        assert!(
+            forward_plan.sync_sql.contains("MODIFY COLUMN `token` varchar(36) DEFAULT (uuid())"),
+            "{}",
+            forward_plan.sync_sql
+        );
+        let forward_rollback = forward_plan.rollback_sync_sql.as_deref().expect("rollback SQL expected");
+        assert!(forward_rollback.contains("MODIFY COLUMN `token` varchar(36) DEFAULT 'uuid()'"), "{forward_rollback}");
+        Parser::parse_sql(&MySqlDialect {}, &forward_plan.sync_sql).expect("forward sync SQL must parse");
+        Parser::parse_sql(&MySqlDialect {}, forward_rollback).expect("forward rollback SQL must parse");
+
+        // Literal source -> expression target
+        let reverse_diffs = diff_columns_with_options(&literal_col, &expr_col, false, false, false, 0.5);
+        assert_eq!(reverse_diffs.len(), 1);
+        assert_eq!(reverse_diffs[0].changes, vec!["default: (uuid()) → 'uuid()'"]);
+        let reverse_plan = generate_schema_sync_sql_plan(
+            &[wrap_table_diff("t", reverse_diffs)],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            None,
+            false,
+            None,
+            &[],
+            true,
+            false,
+        );
+        assert!(
+            reverse_plan.sync_sql.contains("MODIFY COLUMN `token` varchar(36) DEFAULT 'uuid()'"),
+            "{}",
+            reverse_plan.sync_sql
+        );
+        let reverse_rollback = reverse_plan.rollback_sync_sql.as_deref().expect("rollback SQL expected");
+        assert!(reverse_rollback.contains("MODIFY COLUMN `token` varchar(36) DEFAULT (uuid())"), "{reverse_rollback}");
+        Parser::parse_sql(&MySqlDialect {}, &reverse_plan.sync_sql).expect("reverse sync SQL must parse");
+        Parser::parse_sql(&MySqlDialect {}, reverse_rollback).expect("reverse rollback SQL must parse");
+
+        // Equivalent temporal keyword default across MySQL 8 (DEFAULT_GENERATED) and 5.7 (no marker) must not diff.
+        let ts_marked = vec![ColumnInfo {
+            is_nullable: false,
+            column_default: Some("CURRENT_TIMESTAMP".into()),
+            extra: Some("DEFAULT_GENERATED".into()),
+            ..column("created_at", "timestamp", None)
+        }];
+        let ts_unmarked = vec![ColumnInfo {
+            is_nullable: false,
+            column_default: Some("CURRENT_TIMESTAMP".into()),
+            ..column("created_at", "timestamp", None)
+        }];
+        assert!(diff_columns_with_options(&ts_marked, &ts_unmarked, false, false, false, 0.5).is_empty());
     }
 
     #[test]

@@ -1716,7 +1716,7 @@ html.dbx-linux-floating .dbx-desktop-window-frame::before {
 }
 
 :root {
-  --dbx-data-grid-font-family: "Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --dbx-data-grid-font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei";
 }
 
 .dbx-data-grid-font-family {

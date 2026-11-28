@@ -33,7 +33,31 @@ class FoldRangeMarker extends RangeValue {
   endSide = 1;
 }
 
+class FoldEndingMarker extends RangeValue {
+  point = true;
+
+  eq(other: RangeValue): boolean {
+    return other instanceof FoldEndingMarker;
+  }
+}
+
 const foldRangeMarker = new FoldRangeMarker();
+
+function foldRangeSet(folds: Iterable<FoldRange>): RangeSet<FoldRangeMarker> {
+  return RangeSet.of(
+    [...folds].map((range) => foldRangeMarker.range(range.from, range.to)),
+    true,
+  );
+}
+
+const foldEndingMarker = new FoldEndingMarker();
+
+function foldEndingRangeSet(folds: Iterable<FoldRange>): RangeSet<FoldEndingMarker> {
+  return RangeSet.of(
+    [...folds].map((range) => foldEndingMarker.range(range.to, range.to)),
+    true,
+  );
+}
 
 interface QueryEditorStatementBoundariesOptions {
   props: Readonly<QueryEditorProps>;
@@ -64,6 +88,7 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
     doc: import("@codemirror/state").Text;
     startsIndex: StatementGutterStartIndex;
     folds: RangeSet<FoldRangeMarker>;
+    endingFolds: RangeSet<FoldEndingMarker>;
     frameRange: { from: number; to: number } | null;
     fresh: boolean;
     generation: number;
@@ -96,12 +121,8 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
     statementBoundariesView = {
       doc: state.doc,
       startsIndex: statementGutterStartIndexForCache(result),
-      folds: folds
-        ? RangeSet.of(
-            [...folds.values()].map((range) => foldRangeMarker.range(range.from, range.to)),
-            true,
-          )
-        : RangeSet.empty,
+      folds: folds ? foldRangeSet(folds.values()) : RangeSet.empty,
+      endingFolds: folds ? foldEndingRangeSet(folds.values()) : RangeSet.empty,
       frameRange: null,
       fresh: true,
       generation: statementBoundariesGeneration,
@@ -148,6 +169,7 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
     doc: import("@codemirror/state").Text;
     startsIndex: StatementGutterStartIndex;
     folds: RangeSet<FoldRangeMarker>;
+    endingFolds: RangeSet<FoldEndingMarker>;
     frameRange: { from: number; to: number } | null;
     fresh: boolean;
     generation: number;
@@ -161,7 +183,7 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
   // reference current through ChangeSet mapping, so this stays cheap.
   function statementBoundariesForState(state: import("@codemirror/state").EditorState): StatementBoundariesView {
     if (statementBoundariesView && statementBoundariesView.doc === state.doc && statementBoundariesView.generation === statementBoundariesGeneration) return statementBoundariesView;
-    statementBoundariesView = { doc: state.doc, startsIndex: { starts: RangeSet.empty, executableLineStarts: RangeSet.empty }, folds: RangeSet.empty, frameRange: null, fresh: false, generation: statementBoundariesGeneration, windowFolded: new Set(), foldsTree: null };
+    statementBoundariesView = { doc: state.doc, startsIndex: { starts: RangeSet.empty, executableLineStarts: RangeSet.empty }, folds: RangeSet.empty, endingFolds: RangeSet.empty, frameRange: null, fresh: false, generation: statementBoundariesGeneration, windowFolded: new Set(), foldsTree: null };
     refreshStatementBoundaries(state);
     return statementBoundariesView!;
   }
@@ -175,15 +197,21 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
     if (!parseWindowTree || !boundaries.fresh || !analysis || analysis.doc !== state.doc) return;
     const databaseType = queryEditorStatementDatabaseType(props.databaseType, props.mongoQueryLanguage);
     const additions: Array<ReturnType<typeof foldRangeMarker.range>> = [];
+    const endingAdditions: Array<ReturnType<typeof foldEndingMarker.range>> = [];
     for (const statement of statementsOverlapping(analysis.ranges, lineStart, lineEnd)) {
       if (boundaries.windowFolded.has(statement.from)) continue;
       boundaries.windowFolded.add(statement.from);
       if (statement.to - statement.from > WINDOW_FOLD_MAX_STATEMENT_LENGTH) continue;
       const text = state.sliceDoc(statement.from, statement.to);
       const folds = computeBlockFoldRanges(EditorState.create({ doc: text }), databaseType, parseWindowTree(text));
-      for (const range of folds.values()) additions.push(foldRangeMarker.range(statement.from + range.from, statement.from + range.to));
+      for (const range of folds.values()) {
+        const absolute = { from: statement.from + range.from, to: statement.from + range.to };
+        additions.push(foldRangeMarker.range(absolute.from, absolute.to));
+        endingAdditions.push(foldEndingMarker.range(absolute.to, absolute.to));
+      }
     }
     if (additions.length > 0) boundaries.folds = boundaries.folds.update({ add: additions, sort: true });
+    if (endingAdditions.length > 0) boundaries.endingFolds = boundaries.endingFolds.update({ add: endingAdditions, sort: true });
   }
 
   // Below the large-document threshold the main thread already holds a full syntax tree, so folds are
@@ -198,10 +226,8 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
     if (boundaries.foldsTree === tree) return;
     boundaries.foldsTree = tree;
     const folds = computeBlockFoldRanges(state, props.databaseType, tree);
-    boundaries.folds = RangeSet.of(
-      [...folds.values()].map((range) => foldRangeMarker.range(range.from, range.to)),
-      true,
-    );
+    boundaries.folds = foldRangeSet(folds.values());
+    boundaries.endingFolds = foldEndingRangeSet(folds.values());
   }
 
   function scheduleStatementBoundariesRefresh(currentView: EditorViewType) {
@@ -238,7 +264,11 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
             statementBoundariesView = {
               doc: update.state.doc,
               startsIndex: mapStatementGutterStartIndex(boundaries.startsIndex, update.changes),
+              // Map both indexes through the edit. The debounce rebuild can
+              // correct structural changes, while the mapped points keep the
+              // gutter responsive without reparsing or rebuilding all ranges.
               folds: boundaries.folds.map(update.changes),
+              endingFolds: boundaries.endingFolds.map(update.changes),
               frameRange: boundaries.frameRange
                 ? {
                     from: update.changes.mapPos(boundaries.frameRange.from, 1),
@@ -273,6 +303,25 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
         if (from !== lineEnd) return;
         range = { from, to };
         return false;
+      });
+      return range;
+    },
+    foldRangeEndingAtLine(state: EditorState, lineStart: number): FoldRange | null {
+      const lineEnd = state.doc.lineAt(lineStart).to;
+      const boundaries = statementBoundariesForState(state);
+      if (!shouldUseQueryEditorLargeDocumentModeForSize(state.doc.length, state.doc.lines)) ensureSyntaxFolds(state, boundaries);
+      else if (!shouldParseQueryEditorSyntax(state.doc.length)) ensureWindowFolds(state, boundaries, lineStart, lineEnd);
+      let hasEnding = false;
+      boundaries.endingFolds.between(lineStart, lineEnd, () => {
+        hasEnding = true;
+        return false;
+      });
+      if (!hasEnding) return null;
+
+      let range: FoldRange | null = null;
+      boundaries.folds.between(lineStart, lineEnd, (from, to) => {
+        if (to < lineStart || to > lineEnd) return;
+        if (!range || to - from < range.to - range.from) range = { from, to };
       });
       return range;
     },

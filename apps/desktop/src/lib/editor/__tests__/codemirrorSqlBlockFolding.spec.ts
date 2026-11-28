@@ -264,6 +264,17 @@ END`;
     expect(foldedTextAtLine(state, 1)).toBe("\n  SELECT 'BEGIN END CASE', \"END\";\n  /* BEGIN nested comment END */\n");
   });
 
+  it("folds a multiline top-level SELECT through its statement terminator", () => {
+    const sql = `SELECT customer_id,
+  total_amount
+FROM customer_order_summary
+WHERE total_amount > 0
+ORDER BY total_amount DESC;`;
+    const state = stateFor(sql);
+
+    expect(foldedTextAtLine(state, 1)).toBe("\n  total_amount\nFROM customer_order_summary\nWHERE total_amount > 0\nORDER BY total_amount DESC");
+  });
+
   it("returns null for a line with no block opener", () => {
     const sql = "SELECT 1;\nSELECT 2;";
     const state = stateFor(sql);

@@ -133,6 +133,7 @@ import type { ShortcutActionId } from "@/lib/editor/shortcutRegistry";
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
 
 import { createInsertValueHintsExtension, requestInsertValueHintsRefresh, supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
+import { createConsistentFoldGutter } from "@/lib/editor/codemirrorFoldGutter";
 import { createSqlBlockFoldService, sqlBeginEndMatching } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
 import { createSqlUnknownObjectHighlights, refreshSqlUnknownObjectHighlights } from "@/lib/editor/codemirrorSqlUnknownObjectHighlights";
@@ -2267,7 +2268,6 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       history,
       historyKeymap,
       bracketMatching,
-      foldGutter,
       indentOnInput,
       syntaxHighlighting,
       defaultHighlightStyle,
@@ -2371,16 +2371,13 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         keepGuttersAttachedDuringSync(ViewPlugin),
         highlightSpecialChars(),
         initializedRuntime.historyResetComp.of(history()),
-        foldGutter({
-          foldingChanged: (update) => update.transactions.some((transaction) => transaction.effects.some((effect) => !!codeMirrorRuntime.statementBoundariesRefreshEffect && effect.is(codeMirrorRuntime.statementBoundariesRefreshEffect))),
-          markerDOM(open: boolean) {
-            const span = document.createElement("span");
-            span.className = "cm-foldMarker-svg";
-            span.innerHTML = open
-              ? '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4.5 6.5l3.5 3.5 3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
-              : '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6.5 4.5l3.5 3.5-3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-            return span;
+        createConsistentFoldGutter({
+          markerLabels: {
+            fold: () => t("editor.contextMenu.toggleFold"),
+            unfold: () => t("editor.contextMenu.toggleFold"),
           },
+          foldingChanged: (update) => update.transactions.some((transaction) => transaction.effects.some((effect) => !!codeMirrorRuntime.statementBoundariesRefreshEffect && effect.is(codeMirrorRuntime.statementBoundariesRefreshEffect))),
+          foldRangeEndingAtLine: (state, lineStart) => statementBoundaries.foldRangeEndingAtLine(state, lineStart),
         }),
         createSqlBlockFoldService(() => props.databaseType, statementBoundaries.foldRangeForState),
         drawSelection(),

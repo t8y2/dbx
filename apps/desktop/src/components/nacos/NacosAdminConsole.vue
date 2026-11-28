@@ -71,6 +71,7 @@ import { nacosConfigYamlLintDiagnostics, nacosConfigYamlLintExtension } from "@/
 import { translateNacosYamlDiagnostic } from "@/lib/nacos/nacosYamlDiagnostics";
 import type { NacosConfigEditorViewport } from "@/types/database";
 import type {
+  NacosAdminConfig,
   NacosBatchPreview,
   NacosBatchReport,
   NacosConfigHistoryItem,
@@ -151,7 +152,11 @@ const infoLoading = ref(false);
 
 const configLoading = ref(false);
 const configError = ref("");
-const configGroup = ref(restoredUiState.configGroup ?? "");
+const defaultConfigGroup = computed(() => {
+  const config = connectionStore.getConfig(props.connectionId)?.external_config as NacosAdminConfig | undefined;
+  return typeof config?.defaultConfigGroup === "string" ? config.defaultConfigGroup.trim() : "";
+});
+const configGroup = ref(restoredUiState.configGroup ?? defaultConfigGroup.value);
 const configDataId = ref(restoredUiState.configDataId ?? "");
 const configAppName = ref(restoredUiState.configAppName ?? "");
 const configPageNo = ref(restoredUiState.configPageNo ?? 1);
@@ -372,7 +377,7 @@ const nacosConsoleUrl = computed(() => {
   const config = connectionStore.getConfig(props.connectionId)?.external_config;
   if (!config || typeof config !== "object" || Array.isArray(config)) return undefined;
   try {
-    return resolveNacosConsoleUrl(config as import("@/types/nacos").NacosAdminConfig);
+    return resolveNacosConsoleUrl(config as NacosAdminConfig);
   } catch {
     return undefined;
   }
@@ -1076,7 +1081,7 @@ async function loadConfigs(page = configPageNo.value): Promise<boolean> {
     const result = await api.nacosListConfigs(connectionId, {
       namespace: requestNamespace || undefined,
       group: requestGroup || undefined,
-      groupContains: true,
+      groupContains: !defaultConfigGroup.value || requestGroup !== defaultConfigGroup.value,
       dataId: requestDataId || undefined,
       appName: requestAppName || undefined,
       pageNo: page,
@@ -2701,7 +2706,8 @@ watch(
 
 watch(
   () => [props.connectionId, props.namespace] as const,
-  async () => {
+  async ([connectionId], [previousConnectionId]) => {
+    if (connectionId !== previousConnectionId) configGroup.value = defaultConfigGroup.value;
     closePendingConfigMutationConfirmations();
     configListRequestGuard.invalidate();
     configDetailRequestGuard.invalidate();

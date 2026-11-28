@@ -12257,6 +12257,8 @@ export default withEnglishFallback({
     registerInstance: "Registrar instancia",
     deregister: "Dar de baja",
     nacosContextPathHint: "Cuando se deja vacío, se usa el valor predeterminado del modo de conexión actual; si se usa explícitamente la ruta raíz del servicio, complete /; en escenarios de proxy inverso, puede completar prefijos como /nacos.",
+    defaultConfigGroup: "Grupo de configuración predeterminado",
+    defaultConfigGroupHint: "Al abrir un nuevo espacio de nombres, solo se muestran las configuraciones de este grupo. Déjelo vacío para mostrar todos los grupos.",
   },
   databaseBrowser: {
     search: "Buscar bases de datos...",

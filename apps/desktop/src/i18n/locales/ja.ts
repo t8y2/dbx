@@ -12236,6 +12236,8 @@ export default withEnglishFallback({
     registerInstance: "インスタンスを登録",
     deregister: "解除",
     nacosContextPathHint: "空欄の場合は現在の接続モードの既定値を使用します。サービスルートパスを明示的に使用する場合は / を入力し、リバースプロキシのシナリオでは /nacos などのプレフィックスを入力できます。",
+    defaultConfigGroup: "デフォルト設定グループ",
+    defaultConfigGroupHint: "新しい名前空間を開いたときは、このグループの設定のみを表示します。空欄にするとすべてのグループが表示されます。",
   },
   databaseBrowser: {
     search: "データベースを検索...",

@@ -10911,6 +10911,8 @@ export default withEnglishFallback({
     registerInstance: "註冊實例",
     deregister: "註銷",
     nacosContextPathHint: "留空時使用目前連線模式的預設值；明確使用服務根路徑請填寫 /，反向代理情境可填寫 /nacos 等前綴。",
+    defaultConfigGroup: "預設設定群組",
+    defaultConfigGroupHint: "新開啟命名空間時，只顯示此群組的設定。留空則顯示所有群組。",
   },
   userAdmin: {
     accountStatus: "鎖定狀態",

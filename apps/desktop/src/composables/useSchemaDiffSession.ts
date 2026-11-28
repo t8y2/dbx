@@ -7,6 +7,7 @@ import { filterSchemaDiffTables } from "@/lib/schema/schemaDiffTableFilter";
 import { compileSchemaDiffTableFilter } from "@/lib/schema/schemaDiffTableFilter";
 import { filterSchemaDiffFunctions, schemaDiffRoutineKeyFromFunction } from "@/lib/schema/schemaDiffRoutine";
 import { loadSchemaDetails, schemaDiffDeferredDdlTables } from "@/lib/schema/schemaDiffMetadataLoad";
+import { loadSchemaDiffSqlFileSnapshot } from "@/lib/schema/schemaDiffSqlFileSource";
 import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
 import { registerSchemaDiffTask } from "@/lib/schema/schemaDiffCancellation";
 import type { SchemaDiffTableIdentity, SchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
@@ -44,6 +45,12 @@ export interface SchemaDiffSessionConfig {
   options: SchemaDiffCompareOptions;
   ignoreComments: boolean;
   label: string;
+  /**
+   * Where the source snapshot comes from. A schema-only dump keeps its tables
+   * and columns locally, so the side has no connection to load them from.
+   */
+  sourceKind?: "connection" | "sqlFile";
+  sourceSqlFilePath?: string;
 }
 
 export type SchemaDiffSessionStatus = "running" | "completed" | "failed";
@@ -171,7 +178,10 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
   const targetRoutineType = schemaDiffRoutineProductType(input.targetDbType, input.targetEngineDbType);
   const routineKinds = options.routineObjectKinds ?? schemaDiffRoutineObjectTypesIntersection(sourceRoutineType, targetRoutineType);
   const typedRoutines = options.routineObjectKinds !== undefined;
-  const loadRoutines = shouldLoadSchemaDiffRoutines(sourceRoutineType, targetRoutineType, options);
+  const sqlFileSource = input.sourceKind === "sqlFile" && !!input.sourceSqlFilePath;
+  // A dump describes tables only, so routine comparison is unavailable: an empty
+  // source routine list would otherwise turn every target routine into a drop.
+  const loadRoutines = !sqlFileSource && shouldLoadSchemaDiffRoutines(sourceRoutineType, targetRoutineType, options);
   const sessionOptions = options;
   const isPostgresLike = isSchemaDiffPostgresLike(input.targetDbType);
   const hasExtraObjectPhase = shouldLoadSchemaDiffExtraObjectPhase(sourceRoutineType, targetRoutineType, sessionOptions);
@@ -200,6 +210,7 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
         connectionId: input.sourceConnectionId,
         database: input.sourceDatabase,
         schema: input.sourceSchema,
+        ...(sqlFileSource ? { sqlFilePath: input.sourceSqlFilePath } : {}),
       };
       const targetTableIdentity: SchemaDiffTableIdentity = {
         connectionId: input.targetConnectionId,
@@ -217,25 +228,38 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
       // means the compare falls back to whatever the cache returns. Users can
       // opt out via `refreshMetadata` to reuse the cache for faster compares.
       if (sessionOptions.refreshMetadata) {
-        await Promise.all([invalidateObjectMetadataCache({ connectionId: input.sourceConnectionId, database: input.sourceDatabase }), invalidateObjectMetadataCache({ connectionId: input.targetConnectionId, database: input.targetDatabase })]);
+        const invalidations = [];
+        if (!sqlFileSource) invalidations.push(invalidateObjectMetadataCache({ connectionId: input.sourceConnectionId, database: input.sourceDatabase }));
+        invalidations.push(invalidateObjectMetadataCache({ connectionId: input.targetConnectionId, database: input.targetDatabase }));
+        await Promise.all(invalidations);
         signal.throwIfAborted();
       }
 
       publishProgress(session, { phase: "loading-source-details", current: 0, total: sourceTables.length });
-      sourceDetails = await loadSchemaDetails(
-        sourceTables,
-        {
-          connectionId: input.sourceConnectionId,
-          database: input.sourceDatabase,
-          schema: input.sourceSchema,
-          dbType: input.sourceDbType,
-          options: sessionOptions,
-          deferredDdlTables: schemaDiffDeferredDdlTables(input.sourceDbType, sourceTables, targetTables, sessionOptions.tableMappings),
-          signal,
-          onProgress: (progress) => publishProgress(session, { phase: "loading-source-details", ...progress }),
-        },
-        api,
-      );
+      if (sqlFileSource) {
+        // The dump is parsed for the target database name so that its foreign
+        // keys carry the schema qualifier a live target reports.
+        const snapshot = await loadSchemaDiffSqlFileSnapshot(input.sourceSqlFilePath!, input.targetDatabase);
+        signal.throwIfAborted();
+        const selected = new Set(sourceTables.map((table) => table.name));
+        sourceDetails = snapshot.details.filter((detail) => selected.has(detail.name));
+        publishProgress(session, { phase: "loading-source-details", current: sourceTables.length, total: sourceTables.length });
+      } else {
+        sourceDetails = await loadSchemaDetails(
+          sourceTables,
+          {
+            connectionId: input.sourceConnectionId,
+            database: input.sourceDatabase,
+            schema: input.sourceSchema,
+            dbType: input.sourceDbType,
+            options: sessionOptions,
+            deferredDdlTables: schemaDiffDeferredDdlTables(input.sourceDbType, sourceTables, targetTables, sessionOptions.tableMappings),
+            signal,
+            onProgress: (progress) => publishProgress(session, { phase: "loading-source-details", ...progress }),
+          },
+          api,
+        );
+      }
 
       signal.throwIfAborted();
       publishProgress(session, { phase: "loading-target-details", current: 0, total: targetTables.length });

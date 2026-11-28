@@ -15,12 +15,14 @@ const trackerMock = vi.hoisted(() => ({
   addSchemaDiffTask: vi.fn(),
   updateCompareTask: vi.fn(),
 }));
+const sqlFileMock = vi.hoisted(() => ({ loadSchemaDiffSqlFileSnapshot: vi.fn() }));
 
 vi.mock("@/lib/backend/api", () => apiMock);
 vi.mock("@/composables/useDialogSources", () => ({ openSchemaDiffSession: openMock }));
 vi.mock("@/composables/useExportTracker", () => ({ useExportTracker: () => trackerMock }));
 vi.mock("@/lib/schema/schemaDiffMetadataLoad", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/schema/schemaDiffMetadataLoad")>()), loadSchemaDetails: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/lib/metadata/objectMetadataCache", () => ({ invalidateObjectMetadataCache: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("@/lib/schema/schemaDiffSqlFileSource", () => sqlFileMock);
 
 const { replaceSchemaDiffSessionInGroup, startSchemaDiffSession, startSchemaDiffSessions } = await import("../useSchemaDiffSession.ts");
 
@@ -270,6 +272,52 @@ async function waitForSession(session: { status: string }) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 }
+
+test("reads a schema-only dump instead of a source connection", async () => {
+  vi.clearAllMocks();
+  apiMock.prepareSchemaDiff.mockResolvedValue({ diffs: [], renameCandidates: [], syncSql: "", rollbackSyncSql: "" });
+  sqlFileMock.loadSchemaDiffSqlFileSnapshot.mockResolvedValue({
+    tables: [],
+    details: [{ name: "users", columns: [], indexes: [], foreign_keys: [], triggers: [], ddl: null }],
+    functions: [],
+    warnings: [],
+  });
+  const tableListLoader = {
+    load: vi.fn(async (_identity: { sqlFilePath?: string }) => [{ name: "users", table_type: "BASE TABLE" }]),
+  };
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "",
+      sourceDatabase: "",
+      sourceSchema: "",
+      targetConnectionId: "target",
+      targetDatabase: "warehouse",
+      targetSchema: "",
+      sourceDbType: "mysql",
+      targetDbType: "mysql",
+      options: { ...DEFAULT_MYSQL_OPTIONS },
+      ignoreComments: false,
+      label: "dump.sql → warehouse",
+      sourceKind: "sqlFile",
+      sourceSqlFilePath: "/tmp/dump.sql",
+    },
+    { tableListLoader },
+  );
+  await waitForSession(session);
+  assert.equal(session.status, "completed");
+  assert.equal(tableListLoader.load.mock.calls[0][0].sqlFilePath, "/tmp/dump.sql");
+  assert.deepEqual(sqlFileMock.loadSchemaDiffSqlFileSnapshot.mock.calls[0], ["/tmp/dump.sql", "warehouse"]);
+  // The dump has no routines, so a compare must not read them from the target
+  // either: an empty source list would otherwise drop every target routine.
+  assert.equal(apiMock.listFunctions.mock.calls.length, 0);
+  const [{ sourceDetails, sourceFunctions }] = apiMock.prepareSchemaDiff.mock.calls[0];
+  assert.deepEqual(
+    sourceDetails.map((detail: { name: string }) => detail.name),
+    ["users"],
+  );
+  assert.deepEqual(sourceFunctions, []);
+  vi.clearAllMocks();
+});
 
 test("defaults enable tables and functions compare for common targets", () => {
   assert.equal(DEFAULT_MYSQL_OPTIONS.tables, true);

@@ -32,6 +32,7 @@ import { buildContinueOnErrorDeployLog, buildDeployTxResult, type DeployTxResult
 import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjectPhase, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
 import { schemaDiffDefersTableDdl } from "@/lib/schema/schemaDiffMetadataLoad";
 import { createSchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
+import { loadSchemaDiffSqlFileSnapshot } from "@/lib/schema/schemaDiffSqlFileSource";
 import { countSchemaDiffActionableObjects, partitionSchemaDiffObjectsByResultTab, swapSchemaDiffRoutineMappings } from "@/lib/schema/schemaDiffRoutine";
 import { schemaDiffRoutineObjectTypesIntersection, schemaDiffRoutineProductType } from "@/lib/database/databaseObjectCapabilities";
 import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
@@ -101,6 +102,9 @@ const settingsStore = useSettingsStore();
 const schemaDiffTableListLoader = createSchemaDiffTableListLoader({
   ensureConnected: (connectionId) => store.ensureConnected(connectionId),
   listTables: (connectionId, database, schema) => api.listTables(connectionId, database, schema),
+  // The dump is parsed under the target database name so that its foreign keys
+  // carry the schema qualifier the live target reports.
+  loadSqlFileTables: (identity) => loadSchemaDiffSqlFileSnapshot(identity.sqlFilePath ?? "", targetDatabase.value).then((snapshot) => snapshot.tables),
 });
 
 const props = defineProps<{
@@ -119,6 +123,8 @@ const step = ref<"config" | "compare" | "result" | "deploy-review">("config");
 const showConfirmDialog = ref(false);
 
 // Source/Target selections
+const sourceKind = ref<"connection" | "sqlFile">("connection");
+const sourceSqlFilePath = ref("");
 const sourceConnectionId = ref("");
 const sourceDatabase = ref("");
 const sourceSchema = ref("");
@@ -131,7 +137,20 @@ const ignoreComments = ref(false);
 const showOptionsPanel = ref(false);
 const showFieldMappingDialog = ref(false);
 const showConfigSelector = ref(false);
-const sourceDbType = computed(() => store.getConfig(sourceConnectionId.value)?.db_type ?? "");
+const schemaDiffSqlFileSource = computed(() => sourceKind.value === "sqlFile" && !!sourceSqlFilePath.value);
+/** Dumps are MySQL-family only; a file source adopts the target product when it is compatible. */
+const MYSQL_FAMILY_DB_TYPES = new Set(["mysql", "mariadb", "tidb", "oceanbase", "tdsql", "polardb", "greatsql", "custom_mysql", "goldendb", "dolt"]);
+function schemaFileDbType(target: string | undefined): string {
+  return target && MYSQL_FAMILY_DB_TYPES.has(target) ? target : "mysql";
+}
+const sqlFileSourceAvailable = computed(() => MYSQL_FAMILY_DB_TYPES.has(targetDbType.value));
+function schemaFilePathLabel(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+const sourceDbType = computed(() => {
+  if (sourceKind.value === "sqlFile") return schemaFileDbType(store.getConfig(targetConnectionId.value)?.db_type);
+  return store.getConfig(sourceConnectionId.value)?.db_type ?? "";
+});
 const targetDbType = computed(() => store.getConfig(targetConnectionId.value)?.db_type ?? "");
 // A JDBC connection stores `jdbc` in db_type while its product lives in the driver
 // profile; the diff engine needs the product for clause shapes and view comparison.
@@ -717,7 +736,7 @@ function comparisonEndpointLabel(connectionId: string, database: string, schema:
  * already the only place the choice was visible.
  */
 const comparisonEndpoints = computed(() => ({
-  source: comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value),
+  source: schemaDiffSqlFileSource.value ? schemaFilePathLabel(sourceSqlFilePath.value) : comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value),
   target: comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, targetSchema.value),
 }));
 
@@ -727,6 +746,8 @@ function restoreSchemaDiffSession(session: SchemaDiffSession): void {
     sourceConnectionId.value = config.sourceConnectionId;
     sourceDatabase.value = config.sourceDatabase;
     sourceSchema.value = config.sourceSchema;
+    sourceKind.value = config.sourceKind === "sqlFile" ? "sqlFile" : "connection";
+    sourceSqlFilePath.value = config.sourceSqlFilePath ?? "";
     targetConnectionId.value = config.targetConnectionId;
     targetDatabase.value = config.targetDatabase;
     targetSchema.value = config.targetSchema;
@@ -737,6 +758,8 @@ function restoreSchemaDiffSession(session: SchemaDiffSession): void {
     sourceConnectionId: config.sourceConnectionId,
     sourceDatabase: config.sourceDatabase,
     sourceSchema: config.sourceSchema,
+    sourceKind: config.sourceKind === "sqlFile" ? "sqlFile" : "connection",
+    sourceSqlFilePath: config.sourceSqlFilePath ?? "",
     targetConnectionId: config.targetConnectionId,
     targetDatabase: config.targetDatabase,
     targetSchema: config.targetSchema,
@@ -883,8 +906,10 @@ watch(resultTab, (_tab, previous) => {
 });
 
 // Config sync
-watch([sourceConnectionId, sourceDatabase, sourceSchema, targetConnectionId, targetDatabase, targetSchema], ([srcConn, srcDb, srcSchema, tgtConn, tgtDb, tgtSchema]) => {
+watch([sourceKind, sourceSqlFilePath, sourceConnectionId, sourceDatabase, sourceSchema, targetConnectionId, targetDatabase, targetSchema], ([kind, filePath, srcConn, srcDb, srcSchema, tgtConn, tgtDb, tgtSchema]) => {
   updateActiveConfigConnection({
+    sourceKind: kind,
+    sourceSqlFilePath: filePath,
     sourceConnectionId: srcConn,
     sourceDatabase: srcDb,
     sourceSchema: srcSchema,
@@ -914,6 +939,28 @@ function handleSourceConnectionChange(connectionId: string): void {
   sourceConnectionId.value = connectionId;
   sourceDatabase.value = "";
   sourceSchema.value = "";
+  sourceKind.value = "connection";
+  sourceSqlFilePath.value = "";
+  clearCompareObjectSelection();
+}
+
+/** Switching to a dump drops the connection identity, and vice versa. */
+function handleSourceKindChange(kind: "connection" | "sqlFile"): void {
+  if (kind === sourceKind.value) return;
+  sourceKind.value = kind;
+  if (kind === "sqlFile") {
+    sourceConnectionId.value = "";
+    sourceDatabase.value = "";
+    sourceSchema.value = "";
+  } else {
+    sourceSqlFilePath.value = "";
+  }
+  clearCompareObjectSelection();
+}
+
+function handleSourceSqlFileChange(path: string): void {
+  if (path === sourceSqlFilePath.value) return;
+  sourceSqlFilePath.value = path;
   clearCompareObjectSelection();
 }
 
@@ -978,6 +1025,8 @@ function getDbType(): DatabaseType {
 }
 
 function handleSwap() {
+  // A dump is only ever the source, so the sides cannot trade places.
+  if (sourceKind.value === "sqlFile") return;
   const currentOptions = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType());
   const swappedMappings = swapSchemaDiffTableMappings(currentOptions.tableMappings ?? []);
   const swappedSelectedTables = Array.isArray(currentOptions.selectedTables) ? swappedMappings.map((mapping) => mapping.sourceTable) : undefined;
@@ -1073,6 +1122,7 @@ function handleRecompare(): void {
     config?.sourceConnectionId === sourceConnectionId.value &&
     config.sourceDatabase === sourceDatabase.value &&
     config.sourceSchema === sourceSchema.value &&
+    (config.sourceSqlFilePath ?? "") === (schemaDiffSqlFileSource.value ? sourceSqlFilePath.value : "") &&
     config.targetConnectionId === targetConnectionId.value &&
     config.targetDatabase === targetDatabase.value &&
     config.targetSchema === targetSchema.value;
@@ -1082,11 +1132,12 @@ function handleRecompare(): void {
 
 function handleCompare(): SchemaDiffSession | undefined {
   if (!confirmDiscardDeployEdits()) return;
+  const sqlFileSource = schemaDiffSqlFileSource.value;
   const sourceConfig = store.getConfig(sourceConnectionId.value);
   const targetConfig = store.getConfig(targetConnectionId.value);
-  if (!supportsDatabaseCompare(sourceConfig, "schema") || !supportsDatabaseCompare(targetConfig, "schema")) return;
+  if ((!sqlFileSource && !supportsDatabaseCompare(sourceConfig, "schema")) || !supportsDatabaseCompare(targetConfig, "schema")) return;
   const targetDbType = (targetConfig?.db_type || "mysql") as DatabaseType;
-  const sourceDbType = sourceConfig?.db_type || targetDbType;
+  const sourceDbType = sqlFileSource ? schemaFileDbType(targetDbType) : sourceConfig?.db_type || targetDbType;
   const options = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, targetDbType);
 
   appliedSessionResult = null;
@@ -1096,19 +1147,21 @@ function handleCompare(): SchemaDiffSession | undefined {
   const pairs = [{ source: sourceSchema.value, target: targetSchema.value }, ...additionalSchemas.value.map((schema) => ({ source: schema, target: schema }))];
   const [session] = startSchemaDiffSessions(
     pairs.map(({ source, target }) => ({
-      sourceConnectionId: sourceConnectionId.value,
-      sourceDatabase: sourceDatabase.value,
-      sourceSchema: source,
+      sourceConnectionId: sqlFileSource ? "" : sourceConnectionId.value,
+      sourceDatabase: sqlFileSource ? "" : sourceDatabase.value,
+      sourceSchema: sqlFileSource ? "" : source,
+      sourceKind: sqlFileSource ? "sqlFile" : "connection",
+      ...(sqlFileSource ? { sourceSqlFilePath: sourceSqlFilePath.value } : {}),
       targetConnectionId: targetConnectionId.value,
       targetDatabase: targetDatabase.value,
       targetSchema: target,
       sourceDbType,
       targetDbType,
-      sourceEngineDbType: sourceEngineDbType.value,
+      sourceEngineDbType: sqlFileSource ? undefined : sourceEngineDbType.value,
       targetEngineDbType: targetEngineDbType.value,
       options,
       ignoreComments: ignoreComments.value,
-      label: `${comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, source)} → ${comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, target)}`,
+      label: `${sqlFileSource ? schemaFilePathLabel(sourceSqlFilePath.value) : comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, source)} → ${comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, target)}`,
     })),
     { tableListLoader: schemaDiffTableListLoader },
   );
@@ -1533,6 +1586,8 @@ function applyConfigToForm(config: SchemaDiffConfig) {
     sourceConnectionId.value = config.sourceConnectionId;
     sourceDatabase.value = config.sourceDatabase;
     sourceSchema.value = config.sourceSchema;
+    sourceKind.value = config.sourceKind === "sqlFile" ? "sqlFile" : "connection";
+    sourceSqlFilePath.value = config.sourceSqlFilePath ?? "";
     targetConnectionId.value = config.targetConnectionId;
     targetDatabase.value = config.targetDatabase;
     targetSchema.value = config.targetSchema;
@@ -1550,6 +1605,8 @@ function snapshotCurrentConfig(name: string): SchemaDiffConfig {
     sourceConnectionId: sourceConnectionId.value,
     sourceDatabase: sourceDatabase.value,
     sourceSchema: sourceSchema.value,
+    sourceKind: sourceKind.value,
+    sourceSqlFilePath: sourceSqlFilePath.value,
     targetConnectionId: targetConnectionId.value,
     targetDatabase: targetDatabase.value,
     targetSchema: targetSchema.value,
@@ -1807,7 +1864,12 @@ const targetConnectionInfo = computed(() => {
           v-if="step === 'config'"
           class="shrink-0"
           :source-connection-id="sourceConnectionId"
+          :source-kind="sourceKind"
+          :source-sql-file-path="sourceSqlFilePath"
+          :sql-file-source-available="sqlFileSourceAvailable"
           @update:source-connection-id="handleSourceConnectionChange"
+          @update:source-kind="handleSourceKindChange"
+          @update:source-sql-file-path="handleSourceSqlFileChange"
           v-model:source-database="sourceDatabase"
           v-model:source-schema="sourceSchema"
           v-model:target-connection-id="targetConnectionId"

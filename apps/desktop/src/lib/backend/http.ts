@@ -1564,6 +1564,10 @@ export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): 
   return schemaDiffPreparationFromWire(await post<SchemaDiffPreparationWire>("/api/schema-diff/prepare", schemaDiffPreparationToWire(options)));
 }
 
+export async function parseSchemaDiffSqlFile(sql: string, database?: string, dbType?: string): Promise<import("./tauri").SchemaDiffSqlFileParseResult> {
+  return post("/api/schema-diff/sql-file-parse", { sql, database, dbType });
+}
+
 export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: DatabaseType, targetSchema?: string, functionDiffs?: FunctionDiff[], sequenceDiffs?: SequenceDiff[], ruleDiffs?: RuleDiff[], ownerDiffs?: OwnerDiff[], cascadeDelete?: boolean, compareCharset?: boolean): Promise<string> {
   return post("/api/schema-diff/generate-sync-sql", {
     diffs,

@@ -256,6 +256,9 @@ export interface SchemaDiffConfig {
   targetConnectionId: string;
   targetDatabase: string;
   targetSchema: string;
+  /** A schema-only dump can stand in for the source side. */
+  sourceKind?: "connection" | "sqlFile";
+  sourceSqlFilePath?: string;
   options: SchemaDiffCompareOptions;
 }
 
@@ -386,6 +389,8 @@ export function createEmptyConfig(id: string, name: string): SchemaDiffConfig {
     targetConnectionId: "",
     targetDatabase: "",
     targetSchema: "",
+    sourceKind: "connection",
+    sourceSqlFilePath: "",
     options: { ...DEFAULT_POSTGRES_OPTIONS },
   };
 }

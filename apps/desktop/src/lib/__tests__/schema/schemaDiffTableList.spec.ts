@@ -59,6 +59,30 @@ describe("schemaDiffTableList", () => {
     expect(listTables).toHaveBeenCalledWith("target", "app", "public");
   });
 
+  it("reads a SQL file source without connecting to a database", async () => {
+    const loadSqlFileTables = vi.fn(async () => [table("from_dump")]);
+    const ensureConnected = vi.fn().mockResolvedValue(undefined);
+    const listTables = vi.fn().mockResolvedValue([table("live")]);
+    const loader = createSchemaDiffTableListLoader({ ensureConnected, listTables, loadSqlFileTables });
+    const identity: SchemaDiffTableIdentity = { connectionId: "", database: "", schema: "", sqlFilePath: "/tmp/schema.sql" };
+
+    const tables = await loader.load(identity);
+
+    expect(tables.map((entry) => entry.name)).toEqual(["from_dump"]);
+    expect(loadSqlFileTables).toHaveBeenCalledWith(identity);
+    expect(ensureConnected).not.toHaveBeenCalled();
+    expect(listTables).not.toHaveBeenCalled();
+
+    await loader.load({ connectionId: "source", database: "app", schema: "public" });
+    expect(listTables).toHaveBeenCalledWith("source", "app", "public");
+  });
+
+  it("rejects a SQL file source when no reader is wired", async () => {
+    const loader = createSchemaDiffTableListLoader({ ensureConnected: vi.fn().mockResolvedValue(undefined), listTables: vi.fn() });
+
+    await expect(loader.load({ connectionId: "", database: "", schema: "", sqlFilePath: "/tmp/schema.sql" })).rejects.toThrow("SQL file sources are not configured for table lists");
+  });
+
   it("refreshes table names before a second compare after the database changes", async () => {
     const listTables = vi
       .fn()

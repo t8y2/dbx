@@ -181,6 +181,9 @@ describe("codemirrorSqlDialect", () => {
   it.each([
     ["postgres", "postgres"],
     ["sqlserver", "sqlserver"],
+    // ClickHouse resolves to the StandardSQL base, so it needs its own row:
+    // the Oracle/MySQL/SQLite case below cannot stand in for it.
+    ["clickhouse", "clickhouse"],
   ] as const)("keeps nested block comments for %s, which documents them", (mode, databaseType) => {
     const dialect = createDbxCodeMirrorSqlDialect(langSql, mode, databaseType as DatabaseType);
     expect(dialect.spec.nestedComments).toBe(true);
@@ -194,6 +197,24 @@ describe("codemirrorSqlDialect", () => {
     // stays inside the comment — matching what these servers report.
     const stillOpen = ["/* outer /* inner */", "SELECT 1"].join("\n");
     expect(nodeNameAt(dialect, stillOpen, "SELECT"), `${databaseType} still open`).not.toBe("Keyword");
+  });
+
+  // db2, gbase8c and gbase8s resolve to the StandardSQL base, the same base
+  // ClickHouse uses. ClickHouse documents nested comments and opts in above;
+  // these three have no such documentation, so they keep the safe non-nesting
+  // behaviour. Nesting them wrongly would re-introduce the runaway-comment bug,
+  // whereas not nesting only ends a comment early — the cheaper mistake.
+  it("leaves StandardSQL-based dialects non-nesting unless the engine documents nesting", () => {
+    const source = ["/* outer note /* inner marker */", "SELECT col FROM t"].join("\n");
+
+    for (const databaseType of ["db2", "gbase8c", "gbase8s"] as DatabaseType[]) {
+      const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType);
+      expect(dialect.spec.nestedComments, databaseType).toBe(false);
+      expect(nodeNameAt(dialect, source, "SELECT"), databaseType).toBe("Keyword");
+    }
+
+    // Same base, opposite setting — proves the flag is per dialect, not per base.
+    expect(createDbxCodeMirrorSqlDialect(langSql, "clickhouse", "clickhouse").spec.nestedComments).toBe(true);
   });
 
   it("tags QuotedIdentifier as tags.name so quoted columns/tables match unquoted identifiers (#12122)", async () => {

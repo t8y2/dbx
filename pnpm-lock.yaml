@@ -34,7 +34,7 @@ importers:
         specifier: ^6.0.2
         version: 6.0.2
       '@codemirror/lang-sql':
-        specifier: ^6.10.0
+        specifier: 6.10.0
         version: 6.10.0(patch_hash=911c39e8cfaadb960c0c815048cb0a2fad08dcb80cc81977f35984ed30cd2698)
       '@codemirror/lang-xml':
         specifier: ^6.1.0

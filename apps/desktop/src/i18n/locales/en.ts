@@ -1121,6 +1121,7 @@ export default {
     logoutConfirm: "Are you sure you want to log out?",
   },
   toolbar: {
+    connectOrReconnect: "Connect / Reconnect",
     independentWindow: "Separate Window",
     fileEncoding: "File encoding",
     encodingAuto: "Auto",

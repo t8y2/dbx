@@ -86,6 +86,8 @@ export const TOOLBAR_VISIBILITY_ITEMS: readonly ToolbarVisibilityItem[] = [
   { key: "recentClosedTabs", titleKey: "tabs.recentClosedTitle" },
   { key: "databaseBackups", titleKey: "databaseBackup.title" },
   { key: "mcpSettings", titleKey: "settings.openMcpSettings" },
+  { key: "connectOrReconnect", titleKey: "toolbar.connectOrReconnect" },
+  { key: "disconnectConnection", titleKey: "contextMenu.closeConnection" },
   { key: "exportProgress", titleKey: "settings.toolbarExportProgress" },
   { key: "settings", titleKey: "settings.title" },
   { key: "logout", titleKey: "auth.logout", webOnly: true },

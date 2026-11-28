@@ -279,6 +279,7 @@ export default withEnglishFallback({
     logoutConfirm: "Çıkış yapmak istediğinizden emin misiniz?",
   },
   toolbar: {
+    connectOrReconnect: "Bağlan / Yeniden bağlan",
     fileEncoding: "Dosya kodlaması",
     encodingAuto: "Otomatik",
     commitOutcomeUnknown: "Onaylama sonucu bilinmiyor ve oturum artık mevcut değil. SQL'i yeniden çalıştırmadan önce verileri doğrulayın.",

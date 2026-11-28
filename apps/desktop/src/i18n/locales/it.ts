@@ -906,6 +906,7 @@ export default withEnglishFallback({
     logoutConfirm: "Sei sicuro di voler uscire?",
   },
   toolbar: {
+    connectOrReconnect: "Connetti / Riconnetti",
     independentWindow: "Finestra indipendente",
     fileEncoding: "Codifica del file",
     encodingAuto: "Automatica",

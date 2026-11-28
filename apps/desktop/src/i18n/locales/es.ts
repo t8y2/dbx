@@ -912,6 +912,7 @@ export default withEnglishFallback({
     logoutConfirm: "¿Seguro que deseas cerrar sesión?",
   },
   toolbar: {
+    connectOrReconnect: "Conectar / Reconectar",
     independentWindow: "Ventana independiente",
     fileEncoding: "Codificación del archivo",
     encodingAuto: "Automática",

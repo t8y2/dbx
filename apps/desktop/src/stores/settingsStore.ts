@@ -1311,6 +1311,8 @@ export interface ToolbarItems {
   newQuery: boolean;
   openSql: boolean;
   recentClosedTabs: boolean;
+  connectOrReconnect: boolean;
+  disconnectConnection: boolean;
   pinnedMenuItems: ToolbarMenuItemKey[];
   databaseBackups: boolean;
   mcpSettings: boolean;
@@ -1344,6 +1346,8 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   newQuery: true,
   openSql: true,
   recentClosedTabs: true,
+  connectOrReconnect: true,
+  disconnectConnection: true,
   pinnedMenuItems: [],
   databaseBackups: true,
   mcpSettings: true,
@@ -2108,6 +2112,8 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     newQuery: items.newQuery ?? defaults.newQuery,
     openSql: items.openSql ?? defaults.openSql,
     recentClosedTabs: items.recentClosedTabs ?? defaults.recentClosedTabs,
+    connectOrReconnect: items.connectOrReconnect ?? defaults.connectOrReconnect,
+    disconnectConnection: items.disconnectConnection ?? defaults.disconnectConnection,
     pinnedMenuItems: normalizePinnedToolbarMenuItems(items.pinnedMenuItems),
     databaseBackups: items.databaseBackups ?? defaults.databaseBackups,
     mcpSettings: items.mcpSettings ?? defaults.mcpSettings,

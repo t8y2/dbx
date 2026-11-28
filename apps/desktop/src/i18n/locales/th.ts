@@ -980,6 +980,7 @@ export default withEnglishFallback({
     logoutConfirm: "คุณแน่ใจหรือไม่ว่าต้องการออกจากระบบ?",
   },
   toolbar: {
+    connectOrReconnect: "เชื่อมต่อ / เชื่อมต่อใหม่",
     fileEncoding: "การเข้ารหัสไฟล์",
     encodingAuto: "อัตโนมัติ",
     immediateSync: "ซิงก์ตอนนี้",

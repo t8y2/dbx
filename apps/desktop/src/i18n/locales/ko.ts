@@ -916,6 +916,7 @@ export default withEnglishFallback({
     logoutConfirm: "로그아웃하시겠습니까?",
   },
   toolbar: {
+    connectOrReconnect: "연결 / 다시 연결",
     independentWindow: "별도 창",
     fileEncoding: "파일 인코딩",
     encodingAuto: "자동",

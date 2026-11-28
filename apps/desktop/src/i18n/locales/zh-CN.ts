@@ -1055,6 +1055,7 @@ export default withEnglishFallback({
     logoutConfirm: "确定要退出登录吗？",
   },
   toolbar: {
+    connectOrReconnect: "连接 / 重新连接",
     independentWindow: "独立窗口",
     fileEncoding: "文件编码",
     encodingAuto: "自动",

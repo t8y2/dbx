@@ -913,6 +913,7 @@ export default withEnglishFallback({
     logoutConfirm: "Tem certeza de que deseja sair?",
   },
   toolbar: {
+    connectOrReconnect: "Conectar / Reconectar",
     independentWindow: "Janela independente",
     fileEncoding: "Codificação do arquivo",
     encodingAuto: "Automática",

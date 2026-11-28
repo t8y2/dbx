@@ -706,6 +706,21 @@ const blockingAiRunCount = computed(() => (isDesktop ? blockingDesktopAiRunsForQ
 let aiRunsQuitConfirmed = false;
 
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
+const toolbarConnection = computed(() => {
+  const sidebarId = lastFocusedSidebarSurface.value ? findTreeNodeById(connectionStore.treeNodes, connectionStore.selectedTreeNodeId)?.connectionId : undefined;
+  const connectionId = sidebarId || activeTab.value?.connectionId || connectionStore.activeConnectionId;
+  return connectionId ? connectionStore.getConfig(connectionId) : undefined;
+});
+const toolbarConnectionBusy = ref(false);
+const toolbarConnectionActions = computed(() => {
+  const connection = toolbarConnection.value;
+  if (!connection) return undefined;
+  return {
+    name: connection.name,
+    connected: connectionStore.connectedIds.has(connection.id),
+    busy: toolbarConnectionBusy.value || connectionStore.connectingIds.has(connection.id),
+  };
+});
 const pluginAiRecommendationsByTab = ref<Record<string, PluginAiRecommendationHostUpdate>>({});
 const activePluginAiRecommendations = computed(() => {
   const tab = activeTab.value;
@@ -3460,6 +3475,29 @@ function openConnectionSettings(connectionId: string, initialTab: ConfigTab = "c
   showConnectionDialog.value = true;
 }
 
+async function runToolbarConnectionAction(action: "connect" | "disconnect") {
+  const connection = toolbarConnection.value;
+  const state = toolbarConnectionActions.value;
+  if (!connection || !state || state.busy || (action === "disconnect" && !state.connected)) return;
+
+  toolbarConnectionBusy.value = true;
+  try {
+    if (action === "disconnect") {
+      await connectionStore.disconnect(connection.id);
+      toast(t("connection.disconnected"), 2000);
+    } else if (state.connected) {
+      await connectionStore.ensureConnected(connection.id, { forceReconnect: true });
+    } else {
+      await connectionStore.connect(connection);
+    }
+  } catch (error) {
+    const message = translateBackendError(t, error);
+    toast(action === "connect" ? t("connection.connectFailed", { message }) : message, 5000);
+  } finally {
+    toolbarConnectionBusy.value = false;
+  }
+}
+
 interface NewQueryOptions {
   preferredSource?: NewQueryContextSource;
   openDefault?: boolean;
@@ -5790,11 +5828,14 @@ onUnmounted(() => {
           :agent-driver-update-count="showDriverStoreUpdateBadge"
           :has-mcp-update-available="showMcpSettingsUpdateBadge"
           :has-connections="connectionStore.connections.length > 0"
+          :connection-actions="toolbarConnectionActions"
           :can-new-query="canCreateNewQuery"
           :has-sql-file-connections="hasSqlFileConnections"
           :immediate-syncing="immediateSyncing"
           :show-logout="!isDesktop && needsAuth"
           @new-connection="showConnectionDialog = true"
+          @connect-or-reconnect="runToolbarConnectionAction('connect')"
+          @disconnect-connection="runToolbarConnectionAction('disconnect')"
           @expand-sidebar="setSidebarOpen(true)"
           @new-query="newQuery({ preferredSource: lastFocusedSidebarSurface ? 'sidebar' : undefined })"
           @set-theme-mode="setThemeMode"

@@ -43,7 +43,7 @@ export async function mqttGetTopicTree(_connectionId: string) {
   mqttWebNotAvailable("mqttGetTopicTree");
 }
 
-export async function mqttGetMessages(_connectionId: string, _topicFilter?: string | null, _limit?: number | null) {
+export async function mqttGetMessages(_connectionId: string, _topicFilter?: string | string[] | null, _limit?: number | null) {
   mqttWebNotAvailable("mqttGetMessages");
 }
 

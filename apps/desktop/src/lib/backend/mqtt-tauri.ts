@@ -37,7 +37,7 @@ export async function mqttGetTopicTree(connectionId: string) {
   return invoke("mqtt_get_topic_tree", { connectionId });
 }
 
-export async function mqttGetMessages(connectionId: string, topicFilter?: string | null, limit?: number | null) {
+export async function mqttGetMessages(connectionId: string, topicFilter?: string | string[] | null, limit?: number | null) {
   return invoke("mqtt_get_messages", { connectionId, topicFilter: topicFilter ?? null, limit: limit ?? null });
 }
 

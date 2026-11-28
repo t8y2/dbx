@@ -47,8 +47,22 @@ fn mqtt_topic_matches_filter(topic: &str, filter: &str) -> bool {
     topic_index == topic_segments.len()
 }
 
-fn mqtt_message_matches_filter(message: &MqttMessage, filter: Option<&str>) -> bool {
-    filter.is_none_or(|filter| message.topic == filter || mqtt_topic_matches_filter(&message.topic, filter))
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+pub enum MqttMessageTopicFilter {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+fn mqtt_message_matches_filter(message: &MqttMessage, filter: Option<&MqttMessageTopicFilter>) -> bool {
+    let matches = |filter: &str| message.topic == filter || mqtt_topic_matches_filter(&message.topic, filter);
+    match filter {
+        None => true,
+        Some(MqttMessageTopicFilter::Single(filter)) => matches(filter),
+        Some(MqttMessageTopicFilter::Multiple(filters)) => {
+            filters.is_empty() || filters.iter().any(|filter| matches(filter))
+        }
+    }
 }
 
 /// 从 connections map 中获取 MQTT 客户端
@@ -196,7 +210,7 @@ pub async fn mqtt_get_topic_tree(
 pub async fn mqtt_get_messages(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
-    topic_filter: Option<String>,
+    topic_filter: Option<MqttMessageTopicFilter>,
     limit: Option<usize>,
 ) -> Result<Vec<MqttMessage>, String> {
     mqtt_get_messages_inner(&state, connection_id, topic_filter, limit).await
@@ -205,7 +219,7 @@ pub async fn mqtt_get_messages(
 async fn mqtt_get_messages_inner(
     state: &AppState,
     connection_id: String,
-    topic_filter: Option<String>,
+    topic_filter: Option<MqttMessageTopicFilter>,
     limit: Option<usize>,
 ) -> Result<Vec<MqttMessage>, String> {
     mqtt_get_messages_inner_with_hook(state, connection_id, topic_filter, limit, || async {}).await
@@ -214,7 +228,7 @@ async fn mqtt_get_messages_inner(
 async fn mqtt_get_messages_inner_with_hook<F, Fut>(
     state: &AppState,
     connection_id: String,
-    topic_filter: Option<String>,
+    topic_filter: Option<MqttMessageTopicFilter>,
     limit: Option<usize>,
     after_snapshot: F,
 ) -> Result<Vec<MqttMessage>, String>
@@ -255,7 +269,7 @@ where
     let limit = limit.unwrap_or(50).min(MQTT_VISIBLE_MESSAGE_LIMIT);
     Ok(messages
         .into_iter()
-        .filter(|message| mqtt_message_matches_filter(message, topic_filter.as_deref()))
+        .filter(|message| mqtt_message_matches_filter(message, topic_filter.as_ref()))
         .rev()
         .take(limit)
         .collect())

@@ -4,13 +4,14 @@ import { useI18n } from "vue-i18n";
 import { mqttGetBrokerInfo, mqttListTopics, mqttListSavedTopicConfigs, mqttGetMessages, mqttSubscribe, mqttUnsubscribe, mqttSaveTopicConfig, mqttDeleteTopicConfig, mqttClearMessages, mqttDeleteMessage } from "@/lib/backend/api";
 import type { MqttBrokerInfo, MqttSavedTopic, MqttTopicNode, MqttMessage, MqttMessageDirection, MqttQoS } from "@/types/mqtt";
 import { Button } from "@/components/ui/button";
+import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import TopicTreeNode from "./TopicTreeNode.vue";
 import MqttPublishPanel from "./MqttPublishDialog.vue";
 import { decodePayload, PAYLOAD_ENCODINGS, PAYLOAD_ENCODING_LABELS, type PayloadEncoding } from "@/lib/mqtt/mqttPayloadCodec";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
-import { ChevronDown, ChevronUp, Copy, Pause, Play, Trash2 } from "@lucide/vue";
+import { ChevronDown, ChevronUp, Copy, ListFilter, Pause, Play, Trash2 } from "@lucide/vue";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 
@@ -23,6 +24,7 @@ const { t } = useI18n();
 
 interface MqttTabUiState {
   selectedTopic?: string;
+  selectedMessageTopics?: string[];
   messagesPaused?: boolean;
   displayEncoding?: PayloadEncoding;
   topicSearch?: string;
@@ -62,7 +64,14 @@ const subscribedTopics = ref<[string, string][]>([]);
 const messages = ref<MqttMessage[]>([]);
 const collapsedMessageKeys = ref<Set<string>>(new Set());
 const noLocalSubscribe = ref(false);
-const selectedTopic = ref<string>(restoredUiState.selectedTopic ?? props.initialTopic ?? "");
+const initialTopic = restoredUiState.selectedTopic ?? props.initialTopic;
+const selectedMessageTopics = ref(restoredUiState.selectedMessageTopics ?? (initialTopic ? [initialTopic] : []));
+const selectedTopic = computed({
+  get: () => (selectedMessageTopics.value.length === 1 ? selectedMessageTopics.value[0]! : ""),
+  set: (topic: string) => {
+    selectedMessageTopics.value = topic ? [topic] : [];
+  },
+});
 const publishInitialTopic = ref(selectedTopic.value);
 const publishTopic = ref(selectedTopic.value);
 const loading = ref(true);
@@ -107,6 +116,7 @@ const subscriptionDialogContentStyle = computed(() => {
 
 trackUiState(() => ({
   selectedTopic: selectedTopic.value,
+  selectedMessageTopics: selectedMessageTopics.value,
   messagesPaused: messagesPaused.value,
   displayEncoding: displayEncoding.value,
   topicSearch: topicSearch.value,
@@ -197,14 +207,41 @@ const filteredMessages = computed(() => {
   return directionFilteredMessages.value.filter((msg) => messagePayloadText(msg).toLowerCase().includes(query));
 });
 
+const messageTopicOptions = computed(() => {
+  const topics = new Set([...subscribedTopics.value.map(([topic]) => topic), ...selectedMessageTopics.value]);
+  const aliases = new Map(savedTopics.value.filter((config) => config.alias).map((config) => [config.topic, config.alias]));
+  return [
+    { value: "", label: t("connection.mqttAllMessages"), role: "menuitemradio" as const },
+    ...Array.from(topics, (topic) => ({
+      value: topic,
+      label: aliases.has(topic) ? `${aliases.get(topic)} (${topic})` : topic,
+      role: "menuitemcheckbox" as const,
+    })),
+  ];
+});
+
+const messageScopeLabel = computed(() => (selectedMessageTopics.value.length ? t("connection.mqttMessagesForTopic", { topic: selectedMessageTopics.value.join(", ") }) : t("connection.mqttAllMessages")));
+
+function toggleMessageTopic(topic: string) {
+  const current = selectedMessageTopics.value;
+  selectedMessageTopics.value = !topic ? [] : current.includes(topic) ? current.filter((item) => item !== topic) : [...current, topic];
+  void refreshData();
+}
+
+function getMessagesForTopics(topics: string[]) {
+  return mqttGetMessages(props.connectionId, topics.length > 1 ? topics : topics[0], MQTT_MESSAGE_HISTORY_LIMIT) as Promise<MqttMessage[]>;
+}
+
 async function refreshData() {
+  const topics = selectedMessageTopics.value;
   try {
     const [info, active, configs, msgs] = await Promise.all([
       mqttGetBrokerInfo(props.connectionId) as Promise<MqttBrokerInfo>,
       mqttListTopics(props.connectionId) as Promise<[string, string][]>,
       mqttListSavedTopicConfigs(props.connectionId) as Promise<MqttSavedTopic[]>,
-      mqttGetMessages(props.connectionId, selectedTopic.value || undefined, MQTT_MESSAGE_HISTORY_LIMIT) as Promise<MqttMessage[]>,
+      getMessagesForTopics(topics),
     ]);
+    if (selectedMessageTopics.value !== topics) return;
     brokerInfo.value = info;
     subscribedTopics.value = active;
     savedTopics.value = configs.map((config) => ({ ...config, enabled: config.enabled !== false, noLocal: config.noLocal === true }));
@@ -214,9 +251,9 @@ async function refreshData() {
       if (messageListRef.value) messageListRef.value.scrollTop = 0;
     });
   } catch (e) {
-    error.value = String(e);
+    if (selectedMessageTopics.value === topics) error.value = String(e);
   } finally {
-    loading.value = false;
+    if (selectedMessageTopics.value === topics) loading.value = false;
   }
 }
 
@@ -253,6 +290,8 @@ async function handleDelete(config: MqttSavedTopic) {
     if (selectedTopic.value === config.topic) {
       selectedTopic.value = "";
       suggestPublishTopic("");
+    } else if (selectedMessageTopics.value.includes(config.topic)) {
+      selectedMessageTopics.value = selectedMessageTopics.value.filter((topic) => topic !== config.topic);
     }
     await refreshData();
   } catch (e) {
@@ -455,9 +494,10 @@ function startPolling() {
   stopPolling();
   pollingTimer.value = setInterval(async () => {
     if (messagesPaused.value) return;
+    const topics = selectedMessageTopics.value;
     try {
-      const nextMessages = (await mqttGetMessages(props.connectionId, selectedTopic.value || undefined, MQTT_MESSAGE_HISTORY_LIMIT)) as MqttMessage[];
-      if (!messagesPaused.value) messages.value = nextMessages;
+      const nextMessages = await getMessagesForTopics(topics);
+      if (!messagesPaused.value && selectedMessageTopics.value === topics) messages.value = nextMessages;
     } catch {
       /* ignore polling errors */
     }
@@ -521,7 +561,7 @@ function formatMessageTimestamp(timestamp: number): string {
 watch(
   () => props.initialTopic,
   (topic) => {
-    if (topic !== undefined && topic !== selectedTopic.value) {
+    if (topic !== undefined && (topic !== selectedTopic.value || selectedMessageTopics.value.length > 1)) {
       selectedTopic.value = topic;
       suggestPublishTopic(topic, true);
       void refreshData();
@@ -600,9 +640,21 @@ onUnmounted(stopPolling);
       <div class="flex min-w-0 flex-1 flex-col">
         <div class="flex min-h-0 flex-1 flex-col">
           <div class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-3 py-2 text-xs font-semibold uppercase text-muted-foreground">
-            <span v-if="selectedTopic" class="min-w-0 truncate">{{ t("connection.mqttMessagesForTopic", { topic: selectedTopic }) }}</span>
-            <span v-else class="min-w-0 truncate">{{ t("connection.mqttAllMessages") }}</span>
+            <span class="min-w-0 truncate" :title="messageScopeLabel">{{ messageScopeLabel }}</span>
             <div class="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+              <LightDropdown
+                model-value=""
+                :items="messageTopicOptions"
+                :selected-values="selectedMessageTopics.length ? selectedMessageTopics : ['']"
+                :aria-label="t('connection.mqttTopicFilter')"
+                :trigger-label="t('connection.mqttTopicFilter')"
+                :trigger-icon="ListFilter"
+                trigger-class="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border px-2 text-[10px] font-normal normal-case hover:bg-muted"
+                :match-trigger-width="false"
+                :close-on-select="false"
+                :disabled="messageTopicOptions.length < 2"
+                @update:model-value="toggleMessageTopic"
+              />
               <div class="inline-flex h-6 shrink-0 items-center rounded-md border p-0.5" role="group" :aria-label="t('connection.mqttMessageDirectionFilterLabel')">
                 <button
                   type="button"

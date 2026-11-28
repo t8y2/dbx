@@ -2530,6 +2530,9 @@ export default withEnglishFallback({
       selectFirst: "Выберите текст списка",
     },
     structurePeek: {
+      pinPreview: "Закрепить предпросмотр таблицы",
+      minimizePreview: "Свернуть предпросмотр таблицы",
+      restorePreview: "Восстановить предпросмотр таблицы",
       title: "Структура: {name}",
       hint: "Дважды щёлкните ячейку, чтобы вставить её значение в редактор",
       doubleClickInsert: "Дважды щёлкните для вставки",

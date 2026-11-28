@@ -2549,6 +2549,9 @@ export default withEnglishFallback({
       selectFirst: "請選擇清單文字",
     },
     structurePeek: {
+      pinPreview: "固定資料表結構預覽",
+      minimizePreview: "最小化資料表結構預覽",
+      restorePreview: "還原資料表結構預覽",
       title: "資料表結構：{name}",
       hint: "連按兩下儲存格可將內容插入到編輯器游標處",
       doubleClickInsert: "連按兩下插入到編輯器",

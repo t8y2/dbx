@@ -1988,6 +1988,9 @@ export default withEnglishFallback({
       selectFirst: "Silakan pilih teks daftar",
     },
     structurePeek: {
+      pinPreview: "Sematkan pratinjau tabel",
+      minimizePreview: "Minimalkan pratinjau tabel",
+      restorePreview: "Pulihkan pratinjau tabel",
       title: "Struktur: {name}",
       hint: "Klik dua kali sel untuk menyisipkan nilainya ke editor",
       doubleClickInsert: "Klik dua kali untuk menyisipkan",

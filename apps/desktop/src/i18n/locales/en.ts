@@ -2825,6 +2825,9 @@ export default {
       selectFirst: "Please select list text",
     },
     structurePeek: {
+      pinPreview: "Pin table preview",
+      minimizePreview: "Minimize table preview",
+      restorePreview: "Restore table preview",
       title: "Structure: {name}",
       hint: "Double-click a cell to insert its value into the editor",
       doubleClickInsert: "Double-click to insert",

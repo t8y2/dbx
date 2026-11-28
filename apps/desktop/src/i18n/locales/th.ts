@@ -2681,6 +2681,9 @@ export default withEnglishFallback({
       selectFirst: "เลือกข้อความรายการ",
     },
     structurePeek: {
+      pinPreview: "ปักหมุดตัวอย่างตาราง",
+      minimizePreview: "ย่อตัวอย่างตาราง",
+      restorePreview: "คืนค่าตัวอย่างตาราง",
       title: "โครงสร้าง: {name}",
       hint: "ดับเบิลคลิกเซลล์เพื่อแทรกค่าลงในตัวแก้ไข",
       doubleClickInsert: "ดับเบิลคลิกเพื่อแทรก",

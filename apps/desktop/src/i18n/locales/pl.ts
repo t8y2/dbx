@@ -2019,6 +2019,9 @@ export default withEnglishFallback({
       selectFirst: "Najpierw zaznacz tekst listy",
     },
     structurePeek: {
+      pinPreview: "Przypnij podgląd tabeli",
+      minimizePreview: "Zminimalizuj podgląd tabeli",
+      restorePreview: "Przywróć podgląd tabeli",
       title: "Struktura: {name}",
       hint: "Kliknij dwukrotnie komórkę, aby wstawić jej wartość do edytora",
       doubleClickInsert: "Kliknij dwukrotnie, aby wstawić",

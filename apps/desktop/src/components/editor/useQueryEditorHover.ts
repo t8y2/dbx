@@ -7,7 +7,7 @@ import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
 import { findCteColumnResolution, resolveCteColumnOrigins, type CteColumnOrigin } from "@/lib/sql/semantic/cteNavigation";
 import type { SqlSemanticModel, SqlSemanticRowSource } from "@/lib/sql/semantic/types";
 import { resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
-import { extractQualifiedIdentifierAt, isSqlKeyword, splitQualifiedIdentifier, sqlObjectHoverDetail, sqlObjectNavigationSourceKind } from "@/lib/sql/sqlNavigation";
+import { extractQualifiedIdentifierAt, isSqlKeyword, splitQualifiedIdentifier, sqlObjectHoverDetail, sqlObjectNavigationSourceKind, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, quoteIdentifier, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
 import { matchHoverTableCandidates, resolveHoverTableLookupTarget } from "@/lib/editor/hoverTableLookup";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
@@ -30,6 +30,7 @@ interface QueryEditorHoverOptions {
   connectionStore: ReturnType<typeof useConnectionStore>;
   metadata: ReturnType<typeof useQueryEditorCompletionMetadata>;
   createHoverDom: ReturnType<typeof createQueryEditorHoverContent>["createHoverDom"];
+  pinTablePreview?: (target: SqlObjectNavigationTarget, preview: { ddl: string; catalog?: string }) => void;
   semanticCompletionEnabled: boolean;
   maxCompletionTables: number;
 }
@@ -304,7 +305,14 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
         return {
           pos: range.from,
           end: range.to,
-          create: () => createHoverDom(table.name, sqlObjectHoverDetail(table), sqlContent, metadataLoadFailed ? ["[DBX] Failed to load table structure — check connection"] : undefined),
+          create: () => {
+            const detail = sqlObjectHoverDetail(table);
+            const rows = metadataLoadFailed ? ["[DBX] Failed to load table structure — check connection"] : undefined;
+            const ddl = sqlContent;
+            const pin = options.pinTablePreview;
+            if (!pin || !ddl) return createHoverDom(table.name, detail, ddl, rows);
+            return createHoverDom(table.name, detail, ddl, rows, () => pin({ ...table, database: hoverDatabase, schema: hoverSchema }, { ddl, catalog: hoverScope.catalog }));
+          },
         };
       }
 

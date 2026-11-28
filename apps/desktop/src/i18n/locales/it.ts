@@ -2567,6 +2567,9 @@ export default withEnglishFallback({
       selectFirst: "Seleziona il testo della lista",
     },
     structurePeek: {
+      pinPreview: "Fissa anteprima della tabella",
+      minimizePreview: "Riduci anteprima della tabella",
+      restorePreview: "Ripristina anteprima della tabella",
       title: "Struttura: {name}",
       hint: "Fai doppio clic su una cella per inserirne il valore nell'editor",
       doubleClickInsert: "Doppio clic per inserire",

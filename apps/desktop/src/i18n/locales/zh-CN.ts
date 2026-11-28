@@ -2755,6 +2755,9 @@ export default withEnglishFallback({
       selectFirst: "请选择列表文本",
     },
     structurePeek: {
+      pinPreview: "固定表结构预览",
+      minimizePreview: "最小化表结构预览",
+      restorePreview: "还原表结构预览",
       title: "表结构：{name}",
       hint: "双击单元格可将内容插入到编辑器光标处",
       doubleClickInsert: "双击插入到编辑器",

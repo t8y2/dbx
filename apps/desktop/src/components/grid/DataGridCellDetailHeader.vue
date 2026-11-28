@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronRight, ListTree, Maximize2, PanelBottom, PanelRight, TableProperties, WrapText, X } from "@lucide/vue";
+import { ChevronDown, ChevronRight, ListTree, Maximize2, PanelBottom, PanelRight, Pin, TableProperties, WrapText, X } from "@lucide/vue";
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,8 @@ import type { CellDetailTab } from "@/lib/dataGrid/cellDetailPresentation";
 interface DataGridCellDetailHeaderProps {
   metadataCollapsed: boolean;
   panelIsBottom: boolean;
+  panelPinned?: boolean;
+  noActiveCell?: boolean;
   activeTabs: CellDetailTab[];
 }
 
@@ -18,6 +20,7 @@ const props = defineProps<DataGridCellDetailHeaderProps>();
 const emit = defineEmits<{
   toggleMetadata: [];
   toggleLayout: [];
+  togglePin: [];
   openCellDetails: [];
   openRowDetails: [];
   openColumnDetails: [];
@@ -42,6 +45,7 @@ function toggleWordWrap() {
       :title="props.metadataCollapsed ? t('grid.expandCellDetailMetadata') : t('grid.collapseCellDetailMetadata')"
       :aria-label="props.metadataCollapsed ? t('grid.expandCellDetailMetadata') : t('grid.collapseCellDetailMetadata')"
       :aria-expanded="!props.metadataCollapsed"
+      :disabled="props.noActiveCell"
       @click="emit('toggleMetadata')"
     >
       <ChevronRight v-if="props.metadataCollapsed" class="w-3 h-3" />
@@ -70,21 +74,25 @@ function toggleWordWrap() {
         :title="t('settings.wordWrap')"
         :aria-label="t('settings.wordWrap')"
         :aria-pressed="wordWrapEnabled"
+        :disabled="props.noActiveCell"
         @click="toggleWordWrap"
       >
         <WrapText class="w-3 h-3" />
+      </Button>
+      <Button variant="ghost" size="icon" class="h-5 w-5" :class="{ 'bg-accent text-accent-foreground': props.panelPinned }" :title="t('grid.pinCellDetailOnRight')" :aria-label="t('grid.pinCellDetailOnRight')" :aria-pressed="props.panelPinned === true" @click="emit('togglePin')">
+        <Pin class="h-3 w-3" />
       </Button>
       <Button variant="ghost" size="icon" class="h-5 w-5" :title="props.panelIsBottom ? t('grid.cellDetailLayoutRight') : t('grid.cellDetailLayoutBottom')" @click="emit('toggleLayout')">
         <PanelRight v-if="props.panelIsBottom" class="w-3 h-3" />
         <PanelBottom v-else class="w-3 h-3" />
       </Button>
-      <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openCellDetailsDialog')" @click="emit('openCellDetails')">
+      <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openCellDetailsDialog')" :disabled="props.noActiveCell" @click="emit('openCellDetails')">
         <Maximize2 class="w-3 h-3" />
       </Button>
-      <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openRowDetailsDialog')" @click="emit('openRowDetails')">
+      <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openRowDetailsDialog')" :disabled="props.noActiveCell" @click="emit('openRowDetails')">
         <ListTree class="w-3 h-3" />
       </Button>
-      <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openColumnDetailsDialog')" @click="emit('openColumnDetails')">
+      <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openColumnDetailsDialog')" :disabled="props.noActiveCell" @click="emit('openColumnDetails')">
         <TableProperties class="w-3 h-3" />
       </Button>
       <Button variant="ghost" size="icon" class="h-5 w-5" :title="`${t('common.close')} (Esc)`" :aria-label="`${t('common.close')} (Esc)`" @click="emit('close')">

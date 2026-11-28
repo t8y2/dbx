@@ -2897,6 +2897,8 @@ export default withEnglishFallback({
     cellDetails: "Detail Sel",
     cellDetailLayoutBottom: "Pindahkan ke Bawah",
     cellDetailLayoutRight: "Pindahkan ke Kanan",
+    pinCellDetailOnRight: "Sematkan detail sel di kanan",
+    cellDetailSelectCell: "Pilih sel untuk melihat nilainya.",
     collapseCellDetailMetadata: "Ciutkan metadata sel",
     expandCellDetailMetadata: "Perluas metadata sel",
     openCellDetailsDialog: "Buka Detail Sel",

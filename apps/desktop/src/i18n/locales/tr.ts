@@ -2589,6 +2589,8 @@ export default withEnglishFallback({
     cellDetails: "Hücre Ayrıntıları",
     cellDetailLayoutBottom: "Alta Taşı",
     cellDetailLayoutRight: "Sağa Taşı",
+    pinCellDetailOnRight: "Hücre ayrıntılarını sağa sabitle",
+    cellDetailSelectCell: "Değerini görmek için bir hücre seçin.",
     collapseCellDetailMetadata: "Hücre meta verisini daralt",
     expandCellDetailMetadata: "Hücre meta verisini genişlet",
     openCellDetailsDialog: "Hücre Ayrıntılarını Aç",

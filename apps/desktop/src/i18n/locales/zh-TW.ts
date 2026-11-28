@@ -3335,6 +3335,8 @@ export default withEnglishFallback({
     cellDetails: "儲存格詳情",
     cellDetailLayoutBottom: "移到底部",
     cellDetailLayoutRight: "移到右側",
+    pinCellDetailOnRight: "將儲存格詳細資料固定在右側",
+    cellDetailSelectCell: "選取儲存格以查看其值。",
     collapseCellDetailMetadata: "收合儲存格中繼資訊",
     expandCellDetailMetadata: "展開儲存格中繼資訊",
     openCellDetailsDialog: "儲存格詳情",

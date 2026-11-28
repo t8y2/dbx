@@ -3603,6 +3603,8 @@ export default withEnglishFallback({
     cellDetails: "セル詳細",
     cellDetailLayoutBottom: "下部に表示",
     cellDetailLayoutRight: "右側に表示",
+    pinCellDetailOnRight: "セルの詳細を右側に固定",
+    cellDetailSelectCell: "値を表示するにはセルを選択してください。",
     collapseCellDetailMetadata: "セルのメタ情報を折りたたむ",
     expandCellDetailMetadata: "セルのメタ情報を展開",
     openCellDetailsDialog: "セル詳細を開く",

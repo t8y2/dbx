@@ -3872,6 +3872,8 @@ export default withEnglishFallback({
     cellDetails: "单元格详情",
     cellDetailLayoutBottom: "移动到底部",
     cellDetailLayoutRight: "移动到右侧",
+    pinCellDetailOnRight: "将单元格详情固定在右侧",
+    cellDetailSelectCell: "选择单元格查看它的值。",
     collapseCellDetailMetadata: "收起单元格元信息",
     expandCellDetailMetadata: "展开单元格元信息",
     openCellDetailsDialog: "单元格详情",

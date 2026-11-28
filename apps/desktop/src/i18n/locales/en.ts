@@ -3945,6 +3945,8 @@ export default {
     cellDetails: "Cell Details",
     cellDetailLayoutBottom: "Move to Bottom",
     cellDetailLayoutRight: "Move to Right",
+    pinCellDetailOnRight: "Pin cell details on the right",
+    cellDetailSelectCell: "Select a cell to view its value.",
     collapseCellDetailMetadata: "Collapse cell metadata",
     expandCellDetailMetadata: "Expand cell metadata",
     openCellDetailsDialog: "Open Cell Details",

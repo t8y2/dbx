@@ -342,6 +342,29 @@ describe("silent update lifecycle", () => {
     expect(mocks.cancelUpdateDownload).not.toHaveBeenCalled();
   });
 
+  it("stops bounded retries when a shared download ends offline without an update offer", async () => {
+    vi.useFakeTimers();
+    const active = { state: "downloading", attempt_id: "other-window", version: cache.version, progress: null };
+    mocks.getUpdateDownloadState.mockResolvedValueOnce(active).mockResolvedValue({ state: "idle" });
+    mocks.checkForUpdates.mockRejectedValue(new Error("update source offline"));
+    const updater = mount();
+    await updater.initialize();
+    for (let index = 0; index < 8 && updater.phase.value === "checking"; index += 1) await Promise.resolve();
+    expect(updater.phase.value).toBe("downloading");
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mocks.checkForUpdates).toHaveBeenCalledOnce();
+    expect(updater.updateCheckFailed.value).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(900_000);
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(4);
+
+    await vi.advanceTimersByTimeAsync(900_000);
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(4);
+  });
+
   it("discards a package completed during channel switching before downloading the new channel", async () => {
     settings.autoUpdateApp = false;
     const pending = deferred<typeof cache>();

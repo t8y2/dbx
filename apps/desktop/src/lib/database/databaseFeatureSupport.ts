@@ -327,7 +327,7 @@ export function loadsChildTablesOnDemand(connection?: Pick<ConnectionConfig, "db
   return connection?.db_type === "tdengine";
 }
 
-const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "gaussdb", "opengauss", "mysql", "oracle", "jdbc", "oceanbase-oracle", "dameng", "sqlserver", "kingbase"];
+const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "gaussdb", "opengauss", "mysql", "oracle", "jdbc", "oceanbase-oracle", "dameng", "sqlserver", "kingbase", "highgo"];
 
 /** Oracle-family databases, kept ONLY for the Oracle-specific ALTER SESSION SET
  *  CURRENT_SCHEMA compensation in queryStore. Do not use for toolbar/dirty-bit

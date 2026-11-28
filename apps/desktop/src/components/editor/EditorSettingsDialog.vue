@@ -361,6 +361,7 @@ import {
   deriveSqlShortcutDatabaseTypes,
 } from "@/lib/sql/sqlShortcutActions";
 import { applySqlShortcutBodyToAllSelected, buildSqlShortcutBodiesForSave, clearSqlShortcutFormDatabaseTypes as clearSqlShortcutFormBodies, switchSqlShortcutEditingDatabaseType, toggleSqlShortcutFormDatabaseType, type SqlShortcutFormBodies } from "@/lib/sql/sqlShortcutFormBodies";
+import { normalizePreferredTableAlias } from "@/lib/sql/sqlIdentifier";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
@@ -800,6 +801,8 @@ const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurre
 const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValueHints);
 const editShowConnectionGroupPath = ref(settingsStore.editorSettings.showConnectionGroupPath);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
+const editPreferredTableAlias = ref(settingsStore.editorSettings.preferredTableAlias);
+const preferredTableAliasInvalid = computed(() => Boolean(editPreferredTableAlias.value.trim()) && !normalizePreferredTableAlias(editPreferredTableAlias.value));
 const editQualifyColumnCompletions = ref(settingsStore.editorSettings.qualifyColumnCompletions);
 const editBatchColumnSelectionIncludeComments = ref(settingsStore.editorSettings.batchColumnSelectionIncludeComments);
 const editTableCompletionSchemaQualification = ref<SqlTableCompletionSchemaQualification>(settingsStore.editorSettings.tableCompletionSchemaQualification);
@@ -1371,6 +1374,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showInsertValueHints: editShowInsertValueHints.value,
     showConnectionGroupPath: editShowConnectionGroupPath.value,
     autoAliasTables: editAutoAliasTables.value,
+    preferredTableAlias: editPreferredTableAlias.value.trim(),
     qualifyColumnCompletions: editQualifyColumnCompletions.value,
     batchColumnSelectionIncludeComments: editBatchColumnSelectionIncludeComments.value,
     tableCompletionSchemaQualification: editTableCompletionSchemaQualification.value,
@@ -2227,6 +2231,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowInsertValueHints.value = settingsStore.editorSettings.showInsertValueHints;
   editShowConnectionGroupPath.value = settingsStore.editorSettings.showConnectionGroupPath;
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
+  editPreferredTableAlias.value = settingsStore.editorSettings.preferredTableAlias;
   editQualifyColumnCompletions.value = settingsStore.editorSettings.qualifyColumnCompletions;
   editBatchColumnSelectionIncludeComments.value = settingsStore.editorSettings.batchColumnSelectionIncludeComments;
   editTableCompletionSchemaQualification.value = settingsStore.editorSettings.tableCompletionSchemaQualification;
@@ -2431,6 +2436,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showInsertValueHints: editShowInsertValueHints,
   showConnectionGroupPath: editShowConnectionGroupPath,
   autoAliasTables: editAutoAliasTables,
+  preferredTableAlias: editPreferredTableAlias,
   qualifyColumnCompletions: editQualifyColumnCompletions,
   batchColumnSelectionIncludeComments: editBatchColumnSelectionIncludeComments,
   tableCompletionSchemaQualification: editTableCompletionSchemaQualification,
@@ -2904,7 +2910,9 @@ const queryResultRowLimitDraftTouched = computed(
     normalizeTableOpenPageSizeDraft(editPageSize.value) !== normalizeTableOpenPageSizeDraft(editEditorSettingsBase.value.pageSize),
 );
 const hasBlockingQueryResultRowLimit = computed(() => queryResultRowLimitViolated.value && queryResultRowLimitDraftTouched.value);
-const hasApplyBlocker = computed(() => historyRetention.invalid.value || mcpHistoryRetention.invalid.value || historyRetentionSaving.value || mcpHistoryRetentionSaving.value || hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
+const hasApplyBlocker = computed(
+  () => historyRetention.invalid.value || mcpHistoryRetention.invalid.value || historyRetentionSaving.value || mcpHistoryRetentionSaving.value || hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value || preferredTableAliasInvalid.value,
+);
 
 async function cleanupMcpHistory() {
   if (mcpHistoryCleanupLoading.value) return;
@@ -3078,6 +3086,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
     editShowConnectionGroupPath.value = DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+    editPreferredTableAlias.value = DEFAULT_EDITOR_SETTINGS.preferredTableAlias;
     editQualifyColumnCompletions.value = DEFAULT_EDITOR_SETTINGS.qualifyColumnCompletions;
     editBatchColumnSelectionIncludeComments.value = DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments;
     editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
@@ -3306,6 +3315,7 @@ function resetAllDefaults() {
   editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
   editShowConnectionGroupPath.value = DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+  editPreferredTableAlias.value = DEFAULT_EDITOR_SETTINGS.preferredTableAlias;
   editQualifyColumnCompletions.value = DEFAULT_EDITOR_SETTINGS.qualifyColumnCompletions;
   editBatchColumnSelectionIncludeComments.value = DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments;
   editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
@@ -8978,6 +8988,15 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
+                </div>
+
+                <div class="settings-item flex flex-wrap items-start justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="min-w-0 flex-1 space-y-1">
+                    <Label for="editor-preferred-table-alias">{{ t("settings.preferredTableAlias") }}</Label>
+                    <p id="editor-preferred-table-alias-help" class="text-xs text-muted-foreground">{{ t("settings.preferredTableAliasDescription") }}</p>
+                    <p v-if="preferredTableAliasInvalid" id="editor-preferred-table-alias-error" class="text-xs text-destructive">{{ t("settings.preferredTableAliasInvalid") }}</p>
+                  </div>
+                  <Input id="editor-preferred-table-alias" v-model="editPreferredTableAlias" :aria-invalid="preferredTableAliasInvalid" :aria-describedby="preferredTableAliasInvalid ? 'editor-preferred-table-alias-error' : 'editor-preferred-table-alias-help'" class="h-8 w-36" placeholder="T" />
                 </div>
 
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

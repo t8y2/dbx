@@ -15,6 +15,9 @@ export interface OraclePackageMemberEntry {
   isFunction: boolean;
   /** `PROCEDURE` / `FUNCTION` 关键字的字符偏移，直接可用于编辑器定位。 */
   offset: number;
+  /** 头部里子程序名本身的字符区间，用来判断一次点击是否落在这个头上。 */
+  nameStart: number;
+  nameEnd: number;
   /** 1-based 行号。 */
   line: number;
   /** 形参名（大写，按声明顺序）；无参或空参数表为 `[]`。 */
@@ -31,6 +34,8 @@ export interface OraclePackageMemberQuery {
   name: string;
   kind?: "procedure" | "function";
   signature?: string;
+  /** 源码里这个名字是带引号写的：Oracle 下引号标识符大小写敏感，不能再退回大小写不敏感匹配。 */
+  nameQuoted?: boolean;
 }
 
 function unquoteIdentifierText(raw: string): string {
@@ -154,7 +159,7 @@ export function oraclePackageMemberEntries(source: string): readonly OraclePacka
           line += 1;
           lineEnd = source.indexOf("\n", lineEnd + 1);
         }
-        entries.push({ name: unquoteSqlSemanticIdentifier(name), databaseName: databaseIdentifier(name), isFunction, offset, line, ...shape });
+        entries.push({ name: unquoteSqlSemanticIdentifier(name), databaseName: databaseIdentifier(name), isFunction, offset, nameStart: name.span.start, nameEnd: name.span.end, line, ...shape });
       }
       // External call specifications end at their semicolon and have no BEGIN.
       const bodyPrefix = `${tokens[headerEnd + 1]?.normalized} ${tokens[headerEnd + 2]?.normalized}`;
@@ -196,7 +201,8 @@ export function findOraclePackageMember(source: string, query: OraclePackageMemb
   if (!wanted) return null;
   const all = oraclePackageMemberEntries(source).filter((entry) => !query.kind || entry.isFunction === (query.kind === "function"));
   const exactName = all.filter((entry) => entry.name === wanted);
-  const named = exactName.length ? exactName : all.filter((entry) => entry.name.toUpperCase() === wanted.toUpperCase());
+  // 引号标识符在 Oracle 下大小写敏感：`"MyProc"` 不该落到 MYPROC 上，所以不走大小写不敏感回退。
+  const named = exactName.length ? exactName : query.nameQuoted ? [] : all.filter((entry) => entry.name.toUpperCase() === wanted.toUpperCase());
   const signature = query.signature === undefined ? undefined : readSignature(query.signature);
   const candidates = signature ? named.filter((entry) => entry.parameters.length === signature.parameters.length && entry.parameters.every((name, index) => name === signature.parameters[index])) : named;
   if (!candidates.length) return null;
@@ -208,4 +214,14 @@ export function findOraclePackageMember(source: string, query: OraclePackageMemb
   if (exact.length) return exact.length === 1 ? exact[0]! : null;
   const unqualified = pool.filter((entry) => matchingTypes(entry.parameterTypes, signature.parameterTypes, true));
   return unqualified.length === 1 ? unqualified[0]! : null;
+}
+
+/**
+ * 落在某个子程序头名字上的点击命中的那个头部，没有则为 null。
+ *
+ * 用于 Ctrl+点击：包头里的 `PROCEDURE X(...)` 是声明而不是调用，但点在名字上同样是
+ * 「我要看 X」，不能被当成一个同名的独立过程去查数据字典。
+ */
+export function oraclePackageMemberHeaderAt(source: string, position: number): OraclePackageMemberEntry | null {
+  return oraclePackageMemberEntries(source).find((entry) => position >= entry.nameStart && position <= entry.nameEnd) ?? null;
 }

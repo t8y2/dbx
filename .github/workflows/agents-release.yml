@@ -1875,6 +1875,8 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          # aws-cli v3 injects a default region that R2 rejects; R2 accepts "auto".
+          AWS_REGION: auto
           R2_ENDPOINT: "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
           R2_BUCKET: "s3://${{ secrets.R2_BUCKET_NAME }}"
         run: |

@@ -333,7 +333,8 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       };
       if (tableWithInlineColumns.columns && tableWithInlineColumns.columns.length > 0) continue;
       const cacheKey = metadata.completionCacheKey(table, scope);
-      if (metadata.cachedColumnsByTable.has(cacheKey)) continue;
+      const cachedColumns = metadata.cachedColumnsByTable.get(cacheKey);
+      if (cachedColumns && cachedColumns.length > 0) continue;
       const normalizedKey = props.databaseType === "oracle" ? cacheKey : cacheKey.toLowerCase();
       if (seen.has(normalizedKey)) continue;
       seen.add(normalizedKey);

@@ -1162,6 +1162,15 @@ fn agent_json_rpc_response_id(response: &Value) -> Option<u64> {
     response.get("id").and_then(Value::as_u64)
 }
 
+/// Hierarchy scope of a table listing request.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AgentTableScope<'a> {
+    /// Return only root tables (no partitions / child tables).
+    pub page_table_roots: bool,
+    /// Return only the child tables of this parent table.
+    pub parent_name: Option<&'a str>,
+}
+
 pub struct AgentDriverClient {
     child: Option<Child>,
     stdin: Option<BufWriter<ChildStdin>>,
@@ -2769,7 +2778,40 @@ impl AgentDriverClient {
         object_types: Option<&[String]>,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
+        self.list_tables_scoped(
+            database,
+            schema,
+            filter,
+            limit,
+            offset,
+            object_types,
+            AgentTableScope::default(),
+            timeout_duration,
+        )
+        .await
+    }
+
+    /// `list_tables_constrained` plus a hierarchy scope. Agents that do not know a
+    /// scope field ignore it and return the unscoped list, so callers must be able
+    /// to cope with (and post-filter) that answer.
+    pub async fn list_tables_scoped<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        filter: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        object_types: Option<&[String]>,
+        scope: AgentTableScope<'_>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
         let mut params = agent_schema_params(database, schema);
+        if scope.page_table_roots {
+            params["page_table_roots"] = serde_json::json!(true);
+        }
+        if let Some(parent_name) = scope.parent_name.map(str::trim).filter(|name| !name.is_empty()) {
+            params["parent_name"] = serde_json::json!(parent_name);
+        }
         if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
             params["filter"] = serde_json::json!(filter);
         }

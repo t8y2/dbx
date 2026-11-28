@@ -1,4 +1,4 @@
-import { StateEffect, StateField, type Extension } from "@codemirror/state";
+import { type ChangeSet, StateEffect, StateField, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { createDeferredEditorTask } from "@/lib/editor/deferredEditorTask";
 
@@ -50,18 +50,38 @@ function buildDecorationSet(spans: readonly SqlUnknownObjectSpan[], docLength: n
   );
 }
 
+/** Old-document ranges that the changes replace with different text (deleting and inserting at once). */
+function replacedRanges(changes: ChangeSet): { from: number; to: number }[] {
+  const replaced: { from: number; to: number }[] = [];
+  changes.iterChangedRanges((fromA, toA, fromB, toB) => {
+    if (toA > fromA && toB > fromB) replaced.push({ from: fromA, to: toA });
+  });
+  return replaced;
+}
+
+function spanSurvivesChanges(changes: ChangeSet): (from: number, to: number) => boolean {
+  const replaced = replacedRanges(changes);
+  if (replaced.length === 0) return () => true;
+  return (from, to) => !replaced.some((range) => range.from < to && range.to > from);
+}
+
 export function createSqlUnknownObjectHighlights(options: SqlUnknownObjectHighlightOptions): Extension {
   if (!options.enabled) return [];
 
   // Keeps the decorations as a DecorationSet so that typing shifts them through
   // the ChangeSet instead of clearing them until the next deferred scan lands.
+  // A span whose text is *replaced* is dropped first: mapping a replaced range
+  // widens the span over the inserted text (the span end lands after it), so
+  // accepting a completion over an unknown word would paint the whole inserted
+  // statement red until the next scan. Pure insertions and deletions keep
+  // mapping, which is what makes typing inside a flagged identifier flicker-free.
   const spansField = StateField.define<DecorationSet>({
     create: () => Decoration.none,
     update(decorations, transaction) {
       for (const effect of transaction.effects) {
         if (effect.is(setSqlUnknownObjectSpans)) return buildDecorationSet(effect.value, transaction.state.doc.length);
       }
-      if (transaction.docChanged) return decorations.map(transaction.changes);
+      if (transaction.docChanged) return decorations.update({ filter: spanSurvivesChanges(transaction.changes) }).map(transaction.changes);
       return decorations;
     },
     provide: (field) => EditorView.decorations.from(field),

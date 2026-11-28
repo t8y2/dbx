@@ -1362,6 +1362,11 @@ export async function listTables(
   );
 }
 
+/** Child tables of one parent table (TDengine super table), paged on demand. */
+export async function listTableChildren(connectionId: string, database: string, schema: string, parentName: string, limit?: number, offset?: number): Promise<TableInfo[]> {
+  return get(`/api/schema/table-children?${qs({ connection_id: connectionId, database, schema, table: parentName, limit, offset })}`);
+}
+
 export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<string | null> {
   return get(`/api/schema/table-comment?${qs({ connection_id: connectionId, database, schema, table, catalog, exact_identity: exactIdentity || undefined })}`);
 }
@@ -6042,7 +6047,11 @@ export async function downloadUpdate(_source: UpdateDownloadSource, _latestVersi
   throw new Error("In-app update downloads are only available in the desktop app.");
 }
 
-export async function cancelUpdateDownload(): Promise<void> {}
+export async function cancelUpdateDownload(_attemptId: string): Promise<void> {}
+
+export async function getUpdateDownloadState(): Promise<import("./tauri").UpdateDownloadState> {
+  return { state: "idle" };
+}
 
 export async function getDownloadedUpdate(): Promise<DownloadedUpdate | null> {
   return null;

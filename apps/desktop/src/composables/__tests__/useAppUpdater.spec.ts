@@ -10,8 +10,10 @@ const mocks = vi.hoisted(() => ({
   cancelUpdateDownload: vi.fn(),
   installDownloadedUpdate: vi.fn(),
   getDownloadedUpdate: vi.fn(),
+  getUpdateDownloadState: vi.fn(),
   discardDownloadedUpdate: vi.fn(),
   getAppVersion: vi.fn(),
+  initEditorSettings: vi.fn(),
   listen: vi.fn(),
   relaunchApp: vi.fn(),
   persist: vi.fn(),
@@ -22,7 +24,17 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 const settings = reactive({ updateDownloadSource: "official", updateChannel: "stable", ignoredUpdateVersion: "", updateNotificationsEnabled: true, autoDownloadUpdates: true, autoUpdateApp: true, toolbarItems: { checkUpdates: true } });
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: settings, updateEditorSettingsAndPersist: mocks.persist }) }));
+const settingsLoad = reactive({ loaded: true });
+vi.mock("@/stores/settingsStore", () => ({
+  useSettingsStore: () => ({
+    editorSettings: settings,
+    get isEditorSettingsLoaded() {
+      return settingsLoad.loaded;
+    },
+    initEditorSettings: mocks.initEditorSettings,
+    updateEditorSettingsAndPersist: mocks.persist,
+  }),
+}));
 const info = { current_version: "1.0.0", latest_version: "1.1.0", update_available: true, portable_mode: false, manual_update_only: false, release_name: "v1.1.0", release_url: "https://example.com", release_notes: "Changes" };
 const cache = { cache_id: "cached", version: "1.1.0", portable_mode: false, release_url: "https://example.com", release_notes: "Changes", downloaded_at: 1 };
 let app: App;
@@ -56,6 +68,8 @@ async function flush() {
 beforeEach(() => {
   vi.resetAllMocks();
   vi.stubEnv("VITE_DBX_DISABLE_UPDATER", "");
+  settingsLoad.loaded = true;
+  mocks.initEditorSettings.mockResolvedValue(undefined);
   settings.updateDownloadSource = "official";
   settings.updateChannel = "stable";
   settings.ignoredUpdateVersion = "";
@@ -66,6 +80,7 @@ beforeEach(() => {
   mocks.checkForUpdates.mockResolvedValue(info);
   mocks.downloadUpdate.mockResolvedValue(cache);
   mocks.getDownloadedUpdate.mockResolvedValue(null);
+  mocks.getUpdateDownloadState.mockResolvedValue({ state: "idle" });
   mocks.getAppVersion.mockResolvedValue("1.0.0");
   mocks.listen.mockResolvedValue(vi.fn());
   mocks.persist.mockImplementation(async (values) => Object.assign(settings, values));
@@ -153,6 +168,331 @@ describe("silent update lifecycle", () => {
     // An explicit check must still open the center, even when already up to date.
     await updater.checkUpdates();
     expect(updater.showUpdateDialog.value).toBe(true);
+  });
+
+  it("keeps an early manual download and its progress through initialization and reopening", async () => {
+    settings.autoUpdateApp = false;
+    const pending = deferred<typeof cache>();
+    mocks.downloadUpdate.mockReturnValueOnce(pending.promise).mockRejectedValue("UPDATE_BUSY");
+    const updater = mount();
+    await updater.checkUpdates();
+    const downloading = updater.downloadUpdateInBackground();
+    await vi.waitFor(() => expect(mocks.downloadUpdate).toHaveBeenCalledOnce());
+    const progress = mocks.listen.mock.calls[0][1];
+    const attemptId = mocks.downloadUpdate.mock.calls[0][2];
+    progress({ payload: { downloaded: 30, total: 100, attempt_id: attemptId, version: cache.version } });
+
+    await updater.initialize();
+    updater.showUpdateDialog.value = false;
+    await updater.checkUpdates();
+    progress({ payload: { downloaded: 65, total: 100, attempt_id: attemptId, version: cache.version } });
+
+    expect(updater.showUpdateDialog.value).toBe(true);
+    expect(updater.isDownloadingUpdate.value).toBe(true);
+    expect(updater.downloadProgress.value).toBe(65);
+    await updater.downloadUpdateInBackground();
+    expect(mocks.downloadUpdate).toHaveBeenCalledOnce();
+
+    pending.resolve(cache);
+    await downloading;
+    expect(updater.updateDownloadedVersion.value).toBe(cache.version);
+    expect(updater.downloadProgress.value).toBe(100);
+    expect(updater.updateCheckFailed.value).toBe(false);
+  });
+
+  it("recovers the startup cache before an early check even when the network is offline", async () => {
+    settings.autoUpdateApp = false;
+    const stored = deferred<typeof cache>();
+    const remote = deferred<typeof info>();
+    mocks.getDownloadedUpdate.mockReturnValue(stored.promise);
+    mocks.checkForUpdates.mockReturnValue(remote.promise);
+    const updater = mount();
+
+    const checking = updater.checkUpdates();
+    await updater.initialize();
+    expect(mocks.checkForUpdates).not.toHaveBeenCalled();
+    stored.resolve(cache);
+    await vi.waitFor(() => expect(mocks.checkForUpdates).toHaveBeenCalledOnce());
+    remote.reject(new Error("offline"));
+    await checking;
+
+    expect(mocks.getDownloadedUpdate).toHaveBeenCalledOnce();
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+    expect(updater.phase.value).toBe("ready");
+    expect(updater.updateDownloadedVersion.value).toBe(cache.version);
+  });
+
+  it("waits for the persisted beta channel before restoring a package on an early check", async () => {
+    settingsLoad.loaded = false;
+    const settingsReady = deferred<void>();
+    mocks.initEditorSettings.mockReturnValue(settingsReady.promise);
+    const betaCache = { ...cache, version: "1.1.0-beta.1", channel: "beta" };
+    mocks.getDownloadedUpdate.mockResolvedValue(betaCache);
+    mocks.checkForUpdates.mockRejectedValue(new Error("offline"));
+    const updater = mount();
+    const checking = updater.checkUpdates();
+    const initializing = updater.initialize();
+    await flush();
+
+    expect(mocks.getDownloadedUpdate).not.toHaveBeenCalled();
+    expect(mocks.checkForUpdates).not.toHaveBeenCalled();
+    settings.updateChannel = "beta";
+    settings.autoUpdateApp = false;
+    settingsLoad.loaded = true;
+    settingsReady.resolve();
+    await Promise.all([checking, initializing]);
+
+    expect(mocks.discardDownloadedUpdate).not.toHaveBeenCalled();
+    expect(mocks.checkForUpdates).toHaveBeenCalledExactlyOnceWith("en", "official", "beta");
+    expect(updater.updateDownloadedVersion.value).toBe(betaCache.version);
+    expect(updater.phase.value).toBe("ready");
+  });
+
+  it("preserves the cache when editor settings cannot be loaded", async () => {
+    settingsLoad.loaded = false;
+    mocks.initEditorSettings.mockRejectedValue(new Error("settings unavailable"));
+    mocks.getDownloadedUpdate.mockResolvedValue({ ...cache, channel: "beta" });
+    const updater = mount();
+    await updater.checkUpdates();
+
+    expect(mocks.getDownloadedUpdate).not.toHaveBeenCalled();
+    expect(mocks.discardDownloadedUpdate).not.toHaveBeenCalled();
+    expect(mocks.checkForUpdates).not.toHaveBeenCalled();
+    expect(updater.updateCheckMessage.value).toContain("settings unavailable");
+  });
+
+  it("recovers an already downloaded package when the backend rejects a duplicate request", async () => {
+    settings.autoUpdateApp = false;
+    const updater = mount();
+    await updater.checkUpdates();
+    mocks.downloadUpdate.mockRejectedValueOnce("UPDATE_BUSY");
+    mocks.getUpdateDownloadState.mockResolvedValueOnce({ state: "ready", update: cache });
+
+    await updater.downloadUpdateInBackground();
+
+    expect(mocks.downloadUpdate).toHaveBeenCalledOnce();
+    expect(updater.updateDownloadedVersion.value).toBe(cache.version);
+    expect(updater.updateCheckFailed.value).toBe(false);
+  });
+
+  it.each([false, true])("observes the shared progress and adopts the result without another download (raced: %s)", async (raced) => {
+    vi.useFakeTimers();
+    settings.autoUpdateApp = false;
+    const updater = mount();
+    if (raced) await updater.checkUpdates();
+    mocks.downloadUpdate.mockRejectedValueOnce("UPDATE_BUSY");
+    const active = { state: "downloading", attempt_id: "other-window", version: cache.version, progress: { attempt_id: "other-window", version: cache.version, downloaded: 35, total: 100 } };
+    mocks.getUpdateDownloadState
+      .mockResolvedValueOnce(active)
+      .mockResolvedValueOnce({ ...active, progress: { ...active.progress, downloaded: 70 } })
+      .mockResolvedValue({ state: "ready", update: cache });
+
+    const observing = raced ? updater.downloadUpdateInBackground() : updater.checkUpdates();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(updater.isDownloadingUpdate.value).toBe(true);
+    expect(updater.downloadProgress.value).toBe(35);
+    expect(updater.downloadVersion.value).toBe(cache.version);
+    expect(updater.updateCheckFailed.value).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(updater.downloadProgress.value).toBe(70);
+    await vi.advanceTimersByTimeAsync(500);
+    await observing;
+
+    expect(updater.updateDownloadedVersion.value).toBe(cache.version);
+    expect(updater.phase.value).toBe("ready");
+    expect(mocks.downloadUpdate).toHaveBeenCalledTimes(raced ? 1 : 0);
+  });
+
+  it("does not retry the originating window after another window cancels the shared download", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<typeof cache>();
+    const active = { state: "downloading" as const, attempt_id: "originating-window", version: cache.version, progress: null };
+    let sharedState: typeof active | { state: "idle" } = { state: "idle" };
+    mocks.downloadUpdate.mockReturnValue(pending.promise);
+    mocks.getUpdateDownloadState.mockImplementation(async () => sharedState);
+
+    const originatingUpdater = mount();
+    const originatingDownload = originatingUpdater.checkUpdates({ silent: true });
+    await vi.waitFor(() => expect(mocks.downloadUpdate).toHaveBeenCalledOnce());
+
+    sharedState = active;
+    const observingUpdater = mount();
+    const observingCheck = observingUpdater.checkUpdates();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(observingUpdater.isDownloadingUpdate.value).toBe(true);
+
+    mocks.cancelUpdateDownload.mockImplementation(async (attemptId: string) => {
+      expect(attemptId).toBe(active.attempt_id);
+      sharedState = { state: "idle" };
+      pending.reject(new Error("Download canceled by user."));
+    });
+    await observingUpdater.cancelDownload();
+    await vi.advanceTimersByTimeAsync(500);
+    await observingCheck;
+    await originatingDownload;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mocks.downloadUpdate).toHaveBeenCalledOnce();
+    expect(originatingUpdater.phase.value).toBe("idle");
+    expect(originatingUpdater.updateCheckFailed.value).toBe(false);
+  });
+
+  it("follows a native download without relying on the release feed or prior update information", async () => {
+    vi.useFakeTimers();
+    settings.autoUpdateApp = false;
+    mocks.checkForUpdates.mockRejectedValue(new Error("update source offline"));
+    mocks.getUpdateDownloadState.mockResolvedValueOnce({ state: "downloading", attempt_id: "other-window", version: cache.version, progress: { downloaded: 42, total: 100 } }).mockResolvedValue({ state: "ready", update: cache });
+    const updater = mount();
+    await updater.checkUpdates();
+
+    expect(updater.updateInfo.value).toBeNull();
+    expect(updater.phase.value).toBe("downloading");
+    expect(updater.downloadProgress.value).toBe(42);
+    expect(updater.downloadVersion.value).toBe(cache.version);
+    expect(updater.updateCheckFailed.value).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(updater.phase.value).toBe("ready");
+    expect(updater.updateDownloadedVersion.value).toBe(cache.version);
+    expect(updater.updateInfo.value?.current_version).toBe(info.current_version);
+    expect(mocks.checkForUpdates).not.toHaveBeenCalled();
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the offer without automatically restarting a canceled shared download", async () => {
+    vi.useFakeTimers();
+    mocks.getUpdateDownloadState.mockResolvedValueOnce({ state: "downloading", attempt_id: "other-window", version: cache.version, progress: null }).mockResolvedValue({ state: "idle" });
+    const updater = mount();
+    await updater.checkUpdates();
+    expect(updater.phase.value).toBe("downloading");
+
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(updater.phase.value).toBe("idle");
+    expect(updater.hasUpdateAvailable.value).toBe(true);
+    expect(updater.updateDownloaded.value).toBe(false);
+    expect(mocks.checkForUpdates).toHaveBeenCalledOnce();
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+    expect(mocks.cancelUpdateDownload).not.toHaveBeenCalled();
+  });
+
+  it("stops bounded retries when a shared download ends offline without an update offer", async () => {
+    vi.useFakeTimers();
+    const active = { state: "downloading", attempt_id: "other-window", version: cache.version, progress: null };
+    mocks.getUpdateDownloadState.mockResolvedValueOnce(active).mockResolvedValue({ state: "idle" });
+    mocks.checkForUpdates.mockRejectedValue(new Error("update source offline"));
+    const updater = mount();
+    await updater.initialize();
+    for (let index = 0; index < 8 && updater.phase.value === "checking"; index += 1) await Promise.resolve();
+    expect(updater.phase.value).toBe("downloading");
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mocks.checkForUpdates).toHaveBeenCalledOnce();
+    expect(updater.updateCheckFailed.value).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(900_000);
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(4);
+
+    await vi.advanceTimersByTimeAsync(900_000);
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(4);
+  });
+
+  it("discards a package completed during channel switching before downloading the new channel", async () => {
+    settings.autoUpdateApp = false;
+    const pending = deferred<typeof cache>();
+    const betaCache = { ...cache, cache_id: "beta-package", version: "1.2.0-beta.1", channel: "beta" };
+    mocks.downloadUpdate.mockReturnValueOnce(pending.promise).mockResolvedValueOnce(betaCache);
+    mocks.cancelUpdateDownload.mockImplementation(async () => {
+      mocks.getDownloadedUpdate.mockResolvedValueOnce({ ...cache, channel: "stable" });
+      pending.resolve(cache);
+    });
+    mocks.checkForUpdates.mockImplementation(async (_locale, _source, channel) => (channel === "beta" ? { ...info, latest_version: betaCache.version, channel: "beta" } : info));
+    const updater = mount();
+    await updater.checkUpdates();
+    const download = updater.downloadUpdateInBackground();
+    await vi.waitFor(() => expect(mocks.downloadUpdate).toHaveBeenCalledOnce());
+
+    const switchChannel = updater.changeUpdateChannel("beta");
+    await vi.waitFor(() => expect(mocks.cancelUpdateDownload).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith(cache.cache_id));
+    await switchChannel;
+    await download;
+    await updater.checkUpdates();
+    await updater.downloadUpdateInBackground();
+
+    expect(mocks.downloadUpdate).toHaveBeenLastCalledWith("official", betaCache.version, expect.any(String), "Changes", "beta");
+    expect(updater.updateDownloadedVersion.value).toBe(betaCache.version);
+  });
+
+  it("keeps automatic retries in check-only mode after a shared cancellation", async () => {
+    vi.useFakeTimers();
+    const active = { state: "downloading", attempt_id: "other-window", version: cache.version, progress: null };
+    mocks.getUpdateDownloadState.mockResolvedValueOnce(active).mockResolvedValue({ state: "idle" });
+    mocks.checkForUpdates.mockRejectedValueOnce(new Error("temporary feed failure")).mockResolvedValue(info);
+    const updater = mount();
+    await updater.initialize();
+    for (let index = 0; index < 8 && updater.phase.value === "checking"; index += 1) await Promise.resolve();
+    expect(updater.phase.value).toBe("downloading");
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(updater.updateCheckMessage.value).toContain("temporary feed failure");
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+    expect(updater.updateDownloaded.value).toBe(false);
+  });
+
+  it("cancels the observed attempt only when the user explicitly cancels", async () => {
+    vi.useFakeTimers();
+    settings.autoUpdateApp = false;
+    const active = { state: "downloading", attempt_id: "other-window", version: cache.version, progress: null };
+    mocks.getUpdateDownloadState.mockResolvedValue(active);
+    const updater = mount();
+    await updater.checkUpdates();
+    mocks.cancelUpdateDownload.mockImplementation(async () => {
+      mocks.getUpdateDownloadState.mockResolvedValue({ state: "idle" });
+    });
+    await updater.changeUpdateDownloadSource("cnb");
+    expect(updater.isDownloadingUpdate.value).toBe(false);
+    expect(mocks.cancelUpdateDownload).toHaveBeenCalledExactlyOnceWith(active.attempt_id);
+  });
+
+  it("cancels an observed attempt before ignoring its version", async () => {
+    vi.useFakeTimers();
+    const active = { state: "downloading", attempt_id: "other-window", version: cache.version, progress: null };
+    mocks.getUpdateDownloadState.mockResolvedValue(active);
+    const updater = mount();
+    await updater.checkUpdates();
+    await Promise.resolve();
+    updater.updateInfo.value = info;
+    mocks.cancelUpdateDownload.mockImplementation(async () => {
+      mocks.getUpdateDownloadState.mockResolvedValue({ state: "idle" });
+    });
+    await updater.ignoreCurrentVersion();
+
+    expect(mocks.cancelUpdateDownload).toHaveBeenCalledExactlyOnceWith(active.attempt_id);
+    expect(mocks.persist).toHaveBeenCalledWith({ ignoredUpdateVersion: info.latest_version });
+    expect(updater.isDownloadingUpdate.value).toBe(false);
+  });
+
+  it.each([
+    { ...cache, version: "1.0.5" },
+    { ...cache, channel: "beta" },
+  ])("does not adopt a busy updater's older package or a package from another channel", async (otherCache) => {
+    settings.autoUpdateApp = false;
+    const updater = mount();
+    await updater.checkUpdates();
+    mocks.downloadUpdate.mockRejectedValueOnce("UPDATE_BUSY");
+    mocks.getUpdateDownloadState.mockResolvedValueOnce({ state: "ready", update: otherCache });
+
+    await updater.downloadUpdateInBackground();
+
+    expect(updater.updateDownloaded.value).toBe(false);
+    expect(updater.updateInfo.value?.latest_version).toBe(info.latest_version);
+    expect(updater.updateCheckFailed.value).toBe(true);
   });
 
   it("discards the promoted stable cache when its beta binary is already running", async () => {
@@ -350,6 +690,16 @@ describe("silent update lifecycle", () => {
     expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith("cached");
     expect(updater.updateDownloaded.value).toBe(false);
   });
+  it("deletes a shared ready cache when this window has not adopted it", async () => {
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    mocks.getDownloadedUpdate.mockResolvedValueOnce(cache);
+
+    await updater.ignoreCurrentVersion();
+
+    expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith("cached");
+    expect(updater.updateDownloaded.value).toBe(false);
+  });
   it("keeps ready cache if ignoring cannot persist", async () => {
     mocks.persist.mockRejectedValue(new Error("disk full"));
     const updater = mount();
@@ -437,8 +787,8 @@ describe("silent update lifecycle", () => {
   it("reconciles a download that commits just before cancellation without installing it", async () => {
     const pending = deferred<typeof cache>();
     mocks.downloadUpdate.mockReturnValue(pending.promise);
-    mocks.getDownloadedUpdate.mockResolvedValue(cache);
     mocks.cancelUpdateDownload.mockImplementation(async () => {
+      mocks.getDownloadedUpdate.mockResolvedValue(cache);
       pending.resolve(cache);
     });
     const updater = mount();

@@ -2605,7 +2605,7 @@ impl AppState {
         }
 
         // A static tunnel has already chosen the TCP port, even if it is 1433.
-        db::sqlserver::connect_with_port_explicit(
+        db::sqlserver::connect_with_port_explicit_and_init_script(
             host,
             port,
             config.sqlserver_port_explicit() || config.has_effective_transport_layers(),
@@ -2613,6 +2613,7 @@ impl AppState {
             &config.password,
             config.database.as_deref(),
             config.url_params.as_deref(),
+            config.init_script.as_deref(),
             connect_timeout,
         )
         .await?;
@@ -2646,7 +2647,7 @@ impl AppState {
             return Ok(PoolKind::agent(client));
         }
 
-        let client = db::sqlserver::connect_with_port_explicit(
+        let client = db::sqlserver::connect_with_port_explicit_and_init_script(
             host,
             port,
             config.sqlserver_port_explicit() || config.has_effective_transport_layers(),
@@ -2654,6 +2655,7 @@ impl AppState {
             &config.password,
             config.database.as_deref(),
             config.url_params.as_deref(),
+            config.init_script.as_deref(),
             connect_timeout,
         )
         .await?;

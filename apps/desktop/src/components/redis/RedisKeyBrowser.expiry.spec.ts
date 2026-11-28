@@ -1227,6 +1227,23 @@ describe("RedisKeyBrowser command completion", () => {
   });
 });
 
+describe("RedisKeyBrowser command terminal theme", () => {
+  it("uses readable light-mode colors while preserving the dark terminal palette", async () => {
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    const terminalShell = input.closest("form")?.parentElement;
+    expect(terminalShell?.className).toContain("bg-white");
+    expect(terminalShell?.className).toContain("text-slate-800");
+    expect(terminalShell?.className).toContain("dark:bg-[#171b21]");
+    expect(terminalShell?.className).toContain("dark:text-slate-200");
+    expect(input.className).toContain("text-slate-800");
+    expect(input.className).toContain("dark:text-slate-200");
+  });
+});
+
 describe("RedisKeyBrowser command console echo", () => {
   it("echoes the submitted command to the terminal before the response arrives, then fills in the result", async () => {
     const pending = deferred<{ value: unknown }>();

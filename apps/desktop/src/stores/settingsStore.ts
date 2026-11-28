@@ -16,6 +16,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { type ColumnFormatterConfig, type CustomColumnFormatterConfig, normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern } from "@/lib/dataGrid/columnFormatter";
+import { mergeVirtualForeignKeyRules, normalizeVirtualForeignKeyRules, upsertVirtualForeignKeyRule, type MergeVirtualForeignKeyResult, type PortableVirtualForeignKeyRule, type VirtualForeignKeyRule } from "@/lib/dataGrid/virtualForeignKeys";
 import { type BooleanCellValueStyle, normalizeBooleanCellValueStyle } from "@/lib/dataGrid/dataGridBooleanColumn";
 import {
   type DataGridCopyPreference,
@@ -1251,6 +1252,7 @@ export interface EditorSettings {
   columnFormatters: Record<string, ColumnFormatterConfig>;
   customColumnFormatters: Record<string, CustomColumnFormatterConfig>;
   globalNumberGrouping: boolean;
+  virtualForeignKeys: VirtualForeignKeyRule[];
   globalDateTimeDisplayFormat: string;
   globalDateTimeExportFormat: string;
   globalDateTimeImportFormat: string;
@@ -1672,6 +1674,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   columnFormatters: {},
   customColumnFormatters: {},
   globalNumberGrouping: false,
+  virtualForeignKeys: [],
   globalDateTimeDisplayFormat: "",
   globalDateTimeExportFormat: "",
   globalDateTimeImportFormat: "",
@@ -2517,6 +2520,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
     globalNumberGrouping: settings.globalNumberGrouping === true,
+    virtualForeignKeys: normalizeVirtualForeignKeyRules(settings.virtualForeignKeys),
     globalDateTimeDisplayFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeDisplayFormat),
     globalDateTimeExportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeExportFormat),
     globalDateTimeImportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeImportFormat),
@@ -3523,6 +3527,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.columnFormatters !== undefined) editorSettings.value.columnFormatters = partial.columnFormatters;
     if (partial.customColumnFormatters !== undefined) editorSettings.value.customColumnFormatters = partial.customColumnFormatters;
     if (partial.globalNumberGrouping !== undefined) editorSettings.value.globalNumberGrouping = partial.globalNumberGrouping === true;
+    if (partial.virtualForeignKeys !== undefined) editorSettings.value.virtualForeignKeys = normalizeVirtualForeignKeyRules(partial.virtualForeignKeys);
     if (partial.globalDateTimeDisplayFormat !== undefined) editorSettings.value.globalDateTimeDisplayFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeDisplayFormat);
     if (partial.globalDateTimeExportFormat !== undefined) editorSettings.value.globalDateTimeExportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeExportFormat);
     if (partial.globalDateTimeImportFormat !== undefined) editorSettings.value.globalDateTimeImportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeImportFormat);
@@ -3665,6 +3670,31 @@ export const useSettingsStore = defineStore("settings", () => {
       delete columnFormatters[key];
     }
     updateEditorSettings({ columnFormatters });
+  }
+
+  function upsertVirtualForeignKey(rule: Omit<VirtualForeignKeyRule, "id"> & { id?: string }) {
+    const virtualForeignKeys = upsertVirtualForeignKeyRule(editorSettings.value.virtualForeignKeys, rule);
+    updateEditorSettings({ virtualForeignKeys });
+  }
+
+  function removeVirtualForeignKey(id: string) {
+    const virtualForeignKeys = editorSettings.value.virtualForeignKeys.filter((item) => item.id !== id);
+    if (virtualForeignKeys.length === editorSettings.value.virtualForeignKeys.length) return;
+    updateEditorSettings({ virtualForeignKeys });
+  }
+
+  function importVirtualForeignKeys(connectionId: string, incoming: readonly PortableVirtualForeignKeyRule[]): MergeVirtualForeignKeyResult {
+    const merged = mergeVirtualForeignKeyRules(editorSettings.value.virtualForeignKeys, connectionId, incoming);
+    if (merged.added > 0 || merged.upgraded > 0) {
+      updateEditorSettings({ virtualForeignKeys: merged.rules });
+    }
+    return merged;
+  }
+
+  function clearVirtualForeignKeysForConnection(connectionId: string) {
+    const virtualForeignKeys = editorSettings.value.virtualForeignKeys.filter((item) => item.connectionId !== connectionId);
+    if (virtualForeignKeys.length === editorSettings.value.virtualForeignKeys.length) return;
+    updateEditorSettings({ virtualForeignKeys });
   }
 
   function customColumnFormatterDeleteVersion(id: string): number {
@@ -3815,6 +3845,10 @@ export const useSettingsStore = defineStore("settings", () => {
     initMcpGlobalPolicy,
     updateMcpGlobalPolicy,
     updateColumnFormatter,
+    upsertVirtualForeignKey,
+    removeVirtualForeignKey,
+    importVirtualForeignKeys,
+    clearVirtualForeignKeysForConnection,
     rememberConnectionDatabases,
     rememberedDatabaseForConnection,
     clearRememberedConnectionDatabases,

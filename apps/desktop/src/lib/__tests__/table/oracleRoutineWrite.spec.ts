@@ -160,6 +160,50 @@ describe("Oracle routine source save", () => {
     expect(api.executeOracleRoutineOperation).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps watching an operation that is still running when the bounded response returns", async () => {
+    // The backend answers after 30s even if its worker is mid-write. That is progress,
+    // not failure: the save must wait for the original operation instead of reporting
+    // "pending" for a write that commits moments later.
+    const { prepareOracleRoutineSourceSave } = await import("@/lib/table/oracleRoutineWrite");
+    const save = await prepareOracleRoutineSourceSave(input());
+    vi.mocked(api.executeOracleRoutineOperation).mockResolvedValue(record({ lifecycle: "running", acknowledged: false, readback: null }));
+    vi.mocked(api.observeOracleRoutineOperation)
+      .mockResolvedValueOnce({ operation: record({ lifecycle: "running", acknowledged: false, readback: null }), lifecycle: "running", error: null })
+      // The worker marks the write terminal before its verification readback lands;
+      // that intermediate record must not be mistaken for the final answer.
+      .mockResolvedValueOnce({ operation: record({ readback: null }), lifecycle: "terminal", error: null })
+      .mockResolvedValueOnce({ operation: record(), lifecycle: "terminal", error: null });
+
+    // Drive the poll with fake timers: its real interval is seconds long, and waiting it
+    // out here would hold the event loop long enough to time out unrelated suites that
+    // happen to share this worker.
+    vi.useFakeTimers();
+    try {
+      const settling = save();
+      await vi.runAllTimersAsync();
+      const settled = await settling;
+      expect(settled.lifecycle).toBe("terminal");
+      expect(settled.readback?.state).toBe("verified");
+      // Status reads only: the DDL is dispatched once and readback is never re-run here.
+      expect(api.executeOracleRoutineOperation).toHaveBeenCalledTimes(1);
+      expect(api.observeOracleRoutineOperation).toHaveBeenCalledWith("original-operation", false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a failed write at once instead of waiting for a readback", async () => {
+    // Only an acknowledged write has a verification readback still to come; a DDL that
+    // failed is final with its error, so watching it would only delay the report.
+    const { prepareOracleRoutineSourceSave } = await import("@/lib/table/oracleRoutineWrite");
+    const save = await prepareOracleRoutineSourceSave(input());
+    const failed = record({ acknowledged: false, readback: null, error: "ORA-01031: insufficient privileges" });
+    vi.mocked(api.executeOracleRoutineOperation).mockResolvedValue(failed);
+
+    await expect(save()).rejects.toMatchObject({ operation: failed, message: expect.stringContaining("ORA-01031") });
+    expect(api.observeOracleRoutineOperation).not.toHaveBeenCalledWith("original-operation", false);
+  });
+
   it("verification requires terminal lifecycle, write acknowledgement, and full readback", async () => {
     const { oracleRoutineOperationVerified } = await import("@/lib/table/oracleRoutineWrite");
     expect(oracleRoutineOperationVerified(record())).toBe(true);

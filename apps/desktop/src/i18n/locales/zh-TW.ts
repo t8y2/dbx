@@ -5733,6 +5733,16 @@ export default withEnglishFallback({
     showPackageMembers: "展開套件成員",
     packageFunctionAtLine: "函式 {name}，第 {line} 行",
     packageProcedureAtLine: "程序 {name}，第 {line} 行",
+    compileErrorsTitle: "編譯錯誤（{count}）",
+    compileErrorGoTo: "跳至第 {line} 行第 {column} 欄",
+    compileErrorFixWithAi: "用 AI 修復",
+    compileErrorCopy: "複製錯誤訊息",
+    sourceSaveStage: {
+      validating: "正在驗證原始碼",
+      preparing: "正在準備儲存",
+      executing: "正在提交 DDL",
+      verifying: "正在讀回驗證",
+    },
   },
   postgresForeignTable: {
     tableKind: "資料表類型",

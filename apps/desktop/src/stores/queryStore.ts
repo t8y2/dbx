@@ -3588,6 +3588,37 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  /** 把光标移到指定行列（1-based），走编辑器既有的 reveal 通道。 */
+  function revealEditorPosition(id: string, position: { line: number; column?: number }) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab) return;
+    tab.editorRevealRequest = { id: ++contentRevealSeq, line: position.line, column: position.column ?? 1 };
+  }
+
+  /**
+   * 记录/清除上一次保存该对象时数据库报回的编译错误。写入时带上对象标识，tab 被复用
+   * 去看别的对象时就能丢弃，避免把错误行指到无关的源码上。
+   */
+  function setObjectSourceCompileErrors(id: string, errors: QueryTab["objectSourceCompileErrors"]) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab) return;
+    tab.objectSourceCompileErrors = errors?.messages.length ? errors : undefined;
+  }
+
+  /**
+   * 对象源码保存的进行态。保存串了校验、提交、读回三段后端往返，期间编辑器照常可见，
+   * 没有这个状态就只能干等；`stage` 为 undefined 表示保存结束（成功或失败都清掉）。
+   */
+  function setObjectSourceSaveStage(id: string, stage: NonNullable<QueryTab["objectSourceSave"]>["stage"] | undefined) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab) return;
+    if (!stage) {
+      tab.objectSourceSave = undefined;
+      return;
+    }
+    tab.objectSourceSave = { startedAt: tab.objectSourceSave?.startedAt ?? Date.now(), stage };
+  }
+
   /**
    * 把光标放到源码里那个包成员的子程序头上（树上选中包成员时才有定位意图）。
    * 走编辑器既有的 reveal 通道，和全局搜索跳转同一条路。
@@ -12423,6 +12454,9 @@ export const useQueryStore = defineStore("query", () => {
     openObjectSourceTab,
     openObjectSourceTabPending,
     revealPendingPackageMember,
+    setObjectSourceSaveStage,
+    setObjectSourceCompileErrors,
+    revealEditorPosition,
     retryObjectSourceTab,
     refreshObjectSourceTab,
     loadDdlViewerTab,

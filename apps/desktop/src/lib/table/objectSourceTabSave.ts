@@ -6,10 +6,11 @@ import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutio
 import { assertSourceIdentity, beginSourceSave } from "@/lib/table/objectSourceIdentity";
 import { buildExecutableObjectSourceStatements, objectSourceSaveSuccessMessage, prepareObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { requestOracleTypeManagement } from "@/lib/table/oracleTypeManagementRequest";
+import { OracleRoutineWriteError } from "@/lib/table/oracleRoutineWrite";
 
 interface ObjectSourceTabSaveContext {
   connection?: ConnectionConfig;
-  queryStore: Pick<ReturnType<typeof useQueryStore>, "tabs" | "getObjectSourceIdentitySnapshot" | "markTabClean" | "runOracleTriggerSourceAction">;
+  queryStore: Pick<ReturnType<typeof useQueryStore>, "tabs" | "getObjectSourceIdentitySnapshot" | "markTabClean" | "runOracleTriggerSourceAction" | "setObjectSourceSaveStage" | "setObjectSourceCompileErrors">;
   t: (key: string, values?: Record<string, unknown>) => string;
   toast: (message: string, duration?: number) => void;
   /** Quote character reported by the connected server, for types whose quote is not fixed by the
@@ -47,15 +48,27 @@ export async function saveObjectSourceTab(tab: QueryTab, { connection, queryStor
     const schema = source.schema || tab.schema || database;
     const sql = tab.sql;
     if (source.objectType === "TRIGGER" && ["oracle", "oceanbase-oracle", "dameng"].includes(databaseType)) return await queryStore.runOracleTriggerSourceAction(tab.id);
+    // Each of these is a backend round trip; together they can run for seconds, so the
+    // tab advertises the current phase instead of leaving the editor looking idle.
+    queryStore.setObjectSourceSaveStage(tab.id, "validating");
+    // A new attempt supersedes whatever the previous one reported.
+    queryStore.setObjectSourceCompileErrors(tab.id, undefined);
     const statements = await buildExecutableObjectSourceStatements({ databaseType, objectType: source.objectType, schema, name: source.name, source: sql, identifierQuote });
+    queryStore.setObjectSourceSaveStage(tab.id, "preparing");
     save = await prepareObjectSourceSave(connectionId, database, databaseType, statements, schema, { objectType: source.objectType, name: source.name });
     const preparedSave = save;
     const targetIsCurrent = () => queryStore.tabs.includes(tab) && tab.objectSource === source && tab.connectionId === connectionId && tab.database === database && (source.schema || tab.schema || database) === schema;
     const execute = async () => {
       if (!targetIsCurrent()) return;
       const release = beginSourceSave(identity);
+      // The production guard may hold the draft at a confirmation dialog, so the
+      // executing phase starts here rather than before it.
+      queryStore.setObjectSourceSaveStage(tab.id, "executing");
       try {
-        return { operation: await preparedSave() };
+        const operation = await preparedSave();
+        // The DDL is committed by now; what remains is reading the object back.
+        queryStore.setObjectSourceSaveStage(tab.id, "verifying");
+        return { operation };
       } finally {
         release();
       }
@@ -69,10 +82,20 @@ export async function saveObjectSourceTab(tab: QueryTab, { connection, queryStor
     toast(objectSourceSaveSuccessMessage(t("objects.sourceSaved"), result.operation), result.operation?.readback?.compilerMessages.length ? 6000 : 2000);
     return true;
   } catch (error: unknown) {
+    // Oracle accepts the DDL and then reports compilation errors with line/column
+    // numbers. They used to survive only as one line of toast text; keeping them on
+    // the tab lets the editor list them, jump to the offending line and hand them to AI.
+    if (error instanceof OracleRoutineWriteError && error.operation) {
+      const readback = error.operation.readback;
+      const messages = [...(readback?.compilerMessages ?? []), ...(readback?.packageCompanion?.compilerMessages ?? [])];
+      const current = tab.objectSource;
+      if (current) queryStore.setObjectSourceCompileErrors(tab.id, { name: current.name, objectType: current.objectType, messages });
+    }
     const message = error && typeof error === "object" && "message" in error ? error.message : undefined;
     toast(t("objects.sourceSaveFailed", { message: message || String(error) }), 5000);
     return false;
   } finally {
+    queryStore.setObjectSourceSaveStage(tab.id, undefined);
     await save?.dispose?.();
   }
 }

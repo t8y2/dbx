@@ -89,6 +89,7 @@ import ConnectionWatermark from "@/components/common/ConnectionWatermark.vue";
 import { resolveConnectionWatermark } from "@/lib/connection/connectionWatermark";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
 import OraclePackageMembers from "@/components/objects/OraclePackageMembers.vue";
+import ObjectSourceCompileErrors from "@/components/objects/ObjectSourceCompileErrors.vue";
 import type { OraclePackageSourceContext } from "@/lib/sql/oraclePackageMemberNavigation";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import type { OraclePackageMemberEntry } from "@/lib/sql/oraclePackageMembers";
@@ -1268,6 +1269,7 @@ const editorPaneSize = computed(() => (props.editorOnly || !resultsPaneOpen.valu
 const queryRunningElapsed = ref(0);
 const sourceLoadElapsed = ref(0);
 const ddlLoadElapsed = ref(0);
+const objectSourceSaveElapsed = ref(0);
 
 function toggleResultsPane(): boolean {
   if (props.activeTab.mode !== "query" || !hasQueryOutput.value) return false;
@@ -1414,12 +1416,14 @@ function updateRunningElapsed() {
   sourceLoadElapsed.value = sourceStartedAt ? Math.max(0, Date.now() - sourceStartedAt) : 0;
   const ddlStartedAt = pendingDdlLoadStartedAt();
   ddlLoadElapsed.value = ddlStartedAt ? Math.max(0, Date.now() - ddlStartedAt) : 0;
+  const saveStartedAt = props.activeTab.objectSourceSave?.startedAt;
+  objectSourceSaveElapsed.value = saveStartedAt ? Math.max(0, Date.now() - saveStartedAt) : 0;
 }
 
 function startRunningElapsedTimer() {
   stopRunningElapsedTimer();
   updateRunningElapsed();
-  const isTicking = () => (props.activeTab.isExecuting && !!props.activeTab.queryExecutionStartedAt) || pendingSourceLoadStartedAt() !== undefined || pendingDdlLoadStartedAt() !== undefined;
+  const isTicking = () => (props.activeTab.isExecuting && !!props.activeTab.queryExecutionStartedAt) || pendingSourceLoadStartedAt() !== undefined || pendingDdlLoadStartedAt() !== undefined || !!props.activeTab.objectSourceSave;
   if (!isTicking()) return;
   const updateOnNextFrame = () => {
     updateRunningElapsed();
@@ -1433,10 +1437,44 @@ function startRunningElapsedTimer() {
 const queryRunningElapsedSeconds = computed(() => formatElapsedSeconds(queryRunningElapsed.value));
 const sourceLoadElapsedSeconds = computed(() => formatElapsedSeconds(sourceLoadElapsed.value));
 const ddlLoadElapsedSeconds = computed(() => formatElapsedSeconds(ddlLoadElapsed.value));
-
-watch(() => [props.activeTab.id, props.activeTab.isExecuting, props.activeTab.queryExecutionStartedAt, props.activeTab.sourceLoad?.startedAt, props.activeTab.sourceLoad?.error, props.activeTab.ddlLoad?.startedAt, props.activeTab.ddlLoad?.error] as const, startRunningElapsedTimer, {
-  immediate: true,
+const objectSourceSaveElapsedSeconds = computed(() => formatElapsedSeconds(objectSourceSaveElapsed.value));
+// Saving runs validate -> prepare -> execute -> verify, each a backend round trip.
+// Naming the phase turns a blank wait into visible progress.
+// Compilation errors belong to the object they were reported for; a reused tab must
+// not point its error lines at unrelated source.
+const objectSourceCompileErrors = computed(() => {
+  const reported = props.activeTab.objectSourceCompileErrors;
+  const source = props.activeTab.objectSource;
+  if (!reported || !source || reported.name !== source.name || reported.objectType !== source.objectType) return null;
+  return reported;
 });
+function revealCompileError(position: { line: number; column: number }) {
+  queryStore.revealEditorPosition(props.activeTab.id, position);
+}
+const objectSourceSaveLabel = computed(() => {
+  const stage = props.activeTab.objectSourceSave?.stage;
+  if (!stage) return "";
+  return t(`objects.sourceSaveStage.${stage}`);
+});
+
+watch(
+  () =>
+    [
+      props.activeTab.id,
+      props.activeTab.isExecuting,
+      props.activeTab.queryExecutionStartedAt,
+      props.activeTab.sourceLoad?.startedAt,
+      props.activeTab.sourceLoad?.error,
+      props.activeTab.ddlLoad?.startedAt,
+      props.activeTab.ddlLoad?.error,
+      props.activeTab.objectSourceSave?.startedAt,
+      props.activeTab.objectSourceSave?.stage,
+    ] as const,
+  startRunningElapsedTimer,
+  {
+    immediate: true,
+  },
+);
 
 onUnmounted(() => {
   stopRunningElapsedTimer();
@@ -2460,6 +2498,11 @@ defineExpose({
                 <p v-if="activeTab.sourceLoad.error" class="min-w-0 flex-1 break-words text-destructive">{{ activeTab.sourceLoad.error }}</p>
                 <Button v-if="activeTab.sourceLoad.error" variant="outline" size="sm" @click="queryStore.retryObjectSourceTab(activeTab.id)">{{ t("common.retry") }}</Button>
               </div>
+              <div v-if="activeTab.objectSourceSave" class="flex shrink-0 items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-xs" data-object-source-save-progress>
+                <Loader2 class="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+                <span class="min-w-0 flex-1 truncate font-medium">{{ objectSourceSaveLabel }}</span>
+                <span class="shrink-0 tabular-nums text-muted-foreground">{{ objectSourceSaveElapsedSeconds }}</span>
+              </div>
               <QueryLoadingState v-if="activeTab.sourceLoad && !activeTab.sourceLoad.error && !retainTriggerSourceEditor" class="relative z-0 flex-1" :elapsed-seconds="sourceLoadElapsedSeconds" />
               <div v-else-if="activeTab.sourceLoad?.error && !retainTriggerSourceEditor" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-object-source-load-error>
                 <p class="max-w-[80%] text-center break-words text-destructive">{{ activeTab.sourceLoad.error }}</p>
@@ -2559,6 +2602,14 @@ defineExpose({
                   @close-column-panel="onHandleCloseColumnPanel"
                 />
               </div>
+              <ObjectSourceCompileErrors
+                v-if="objectSourceCompileErrors"
+                :messages="objectSourceCompileErrors.messages"
+                :object-name="objectSourceCompileErrors.name"
+                @navigate="revealCompileError"
+                @fix-with-ai="(instruction) => emit('fixWithAi', activeTab.id, instruction)"
+                @dismiss="queryStore.setObjectSourceCompileErrors(activeTab.id, undefined)"
+              />
               <ColumnInfoPanel
                 v-if="showColumnInfo"
                 :columns="columnInfoColumns"

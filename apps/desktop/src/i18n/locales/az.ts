@@ -9739,6 +9739,7 @@ export default withEnglishFallback({
     clearColumns: "Təmizlə",
     selectAtLeastOneColumn: "İxrac üçün ən azı bir sütun seçin.",
     includeObjects: "Görünüşlər / prosedurlar / funksiyalar / ardıcıllıqlar",
+    splitSqlByTable: "SQL-i cədvəllərə görə böl (ZIP)",
     splitSqlOutput: "SQL ixracını ZIP arxivinə böl",
     splitSqlPartMaxMb: "Hər SQL hissəsi üçün maksimum ölçü (MB)",
     splitSqlOutputDescription: "Nömrələnmiş SQL hissələri və manifestdən ibarət ZIP arxivi yaradır. Hissələr tam SQL ifadələri arasında bölünür ({min}–{max} MB).",

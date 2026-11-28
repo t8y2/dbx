@@ -146,6 +146,14 @@ function persistExportOptions() {
 // db_type == mysql, which also covers MariaDB / TiDB / OceanBase-MySQL-mode).
 const isMysqlFamily = computed(() => store.getConfig(connectionId.value)?.db_type === "mysql");
 const isPostgresAllSchemas = computed(() => store.getConfig(connectionId.value)?.db_type === "postgres" && schema.value === POSTGRES_ALL_SCHEMAS);
+const canSplitSqlByTable = computed(() => (exportAllDatabases.value || !isPostgresAllSchemas.value) && (includeStructure.value || includeData.value));
+const splitSqlBySize = computed(() => splitSqlOutput.value === true);
+const splitSqlByTable = computed(() => canSplitSqlByTable.value && splitSqlOutput.value === "table");
+const sqlOutputIsZip = computed(() => splitSqlBySize.value || splitSqlByTable.value);
+const sqlSplitOptions = computed<Pick<api.DatabaseExportRequest, "splitMaxMb" | "outputCompression">>(() => {
+  if (splitSqlByTable.value) return { outputCompression: "zipByTable" };
+  return splitSqlBySize.value ? { splitMaxMb: normalizedSplitSqlPartMaxMb() } : {};
+});
 
 // Export state
 const isExporting = ref(false);
@@ -505,7 +513,7 @@ async function startDesktopExport() {
     tables: [...selectedTables.value],
     objectNames: selectedObjectNames(),
     mode: executionMode.value,
-    split: splitSqlOutput.value,
+    split: sqlOutputIsZip.value,
     request: {
       selectedTables: selectedTablesRequest(),
       selectedObjects: selectedObjectsRequest(),
@@ -520,7 +528,7 @@ async function startDesktopExport() {
       omitDatabaseQualifier: omitDatabaseQualifier.value,
       preserveOriginalLanguage: preserveOriginalLanguage.value,
       batchSize: 1000,
-      splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
+      ...sqlSplitOptions.value,
       rowLimitPerTable: rowsPerTableLimitRequest(),
       rowLimitSortColumn: rowLimitSortColumnRequest(),
       rowLimitSortDescending: rowLimitSortDescendingRequest(),
@@ -747,8 +755,8 @@ async function startExport() {
     try {
       const safeName = sanitizeFileName(databaseExportFileStem(database.value || "database", selectedObjectNames()) || "database");
       const path = await promptExportSavePath({
-        defaultFileName: `${safeName}.${splitSqlOutput.value ? "zip" : "sql"}`,
-        filters: [{ name: splitSqlOutput.value ? "ZIP" : "SQL", extensions: [splitSqlOutput.value ? "zip" : "sql"] }],
+        defaultFileName: `${safeName}.${sqlOutputIsZip.value ? "zip" : "sql"}`,
+        filters: [{ name: sqlOutputIsZip.value ? "ZIP" : "SQL", extensions: [sqlOutputIsZip.value ? "zip" : "sql"] }],
       });
       if (!path) return;
       filePath = path;
@@ -760,7 +768,7 @@ async function startExport() {
     }
   } else {
     // Web mode: use a temp path; the server will handle the file
-    filePath = `__web_export_${exportId.value}.sql`;
+    filePath = `__web_export_${exportId.value}.${splitSqlByTable.value ? "zip" : "sql"}`;
   }
   exportFilePath.value = filePath;
 
@@ -816,7 +824,7 @@ async function startExport() {
           preserveOriginalLanguage: preserveOriginalLanguage.value,
           snapshotSessionId,
           batchSize: 1000,
-          splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
+          ...sqlSplitOptions.value,
           rowLimitPerTable: rowsPerTableLimitRequest(),
           rowLimitSortColumn: rowLimitSortColumnRequest(),
           rowLimitSortDescending: rowLimitSortDescendingRequest(),
@@ -939,7 +947,7 @@ async function startAllDatabasesExport() {
       batchDatabaseIndex.value = index + 1;
       const currentExportId = `${batchId}-${index + 1}`;
       activeDatabaseExportId.value = currentExportId;
-      const filePath = isTauriRuntime() ? joinExportPath(directoryPath, `${sanitizeFileName(item.fileStem)}.${splitSqlOutput.value ? "zip" : "sql"}`) : `__web_export_${currentExportId}.${splitSqlOutput.value ? "zip" : "sql"}`;
+      const filePath = isTauriRuntime() ? joinExportPath(directoryPath, `${sanitizeFileName(item.fileStem)}.${sqlOutputIsZip.value ? "zip" : "sql"}`) : `__web_export_${currentExportId}.${sqlOutputIsZip.value ? "zip" : "sql"}`;
       if (!firstExportedFilePath && isTauriRuntime()) {
         firstExportedFilePath = filePath;
       }
@@ -971,7 +979,7 @@ async function startAllDatabasesExport() {
               preserveOriginalLanguage: preserveOriginalLanguage.value,
               snapshotSessionId,
               batchSize: 1000,
-              splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
+              ...sqlSplitOptions.value,
               rowLimitPerTable: rowsPerTableLimitRequest(),
               rowLimitSortColumn: rowLimitSortColumnRequest(),
               rowLimitSortDescending: rowLimitSortDescendingRequest(),
@@ -1469,13 +1477,13 @@ watch(
               {{ t("databaseExport.includeObjects") }}
             </div>
             <div class="flex items-center justify-between gap-2 text-xs">
-              <button type="button" class="flex min-w-0 items-center gap-2 text-left" @click="splitSqlOutput = !splitSqlOutput">
-                <CheckSquare v-if="splitSqlOutput" class="w-3.5 h-3.5 text-primary shrink-0" />
+              <button type="button" class="flex min-w-0 items-center gap-2 text-left" :aria-pressed="splitSqlBySize" @click="splitSqlOutput = !splitSqlBySize">
+                <CheckSquare v-if="splitSqlBySize" class="w-3.5 h-3.5 text-primary shrink-0" />
                 <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
                 <span>{{ t("databaseExport.splitSqlOutput") }}</span>
               </button>
               <Input
-                v-if="splitSqlOutput"
+                v-if="splitSqlBySize"
                 v-model.number="splitSqlPartMaxMb"
                 type="number"
                 inputmode="numeric"
@@ -1486,9 +1494,14 @@ watch(
                 @blur="splitSqlPartMaxMb = normalizedSplitSqlPartMaxMb()"
               />
             </div>
-            <p v-if="splitSqlOutput" class="pl-5 text-[11px] text-muted-foreground">
+            <p v-if="splitSqlBySize" class="pl-5 text-[11px] text-muted-foreground">
               {{ t("databaseExport.splitSqlOutputDescription", { min: MIN_SPLIT_SQL_PART_MB, max: MAX_SPLIT_SQL_PART_MB }) }}
             </p>
+            <button v-if="canSplitSqlByTable" type="button" class="flex min-w-0 items-center gap-2 text-left text-xs" :aria-pressed="splitSqlByTable" @click="splitSqlOutput = splitSqlByTable ? false : 'table'">
+              <CheckSquare v-if="splitSqlByTable" class="w-3.5 h-3.5 text-primary shrink-0" />
+              <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+              <span>{{ t("databaseExport.splitSqlByTable") }}</span>
+            </button>
             <div class="flex items-center justify-between gap-2 text-xs">
               <button type="button" class="flex min-w-0 items-center gap-2 text-left" :class="includeData ? 'cursor-pointer' : 'cursor-not-allowed text-muted-foreground/50'" :disabled="!includeData" @click="includeData && (limitRowsPerTable = !limitRowsPerTable)">
                 <CheckSquare v-if="limitRowsPerTable" class="w-3.5 h-3.5 text-primary shrink-0" />

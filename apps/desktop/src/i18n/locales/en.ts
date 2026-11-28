@@ -12700,6 +12700,7 @@ export default {
     standardSqlInsert: "Use Standard SQL INSERT for table data",
     standardSqlInsertDescription: "Uses ANSI double-quoted identifiers and portable scalar literals. DDL and other objects keep the source database dialect.",
     includeObjects: "Views / Procedures / Functions / Sequences",
+    splitSqlByTable: "Split SQL by table (ZIP)",
     splitSqlOutput: "Split SQL export into a ZIP archive",
     splitSqlPartMaxMb: "Maximum size per SQL part (MB)",
     splitSqlOutputDescription: "Creates a ZIP archive containing numbered SQL parts and a manifest. Parts are split between complete SQL statements ({min}–{max} MB).",

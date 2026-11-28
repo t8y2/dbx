@@ -11523,6 +11523,7 @@ export default withEnglishFallback({
     standardSqlInsert: "Usar INSERT SQL estándar para los datos de tablas",
     standardSqlInsertDescription: "Usa identificadores con comillas dobles ANSI y literales escalares portables. El DDL y otros objetos conservan el dialecto de la base de datos de origen.",
     includeObjects: "Vistas / Procedimientos / Funciones / Secuencias",
+    splitSqlByTable: "Dividir el SQL por tabla (ZIP)",
     splitSqlOutput: "Dividir la exportación SQL en un archivo ZIP",
     splitSqlPartMaxMb: "Tamaño máximo por parte SQL (MB)",
     splitSqlOutputDescription: "Crea un archivo ZIP con partes SQL numeradas y un manifiesto. Las partes se dividen entre sentencias SQL completas ({min}–{max} MB).",

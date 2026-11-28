@@ -12842,6 +12842,7 @@ export default withEnglishFallback({
     clearColumns: "Очистить",
     selectAtLeastOneColumn: "Выберите хотя бы один столбец для экспорта.",
     includeObjects: "Представления / Процедуры / Функции / Последовательности",
+    splitSqlByTable: "Разделить SQL по таблицам (ZIP)",
     splitSqlOutput: "Разделить экспорт SQL на ZIP-архив",
     splitSqlPartMaxMb: "Максимальный размер одной части SQL (МБ)",
     splitSqlOutputDescription: "Создаёт ZIP-архив с пронумерованными частями SQL и манифестом. Части разделяются между целыми SQL-операторами ({min}–{max} МБ).",

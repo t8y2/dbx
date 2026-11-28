@@ -9634,6 +9634,7 @@ export default withEnglishFallback({
     clearColumns: "Temizle",
     selectAtLeastOneColumn: "Dışa aktarmak için en az bir sütun seçin.",
     includeObjects: "Görünümler / Yordamlar / İşlevler / Diziler",
+    splitSqlByTable: "SQL’i tabloya göre böl (ZIP)",
     splitSqlOutput: "SQL dışa aktarmayı ZIP arşivine böl",
     splitSqlPartMaxMb: "SQL parçası başına maksimum boyut (MB)",
     splitSqlOutputDescription: "Numaralı SQL parçaları ve bir bildirim içeren bir ZIP arşivi oluşturur. Parçalar tam SQL ifadeleri arasında bölünür ({min}–{max} MB).",

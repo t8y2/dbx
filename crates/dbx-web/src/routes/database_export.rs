@@ -51,15 +51,16 @@ pub async fn start_database_export(
     // endpoint after the export completes.
     let tmp_dir = state.data_dir.join("tmp");
     std::fs::create_dir_all(&tmp_dir).map_err(|e| AppError::from(e.to_string()))?;
-    let extension = if req.split_max_mb.is_some() {
-        "zip"
-    } else if req.output_compression == DatabaseExportOutputCompression::Gzip {
-        "sql.gz"
-    } else if req.output_compression == DatabaseExportOutputCompression::Nb3 {
-        "nb3"
-    } else {
-        "sql"
-    };
+    let extension =
+        if req.split_max_mb.is_some() || req.output_compression == DatabaseExportOutputCompression::ZipByTable {
+            "zip"
+        } else if req.output_compression == DatabaseExportOutputCompression::Gzip {
+            "sql.gz"
+        } else if req.output_compression == DatabaseExportOutputCompression::Nb3 {
+            "nb3"
+        } else {
+            "sql"
+        };
     let tmp_file = tmp_dir.join(format!("database_export_{export_id}.{extension}"));
     let tmp_file_path = tmp_file.to_string_lossy().to_string();
     req.file_path = tmp_file_path.clone();

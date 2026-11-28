@@ -11341,6 +11341,7 @@ export default withEnglishFallback({
     clearColumns: "지우기",
     selectAtLeastOneColumn: "내보낼 열을 하나 이상 선택하세요.",
     includeObjects: "뷰 / 프로시저 / 함수 / 시퀀스",
+    splitSqlByTable: "테이블별로 SQL 분할 (ZIP)",
     splitSqlOutput: "SQL 내보내기를 ZIP 압축 파일로 분할",
     splitSqlPartMaxMb: "SQL 파트당 최대 크기(MB)",
     splitSqlOutputDescription: "번호가 지정된 SQL 파트와 매니페스트가 포함된 ZIP 압축 파일을 만듭니다. 파트는 완전한 SQL 문 사이에서 분할됩니다({min}–{max} MB).",

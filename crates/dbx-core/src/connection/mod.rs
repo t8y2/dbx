@@ -40,6 +40,7 @@ use crate::models::connection::{
     validate_jdbc_transport_url, ConnectionConfig, ConnectionIdleClosedEvent, ConnectionLivenessFailureKind,
     ConnectionLivenessMessage, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig,
 };
+use crate::models::observability::{cap_observation_text, KIND_CONNECTION_OPENED, KIND_CONNECTION_OPEN_FAILED};
 use crate::mongo_oidc::MongoOidcBrowserOpener;
 use crate::nacos::config::{NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD};
 use crate::path_utils::expand_tilde;
@@ -338,6 +339,63 @@ fn postgres_family_product_name(server_version: &str) -> Option<&str> {
     lower.contains("postgresql").then_some("PostgreSQL")
 }
 
+/// Combine the GaussDB (non-DWS) server version with its hot-patch version for
+/// display. The `product_version` `pg_settings` value is the server version and
+/// the `hotpatch_version` value is the running hot patch; the hot-patch part is
+/// shown only when the server reports one.
+fn gaussdb_native_product_version(server_version: &str, hotpatch_version: Option<&str>) -> Option<String> {
+    let server_version = server_version.trim();
+    if server_version.is_empty() {
+        return None;
+    }
+    match hotpatch_version.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(hotpatch) => Some(format!("{server_version} ({hotpatch})")),
+        None => Some(server_version.to_string()),
+    }
+}
+
+/// GaussDB (non-DWS) native server version, read from `pg_settings` instead of
+/// `version()` because `version()` only reports the PostgreSQL compatibility
+/// layer. `product_version` is the server version and `hotpatch_version` is the
+/// hot-patch version (omitted when the server does not report one).
+async fn gaussdb_native_product_version_from_pool(pool: &deadpool_postgres::Pool) -> Option<String> {
+    let sql = "SELECT name, setting FROM pg_settings WHERE name IN ('product_version', 'hotpatch_version')";
+    let result =
+        tokio::time::timeout(Duration::from_secs(5), db::postgres::execute_query_with_max_rows(pool, sql, Some(2)))
+            .await
+            .ok()?
+            .ok()?;
+    let mut server_version = None;
+    let mut hotpatch_version = None;
+    for row in &result.rows {
+        let [name, setting] = row.as_slice() else { continue };
+        match name.as_str() {
+            Some("product_version") => server_version = setting.as_str(),
+            Some("hotpatch_version") => hotpatch_version = setting.as_str(),
+            _ => {}
+        }
+    }
+    gaussdb_native_product_version(server_version?, hotpatch_version)
+}
+
+/// Database metadata for a native (non-DWS, non-JDBC) GaussDB pool. The server
+/// version comes from `pg_settings.product_version` and the hot-patch version
+/// from `pg_settings.hotpatch_version`; versionless info is returned (instead
+/// of `None`) when the settings are unavailable so callers still present the
+/// connection as GaussDB.
+pub async fn gaussdb_native_database_info(
+    pool: &deadpool_postgres::Pool,
+    current_database: Option<&str>,
+) -> DatabaseConnectionInfo {
+    DatabaseConnectionInfo {
+        product_name: Some("GaussDB".to_string()),
+        product_version: gaussdb_native_product_version_from_pool(pool).await,
+        current_database: current_database.map(str::to_string),
+        driver_name: Some("DBX PostgreSQL driver".to_string()),
+        ..Default::default()
+    }
+}
+
 /// Held connection for a manual transaction session
 pub enum TxnConnection {
     /// Isolated native SQL Server client, discarded after an interrupted stream.
@@ -505,6 +563,9 @@ pub struct AppState {
     pub storage: Storage,
     pub plugins: PluginRegistry,
     pub plugin_host: PluginHost,
+    /// Structured host activity for observability plugins (`host.observe:*`).
+    /// Taps publish here; shells forward to plugin UIs and sidecars.
+    pub host_observations: crate::observability::HostObservationBus,
     pub agent_manager: crate::agent_manager::AgentManager,
     pub pl_debug: Arc<crate::query::pl_debug::PlDebugRegistry>,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
@@ -518,6 +579,9 @@ pub struct AppState {
     /// PostgreSQL TLS cancel context, keyed by pool_key.
     /// Used to reconstruct a TLS connector compatible with the original connection when cancelling.
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
+    /// Probed Greenplum server capabilities, keyed by pool_key and cleared
+    /// alongside the pool so reconnects always re-discover the target server.
+    greenplum_capabilities: Arc<RwLock<HashMap<String, db::greenplum::GreenplumCapabilities>>>,
     /// Pool keys whose tab-scoped MySQL connection holds a transaction the user
     /// opened explicitly and DBX deliberately kept open
     /// (`preserve_explicit_transaction`). Keeping it here — not on the driver
@@ -1025,6 +1089,7 @@ struct PoolRoutingControl {
     connections: Arc<RwLock<ConnectionPoolRegistry>>,
     pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
+    greenplum_capabilities: Arc<RwLock<HashMap<String, db::greenplum::GreenplumCapabilities>>>,
     /// The same set as [`AppState::mysql_preserved_transactions`]. Every detach
     /// path (including `ClientSessionPoolCleanupGuard`'s `Drop`, which never
     /// reaches `AppState`) has to clear the marker together with the pool:
@@ -1188,10 +1253,12 @@ impl PoolRoutingControl {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut greenplum_caps = self.greenplum_capabilities.write().await;
             let mut preserved = self.mysql_preserved_transactions.write().await;
             for (key, _) in &removed {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                greenplum_caps.remove(key);
                 preserved.remove(key);
             }
         }
@@ -1292,9 +1359,16 @@ impl PoolRoutingControl {
     }
 
     async fn close_removed(&self, removed: Vec<(String, PoolKind)>) {
-        for (pool_key, pool) in removed {
-            self.close_pool_with_timeout(pool_key, pool).await;
+        if removed.is_empty() {
+            return;
         }
+        // Close all removed pools concurrently so a slow or hung pool cannot
+        // exhaust the shutdown budget before sibling pools send COM_QUIT /
+        // disconnect (#15612).
+        futures::future::join_all(
+            removed.into_iter().map(|(pool_key, pool)| self.close_pool_with_timeout(pool_key, pool)),
+        )
+        .await;
     }
 
     fn close_removed_in_background(&self, removed: Vec<(String, PoolKind)>) {
@@ -1305,9 +1379,7 @@ impl PoolRoutingControl {
         let routing = self.clone();
         let task_key = format!("pool-close:{}", uuid::Uuid::new_v4());
         if !self.task_supervisor.spawn_once(task_key, move |_| async move {
-            for (pool_key, pool) in removed {
-                routing.close_pool_with_timeout(pool_key, pool).await;
-            }
+            routing.close_removed(removed).await;
         }) {
             log::debug!("Dropped {pool_count} detached pool handle(s) during application shutdown");
         }
@@ -2021,6 +2093,7 @@ impl AppState {
             connections: self.connections.clone(),
             pool_activity: self.pool_activity.clone(),
             postgres_cancel_contexts: self.postgres_cancel_contexts.clone(),
+            greenplum_capabilities: self.greenplum_capabilities.clone(),
             mysql_preserved_transactions: self.mysql_preserved_transactions.clone(),
             task_supervisor: self.task_supervisor.clone(),
         }
@@ -2169,7 +2242,22 @@ impl AppState {
         let app_version = app_version.into();
         let data_dir = storage.data_dir().to_path_buf();
         let plugins = PluginRegistry::new_with_app_version(plugin_dir, app_version.clone());
-        let plugin_host = PluginHost::new(plugins.clone());
+        // One bus per AppState. Plugin lifecycle observations are wired into
+        // the same bus so a plugin watching `host.observe:plugins` sees its
+        // peers start/stop alongside queries and connections.
+        let host_observations = crate::observability::HostObservationBus::new();
+        let observation_interest = host_observations.interest().clone();
+        let plugin_host = {
+            let bus = host_observations.clone();
+            let sink: dbx_plugin_runtime::plugins::observation::PluginObservationSink =
+                Arc::new(move |observation: dbx_plugin_runtime::plugins::observation::PluginObservation| {
+                    bus.publish(observation.kind, None, None, observation.payload);
+                });
+            // The runtime registers the interest of every running sidecar that
+            // declared `host.observe:*`, so the bus only builds payloads while
+            // such a sidecar is actually alive.
+            PluginHost::with_observations(plugins.clone(), Some(sink), Some(observation_interest))
+        };
         Self {
             connections: Arc::new(RwLock::new(ConnectionPoolRegistry::new())),
             task_supervisor: TaskSupervisor::new(),
@@ -2187,6 +2275,7 @@ impl AppState {
             storage,
             plugins,
             plugin_host,
+            host_observations,
             agent_manager: crate::agent_manager::AgentManager::new_with_base_dir_and_app_version(
                 agent_dir,
                 app_version,
@@ -2197,6 +2286,7 @@ impl AppState {
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
             honor_fixed_ssh_local_ports: AtomicBool::new(false),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
+            greenplum_capabilities: Arc::new(RwLock::new(HashMap::new())),
             mysql_preserved_transactions: Arc::new(RwLock::new(HashSet::new())),
             mysql_client_sessions: RwLock::new(HashMap::new()),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -3118,6 +3208,36 @@ impl AppState {
         self.postgres_cancel_contexts.read().await.get(pool_key).cloned()
     }
 
+    /// Resolves cached Greenplum capabilities for a native PostgreSQL pool.
+    /// Plain PostgreSQL, Cloudberry, OpenTenBase, and other PG-protocol engines
+    /// return `None` without altering their existing routing.
+    pub(crate) async fn greenplum_capabilities_for_pool(
+        &self,
+        pool_key: &str,
+        pool: &deadpool_postgres::Pool,
+        config: Option<&ConnectionConfig>,
+    ) -> Option<db::greenplum::GreenplumCapabilities> {
+        if let Some(config) = config {
+            if db::greenplum::is_known_non_greenplum_config(config) {
+                return None;
+            }
+        }
+        if let Some(cached) = self.greenplum_capabilities.read().await.get(pool_key).cloned() {
+            return cached.is_greenplum.then_some(cached);
+        }
+        match db::greenplum::probe_capabilities(pool).await {
+            Ok(caps) => {
+                let matched = caps.is_greenplum.then(|| caps.clone());
+                self.greenplum_capabilities.write().await.insert(pool_key.to_string(), caps);
+                matched
+            }
+            Err(error) => {
+                log::debug!("[greenplum][probe-fallback] pool_key={pool_key} error={error}");
+                None
+            }
+        }
+    }
+
     pub fn pool_activity_touch(&self, pool_key: &str) -> PoolActivityTouch {
         PoolActivityTouch {
             pool_key: pool_key.to_string(),
@@ -3147,18 +3267,19 @@ impl AppState {
                 }
             };
             let shutdown = async {
+                #[allow(unused_mut)]
                 let mut removed_pools = self.drain_all_connection_pools().await;
                 #[cfg(feature = "mq-admin")]
                 self.persist_removed_mqtt_history(&mut removed_pools).await;
                 self.transaction_sessions.write().await.clear();
                 let routing = self.pool_routing_control();
-                let protected = async {
-                    if let Err(error) = debug_shutdown.wait().await {
-                        log::warn!("Debugger cleanup could not confirm controlled release during application shutdown: {error}");
-                    }
-                    stop_dependencies(application_deadline.saturating_duration_since(Instant::now())).await;
-                };
-                tokio::join!(routing.close_removed(removed_pools), protected);
+                let (_, debug_result) = tokio::join!(routing.close_removed(removed_pools), debug_shutdown.wait());
+                if let Err(error) = debug_result {
+                    log::warn!(
+                        "Debugger cleanup could not confirm controlled release during application shutdown: {error}"
+                    );
+                }
+                stop_dependencies(application_deadline.saturating_duration_since(Instant::now())).await;
             };
             if tokio::time::timeout_at(application_deadline.into(), shutdown).await.is_err() {
                 debug_shutdown.isolate_remaining();
@@ -3167,6 +3288,7 @@ impl AppState {
             }
             return;
         }
+        #[allow(unused_mut)]
         let mut removed_pools = self.drain_all_connection_pools().await;
         #[cfg(feature = "mq-admin")]
         self.persist_removed_mqtt_history(&mut removed_pools).await;
@@ -3174,9 +3296,15 @@ impl AppState {
 
         let shutdown = async {
             let routing = self.pool_routing_control();
-            let (_, _, _, _, _, _, plugin_shutdown) = tokio::join!(
-                self.task_supervisor.shutdown(deadline),
-                routing.close_removed(removed_pools),
+            // Close pooled database connections and finish in-flight background
+            // pool-close tasks BEFORE stopping SSH/proxy tunnels, agent daemons,
+            // and plugins so COM_QUIT / disconnect reaches the server cleanly (#15612).
+            let pool_close_budget = deadline.saturating_sub(Duration::from_millis(500)).max(deadline / 2);
+            let _ = tokio::time::timeout(pool_close_budget, async {
+                tokio::join!(self.task_supervisor.shutdown(pool_close_budget), routing.close_removed(removed_pools),);
+            })
+            .await;
+            let (_, _, _, _, plugin_shutdown) = tokio::join!(
                 self.tunnels.stop_all_tunnels(),
                 self.proxy_tunnels.stop_all_tunnels(),
                 self.http_tunnels.stop_all_tunnels(),
@@ -3558,6 +3686,60 @@ impl AppState {
         }
     }
 
+    /// Publish a `connection.opened` observation when the core pool funnel
+    /// creates a pool on demand. Explicit user connects publish their own
+    /// event from the shell with `reason: "explicit"`; this funnel never runs
+    /// on that path, so the two cannot double count.
+    fn publish_connection_opened(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+        database: Option<&str>,
+        reason: &str,
+        duration_ms: u64,
+    ) {
+        if !self.host_observations.is_enabled(KIND_CONNECTION_OPENED) {
+            return;
+        }
+        self.host_observations.publish(
+            KIND_CONNECTION_OPENED,
+            Some(connection_id.to_string()),
+            database.map(str::to_string),
+            serde_json::json!({
+                "dbType": serde_json::to_value(config.db_type).unwrap_or(serde_json::Value::Null),
+                "reason": reason,
+                "durationMs": duration_ms,
+            }),
+        );
+    }
+
+    fn publish_connection_open_failed(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+        database: Option<&str>,
+        reason: &str,
+        duration_ms: u64,
+        error: &str,
+    ) {
+        if !self.host_observations.is_enabled(KIND_CONNECTION_OPEN_FAILED) {
+            return;
+        }
+        let (message, truncated) = cap_observation_text(error);
+        self.host_observations.publish(
+            KIND_CONNECTION_OPEN_FAILED,
+            Some(connection_id.to_string()),
+            database.map(str::to_string),
+            serde_json::json!({
+                "dbType": serde_json::to_value(config.db_type).unwrap_or(serde_json::Value::Null),
+                "reason": reason,
+                "durationMs": duration_ms,
+                "error": message,
+                "errorTruncated": truncated,
+            }),
+        );
+    }
+
     async fn get_or_create_pool_for_session_inner(
         &self,
         connection_id: &str,
@@ -3592,6 +3774,7 @@ impl AppState {
             let configs = self.configs.read().await;
             configs.get(connection_id).ok_or("Connection config not found")?.clone()
         };
+        let observation_started = Instant::now();
         validate_connection_url_params(&config)?;
         let validate_existing_pool = should_validate_existing_pool_before_reuse(config.db_type);
         let catalog = catalog.map(str::trim).filter(|value| !value.is_empty());
@@ -4333,14 +4516,43 @@ impl AppState {
         }.await;
         let pool = match pool_result {
             Ok(ConnectionPoolBuild::Candidate(pool)) => *pool,
-            Ok(ConnectionPoolBuild::Published(receipt)) => return Ok(receipt),
+            Ok(ConnectionPoolBuild::Published(receipt)) => {
+                // Some driver branches (native MongoDB) publish their pool
+                // internally and return `Published`, skipping the outer
+                // publish below; report the open here so exactly one event
+                // fires for this pool either way.
+                self.publish_connection_opened(
+                    connection_id,
+                    &config,
+                    database,
+                    "on_demand",
+                    observation_started.elapsed().as_millis() as u64,
+                );
+                return Ok(receipt);
+            }
             Err(error) => {
                 self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
+                self.publish_connection_open_failed(
+                    connection_id,
+                    &config,
+                    database,
+                    "on_demand",
+                    observation_started.elapsed().as_millis() as u64,
+                    &error,
+                );
                 return Err(error);
             }
         };
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
             self.discard_stale_connection_attempt_pool(connection_id, pool_key.clone(), pool, &transport_stamp).await;
+            self.publish_connection_open_failed(
+                connection_id,
+                &config,
+                database,
+                "on_demand",
+                observation_started.elapsed().as_millis() as u64,
+                &err,
+            );
             return Err(err);
         }
         let published = self
@@ -4352,8 +4564,25 @@ impl AppState {
                 connection_attempt,
             )
             .await;
-        if published.is_err() {
-            self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
+        match &published {
+            Ok(_) => self.publish_connection_opened(
+                connection_id,
+                &config,
+                database,
+                "on_demand",
+                observation_started.elapsed().as_millis() as u64,
+            ),
+            Err(error) => {
+                self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
+                self.publish_connection_open_failed(
+                    connection_id,
+                    &config,
+                    database,
+                    "on_demand",
+                    observation_started.elapsed().as_millis() as u64,
+                    error,
+                );
+            }
         }
         published
     }
@@ -6053,6 +6282,7 @@ impl AppState {
         };
 
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.greenplum_capabilities.write().await.remove(pool_key);
         routing.close_pool_with_timeout(pool_key.to_string(), removed).await;
         #[cfg(test)]
         if let Some((ready, resume)) =
@@ -6140,6 +6370,7 @@ impl AppState {
             self.stop_keepalive_task(&pool_key).await;
             self.pool_activity.write().await.remove(&pool_key);
             self.postgres_cancel_contexts.write().await.remove(&pool_key);
+            self.greenplum_capabilities.write().await.remove(&pool_key);
             let removed = self.connections.write().await.remove(&pool_key);
             if let Some(pool) = removed {
                 self.pool_routing_control().close_pool_with_timeout(pool_key.clone(), pool).await;
@@ -6372,6 +6603,7 @@ impl AppState {
         self.stop_keepalive_task(&pool_key).await;
         self.pool_activity.write().await.remove(&pool_key);
         self.postgres_cancel_contexts.write().await.remove(&pool_key);
+        self.greenplum_capabilities.write().await.remove(&pool_key);
         self.mysql_preserved_transactions.write().await.remove(&pool_key);
         self.mysql_client_sessions.write().await.remove(&pool_key);
         let removed = self.update_connection_pools(|connections| connections.remove(&pool_key)).await;
@@ -6525,6 +6757,7 @@ impl AppState {
         self.stop_keepalive_task(pool_key).await;
         self.pool_activity.write().await.remove(pool_key);
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.greenplum_capabilities.write().await.remove(pool_key);
         self.mysql_preserved_transactions.write().await.remove(pool_key);
         let removed = self.connections.write().await.remove(pool_key);
         if let Some(pool) = removed {
@@ -6600,6 +6833,7 @@ impl AppState {
 
         self.pool_activity.write().await.remove(pool_key);
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.greenplum_capabilities.write().await.remove(pool_key);
         match close_reclaimed_agent_pool(pool).await {
             Ok(()) => true,
             Err((PoolKind::Agent(client), error)) if should_replace_agent_runtime(&error) => {
@@ -6738,9 +6972,11 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut greenplum_caps = self.greenplum_capabilities.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                greenplum_caps.remove(key);
             }
         }
         let mut conns = self.connections.write().await;
@@ -6997,30 +7233,41 @@ impl AppState {
                 // `product_version` because engine sniffing (Greenplum /
                 // Cloudberry, whose AO tables reject system-column locators)
                 // depends on the product keywords it carries (#14745).
-                let product_version = db::postgres::execute_query_with_max_rows(&pool, "SELECT version()", Some(1))
-                    .await
-                    .ok()
-                    .and_then(|result| {
-                        result
-                            .rows
-                            .first()
-                            .and_then(|row| row.first())
-                            .and_then(|value| value.as_str())
+                //
+                // Non-DWS GaussDB reports its real version only through
+                // `pg_settings` (`product_version` / `hotpatch_version`), so
+                // read those instead and surface the hot-patch version when the
+                // server runs one.
+                if config.db_type == DatabaseType::Gaussdb {
+                    let current_database =
+                        database.map(str::to_string).or_else(|| config.effective_database().map(str::to_string));
+                    Ok(Some(gaussdb_native_database_info(&pool, current_database.as_deref()).await))
+                } else {
+                    let product_version = db::postgres::execute_query_with_max_rows(&pool, "SELECT version()", Some(1))
+                        .await
+                        .ok()
+                        .and_then(|result| {
+                            result
+                                .rows
+                                .first()
+                                .and_then(|row| row.first())
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string)
+                        });
+                    Ok(Some(DatabaseConnectionInfo {
+                        product_name: product_version
+                            .as_deref()
+                            .and_then(postgres_family_product_name)
                             .map(str::to_string)
-                    });
-                Ok(Some(DatabaseConnectionInfo {
-                    product_name: product_version
-                        .as_deref()
-                        .and_then(postgres_family_product_name)
-                        .map(str::to_string)
-                        .or_else(|| Some("PostgreSQL".to_string())),
-                    product_version,
-                    current_database: database
-                        .map(str::to_string)
-                        .or_else(|| config.effective_database().map(str::to_string)),
-                    driver_name: Some("DBX PostgreSQL driver".to_string()),
-                    ..Default::default()
-                }))
+                            .or_else(|| Some("PostgreSQL".to_string())),
+                        product_version,
+                        current_database: database
+                            .map(str::to_string)
+                            .or_else(|| config.effective_database().map(str::to_string)),
+                        driver_name: Some("DBX PostgreSQL driver".to_string()),
+                        ..Default::default()
+                    }))
+                }
             }
             Some(ConnectionDatabaseInfoSource::NativeHBase(client)) => {
                 db::hbase_driver::database_connection_info(&client).await
@@ -7648,6 +7895,7 @@ impl AppState {
         let debug_fence = crate::query::pl_debug::drain_connection(self, connection_id, "connection_removed").await?;
         self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
+        #[allow(unused_mut)]
         let mut removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
         #[cfg(feature = "mq-admin")]
@@ -7692,6 +7940,7 @@ impl AppState {
         let debug_fence = crate::query::pl_debug::drain_connection(self, connection_id, "connection_removed").await?;
         self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
+        #[allow(unused_mut)]
         let mut removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
         #[cfg(feature = "mq-admin")]
@@ -7778,14 +8027,13 @@ impl AppState {
                 continue;
             }
 
-            // 5. 复用既有池回收路径：先摘除，再走后台关闭。close_removed_in_background 内部
-            //    经 close_pool_with_timeout，从而继承 Agent 共享 runtime / 手动事务共享 runtime
-            //    的保护逻辑，确保池被真正 close/释放而不只是从 map 移除。
+            // 5. 复用既有池回收路径：先摘除并并发关闭全部池，确保 COM_QUIT / disconnect
+            //    在通知前端触发 disconnect_db（可能重置隧道）之前真正送达服务端 (#15612)。
             let Some(_debug_fence) = self.pl_debug.try_idle_fence(&connection_id) else {
                 continue;
             };
             let removed = self.drain_connection_pools(&connection_id).await;
-            self.pool_routing_control().close_removed_in_background(removed);
+            self.pool_routing_control().close_removed(removed).await;
             log::info!(
                 "[connection][idle_disconnect] connection '{connection_id}' pools closed after {idle_disconnect_secs}s without query activity"
             );
@@ -7864,6 +8112,7 @@ impl AppState {
         self.pool_activity.write().await.clear();
         self.session_credentials.clear_pool_owners();
         self.postgres_cancel_contexts.write().await.clear();
+        self.greenplum_capabilities.write().await.clear();
         self.draining_pools.lock().unwrap_or_else(|error| error.into_inner()).clear();
         self.metadata_gates.lock().await.clear();
         self.connections.write().await.drain().collect()
@@ -7888,6 +8137,15 @@ impl AppState {
         self.pool_routing_control().close_removed(removed).await;
     }
 
+    /// Whether any pool is currently registered for `connection_id` (the base
+    /// key itself or a `{connection_id}:…` session/database key). Lets shells
+    /// skip a `connection.closed` observation for a disconnect of a
+    /// never-connected id.
+    pub async fn has_connection_pools(&self, connection_id: &str) -> bool {
+        let pool_prefix = format!("{connection_id}:");
+        self.connections.read().await.keys().any(|key| *key == connection_id || key.starts_with(&pool_prefix))
+    }
+
     async fn drain_connection_pools(&self, connection_id: &str) -> Vec<(String, PoolKind)> {
         let pool_prefix = format!("{connection_id}:");
         let keys_to_remove: Vec<String> = self
@@ -7902,9 +8160,11 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut greenplum_caps = self.greenplum_capabilities.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                greenplum_caps.remove(key);
             }
         }
         self.session_credentials.remove_pool_owners(&keys_to_remove);
@@ -7936,9 +8196,11 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut greenplum_caps = self.greenplum_capabilities.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                greenplum_caps.remove(key);
             }
         }
         let mut conns = self.connections.write().await;
@@ -8742,6 +9004,8 @@ pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionCo
     // A default browser filter does not change the established Redis session.
     a.redis_key_filter = None;
     b.redis_key_filter = None;
+    a.watermark = None;
+    b.watermark = None;
     if !a.save_password && !b.save_password {
         a.password.clear();
         b.password.clear();
@@ -8772,6 +9036,7 @@ pub fn connection_configs_session_credentials_compatible(a: &ConnectionConfig, b
         config.show_native_jobs = None;
         config.show_user_admin = None;
         config.color = None;
+        config.watermark = None;
         config.docs_notes_path = None;
         config.connect_timeout_secs = 0;
         config.query_timeout_secs = 0;
@@ -9389,17 +9654,17 @@ mod tests {
         connection_configs_session_credentials_compatible, connection_probe_endpoints, connection_remote_endpoint,
         connection_url_for_endpoint, consul_config_for_endpoint, database_connection_config,
         database_connection_config_with_catalog, gaussdb_identifier_quote_from_query_result,
-        gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, kafka_loopback_local_port_error,
-        kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
-        metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
-        postgres_family_product_name, prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port,
-        redact_transport_url, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
-        redis_sentinel_transport_prefix, report_connection_liveness_lost, sqlserver_legacy_agent_config,
-        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, ssh_local_port_config_error,
-        task_client_session_id, transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool,
-        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
-        TxnConnection, CLOUDFLARE_D1_LOCAL_PORT_ERROR, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
-        PRESTOSQL_JDBC_DRIVER_CLASS,
+        gaussdb_m_jdbc_config_for_endpoint, gaussdb_native_product_version, gaussdb_uses_m_jdbc_driver,
+        kafka_loopback_local_port_error, kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead,
+        metadata_connection_config, metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries,
+        oceanbase_mysql_setup_queries, postgres_family_product_name, prestosql_jdbc_config_for_endpoint,
+        primary_tunnel_fixed_local_port, redact_transport_url, redacted_connection_url_for_endpoint,
+        redis_sentinel_transport_id, redis_sentinel_transport_prefix, report_connection_liveness_lost,
+        sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
+        ssh_local_port_config_error, task_client_session_id, transport_layers_through_last_ssh,
+        upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe, validate_connection_url_params,
+        validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection, CLOUDFLARE_D1_LOCAL_PORT_ERROR,
+        GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -9426,6 +9691,44 @@ mod tests {
             "https://example.test/tunnel.php"
         );
         assert_eq!(redact_transport_url("https://alice:secret@%/"), "<invalid-url>");
+    }
+
+    #[test]
+    fn gaussdb_native_product_version_combines_server_and_hotpatch_versions() {
+        // `pg_settings.product_version` is the server version; a non-empty
+        // `hotpatch_version` is appended in parentheses, and an empty one is
+        // omitted entirely.
+        assert_eq!(gaussdb_native_product_version("9.1.1", None), Some("9.1.1".to_string()));
+        assert_eq!(gaussdb_native_product_version("9.1.1", Some("1.0.0")), Some("9.1.1 (1.0.0)".to_string()));
+        assert_eq!(gaussdb_native_product_version(" 9.1.1 ", Some(" 1.0.0 ")), Some("9.1.1 (1.0.0)".to_string()));
+        assert_eq!(gaussdb_native_product_version("9.1.1", Some("")), Some("9.1.1".to_string()));
+        assert_eq!(gaussdb_native_product_version("9.1.1", Some("   ")), Some("9.1.1".to_string()));
+        assert_eq!(gaussdb_native_product_version("", Some("1.0.0")), None);
+        assert_eq!(gaussdb_native_product_version("   ", None), None);
+    }
+
+    #[tokio::test]
+    async fn connection_open_failed_observation_carries_reason_and_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, directory.path().join("plugins"));
+        let config = mysql_config(None);
+        state
+            .host_observations
+            .interest()
+            .acquire("test", &[dbx_types::models::observability::OBSERVE_CONNECTIONS_PERMISSION.to_string()]);
+        let mut events = state.host_observations.subscribe();
+
+        state.publish_connection_open_failed("conn-x", &config, Some("sales"), "on_demand", 42, "boom");
+
+        let event = events.recv().await.expect("connection.open_failed event");
+        assert_eq!(event.kind, dbx_types::models::observability::KIND_CONNECTION_OPEN_FAILED);
+        assert_eq!(event.connection_id.as_deref(), Some("conn-x"));
+        assert_eq!(event.database.as_deref(), Some("sales"));
+        assert_eq!(event.payload["reason"], "on_demand");
+        assert_eq!(event.payload["durationMs"], 42);
+        assert_eq!(event.payload["error"], "boom");
+        assert_eq!(event.payload["errorTruncated"], false);
     }
 
     #[tokio::test]
@@ -9580,6 +9883,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: default_connect_timeout_secs(),
             query_timeout_secs: crate::models::connection::default_query_timeout_secs(),
+            write_timeout_secs: 0,
             idle_timeout_secs: crate::models::connection::default_idle_timeout_secs(),
             manual_transaction_timeout_secs: crate::models::connection::default_manual_transaction_timeout_secs(),
             idle_disconnect_secs: crate::models::connection::default_idle_disconnect_secs(),
@@ -9620,6 +9924,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }
@@ -13590,6 +13895,7 @@ sleep 30
             transport_layers: Vec::new(),
             connect_timeout_secs: 1,
             query_timeout_secs: 30,
+            write_timeout_secs: 0,
             idle_timeout_secs: 60,
             manual_transaction_timeout_secs: 300,
             idle_disconnect_secs: 0,
@@ -13632,6 +13938,7 @@ sleep 30
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
@@ -14489,6 +14796,129 @@ for line in sys.stdin:
         let payload = serde_json::to_value(&event).unwrap();
         assert_eq!(payload["connectionId"], "conn");
         assert!(payload["closedAtMs"].as_u64().is_some_and(|value| value > 0));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sweep_idle_connections_and_shutdown_send_com_quit_to_all_mysql_pools() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn write_mysql_packet(socket: &mut tokio::net::TcpStream, seq: u8, payload: &[u8]) {
+            let len = payload.len();
+            let header = [(len & 0xff) as u8, ((len >> 8) & 0xff) as u8, ((len >> 16) & 0xff) as u8, seq];
+            let _ = socket.write_all(&header).await;
+            let _ = socket.write_all(payload).await;
+        }
+
+        fn build_handshake_v10() -> Vec<u8> {
+            use mysql_async::consts::CapabilityFlags as Caps;
+            let caps = (Caps::CLIENT_PROTOCOL_41
+                | Caps::CLIENT_SECURE_CONNECTION
+                | Caps::CLIENT_PLUGIN_AUTH
+                | Caps::CLIENT_DEPRECATE_EOF)
+                .bits();
+            let mut buf = Vec::new();
+            buf.push(10); // protocol version
+            buf.extend_from_slice(b"8.0.19\0");
+            buf.extend_from_slice(&1u32.to_le_bytes()); // conn id
+            buf.extend_from_slice(b"12345678"); // auth-plugin-data-part-1
+            buf.push(0); // filler
+            buf.extend_from_slice(&(caps as u16).to_le_bytes()); // lower caps
+            buf.push(45); // charset utf8mb4
+            buf.extend_from_slice(&2u16.to_le_bytes()); // SERVER_STATUS_AUTOCOMMIT
+            buf.extend_from_slice(&((caps >> 16) as u16).to_le_bytes()); // upper caps
+            buf.push(21); // auth plugin data len
+            buf.extend_from_slice(&[0u8; 10]); // reserved
+            buf.extend_from_slice(b"abcdefghijkl\0"); // auth-plugin-data-part-2 (13 bytes)
+            buf.extend_from_slice(b"mysql_native_password\0");
+            buf
+        }
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let com_quit = Arc::new(AtomicUsize::new(0));
+        let abrupt_eof = Arc::new(AtomicUsize::new(0));
+        let com_quit_s = Arc::clone(&com_quit);
+        let abrupt_eof_s = Arc::clone(&abrupt_eof);
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let com_quit_h = Arc::clone(&com_quit_s);
+                let abrupt_eof_h = Arc::clone(&abrupt_eof_s);
+                tokio::spawn(async move {
+                    write_mysql_packet(&mut socket, 0, &build_handshake_v10()).await;
+                    let mut hdr = [0u8; 4];
+                    if socket.read_exact(&mut hdr).await.is_err() {
+                        return;
+                    }
+                    let len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], 0]) as usize;
+                    let mut req = vec![0u8; len];
+                    if socket.read_exact(&mut req).await.is_err() {
+                        return;
+                    }
+                    write_mysql_packet(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    loop {
+                        let mut cmd_hdr = [0u8; 4];
+                        if socket.read_exact(&mut cmd_hdr).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        let cmd_len = u32::from_le_bytes([cmd_hdr[0], cmd_hdr[1], cmd_hdr[2], 0]) as usize;
+                        let mut cmd = vec![0u8; cmd_len];
+                        if socket.read_exact(&mut cmd).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        if cmd.first() == Some(&0x01) {
+                            com_quit_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        write_mysql_packet(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    }
+                });
+            }
+        });
+
+        let url = format!(
+            "mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled&max_allowed_packet=65536&wait_timeout=60&sessionVariables=group_concat_max_len%3D1024"
+        );
+
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "conn".to_string();
+        config.idle_disconnect_secs = 30;
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        // 1) Idle sweep closes every pool and sends COM_QUIT before returning.
+        for (key, max_conns) in [("conn", 3usize), ("conn:app", 3), ("conn:app:session:tab-1", 1)] {
+            let pool = db::mysql::connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(3), max_conns)
+                .await
+                .unwrap();
+            state.connections.write().await.insert(key.to_string(), PoolKind::Mysql(pool, MysqlMode::Normal));
+            state
+                .pool_activity
+                .write()
+                .await
+                .insert(key.to_string(), super::PoolActivity::idle_for(Duration::from_secs(120)));
+        }
+        assert_eq!(state.sweep_idle_connections().await, vec!["conn".to_string()]);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(com_quit.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(abrupt_eof.load(AtomicOrdering::SeqCst), 0);
+
+        // 2) Application shutdown closes all remaining MySQL pools concurrently with COM_QUIT.
+        for (key, max_conns) in [("conn", 3usize), ("conn:app", 3), ("conn:app:session:tab-1", 1)] {
+            let pool = db::mysql::connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(3), max_conns)
+                .await
+                .unwrap();
+            state.connections.write().await.insert(key.to_string(), PoolKind::Mysql(pool, MysqlMode::Normal));
+        }
+        state.shutdown(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        server.abort();
+        assert_eq!(com_quit.load(AtomicOrdering::SeqCst), 6);
+        assert_eq!(abrupt_eof.load(AtomicOrdering::SeqCst), 0);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -16425,7 +16855,7 @@ for line in sys.stdin:
                 request.extend_from_slice(&byte);
             }
             let request = String::from_utf8(request).unwrap();
-            assert!(request.starts_with("GET /?query=SELECT%201 "));
+            assert!(request.starts_with("POST / "));
             assert!(request.lines().any(|line| line.eq_ignore_ascii_case("host: clickhouse.proxy.invalid:8123")));
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n1\n").await.unwrap();
         });

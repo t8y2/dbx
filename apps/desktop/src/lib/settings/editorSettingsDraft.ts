@@ -1,5 +1,5 @@
 import { normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
-import { DEFAULT_EDITOR_SETTINGS, MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS, MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS, type EditorSettings } from "@/stores/settingsStore";
+import { normalizeCompletionAutoActivationDelay, normalizeTabDoubleClickAction, type EditorSettings } from "@/stores/settingsStore";
 import { normalizeBackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
@@ -35,6 +35,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showInsertValueHints",
   "showConnectionGroupPath",
   "autoAliasTables",
+  "preferredTableAlias",
   "qualifyColumnCompletions",
   "batchColumnSelectionIncludeComments",
   "tableCompletionSchemaQualification",
@@ -239,12 +240,13 @@ export function normalizeQueryResultMaxRowsDraft(value: unknown): number {
   return normalizeQueryResultMaxRows(value);
 }
 
+export function normalizeCompletionAutoActivationDelayDraft(value: unknown): number {
+  return normalizeCompletionAutoActivationDelay(typeof value === "string" && value.trim() ? Number(value) : value);
+}
+
 function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unknown {
   if (key === "sidebarHoverDelay") return normalizeSidebarHoverDelay(value);
-  if (key === "completionAutoActivationDelayMs") {
-    const parsed = typeof value === "number" ? value : Number.parseInt(String(value).trim(), 10);
-    return Number.isFinite(parsed) ? Math.min(MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.max(MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS, parsed)) : DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs;
-  }
+  if (key === "completionAutoActivationDelayMs") return normalizeCompletionAutoActivationDelayDraft(value);
   if (key === "pageSize" || key === "tableOpenPageSize") return normalizeTableOpenPageSizeDraft(value);
   if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
   if (key === "externalSqlEditorMaxMb") return normalizeExternalSqlEditorMaxMb(value);
@@ -257,7 +259,7 @@ function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unkn
   if (key === "csvNullMode") return normalizeCsvNullMode(value);
   if (key === "backgroundImage") return normalizeBackgroundImageSettings(value);
   if (key === "snippetTriggerKey") return value === "space" || value === "both" ? value : "tab";
-  if (key === "tabDoubleClickAction") return value === "close" ? "close" : "default";
+  if (key === "tabDoubleClickAction") return normalizeTabDoubleClickAction(value);
   if (key === "webLogoPosition") return value === "right" || value === "hidden" ? value : "left";
   if (key === "aiSqlApplyTargetMode") return normalizeAiSqlApplyTargetMode(value);
   if (key === "colorizeConnectionTabsScope") return value === "active" ? "active" : "all";

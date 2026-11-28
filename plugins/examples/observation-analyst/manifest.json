@@ -1,0 +1,36 @@
+{
+  "$schema": "../../manifest.schema.json",
+  "manifest_version": 1,
+  "id": "dbx.example.observation-analyst",
+  "name": "DBX Observation Analyst",
+  "version": "0.1.0",
+  "publisher": "dbx",
+  "description": "Test companion for the host observation bus: aggregates query/connection/AI/transfer/plugin events into latency percentiles, error rates and an exportable JSONL audit log, so debugging, performance-analysis and audit requirements can be verified end to end.",
+  "source": "https://github.com/t8y2/dbx",
+  "homepage": "https://github.com/t8y2/dbx/tree/main/plugins/examples/observation-analyst",
+  "engines": {
+    "dbx": ">=0.6.0",
+    "host_api": "^1.0"
+  },
+  "permissions": [
+    "host.observe:queries",
+    "host.observe:connections",
+    "host.observe:ai",
+    "host.observe:transfers",
+    "host.observe:plugins"
+  ],
+  "entrypoints": {
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "workbench",
+      "id": "dbx.example.observation-analyst.main",
+      "label": "Observation Analyst",
+      "description": "Aggregates host observation events into metrics and an exportable audit log."
+    }
+  ]
+}

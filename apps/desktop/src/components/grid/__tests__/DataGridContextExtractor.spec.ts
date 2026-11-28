@@ -429,6 +429,128 @@ describe("DataGrid context menu target lifecycle", () => {
     expect(contextMenuButton("SQL Select").disabled).toBe(false);
   });
 
+  it.each([false, true])("exports a transposed record through the Markdown extractor with field sorting set to %s", async (sortFields) => {
+    const layoutScopeKey = "transposed-markdown-extractor";
+    localStorage.setItem(`dbx-data-grid-column-layout:${layoutScopeKey}`, JSON.stringify({ version: 1, orderKeys: ["payload\u00000", "created_at\u00000"], hiddenKeys: [] }));
+    const result: QueryResult = {
+      columns: ["id", "created_at", "payload"],
+      column_types: ["number", "DATE", "varchar"],
+      rows: [
+        [1, "2026-11-25T10:56:57", "hello|world\nnext"],
+        [2, "2026-11-26T10:56:57", "unselected"],
+      ],
+      hidden_column_indexes: [0],
+      affected_rows: 0,
+      execution_time_ms: 0,
+    };
+    const { host, settingsStore } = mountGrid(
+      result,
+      undefined,
+      "oracle",
+      {
+        tableName: "events",
+        columns: [
+          { name: "id", data_type: "number" },
+          { name: "created_at", data_type: "DATE" },
+          { name: "payload", data_type: "varchar" },
+        ],
+        primaryKeys: ["id"],
+      },
+      layoutScopeKey,
+    );
+    settingsStore.updateEditorSettings({ dataGridMultiRowTranspose: true });
+    const output = "formatted Markdown";
+    mocks.extractDataGridSelection.mockResolvedValueOnce({ text: output, mimeType: "text/markdown", fileExtension: "md", rowCount: 2, columnCount: 2 });
+    mocks.saveTextFile.mockResolvedValueOnce(true);
+    await settle();
+
+    rowNumber(host).dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    await settle();
+    if (sortFields) {
+      host.querySelector<HTMLButtonElement>("[data-grid-transpose-column-sort]")!.click();
+      await settle();
+    }
+    const record = host.querySelector<HTMLElement>('[data-grid-transpose-record-index="0"]');
+    expect(record).not.toBeNull();
+    openContextMenu(record!);
+    await settle();
+    contextMenuButton("Export").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    contextMenuButton("Markdown").click();
+
+    await vi.waitFor(() => expect(mocks.saveTextFile).toHaveBeenCalledWith(output, expect.stringMatching(/\.md$/), "MD", "md", { operation: "selection-extractor-markdown" }));
+    expect(mocks.extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "markdown",
+        columns: [expect.objectContaining({ displayName: "payload", sourceIndex: 0 }), expect.objectContaining({ displayName: "created_at", sourceIndex: 1 })],
+        selectedColumnIndexes: sortFields ? [1, 0] : [0, 1],
+        rows: [["hello|world\nnext", "2026-11-25 10:56:57"]],
+        transposedMarkdown: { field: i18n.global.t("common.column"), data: i18n.global.t("settings.dataTab") },
+      }),
+    );
+    localStorage.removeItem(`dbx-data-grid-column-layout:${layoutScopeKey}`);
+  });
+
+  it.each([
+    {
+      hit: "header",
+      target: 1,
+      kind: "rows",
+      expected: [
+        [1, "one"],
+        [2, "two"],
+      ],
+    },
+    { hit: "header", target: 2, kind: "rows", expected: [[3, "three"]] },
+    {
+      hit: "cell",
+      target: 1,
+      kind: "rows",
+      expected: [
+        [1, "one"],
+        [2, "two"],
+      ],
+    },
+    { hit: "cell", target: 2, kind: "cells", expected: [[3]] },
+  ])("exports the intended selection after right-clicking a transpose $hit at record $target", async ({ hit, target, kind, expected }) => {
+    const rows = [
+      [1, "one"],
+      [2, "two"],
+      [3, "three"],
+    ];
+    const { host, settingsStore } = mountGrid({ ...hydratedResult(1, "one"), rows });
+    settingsStore.updateEditorSettings({ dataGridMultiRowTranspose: true });
+    mocks.extractDataGridSelection.mockResolvedValueOnce({ text: "markdown", mimeType: "text/markdown", fileExtension: "md", rowCount: kind === "rows" ? 2 : 1, columnCount: kind === "rows" ? expected.length + 1 : 1 });
+    mocks.saveTextFile.mockResolvedValueOnce(true);
+    await settle();
+
+    rowNumber(host).dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    await settle();
+    const records = host.querySelectorAll<HTMLElement>("[data-grid-transpose-record-header]");
+    expect(records).toHaveLength(3);
+    records[0]!.click();
+    records[1]!.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+    await settle();
+    expect(host.querySelectorAll(".transpose-record-header-selected")).toHaveLength(2);
+
+    const targetElement = hit === "header" ? records[target]! : host.querySelector<HTMLElement>(`[data-grid-transpose-cell][data-grid-transpose-record-index="${target}"]`)!;
+    targetElement.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 2, buttons: 2 }));
+    targetElement.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 12, clientY: 12 }));
+    targetElement.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 2 }));
+    await settle();
+    contextMenuButton("Export").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    contextMenuButton("Markdown").click();
+    await vi.waitFor(() => expect(mocks.saveTextFile).toHaveBeenCalledOnce());
+    const request = mocks.extractDataGridSelection.mock.calls[0]![0];
+    expect(request).toMatchObject({ extractor: "markdown", selectionKind: kind, rows: expected });
+    if (kind === "rows") {
+      expect(request.transposedMarkdown).toEqual({ field: i18n.global.t("common.column"), data: i18n.global.t("settings.dataTab") });
+    } else {
+      expect(request.transposedMarkdown).toBeUndefined();
+    }
+  });
+
   it.each([true, false])("exports SQL Updates with select-all set to %s", async (selectAll) => {
     const result = hydratedResult(1, "first");
     const rows = Array.from({ length: 101 }, (_, index) => [index + 1, `value ${index + 1}`]);

@@ -113,6 +113,8 @@ For existing tables, DBX first matches exact names, then normalized names. Norma
 - At least one column must be mapped
 - Required unmapped columns need a default, auto-generated behavior, or nullable definition
 
+To reuse a mapping for files with the same layout, choose **Save as template** in the mapping toolbar once at least one column is mapped, then pick it later from **Apply template…**. Templates are available in existing-table mode only and are stored locally on this machine; saving under an existing name replaces that template. Applying a template replaces the current mapping: source columns match by exact name first, then ignoring case, spaces, underscores, and hyphens, and target columns that do not exist in the table are skipped. Two file columns are never mapped to the same target.
+
 For new tables, source columns initially map to same-name targets and DBX suggests database-specific types from preview values. Suggestions are only a starting point; review dates, precision, long text, JSON, binary values, and engine-specific types before execution.
 
 ## Modes and Batches

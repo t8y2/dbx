@@ -794,7 +794,7 @@ pub async fn disconnect_db(
     permit
         .after_debug_cleanup_with_error(async {
             app.running_queries.cancel_connection(&body.connection_id);
-            app.remove_connection_pools_detached_checked(&body.connection_id).await.map_err(AppError::from)?;
+            app.remove_connection_pools_checked(&body.connection_id).await.map_err(AppError::from)?;
             app.nacos_registry.drop_connection(&body.connection_id).await;
             #[cfg(feature = "mq-admin")]
             app.mq_registry.drop_connection(&body.connection_id).await;
@@ -1517,6 +1517,8 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: dbx_core::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: dbx_core::models::connection::default_query_timeout_secs(),
+
+            write_timeout_secs: 0,
             idle_timeout_secs: dbx_core::models::connection::default_idle_timeout_secs(),
             manual_transaction_timeout_secs: dbx_core::models::connection::default_manual_transaction_timeout_secs(),
             idle_disconnect_secs: dbx_core::models::connection::default_idle_disconnect_secs(),
@@ -1557,6 +1559,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }

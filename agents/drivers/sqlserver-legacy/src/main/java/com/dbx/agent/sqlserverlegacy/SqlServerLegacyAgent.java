@@ -707,8 +707,18 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     static String unqualifiedObjectSchemaSql() {
-        return "SELECT COALESCE(OBJECT_SCHEMA_NAME(OBJECT_ID(QUOTENAME(?))), "
-            + "NULLIF(SCHEMA_NAME(), N''), N'dbo') AS schema_name";
+        // OBJECT_SCHEMA_NAME only exists from SQL Server 2008 on; SQL Server 2005
+        // answers error 195 ("not a recognized built-in function name"), which
+        // surfaced right after CREATE TABLE while DBX refreshed the new table's
+        // structure. Resolve the object's schema through sys.objects instead:
+        // default schema first, then dbo, then any other schema.
+        return "SELECT COALESCE(("
+            + "SELECT TOP 1 s.name FROM sys.objects o "
+            + "JOIN sys.schemas s ON s.schema_id = o.schema_id "
+            + "WHERE o.name = ? AND o.type IN ('U', 'V') "
+            + "ORDER BY CASE WHEN s.name = SCHEMA_NAME() THEN 0 "
+            + "WHEN s.name = N'dbo' THEN 1 ELSE 2 END, s.name"
+            + "), NULLIF(SCHEMA_NAME(), N''), N'dbo') AS schema_name";
     }
 
     static String sqlServer2000ObjectSchemaSql() {

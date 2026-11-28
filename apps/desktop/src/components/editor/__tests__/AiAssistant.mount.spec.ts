@@ -36,6 +36,21 @@ const aiAssistantMountApi = vi.hoisted(() => ({
   // Fifth argument: the custom prompt context (globals, templates, skill listing).
   runAgentStreamCustoms: [] as unknown[],
   savedConversations: [] as Array<Record<string, unknown>>,
+  /** Pin-save behavior for the #14226 failure/ordering tests: when set, each
+   *  saveAiConversation call awaits it (a test resolves/rejects the returned
+   *  promise) instead of resolving immediately. */
+  pinSaveGate: undefined as undefined | (() => Promise<void>),
+  /** Reached after each of those gated saves has been recorded. */
+  pinSaveStarted: [] as string[],
+  /** Records the streamed snapshots the pin path flushes before writing. */
+  savedRunStateConversations: [] as Array<Record<string, unknown>>,
+  /** Column-only pin writes, in call order. */
+  savedPins: [] as Array<{ id: string; pinned: boolean; pinnedAt?: string }>,
+  /** Simulates a pin write whose target row no longer exists: the backend
+   *  answers `false` and nothing is recorded. */
+  pinTargetMissing: false,
+  /** Overrides the "disk" answer for `loadAiConversations`. */
+  loadConversations: undefined as undefined | (() => Promise<Array<Record<string, unknown>>>),
   // Namespace listings the composer asks for when its pickers open (#12972).
   // Empty by default, so no existing test's behavior changes.
   databaseNames: [] as string[],
@@ -57,7 +72,26 @@ const aiAssistantMountApi = vi.hoisted(() => ({
   // renders — the skill-capability test flips this for its own duration.
   tauriRuntime: false,
   detachedWindow: false,
-  loadAiRuns: vi.fn(async () => []),
+  // Plugin ids whose "built-in AI tools" switch is on, and the installed plugins
+  // that name them (#13978). Empty by default: no connection is eligible, so no
+  // existing test's behavior changes.
+  pluginToolPluginIds: [] as string[],
+  installedPlugins: [] as Array<Record<string, unknown>>,
+  // #13978 review: defer the next conversation save so a test can toggle plugin
+  // attachments while the first snapshot of a new chat is still in flight.
+  deferNextConversationSave: false,
+  deferredSaveResolvers: [] as Array<() => void>,
+  // #13978 review: targeted attachment patches and recovered run snapshots.
+  pluginConnectionUpdates: [] as Array<{ conversationId: string; pluginConnectionIds: string[] }>,
+  deferNextPluginConnectionUpdate: false,
+  deferredPluginUpdateResolvers: [] as Array<() => void>,
+  failNextPluginConnectionUpdate: false,
+  savedRunStates: [] as Array<{ conversation: Record<string, unknown>; run: Record<string, unknown> }>,
+  // Queued runs the panel recovers on mount; a test supplies its own. The mock is
+  // a spy (not a plain function) so the detached-window test can assert the
+  // recovery read never happens.
+  runs: [] as unknown[],
+  loadAiRuns: vi.fn(async () => aiAssistantMountApi.runs as never),
   aiCancelStream: vi.fn(async () => true),
 }));
 
@@ -169,11 +203,57 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
   const empty = () => Promise.resolve([]);
   return {
     ...actual,
-    loadAiConversations: () => Promise.resolve(aiAssistantMountApi.conversations),
+    // A test can swap the list the "disk" answers with, so a reload during an
+    // in-flight pin write can return the stale pre-pin record (#14226 review).
+    loadAiConversations: () => (aiAssistantMountApi.loadConversations ?? (() => Promise.resolve(aiAssistantMountApi.conversations)))(),
     loadAiRuns: aiAssistantMountApi.loadAiRuns,
     aiCancelStream: aiAssistantMountApi.aiCancelStream,
+    updateAiConversationPluginConnections: (conversationId: string, pluginConnectionIds: string[]) => {
+      aiAssistantMountApi.pluginConnectionUpdates.push({ conversationId, pluginConnectionIds: [...pluginConnectionIds] });
+      if (aiAssistantMountApi.failNextPluginConnectionUpdate) {
+        aiAssistantMountApi.failNextPluginConnectionUpdate = false;
+        return Promise.reject(new Error("db write failed"));
+      }
+      if (aiAssistantMountApi.deferNextPluginConnectionUpdate) {
+        aiAssistantMountApi.deferNextPluginConnectionUpdate = false;
+        return new Promise<void>((resolve) => aiAssistantMountApi.deferredPluginUpdateResolvers.push(resolve));
+      }
+      return Promise.resolve();
+    },
     saveAiConversation: (conversation: Record<string, unknown>) => {
       aiAssistantMountApi.savedConversations.push(conversation);
+      if (aiAssistantMountApi.deferNextConversationSave) {
+        aiAssistantMountApi.deferNextConversationSave = false;
+        return new Promise<void>((resolve) => aiAssistantMountApi.deferredSaveResolvers.push(resolve));
+      }
+      const gate = aiAssistantMountApi.pinSaveGate;
+      if (!gate) return Promise.resolve();
+      // Gated saves are the pin tests' stand-in for a slow/failing write.
+      aiAssistantMountApi.pinSaveStarted.push(String(conversation.id));
+      return gate();
+    },
+    // The pin toggle is a column-only write (#14226); it shares the same gate so
+    // the failure/ordering tests drive one knob. A gated call is recorded only
+    // once it succeeded, so `savedPins` is what actually reached disk. A missing
+    // target answers `false` — the row was deleted meanwhile (#14226 review).
+    saveAiConversationPin: (id: string, pinned: boolean, pinnedAt?: string) => {
+      const record = { id, pinned, pinnedAt };
+      const finish = () => {
+        if (aiAssistantMountApi.pinTargetMissing) return false;
+        aiAssistantMountApi.savedPins.push(record);
+        return true;
+      };
+      const gate = aiAssistantMountApi.pinSaveGate;
+      if (!gate) return Promise.resolve(finish());
+      aiAssistantMountApi.pinSaveStarted.push(id);
+      return gate().then(finish);
+    },
+    // The pin path flushes a run's streamed snapshot first; the panel only
+    // mirrors that record into the list once the write succeeds, so the mock has
+    // to resolve for the "#14226 review" test to exercise the flushed state.
+    saveAiRunState: (conversation: Record<string, unknown>, run: Record<string, unknown>) => {
+      aiAssistantMountApi.savedRunStates.push({ conversation, run });
+      aiAssistantMountApi.savedRunStateConversations.push(conversation);
       return Promise.resolve();
     },
     // The send path consults the skill catalog (metadata only — bodies are read
@@ -195,7 +275,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     },
     loadAiConfigs: empty,
     saveAiConfigItem: () => Promise.resolve(),
-    listPlugins: empty,
+    listPlugins: () => Promise.resolve(aiAssistantMountApi.installedPlugins as never),
+    getAiPluginToolPlugins: () => Promise.resolve(aiAssistantMountApi.pluginToolPluginIds),
     loadPromptTemplates: empty,
     getAiGlobalCustomInstructions: () => Promise.resolve(""),
     saveAiChatSelection: () => Promise.resolve(),
@@ -228,6 +309,12 @@ afterEach(() => {
   aiAssistantMountApi.runAgentStreamHistories = [];
   aiAssistantMountApi.runAgentStreamCustoms = [];
   aiAssistantMountApi.savedConversations = [];
+  aiAssistantMountApi.pinSaveGate = undefined;
+  aiAssistantMountApi.pinSaveStarted = [];
+  aiAssistantMountApi.savedRunStateConversations = [];
+  aiAssistantMountApi.savedPins = [];
+  aiAssistantMountApi.pinTargetMissing = false;
+  aiAssistantMountApi.loadConversations = undefined;
   aiAssistantMountApi.databaseNames = [];
   aiAssistantMountApi.schemaNames = [];
   aiAssistantMountApi.codeHighlighterDelayMs = 0;
@@ -237,6 +324,16 @@ afterEach(() => {
   aiAssistantMountApi.skillListCalls = 0;
   aiAssistantMountApi.tauriRuntime = false;
   aiAssistantMountApi.detachedWindow = false;
+  aiAssistantMountApi.pluginToolPluginIds = [];
+  aiAssistantMountApi.installedPlugins = [];
+  aiAssistantMountApi.deferNextConversationSave = false;
+  aiAssistantMountApi.deferredSaveResolvers = [];
+  aiAssistantMountApi.pluginConnectionUpdates = [];
+  aiAssistantMountApi.deferNextPluginConnectionUpdate = false;
+  aiAssistantMountApi.deferredPluginUpdateResolvers = [];
+  aiAssistantMountApi.failNextPluginConnectionUpdate = false;
+  aiAssistantMountApi.savedRunStates = [];
+  aiAssistantMountApi.runs = [];
   aiAssistantMountApi.loadAiRuns.mockClear();
   // Reset the shared catalog mock, then re-arm the default implementation that
   // reads `skillCatalog`: `mockReset()` alone leaves it returning undefined, so
@@ -287,13 +384,17 @@ async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig
   const container = document.createElement("div");
   document.body.append(container);
   app.mount(container);
-  cleanups.push(() => {
+  let unmounted = false;
+  const unmount = () => {
+    if (unmounted) return;
+    unmounted = true;
     app.unmount();
     container.remove();
-  });
+  };
+  cleanups.push(unmount);
   // Let mount-time loads settle so their failures surface here too.
   await new Promise((resolve) => setTimeout(resolve, 20));
-  return { errors, container, panelRef, pinia };
+  return { errors, container, panelRef, pinia, unmount };
 }
 
 describe("AiAssistant mount", () => {
@@ -895,6 +996,8 @@ describe("AiAssistant mount", () => {
   // selection chip that renders is worthless if the send drops it.
   const POSTGRES: ConnectionConfig = { id: "postgres", name: "PostgreSQL", db_type: "postgres", host: "localhost", port: 5432, username: "", password: "", database: "app" };
   const CONN_A: ConnectionConfig = { id: "conn-a", name: "ConnA", db_type: "mysql", host: "localhost", port: 3306, username: "", password: "", database: "db_a" };
+  /** A plugin connection the user opened for their own terminal work (#13978). */
+  const SSH_PLUGIN: ConnectionConfig = { id: "ssh-1", name: "middleware", db_type: "plugin", plugin_id: "sample.plugin", host: "localhost", port: 22, username: "", password: "" };
 
   function configureAiPanel(settings: ReturnType<typeof useSettingsStore>) {
     settings.aiConfigs = [
@@ -1130,6 +1233,558 @@ describe("AiAssistant mount", () => {
 
     // The connection arrived: the recorded Agent mode comes back on its own.
     expect(modeTrigger().textContent).toContain(i18n.global.t("ai.modes.agent"));
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #13978: opening a plugin connection is not consent. The run's plugin tools are
+  // limited to the connections the conversation attached, so the control is the
+  // only way an SSH terminal's tools can reach the model.
+  it("hides the plugin tools control when no plugin connection is open or attached", async () => {
+    const { container, errors } = await mountPanel(true, POSTGRES, (settings) => {
+      configureAiPanel(settings);
+      settings.defaultAiMode = "agent";
+    });
+    await settle();
+    expect(container.querySelector(".ai-mode-action-trigger")?.textContent).toContain(i18n.global.t("ai.modes.agent"));
+    expect(container.querySelector(".ai-plugin-tools-trigger")).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("hides the plugin tools control in ask mode", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "ask";
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+    // Ask mode never receives plugin tools, so the control would only mislead.
+    expect(container.querySelector(".ai-plugin-tools-trigger")).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("reveals the plugin tools control after the plugin is enabled and its connection opens", async () => {
+    // Mounted with an empty catalog and no attachments: the control is hidden.
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    await settle();
+    expect(container.querySelector(".ai-plugin-tools-trigger")).toBeNull();
+
+    // The user enables the plugin's built-in AI tools, then opens its connection.
+    // Opening reloads the catalog, so the control appears without a remount.
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await vi.waitFor(() => expect(container.querySelector(".ai-plugin-tools-trigger")).not.toBeNull());
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps a toggle made while the first save of a new chat is in flight", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.installedPlugins = [{ manifest: { id: "sample.plugin", name: "Sample", drivers: [] }, compatibility: { compatible: true } }];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+
+    const trigger = () => container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    const popoverOpen = () => !!container.querySelector('[data-slot="popover-content"]');
+    const openPopover = async () => {
+      if (!popoverOpen()) trigger()!.click();
+      await settle();
+    };
+    const row = () => Array.from(container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button[aria-pressed]')).find((button) => button.textContent?.includes(SSH_PLUGIN.name));
+
+    // Attach in the draft, then send: the first snapshot carries the attachment.
+    await openPopover();
+    await vi.waitFor(() => expect(row()).toBeDefined());
+    row()!.click();
+    await settle();
+    aiAssistantMountApi.deferNextConversationSave = true;
+    await sendPrompt(container, "check memory");
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedConversations.at(-1) as unknown as { pluginConnectionIds?: string[] }).toMatchObject({ pluginConnectionIds: [SSH_PLUGIN.id] }));
+    expect(aiAssistantMountApi.deferredSaveResolvers).toHaveLength(1);
+
+    // Detach while that first save is still pending.
+    await openPopover();
+    await vi.waitFor(() => expect(row()).toBeDefined());
+    row()!.click();
+    await settle();
+
+    // The stale snapshot resolves last. The repair must patch only the
+    // attachment column (never re-save the older transcript), and neither the
+    // record nor the next request may bring the attachment back.
+    const updatesBeforeResolve = aiAssistantMountApi.pluginConnectionUpdates.length;
+    aiAssistantMountApi.deferredSaveResolvers.shift()!();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pluginConnectionUpdates.length).toBeGreaterThan(updatesBeforeResolve));
+    expect(aiAssistantMountApi.pluginConnectionUpdates.at(-1)).toEqual({ conversationId: expect.any(String), pluginConnectionIds: [] });
+    expect(trigger()!.querySelector(".ai-plugin-tools-count")).toBeNull();
+    expect(trigger()!.getAttribute("aria-label")).toBe(i18n.global.t("ai.pluginToolsNoneTitle"));
+
+    await settle();
+    await sendPrompt(container, "check memory again");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps an attachment added while the first save of a new chat is in flight", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.installedPlugins = [{ manifest: { id: "sample.plugin", name: "Sample", drivers: [] }, compatibility: { compatible: true } }];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+
+    const trigger = () => container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    const row = () => Array.from(container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button[aria-pressed]')).find((button) => button.textContent?.includes(SSH_PLUGIN.name));
+
+    // Send first: the first snapshot carries no attachments and is deferred.
+    aiAssistantMountApi.deferNextConversationSave = true;
+    await sendPrompt(container, "check memory");
+    await vi.waitFor(() => expect(aiAssistantMountApi.deferredSaveResolvers).toHaveLength(1));
+
+    // Attach while that save is pending.
+    trigger()!.click();
+    await settle();
+    await vi.waitFor(() => expect(row()).toBeDefined());
+    row()!.click();
+    await settle();
+
+    // The stale empty snapshot resolves last; the repair patches only the
+    // attachment column, so the attachment survives in the record, the UI and
+    // the next request.
+    const updatesBeforeResolve = aiAssistantMountApi.pluginConnectionUpdates.length;
+    aiAssistantMountApi.deferredSaveResolvers.shift()!();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pluginConnectionUpdates.length).toBeGreaterThan(updatesBeforeResolve));
+    expect(aiAssistantMountApi.pluginConnectionUpdates.at(-1)).toEqual({ conversationId: expect.any(String), pluginConnectionIds: [SSH_PLUGIN.id] });
+    expect(trigger()!.querySelector(".ai-plugin-tools-count")?.textContent?.trim()).toBe("1");
+
+    await settle();
+    await sendPrompt(container, "check memory again");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([SSH_PLUGIN.id]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("serializes attachment patches so the last click wins", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.installedPlugins = [{ manifest: { id: "sample.plugin", name: "Sample", drivers: [] }, compatibility: { compatible: true } }];
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-order", connectionId: "postgres", connectionName: "PostgreSQL", database: "app" })];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+        settings.restoreLastConversation = true;
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+
+    const trigger = () => container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    const row = () => Array.from(container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button[aria-pressed]')).find((button) => button.textContent?.includes(SSH_PLUGIN.name));
+    trigger()!.click();
+    await settle();
+    await vi.waitFor(() => expect(row()).toBeDefined());
+
+    // Attach, then detach before the first patch resolves: the detach must queue
+    // behind it, so the database can never end on the earlier attach.
+    aiAssistantMountApi.deferNextPluginConnectionUpdate = true;
+    row()!.click();
+    await settle();
+    row()!.click();
+    await settle();
+    expect(aiAssistantMountApi.pluginConnectionUpdates.map((update) => update.pluginConnectionIds)).toEqual([[SSH_PLUGIN.id]]);
+
+    aiAssistantMountApi.deferredPluginUpdateResolvers.shift()!();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pluginConnectionUpdates.map((update) => update.pluginConnectionIds)).toEqual([[SSH_PLUGIN.id], []]));
+    expect(aiAssistantMountApi.pluginConnectionUpdates.every((update) => update.conversationId === "conv-order")).toBe(true);
+    expect(trigger()!.querySelector(".ai-plugin-tools-count")).toBeNull();
+
+    await settle();
+    await sendPrompt(container, "check memory");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("shares live attachments across panel instances after a background reopen", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.installedPlugins = [{ manifest: { id: "sample.plugin", name: "Sample", drivers: [] }, compatibility: { compatible: true } }];
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-shared", connectionId: "postgres", connectionName: "PostgreSQL", database: "app", pluginConnectionIds: [SSH_PLUGIN.id] })];
+    const first = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+        settings.restoreLastConversation = true;
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    useConnectionStore(first.pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+
+    const firstTrigger = () => first.container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    const row = () => Array.from(first.container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button[aria-pressed]')).find((button) => button.textContent?.includes(SSH_PLUGIN.name));
+    expect(firstTrigger()!.querySelector(".ai-plugin-tools-count")?.textContent?.trim()).toBe("1");
+    firstTrigger()!.click();
+    await settle();
+    await vi.waitFor(() => expect(row()).toBeDefined());
+    row()!.click();
+    await settle();
+    expect(aiAssistantMountApi.pluginConnectionUpdates.at(-1)?.pluginConnectionIds).toEqual([]);
+    first.unmount();
+
+    // A reopened panel (as after a background run) loads the same stale record.
+    // The live attachment state is shared, so the revoked attachment stays gone.
+    const second = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+        settings.restoreLastConversation = true;
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    useConnectionStore(second.pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+    const secondTrigger = second.container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    expect(secondTrigger?.querySelector(".ai-plugin-tools-count")).toBeNull();
+    await sendPrompt(second.container, "check memory");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([]);
+    expect([...first.errors, ...second.errors].map(String)).toEqual([]);
+  });
+
+  it("tells the user when an attachment change cannot be saved", async () => {
+    useToast().dismissToast();
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.installedPlugins = [{ manifest: { id: "sample.plugin", name: "Sample", drivers: [] }, compatibility: { compatible: true } }];
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-save-fail", connectionId: "postgres", connectionName: "PostgreSQL", database: "app", pluginConnectionIds: [SSH_PLUGIN.id] })];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+        settings.restoreLastConversation = true;
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+
+    const trigger = () => container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    const row = () => Array.from(container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button[aria-pressed]')).find((button) => button.textContent?.includes(SSH_PLUGIN.name));
+    trigger()!.click();
+    await settle();
+    await vi.waitFor(() => expect(row()).toBeDefined());
+
+    // The detach is applied in memory but cannot be saved: the user must know.
+    aiAssistantMountApi.failNextPluginConnectionUpdate = true;
+    row()!.click();
+    await settle();
+    expect(useToast().visible.value).toBe(true);
+    expect(useToast().message.value).toBe(i18n.global.t("ai.pluginToolsSaveFailed", { message: "db write failed" }));
+    expect(trigger()!.querySelector(".ai-plugin-tools-count")).toBeNull();
+
+    // The in-memory choice still drives the next request, and a later change
+    // reaches disk again (the failed write did not poison the chain).
+    await sendPrompt(container, "check memory");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([]);
+    if (!container.querySelector('[data-slot="popover-content"]')) trigger()!.click();
+    await settle();
+    await vi.waitFor(() => expect(row()).toBeDefined());
+    row()!.click();
+    await settle();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pluginConnectionUpdates.at(-1)?.pluginConnectionIds).toEqual([SSH_PLUGIN.id]));
+    await settle();
+    await sendPrompt(container, "check memory again");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([SSH_PLUGIN.id]);
+    expect(errors.map(String)).toEqual([]);
+    useToast().dismissToast();
+  });
+
+  it("reports a failed repair after a stale snapshot lands", async () => {
+    useToast().dismissToast();
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.installedPlugins = [{ manifest: { id: "sample.plugin", name: "Sample", drivers: [] }, compatibility: { compatible: true } }];
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-repair-fail", connectionId: "postgres", connectionName: "PostgreSQL", database: "app", pluginConnectionIds: [SSH_PLUGIN.id] })];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+        settings.restoreLastConversation = true;
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+
+    const trigger = () => container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    const row = () => Array.from(container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button[aria-pressed]')).find((button) => button.textContent?.includes(SSH_PLUGIN.name));
+    trigger()!.click();
+    await settle();
+    await vi.waitFor(() => expect(row()).toBeDefined());
+
+    // A snapshot carrying the attachment is built and its save is deferred.
+    aiAssistantMountApi.deferNextConversationSave = true;
+    await sendPrompt(container, "check memory");
+    await vi.waitFor(() => expect(aiAssistantMountApi.deferredSaveResolvers).toHaveLength(1));
+
+    // The user revokes it while that snapshot is in flight; the revocation saves.
+    row()!.click();
+    await settle();
+    expect(aiAssistantMountApi.pluginConnectionUpdates.at(-1)?.pluginConnectionIds).toEqual([]);
+
+    // The stale snapshot lands, and its repair write fails once.
+    aiAssistantMountApi.failNextPluginConnectionUpdate = true;
+    aiAssistantMountApi.deferredSaveResolvers.shift()!();
+    await settle();
+    expect(useToast().visible.value).toBe(true);
+    expect(useToast().message.value).toContain("db write failed");
+
+    // The automatic retry re-applies the live list, so disk and UI converge.
+    await vi.waitFor(() => expect(aiAssistantMountApi.pluginConnectionUpdates.at(-1)?.pluginConnectionIds).toEqual([]));
+    expect(trigger()!.querySelector(".ai-plugin-tools-count")).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+    useToast().dismissToast();
+  });
+
+  it("shows which attached connections exceed the backend's 8-connection cap", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.installedPlugins = [{ manifest: { id: "sample.plugin", name: "Sample", drivers: [] }, compatibility: { compatible: true } }];
+    const pluginConnections: ConnectionConfig[] = Array.from({ length: 9 }, (_, index) => ({
+      id: `ssh-${index}`,
+      name: `c${index}`,
+      db_type: "plugin",
+      plugin_id: "sample.plugin",
+      host: "localhost",
+      port: 22,
+      username: "",
+      password: "",
+    }));
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-cap", connectionId: "postgres", connectionName: "PostgreSQL", database: "app", pluginConnectionIds: pluginConnections.map((connection) => connection.id) })];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+        settings.restoreLastConversation = true;
+      },
+      undefined,
+      pluginConnections,
+    );
+    const connectionStore = useConnectionStore(pinia);
+    for (const connection of pluginConnections) connectionStore.connectedIds.add(connection.id);
+    await settle();
+
+    const trigger = () => container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    // Nine attached, but the backend only keeps eight: the badge and label say so.
+    expect(trigger()!.querySelector(".ai-plugin-tools-count")?.textContent?.trim()).toBe("8");
+    expect(trigger()!.getAttribute("aria-label")).toBe(i18n.global.t("ai.pluginToolsSelectedTitle", { names: "c0, c1, c2, c3, c4, c5, c6, c7" }));
+
+    trigger()!.click();
+    await settle();
+    await vi.waitFor(() => expect(container.querySelector("[data-ai-plugin-tools-overflow]")).not.toBeNull());
+    expect(container.querySelector("[data-ai-plugin-tools-overflow]")?.textContent).toContain("c8");
+
+    // Closing one effective connection lets the capped one take its place.
+    connectionStore.connectedIds.delete("ssh-0");
+    await settle();
+    expect(trigger()!.querySelector(".ai-plugin-tools-count")?.textContent?.trim()).toBe("8");
+    expect(trigger()!.getAttribute("aria-label")).toBe(i18n.global.t("ai.pluginToolsSelectedTitle", { names: "c1, c2, c3, c4, c5, c6, c7, c8" }));
+    expect(container.querySelector("[data-ai-plugin-tools-overflow]")).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps saved plugin attachments when a queued run is recovered", async () => {
+    aiAssistantMountApi.tauriRuntime = true;
+    aiAssistantMountApi.conversations = [
+      storedConversation({
+        id: "conv-recover",
+        connectionId: "postgres",
+        connectionName: "PostgreSQL",
+        database: "app",
+        pluginConnectionIds: [SSH_PLUGIN.id],
+        messages: [{ role: "user", content: "unsent question" }],
+      }),
+    ];
+    aiAssistantMountApi.runs = [
+      {
+        runId: "run-recover",
+        conversationId: "conv-recover",
+        sessionIds: [],
+        status: "queued",
+        connectionId: "postgres",
+        database: "app",
+        fifoCategory: "normal_send",
+        maxSeq: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ];
+    const { errors } = await mountPanel(true, POSTGRES, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    await settle();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedRunStates.length).toBeGreaterThan(0));
+    // Recovery rewrites the whole record; the user's explicit attachment must
+    // ride along or the recovered draft silently loses its plugin tools.
+    const recovered = aiAssistantMountApi.savedRunStates.at(-1)!.conversation as { pluginConnectionIds?: string[] };
+    expect(recovered.pluginConnectionIds).toEqual([SSH_PLUGIN.id]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("attaches an open plugin connection, persists it, and freezes it into the send", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.installedPlugins = [{ manifest: { id: "sample.plugin", name: "Sample", drivers: [] }, compatibility: { compatible: true } }];
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-ssh", connectionId: "postgres", connectionName: "PostgreSQL", database: "app" })];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+        settings.restoreLastConversation = true;
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    const connectionStore = useConnectionStore(pinia);
+    connectionStore.connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+
+    // Nothing is attached yet, so the run carries an empty allow-list.
+    await sendPrompt(container, "check memory");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([]);
+
+    const trigger = () => container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    expect(trigger()).not.toBeNull();
+    expect(trigger()!.getAttribute("aria-label")).toBe(i18n.global.t("ai.pluginToolsNoneTitle"));
+    trigger()!.click();
+    await settle();
+
+    const row = () => Array.from(container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button[aria-pressed]')).find((button) => button.textContent?.includes(SSH_PLUGIN.name));
+    await vi.waitFor(() => expect(row()).toBeDefined());
+    expect(row()!.getAttribute("aria-pressed")).toBe("false");
+    row()!.click();
+    await settle();
+
+    expect(row()!.getAttribute("aria-pressed")).toBe("true");
+    expect(trigger()!.querySelector(".ai-plugin-tools-count")?.textContent?.trim()).toBe("1");
+    expect(trigger()!.getAttribute("aria-label")).toBe(i18n.global.t("ai.pluginToolsSelectedTitle", { names: SSH_PLUGIN.name }));
+    // The attached connection is visible as an extra target in the target row,
+    // not hidden behind the generic entry label.
+    expect(trigger()!.textContent).toContain(SSH_PLUGIN.name);
+    // A toggle reaches disk immediately as a targeted attachment patch: the
+    // transcript is never re-saved from this path.
+    await vi.waitFor(() => expect(aiAssistantMountApi.pluginConnectionUpdates.at(-1)).toEqual({ conversationId: "conv-ssh", pluginConnectionIds: [SSH_PLUGIN.id] }));
+
+    await sendPrompt(container, "check memory again");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([SSH_PLUGIN.id]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps a closed stored attachment visible but inactive", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-ssh", connectionId: "postgres", connectionName: "PostgreSQL", database: "app", pluginConnectionIds: [SSH_PLUGIN.id] })];
+    const { container, errors } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+        settings.restoreLastConversation = true;
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    await settle();
+
+    // The selection stays visible (so it can be removed) but contributes nothing.
+    const trigger = container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    expect(trigger?.querySelector(".ai-plugin-tools-count")).toBeNull();
+    expect(trigger?.getAttribute("aria-label")).toBe(i18n.global.t("ai.pluginToolsNoneTitle"));
+
+    // …and the row is reachable, marked inactive, so the stale selection can be
+    // detached instead of becoming an unreachable stored value.
+    trigger!.click();
+    await settle();
+    const row = () => Array.from(container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button[aria-pressed]')).find((button) => button.textContent?.includes(SSH_PLUGIN.name));
+    await vi.waitFor(() => expect(row()).toBeDefined());
+    expect(row()!.getAttribute("aria-pressed")).toBe("true");
+    expect(row()!.textContent).toContain(i18n.global.t("connection.disconnected"));
+    expect(container.querySelector('[data-slot="popover-content"]')?.textContent).toContain(i18n.global.t("ai.pluginToolsClosedHint", { count: 1 }));
+
+    await sendPrompt(container, "check memory");
+    // The request carries the stored attachment; the backend drops it because the
+    // connection is not open, so the run still gets no plugin tools.
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([SSH_PLUGIN.id]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("locks the plugin tools control to a plugin-connection target", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      SSH_PLUGIN,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+      },
+      undefined,
+      [POSTGRES],
+    );
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+
+    const trigger = container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    expect(trigger).not.toBeNull();
+    expect(trigger!.disabled).toBe(true);
+    expect(trigger!.getAttribute("aria-label")).toBe(i18n.global.t("ai.pluginToolsFollowsTarget"));
+    // The target follows itself into the run without any attachment.
+    await sendPrompt(container, "check memory");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([SSH_PLUGIN.id]);
     expect(errors.map(String)).toEqual([]);
   });
 
@@ -2294,5 +2949,588 @@ describe("AiAssistant mount", () => {
       finish();
       await settle();
     }
+  });
+
+  // --- History pinning (#14226) ---
+
+  /** Opens the history popover and returns its content. */
+  async function openHistory(container: HTMLElement): Promise<HTMLElement> {
+    const trigger = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.getAttribute("title") === i18n.global.t("history.title"))!;
+    expect(trigger).toBeTruthy();
+    trigger.click();
+    await settle();
+    const popover = container.querySelector<HTMLElement>('[data-slot="popover-content"]');
+    expect(popover).not.toBeNull();
+    return popover!;
+  }
+
+  /** The pin toggle on the history row that shows `title`. */
+  function pinButton(popover: HTMLElement, title: string): HTMLButtonElement {
+    const button = Array.from(popover.querySelectorAll<HTMLButtonElement>("[data-ai-conversation-pin]")).find((candidate) => candidate.closest("div")?.textContent?.includes(title));
+    expect(button, `pin button for ${title}`).toBeTruthy();
+    return button!;
+  }
+
+  /** The history popover's trigger (opening and closing both go through it). */
+  function historyTrigger(container: HTMLElement): HTMLButtonElement {
+    const trigger = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.getAttribute("title") === i18n.global.t("history.title"))!;
+    expect(trigger).toBeTruthy();
+    return trigger;
+  }
+
+  /** The rename pencil on the history row that shows `title`. */
+  function renameButton(popover: HTMLElement, title: string): HTMLButtonElement {
+    const button = Array.from(popover.querySelectorAll<HTMLButtonElement>("button")).find((candidate) => candidate.getAttribute("title") === i18n.global.t("ai.renameConversation") && candidate.closest("div")?.textContent?.includes(title));
+    expect(button, `rename button for ${title}`).toBeTruthy();
+    return button!;
+  }
+
+  it("groups a pinned conversation above recent ones and persists the pin", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-pinned", title: "Pinned chat", updatedAt: "2026-01-01T00:00:00.000Z", pinned: true, pinnedAt: "2026-01-02T00:00:00.000Z" }), storedConversation({ id: "conv-new", title: "Newest chat", updatedAt: "2026-10-01T00:00:00.000Z" })];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+    const popover = await openHistory(container);
+    const labels = [...popover.querySelectorAll("[data-ai-conversation-group]")].map((element) => element.textContent?.trim());
+    expect(labels).toEqual([i18n.global.t("history.pinnedGroup"), i18n.global.t("history.recentGroup")]);
+    // The pinned row renders first despite carrying the older timestamp.
+    const rowTitles = [...popover.querySelectorAll<HTMLElement>("[data-ai-conversation-pin]")].map((button) => button.closest("div")?.textContent ?? "");
+    expect(rowTitles[0]).toContain("Pinned chat");
+    expect(rowTitles[1]).toContain("Newest chat");
+
+    // Pin then unpin, asserting each write reaches the backend.
+    pinButton(popover, "Newest chat").click();
+    await settle();
+    expect(aiAssistantMountApi.savedPins.at(-1)).toMatchObject({ id: "conv-new", pinned: true });
+
+    pinButton(popover, "Newest chat").click();
+    await settle();
+    expect(aiAssistantMountApi.savedPins.at(-1)).toMatchObject({ id: "conv-new", pinned: false });
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps a conversation pinned when a later message snapshot is saved", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", pinned: true, pinnedAt: "2026-09-27T00:00:00.000Z", assistantMode: "ask" })];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "follow up";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedConversations.length).toBeGreaterThan(0));
+    const saved = aiAssistantMountApi.savedConversations.at(-1) as { pinned?: boolean; pinnedAt?: string };
+    expect(saved.pinned).toBe(true);
+    expect(saved.pinnedAt).toBe("2026-09-27T00:00:00.000Z");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("restores the newest conversation rather than the pinned one", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-pinned", title: "Pinned chat", updatedAt: "2026-01-01T00:00:00.000Z", pinned: true }), storedConversation({ id: "conv-new", title: "Newest chat", updatedAt: "2026-10-01T00:00:00.000Z" })];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    expect(container.querySelector("[data-tauri-drag-region]")?.textContent?.trim()).toBe("Newest chat");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: a failed pin write must not roll the whole record back. The
+  // snapshot flush that runs before the write has already synced newer content
+  // into the list entry, and a wholesale restore would put the stale transcript
+  // back — where a later record-based save (a rebind) would persist it.
+  it("rolls back only the pin when the pin write fails after a snapshot flush", async () => {
+    useToast().dismissToast();
+    useToast().message.value = "";
+    aiAssistantMountApi.tauriRuntime = true;
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A", assistantMode: "agent" })];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+
+    // Start a streaming run so a run-snapshot flush happens inside the pin write.
+    let emit!: (event: { type: string; [key: string]: unknown }) => void;
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      emit = onEvent;
+      await running;
+      onEvent({ type: "agent_end" });
+      return "streamed answer";
+    };
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "stream please";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    emit({ type: "text_delta", delta: "streamed answer" });
+    await settle();
+
+    // The pin write itself fails.
+    aiAssistantMountApi.pinSaveGate = () => Promise.reject(new Error("disk full"));
+    const popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(useToast().message.value).toBe(i18n.global.t("ai.conversationPinFailed")));
+
+    // The snapshot flushed before the failed pin carried the OLD pin, so nothing
+    // the pin write did reached disk: the UI and a reload agree.
+    const flushed = aiAssistantMountApi.savedRunStateConversations.at(-1)!;
+    expect(flushed.pinned).toBe(false);
+    expect((flushed.messages as Array<{ content: string }>).some((message) => message.content.includes("streamed answer"))).toBe(true);
+    // …and the failed pin never reached disk.
+    expect(aiAssistantMountApi.savedPins).toEqual([]);
+    // The popover stays open across the failure, so the row is the one the user
+    // is looking at: it must show the restored (unpinned) state.
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("false");
+
+    // Retrying succeeds and persists the pin, while the transcript the flush
+    // already made durable is still what a later record save carries.
+    aiAssistantMountApi.pinSaveGate = undefined;
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedPins.at(-1)?.pinned).toBe(true));
+    expect(aiAssistantMountApi.savedPins.at(-1)).toMatchObject({ id: "conv-a", pinned: true });
+
+    finish();
+    await settle();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: with two failed clicks in a row, the second click's "before"
+  // value is the first click's never-persisted optimistic value. Rolling back to
+  // it (or leaving it) would show a pin that is not on disk.
+  it("rolls back to the last persisted pin when consecutive pin writes fail", async () => {
+    useToast().dismissToast();
+    useToast().message.value = "";
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A" })];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+    aiAssistantMountApi.pinSaveGate = () => Promise.reject(new Error("disk full"));
+    const popover = await openHistory(container);
+
+    // Unpinned on disk. Pin (fails), then unpin (fails again).
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(useToast().message.value).toBe(i18n.global.t("ai.conversationPinFailed")));
+    useToast().dismissToast();
+    useToast().message.value = "";
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(useToast().message.value).toBe(i18n.global.t("ai.conversationPinFailed")));
+
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("false");
+    expect(aiAssistantMountApi.savedPins).toEqual([]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: the pre-write snapshot flush replaces the list entry with a
+  // record carrying the OLD pin. A successful pin must therefore put the
+  // optimistic value back, or the row shows unpinned while the DB says pinned —
+  // and the next click would try to pin again.
+  it("keeps a streaming conversation showing pinned after the pin write succeeds", async () => {
+    aiAssistantMountApi.tauriRuntime = true;
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A", assistantMode: "agent" })];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+
+    let emit!: (event: { type: string; [key: string]: unknown }) => void;
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      emit = onEvent;
+      await running;
+      onEvent({ type: "agent_end" });
+      return "streamed answer";
+    };
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "stream please";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    emit({ type: "text_delta", delta: "streamed answer" });
+    await settle();
+
+    const popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedPins.at(-1)?.pinned).toBe(true));
+
+    // The row reflects the write that just succeeded, even though the flush that
+    // ran before it synced a record with the old pin.
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+    // A later delta's snapshot carries the now-confirmed pin, so the row stays.
+    emit({ type: "text_delta", delta: " still streaming" });
+    await settle();
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+
+    finish();
+    await settle();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: a snapshot can be scheduled WHILE the pin column write is
+  // still in flight — the stream keeps flushing every throttle interval. That
+  // snapshot carries the pre-pin value, and its `syncPersistedConversation` must
+  // not overwrite what the user is being shown.
+  it("keeps the row pinned when a throttled snapshot lands during the pin write", async () => {
+    aiAssistantMountApi.tauriRuntime = true;
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A", assistantMode: "agent" })];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+
+    let emit!: (event: { type: string; [key: string]: unknown }) => void;
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      emit = onEvent;
+      await running;
+      onEvent({ type: "agent_end" });
+      return "streamed answer";
+    };
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "stream please";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    // Schedules the run's throttled snapshot for the next interval.
+    emit({ type: "text_delta", delta: "streamed answer" });
+    await settle();
+
+    // Hold the column write open so a throttled snapshot can land behind it.
+    let releasePin!: () => void;
+    const pinGate = new Promise<void>((resolve) => {
+      releasePin = resolve;
+    });
+    aiAssistantMountApi.pinSaveGate = () => pinGate;
+    const popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(1));
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+
+    // Let the throttle fire: that snapshot reaches syncPersistedConversation with
+    // the pre-pin value while the column write is still pending.
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    expect(aiAssistantMountApi.savedPins).toEqual([]);
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+
+    releasePin();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedPins.at(-1)?.pinned).toBe(true));
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+
+    finish();
+    await settle();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: reopening the history panel reloads the list from disk. If the
+  // pin write is still in flight, that reload returns the pre-pin record, so the
+  // reload must merge the displayed pin in — otherwise the row looks unpinned and
+  // a second click re-pins instead of undoing the first one.
+  it.each([
+    { outcome: "succeeds", fails: false, expectedDiskPin: true },
+    { outcome: "fails", fails: true, expectedDiskPin: false },
+  ])("keeps the pending pin across a panel reopen when the write $outcome", async ({ fails, expectedDiskPin }) => {
+    useToast().dismissToast();
+    useToast().message.value = "";
+    const stale = storedConversation({ id: "conv-a", title: "Chat A" });
+    aiAssistantMountApi.conversations = [stale];
+    // Every reload answers the OLD disk state, as if the write had not landed yet.
+    aiAssistantMountApi.loadConversations = () => Promise.resolve([{ ...stale, pinned: false }]);
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+
+    let releasePin!: () => void;
+    const pinGate = new Promise<void>((resolve, reject) => {
+      releasePin = () => (fails ? reject(new Error("disk full")) : resolve());
+    });
+    aiAssistantMountApi.pinSaveGate = () => pinGate;
+
+    // Pin, then close the panel while the write is still pending.
+    let popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(1));
+    const trigger = () => Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.getAttribute("title") === i18n.global.t("history.title"))!;
+    trigger().click();
+    await settle();
+
+    // Reopen: the reloaded row must still show the pin the user just set.
+    popover = await openHistory(container);
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+
+    releasePin();
+    if (fails) {
+      await vi.waitFor(() => expect(useToast().message.value).toBe(i18n.global.t("ai.conversationPinFailed")));
+    } else {
+      await vi.waitFor(() => expect(aiAssistantMountApi.savedPins.at(-1)?.pinned).toBe(true));
+    }
+    // Either way the row matches what is now on disk.
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe(String(expectedDiskPin));
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: rapid clicks must reach disk in click order. Without a
+  // per-conversation write chain the slower first write lands last and the
+  // persisted pin disagrees with what the list shows.
+  it("serializes rapid pin clicks so the last click wins on disk", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A" })];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let call = 0;
+    aiAssistantMountApi.pinSaveGate = () => {
+      call += 1;
+      return call === 1 ? firstGate : Promise.resolve();
+    };
+
+    const popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(1));
+    // Second click while the first write is still in flight.
+    pinButton(popover, "Chat A").click();
+    await settle();
+    expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(1);
+
+    releaseFirst();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(2));
+    expect(aiAssistantMountApi.savedPins.map((record) => record.pinned)).toEqual([true, false]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: the confirmed pin cache must not outlive the write that
+  // produced it — otherwise a reload can never adopt a pin another window or
+  // client changed.
+  it("adopts a pin changed elsewhere on the next reload", async () => {
+    const conv = storedConversation({ id: "conv-a", title: "Chat A" });
+    aiAssistantMountApi.conversations = [conv];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+
+    let popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedPins.at(-1)?.pinned).toBe(true));
+
+    // Another window unpins it; the next reload answers that state.
+    aiAssistantMountApi.loadConversations = () => Promise.resolve([{ ...conv, pinned: false }]);
+    historyTrigger(container).click();
+    await settle();
+    popover = await openHistory(container);
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("false");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: a reload that started BEFORE a pin write may answer the
+  // pre-write state even though its query ran after the write committed. The
+  // write's completion stamp is what keeps the row pinned across that race.
+  it("keeps a pin write that finishes while the reload is answering", async () => {
+    const conv = storedConversation({ id: "conv-a", title: "Chat A" });
+    aiAssistantMountApi.conversations = [conv];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+
+    let releasePin!: () => void;
+    const pinGate = new Promise<void>((resolve) => {
+      releasePin = resolve;
+    });
+    aiAssistantMountApi.pinSaveGate = () => pinGate;
+    let popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(1));
+
+    // Reopen while the write is pending: the reload will answer the pre-pin state.
+    let releaseLoad!: () => void;
+    const loadGate = new Promise<void>((resolve) => {
+      releaseLoad = resolve;
+    });
+    aiAssistantMountApi.loadConversations = () => loadGate.then(() => [{ ...conv, pinned: false }]);
+    historyTrigger(container).click();
+    await settle();
+    popover = await openHistory(container);
+
+    // The write lands after the reload started but before its answer applies.
+    releasePin();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedPins.at(-1)?.pinned).toBe(true));
+    releaseLoad();
+    await settle();
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: a content snapshot owns content fields only. When its save
+  // completes after a reload adopted the disk pin (which retires the caches), a
+  // stale pin captured at build time must not overwrite the row.
+  it("keeps a reloaded pin when an older content snapshot lands afterwards", async () => {
+    const stale = storedConversation({ id: "conv-a", title: "Chat A", assistantMode: "ask" });
+    aiAssistantMountApi.conversations = [stale];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+
+    let releaseSave!: () => void;
+    const saveGate = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    aiAssistantMountApi.pinSaveGate = () => saveGate;
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "follow up";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted.length).toBeGreaterThan(0));
+
+    // Another window pins it; reopening the panel adopts the disk state and
+    // retires the local caches.
+    aiAssistantMountApi.loadConversations = () => Promise.resolve([{ ...stale, pinned: true, pinnedAt: "2026-11-26T00:00:00.000Z" }]);
+    const popover = await openHistory(container);
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+
+    // The delayed snapshot still carries the pre-pin value.
+    releaseSave();
+    await settle();
+    await settle();
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: overlapping history loads must apply in request order. An
+  // older answer arriving last must not replace the newer list or retire the
+  // caches the newer load established.
+  it("ignores a stale history load that resolves after a newer one", async () => {
+    const conv = storedConversation({ id: "conv-a", title: "Chat A" });
+    aiAssistantMountApi.conversations = [conv];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+
+    const pendingLoads: Array<(rows: Array<Record<string, unknown>>) => void> = [];
+    aiAssistantMountApi.loadConversations = () =>
+      new Promise<Array<Record<string, unknown>>>((resolve) => {
+        pendingLoads.push(resolve);
+      });
+
+    // Two overlapping loads: open, close, open again.
+    let popover = await openHistory(container);
+    historyTrigger(container).click();
+    await settle();
+    popover = await openHistory(container);
+    expect(pendingLoads).toHaveLength(2);
+
+    // The NEWER request answers first…
+    pendingLoads[1]([{ ...conv, pinned: true, pinnedAt: "2026-11-26T00:00:00.000Z" }]);
+    await vi.waitFor(() => expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true"));
+
+    // …and the older one, carrying the pre-pin state, arrives last.
+    pendingLoads[0]([{ ...conv, pinned: false }]);
+    await settle();
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: a rename must merge only the fields it owns. Its save can be
+  // in flight while an earlier pin write fails; the rollback has to survive the
+  // rename completing, or the row shows a pin the disk does not carry.
+  it("keeps a failed pin's rollback when a rename save is still in flight", async () => {
+    useToast().dismissToast();
+    useToast().message.value = "";
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A" })];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+
+    let rejectPin!: (error: Error) => void;
+    const pinGate = new Promise<void>((_, reject) => {
+      rejectPin = reject;
+    });
+    let releaseRename!: () => void;
+    const renameGate = new Promise<void>((resolve) => {
+      releaseRename = resolve;
+    });
+    let call = 0;
+    aiAssistantMountApi.pinSaveGate = () => {
+      call += 1;
+      return call === 1 ? pinGate : renameGate;
+    };
+
+    const popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(1));
+
+    // Rename while the pin write is still pending.
+    renameButton(popover, "Chat A").click();
+    await settle();
+    const titleInput = Array.from(popover.querySelectorAll<HTMLInputElement>("input")).find((input) => input.value === "Chat A")!;
+    expect(titleInput, "rename input").toBeTruthy();
+    titleInput.value = "Chat B";
+    titleInput.dispatchEvent(new Event("input"));
+    titleInput.dispatchEvent(new Event("blur"));
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(2));
+
+    // The pin write fails and rolls the row back…
+    rejectPin(new Error("disk full"));
+    await vi.waitFor(() => expect(useToast().message.value).toBe(i18n.global.t("ai.conversationPinFailed")));
+    // …then the rename save completes: it must not resurrect the failed pin.
+    releaseRename();
+    await vi.waitFor(() => expect(pinButton(popover, "Chat B")).toBeTruthy());
+    expect(pinButton(popover, "Chat B").getAttribute("aria-pressed")).toBe("false");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: a pin write whose target row is gone must not be confirmed.
+  // The stale row is dropped (and the column-only write never re-inserts it).
+  it("drops a row when the backend reports the conversation no longer exists", async () => {
+    useToast().dismissToast();
+    useToast().message.value = "";
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A" })];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+    aiAssistantMountApi.pinTargetMissing = true;
+    const popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(popover.querySelectorAll("[data-ai-conversation-pin]").length).toBe(0));
+    expect(aiAssistantMountApi.savedPins).toEqual([]);
+    expect(useToast().message.value).not.toBe(i18n.global.t("ai.conversationPinFailed"));
+    expect(errors.map(String)).toEqual([]);
   });
 });

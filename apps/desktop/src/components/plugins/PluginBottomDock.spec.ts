@@ -4,9 +4,10 @@ import { createApp, defineComponent, h, inject, provide, ref, type App } from "v
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin } from "@/types/database";
 
-const mocks = vi.hoisted(() => ({ listPlugins: vi.fn(), invokePlugin: vi.fn(), useConnectionStore: vi.fn() }));
+const mocks = vi.hoisted(() => ({ listPlugins: vi.fn(), invokePlugin: vi.fn(), useConnectionStore: vi.fn(), getOrLoadPluginUiHtml: vi.fn() }));
 
 vi.mock("@/lib/backend/api", () => ({ listPlugins: mocks.listPlugins, invokePlugin: mocks.invokePlugin }));
+vi.mock("@/lib/plugins/pluginUiHtmlCache", () => ({ getOrLoadPluginUiHtml: mocks.getOrLoadPluginUiHtml }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ locale: ref("en"), t: (key: string) => key }) }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: mocks.useConnectionStore }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
@@ -174,6 +175,36 @@ describe("PluginBottomDock workbench contribution guard", () => {
       expect(root.querySelector("[data-plugin-dock-plus-menu]")?.textContent).toContain("pluginDock.newTerminal");
     } finally {
       warnSpy.mockRestore();
+    }
+  });
+
+  it("does not read panel plugin ui builds at startup or when the plugin set changes", async () => {
+    // A panel plugin's ui build is tens of MB (io.dbx.ssh ships ~25 MB) and the
+    // read/inline pipeline keeps several full-size copies alive. Warming every
+    // panel plugin at idle time cost hundreds of MB of WebContent memory for
+    // users who never opened those panels; the picker warms on demand instead.
+    const plugin = installedPlugin("sample.panel");
+    plugin.manifest.contributions!.push({
+      type: "command",
+      id: "sample.open",
+      label: "Open sample",
+      action: { type: "open-workbench", workbench: "sample.panel", presentation: "panel" },
+    });
+    mocks.listPlugins.mockResolvedValue([plugin]);
+    // Run any idle callback immediately so a startup warm cannot hide behind the idle delay.
+    vi.stubGlobal("requestIdleCallback", (callback: () => void) => {
+      callback();
+      return 0;
+    });
+    try {
+      await mountDock();
+      window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(mocks.listPlugins).toHaveBeenCalledTimes(2);
+      expect(mocks.getOrLoadPluginUiHtml).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 

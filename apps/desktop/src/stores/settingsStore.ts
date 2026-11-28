@@ -55,6 +55,7 @@ import { normalizeSqlVariableSyntaxOverrides, type SqlVariableSyntaxOverrides } 
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { type DataTabReuseMode, DEFAULT_DATA_TAB_REUSE_MODE, normalizeDataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
 import { normalizeTableHoverLookupMode, type TableHoverLookupMode } from "@/lib/editor/hoverTableLookup";
+import { normalizePreferredTableAlias } from "@/lib/sql/sqlIdentifier";
 import { normalizeCompletionTriggerMode, type SqlCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import { DEFAULT_SQL_COMPLETION_MATCH_MODE, normalizeCompletionMatchMode, type SqlCompletionMatchMode } from "@/lib/sql/sqlCompletionMatchMode";
 import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletions";
@@ -581,23 +582,6 @@ export const AI_PROVIDER_PARTNER_PRESETS: readonly AiPartnerProviderPreset[] = [
     badgeKey: "ai.hualongSponsored",
   },
   {
-    id: "hiapi",
-    label: "HiAPI",
-    iconPath: "/icons/ai/hiapi.png",
-    group: "partner",
-    provider: "openai-compatible",
-    endpoint: "https://api.hiapi.ai/v1",
-    model: "",
-    models: [{ name: "glm-5.3" }, { name: "deepseek-v4-flash" }, { name: "deepseek-v4.1-flash" }, { name: "gpt-6-astra" }, { name: "claude-sonnet-4-6" }, { name: "kimi-k3" }],
-    apiStyle: "completions",
-    authMethod: "bearer",
-    requiresApiKey: true,
-    websiteUrl: "https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=ai-provider",
-    apiKeyUrl: "https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=ai-provider",
-    descriptionKey: "ai.hiapiDescription",
-    badgeKey: "ai.hiapiSponsored",
-  },
-  {
     id: "astraflow",
     label: "AstraFlow",
     iconPath: "/icons/ai/astraflow.png",
@@ -1016,6 +1000,7 @@ export interface EditorSettings {
   /** Whether the query toolbar connection picker shows the full group path. */
   showConnectionGroupPath: boolean;
   autoAliasTables: boolean;
+  preferredTableAlias: string;
   qualifyColumnCompletions: boolean;
   batchColumnSelectionIncludeComments: boolean;
   tableCompletionSchemaQualification: SqlTableCompletionSchemaQualification;
@@ -1067,7 +1052,7 @@ export interface EditorSettings {
   tabSortMode: TabSortMode;
   /** 水平标签页最大显示宽度（像素，0 表示不限制）。 */
   tabMaxWidth: number;
-  tabDoubleClickAction: "default" | "close";
+  tabDoubleClickAction: "default" | "close" | "none";
   /** 分组标签在水平标签栏中的行数：single 为分组与标签混排一行，two-row 为分组独占一行。 */
   tabGroupRows: TabGroupRowMode;
   appLayout: "separated" | "classic";
@@ -1178,6 +1163,7 @@ export interface EditorSettings {
   dataGridHideNullColumns: boolean;
   dataGridHideEmptyColumns: boolean;
   dataGridFreezeFirstColumn: boolean;
+  dataGridConfirmColumnHeaderReorder: boolean;
   dataGridBooleanDisplayMode: "dropdown" | "checkbox";
   dataGridBooleanValueStyle: BooleanCellValueStyle;
   numericColumnRightAlign: boolean;
@@ -1471,6 +1457,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showInsertValueHints: true,
   showConnectionGroupPath: false,
   autoAliasTables: true,
+  preferredTableAlias: "",
   qualifyColumnCompletions: true,
   batchColumnSelectionIncludeComments: true,
   tableCompletionSchemaQualification: DEFAULT_SQL_TABLE_COMPLETION_SCHEMA_QUALIFICATION,
@@ -1481,7 +1468,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   snippetTriggerKey: "tab",
   sortCompletionColumnsAlphabetically: true,
   selectFirstCompletionOnOpen: true,
-  completionAutoActivationDelayMs: 500,
+  completionAutoActivationDelayMs: 50,
   wordWrap: false,
   showWhitespace: false,
   tableDdlWordWrap: true,
@@ -1598,6 +1585,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridHideNullColumns: false,
   dataGridHideEmptyColumns: false,
   dataGridFreezeFirstColumn: false,
+  dataGridConfirmColumnHeaderReorder: false,
   dataGridBooleanDisplayMode: "dropdown",
   dataGridBooleanValueStyle: "true-false",
   numericColumnRightAlign: true,
@@ -1742,7 +1730,7 @@ function normalizeUiScale(value: unknown): number {
 export const MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS = 0;
 export const MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS = 5000;
 
-function normalizeCompletionAutoActivationDelay(value: unknown): number {
+export function normalizeCompletionAutoActivationDelay(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs;
   return Math.min(MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.max(MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.round(value)));
 }
@@ -1812,6 +1800,10 @@ export function normalizeTabGroupCustomizations(value: unknown): Record<string, 
 
 function normalizeTabSortMode(value: unknown): TabSortMode {
   return TAB_SORT_MODES.includes(value as TabSortMode) ? (value as TabSortMode) : DEFAULT_EDITOR_SETTINGS.tabSortMode;
+}
+
+export function normalizeTabDoubleClickAction(value: unknown): EditorSettings["tabDoubleClickAction"] {
+  return value === "close" || value === "none" ? value : DEFAULT_EDITOR_SETTINGS.tabDoubleClickAction;
 }
 
 export function normalizeTabMaxWidth(value: unknown): number {
@@ -2253,6 +2245,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showInsertValueHints: typeof settings.showInsertValueHints === "boolean" ? settings.showInsertValueHints : DEFAULT_EDITOR_SETTINGS.showInsertValueHints,
     showConnectionGroupPath: typeof settings.showConnectionGroupPath === "boolean" ? settings.showConnectionGroupPath : DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
+    preferredTableAlias: normalizePreferredTableAlias(settings.preferredTableAlias),
     qualifyColumnCompletions: typeof settings.qualifyColumnCompletions === "boolean" ? settings.qualifyColumnCompletions : DEFAULT_EDITOR_SETTINGS.qualifyColumnCompletions,
     batchColumnSelectionIncludeComments: typeof settings.batchColumnSelectionIncludeComments === "boolean" ? settings.batchColumnSelectionIncludeComments : DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments,
     tableCompletionSchemaQualification: normalizeSqlTableCompletionSchemaQualification(settings.tableCompletionSchemaQualification),
@@ -2298,7 +2291,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tabGroupCustomizations: normalizeTabGroupCustomizations(settings.tabGroupCustomizations),
     tabSortMode: normalizeTabSortMode(settings.tabSortMode),
     tabMaxWidth: normalizeTabMaxWidth(settings.tabMaxWidth),
-    tabDoubleClickAction: settings.tabDoubleClickAction === "close" ? "close" : "default",
+    tabDoubleClickAction: normalizeTabDoubleClickAction(settings.tabDoubleClickAction),
     tabGroupRows: normalizeTabGroupRows(settings.tabGroupRows),
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     webLogoPosition: normalizeWebLogoPosition(settings.webLogoPosition),
@@ -2379,6 +2372,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridHideNullColumns: settings.dataGridHideNullColumns === true,
     dataGridHideEmptyColumns: settings.dataGridHideEmptyColumns === true,
     dataGridFreezeFirstColumn: settings.dataGridFreezeFirstColumn === true,
+    dataGridConfirmColumnHeaderReorder: settings.dataGridConfirmColumnHeaderReorder === true,
     dataGridBooleanDisplayMode: settings.dataGridBooleanDisplayMode === "checkbox" ? "checkbox" : "dropdown",
     dataGridBooleanValueStyle: normalizeDataGridBooleanValueStyle(settings.dataGridBooleanValueStyle),
     numericColumnRightAlign: typeof settings.numericColumnRightAlign === "boolean" ? settings.numericColumnRightAlign : DEFAULT_EDITOR_SETTINGS.numericColumnRightAlign,
@@ -3277,6 +3271,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showInsertValueHints !== undefined) editorSettings.value.showInsertValueHints = partial.showInsertValueHints === true;
     if (partial.showConnectionGroupPath !== undefined) editorSettings.value.showConnectionGroupPath = partial.showConnectionGroupPath === true;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
+    if (partial.preferredTableAlias !== undefined) editorSettings.value.preferredTableAlias = normalizePreferredTableAlias(partial.preferredTableAlias);
     if (partial.qualifyColumnCompletions !== undefined) editorSettings.value.qualifyColumnCompletions = partial.qualifyColumnCompletions === true;
     if (partial.batchColumnSelectionIncludeComments !== undefined) editorSettings.value.batchColumnSelectionIncludeComments = partial.batchColumnSelectionIncludeComments === true;
     if (partial.tableCompletionSchemaQualification !== undefined) editorSettings.value.tableCompletionSchemaQualification = normalizeSqlTableCompletionSchemaQualification(partial.tableCompletionSchemaQualification);
@@ -3328,7 +3323,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tabGroupCustomizations !== undefined) editorSettings.value.tabGroupCustomizations = normalizeTabGroupCustomizations(partial.tabGroupCustomizations);
     if (partial.tabSortMode !== undefined) editorSettings.value.tabSortMode = normalizeTabSortMode(partial.tabSortMode);
     if (partial.tabMaxWidth !== undefined) editorSettings.value.tabMaxWidth = normalizeTabMaxWidth(partial.tabMaxWidth);
-    if (partial.tabDoubleClickAction !== undefined) editorSettings.value.tabDoubleClickAction = partial.tabDoubleClickAction === "close" ? "close" : "default";
+    if (partial.tabDoubleClickAction !== undefined) editorSettings.value.tabDoubleClickAction = normalizeTabDoubleClickAction(partial.tabDoubleClickAction);
     if (partial.tabGroupRows !== undefined) editorSettings.value.tabGroupRows = normalizeTabGroupRows(partial.tabGroupRows);
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.webLogoPosition !== undefined) editorSettings.value.webLogoPosition = normalizeWebLogoPosition(partial.webLogoPosition);
@@ -3417,6 +3412,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridHideNullColumns !== undefined) editorSettings.value.dataGridHideNullColumns = partial.dataGridHideNullColumns === true;
     if (partial.dataGridHideEmptyColumns !== undefined) editorSettings.value.dataGridHideEmptyColumns = partial.dataGridHideEmptyColumns === true;
     if (partial.dataGridFreezeFirstColumn !== undefined) editorSettings.value.dataGridFreezeFirstColumn = partial.dataGridFreezeFirstColumn === true;
+    if (partial.dataGridConfirmColumnHeaderReorder !== undefined) editorSettings.value.dataGridConfirmColumnHeaderReorder = partial.dataGridConfirmColumnHeaderReorder === true;
     if (partial.dataGridBooleanValueStyle !== undefined) editorSettings.value.dataGridBooleanValueStyle = normalizeDataGridBooleanValueStyle(partial.dataGridBooleanValueStyle);
     if (partial.dataGridBooleanDisplayMode !== undefined) editorSettings.value.dataGridBooleanDisplayMode = partial.dataGridBooleanDisplayMode === "dropdown" ? "dropdown" : "checkbox";
     if (partial.numericColumnRightAlign !== undefined) editorSettings.value.numericColumnRightAlign = partial.numericColumnRightAlign === true;

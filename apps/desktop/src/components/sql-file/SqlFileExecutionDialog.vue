@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useToast } from "@/composables/useToast";
@@ -1308,14 +1309,17 @@ watch(
                   {{ t("sqlFile.newDatabase") }}
                 </Button>
               </div>
-              <Select v-if="databaseOptions.length" v-model="targetNamespace" :disabled="executionLocked || loadingDatabases">
-                <SelectTrigger class="h-8 text-xs">
-                  <SelectValue :placeholder="t(namespacePickerListsSchemas ? 'sqlFile.schemaPlaceholder' : 'sqlFile.selectDatabase')" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="db in databaseOptions" :key="db" :value="db">{{ db }}</SelectItem>
-                </SelectContent>
-              </Select>
+              <SearchableSelect
+                v-if="databaseOptions.length"
+                v-model="targetNamespace"
+                :options="databaseOptions"
+                :placeholder="t(namespacePickerListsSchemas ? 'sqlFile.schemaPlaceholder' : 'sqlFile.selectDatabase')"
+                :search-placeholder="t(namespacePickerListsSchemas ? 'transfer.searchSchema' : 'transfer.searchDatabase')"
+                :empty-text="t('common.noResults')"
+                :disabled="executionLocked || loadingDatabases"
+                trigger-class="h-8 w-full justify-between text-xs"
+                content-class="w-[var(--reka-popover-trigger-width)]"
+              />
               <div v-else class="relative">
                 <Input v-model="targetNamespace" class="h-8 text-xs" :disabled="executionLocked || loadingDatabases" :placeholder="t(namespacePickerListsSchemas ? 'sqlFile.schemaPlaceholder' : 'sqlFile.databasePlaceholder')" />
                 <Loader2 v-if="loadingDatabases" class="absolute right-2 top-2 w-3.5 h-3.5 animate-spin text-muted-foreground" />

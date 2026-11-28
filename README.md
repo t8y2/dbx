@@ -104,23 +104,13 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-en" target="_blank">
-        <img src="docs/public/sponsors/hiapi-card.png" alt="HiAPI" width="175" />
-      </a>
-    </td>
-    <td>
-      HiAPI is a developer-focused API platform for image, video, audio, and text models — GPT Image 2.5 (Flare & Sunburst), OpenAI-compatible text endpoints, and Remote MCP/Agent Skills for Claude Code, Cursor, and more. Pay as you go with no minimum spend; new users get 200 Credits on signup, plus 10% bonus Credits on top-ups.
-      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-en" target="_blank">Visit HiAPI</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
         <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
       </a>
     </td>
     <td>
       UCloud is the first public cloud provider listed on China's STAR Market, with 28 global regions for cloud hosting, databases, and CDN; its AstraFlow platform offers one-click access to 200+ mainstream LLMs.
+      <br />Enterprise access: after completing enterprise certification, contact the platform for details if you need access to frontier models.
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">Visit UCloud</a>
     </td>
   </tr>

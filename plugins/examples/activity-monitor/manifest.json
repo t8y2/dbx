@@ -1,0 +1,36 @@
+{
+  "$schema": "../../manifest.schema.json",
+  "manifest_version": 1,
+  "id": "dbx.example.activity-monitor",
+  "name": "DBX Activity Monitor",
+  "version": "0.1.0",
+  "publisher": "dbx",
+  "description": "Live host observation stream for debugging, performance analysis and audit: SQL execution, connection lifecycle, AI agent activity, transfers and plugin lifecycle.",
+  "source": "https://github.com/t8y2/dbx",
+  "homepage": "https://github.com/t8y2/dbx/tree/main/plugins/examples/activity-monitor",
+  "engines": {
+    "dbx": ">=0.6.0",
+    "host_api": "^1.0"
+  },
+  "permissions": [
+    "host.observe:queries",
+    "host.observe:connections",
+    "host.observe:ai",
+    "host.observe:transfers",
+    "host.observe:plugins"
+  ],
+  "entrypoints": {
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "workbench",
+      "id": "dbx.example.activity-monitor.main",
+      "label": "Activity Monitor",
+      "description": "Streams host observation events as they happen."
+    }
+  ]
+}

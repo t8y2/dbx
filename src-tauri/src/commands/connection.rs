@@ -500,6 +500,8 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: dbx_core::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: dbx_core::models::connection::default_query_timeout_secs(),
+
+            write_timeout_secs: 0,
             idle_timeout_secs: dbx_core::models::connection::default_idle_timeout_secs(),
             manual_transaction_timeout_secs: dbx_core::models::connection::default_manual_transaction_timeout_secs(),
             idle_disconnect_secs: dbx_core::models::connection::default_idle_disconnect_secs(),
@@ -542,6 +544,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }
@@ -582,12 +585,8 @@ mod tests {
                 request.extend_from_slice(&byte);
             }
             let request = String::from_utf8(request).unwrap();
-            let target = if proxy_type == ProxyType::Socks5 {
-                "/?query=SELECT%201"
-            } else {
-                "http://clickhouse.desktop.invalid:8123/?query=SELECT%201"
-            };
-            assert!(request.starts_with(&format!("GET {target} HTTP/1.1\r\n")));
+            let target = if proxy_type == ProxyType::Socks5 { "/" } else { "http://clickhouse.desktop.invalid:8123/" };
+            assert!(request.starts_with(&format!("POST {target} HTTP/1.1\r\n")));
             assert!(request.lines().any(|line| line.eq_ignore_ascii_case("host: clickhouse.desktop.invalid:8123")));
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n1\n").await.unwrap();
         });
@@ -1762,6 +1761,17 @@ async fn test_connection_with_info_impl(
                 | DatabaseType::Questdb
                 | DatabaseType::OpenGauss => match db::postgres::connect(&url, connect_timeout).await {
                     Ok(pool) => {
+                        // Non-DWS native GaussDB reports its real version only through
+                        // `pg_settings`; surface it in the test result so the connection
+                        // dialog shows the server and hot-patch versions.
+                        if config.db_type == DatabaseType::Gaussdb
+                            && !dbx_core::query::plugin_plan::is_explicit_gaussdb_dws_profile(&config)
+                        {
+                            database_info = Some(
+                                dbx_core::connection::gaussdb_native_database_info(&pool, config.effective_database())
+                                    .await,
+                            );
+                        }
                         pool.close();
                         Ok("Connection successful".to_string())
                     }
@@ -2284,6 +2294,13 @@ pub async fn connect_db(
 ) -> Result<String, String> {
     let (config, password) = prepare_rocketmq_runtime_config(config);
     let app = state.inner().clone();
+    // Observation context must be captured before `config` moves into the
+    // inner call. The core pool funnel never runs on this explicit path, so
+    // the reason discriminator cannot produce duplicate open events.
+    let observed_connection_id = config.id.clone();
+    let observed_database = config.database.clone();
+    let observed_db_type = config.db_type;
+    let observed_started = std::time::Instant::now();
     let access = dbx_core::query::pl_debug::PlDebugAccess::desktop();
     let permit = dbx_core::query::pl_debug::pl_debug_claim_mutation_core(
         &app,
@@ -2294,6 +2311,44 @@ pub async fn connect_db(
         .after_debug_cleanup(async {
             let token = password.as_deref().and_then(|password| app.session_credentials.set("", &config.id, password));
             let result = connect_db_inner(state, config, client_attempt).await;
+            if app.host_observations.is_enabled(dbx_core::models::observability::KIND_CONNECTION_OPENED)
+                || app.host_observations.is_enabled(dbx_core::models::observability::KIND_CONNECTION_OPEN_FAILED)
+            {
+                use dbx_core::models::observability::{
+                    cap_observation_text, KIND_CONNECTION_OPENED, KIND_CONNECTION_OPEN_FAILED,
+                };
+                let duration_ms = observed_started.elapsed().as_millis() as u64;
+                let db_type = serde_json::to_value(observed_db_type).unwrap_or(serde_json::Value::Null);
+                let (kind, payload) = match &result {
+                    Ok(_) => (
+                        KIND_CONNECTION_OPENED,
+                        serde_json::json!({
+                            "dbType": db_type,
+                            "reason": "explicit",
+                            "durationMs": duration_ms,
+                        }),
+                    ),
+                    Err(error) => {
+                        let (message, truncated) = cap_observation_text(error);
+                        (
+                            KIND_CONNECTION_OPEN_FAILED,
+                            serde_json::json!({
+                                "dbType": db_type,
+                                "reason": "explicit",
+                                "durationMs": duration_ms,
+                                "error": message,
+                                "errorTruncated": truncated,
+                            }),
+                        )
+                    }
+                };
+                app.host_observations.publish(
+                    kind,
+                    Some(observed_connection_id.clone()),
+                    observed_database.clone(),
+                    payload,
+                );
+            }
             if result.is_err() {
                 if let Some(token) = token {
                     // A stale failed attempt must not remove a newer attempt's credential.
@@ -2881,17 +2936,33 @@ pub async fn disconnect_db(
     if !should_disconnect {
         return Ok(());
     }
-    permit
+    // Observation gate: a disconnect of a never-connected id still succeeds,
+    // but it has nothing to "close" — only report a closed lifecycle when the
+    // connection actually held pools.
+    let had_pools = state.has_connection_pools(&connection_id).await;
+    let result = permit
         .after_debug_cleanup(async {
             state.running_queries.cancel_connection(&connection_id);
-            state.remove_connection_pools_detached_checked(&connection_id).await?;
+            state.remove_connection_pools_checked(&connection_id).await?;
             drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
             drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
             state.reset_connection_transport_checked(&connection_id).await?;
             release_runtime_config_on_disconnect(state.inner(), &connection_id).await;
             Ok(())
         })
-        .await
+        .await;
+    if result.is_ok()
+        && had_pools
+        && state.host_observations.is_enabled(dbx_core::models::observability::KIND_CONNECTION_CLOSED)
+    {
+        state.host_observations.publish(
+            dbx_core::models::observability::KIND_CONNECTION_CLOSED,
+            Some(connection_id),
+            None,
+            serde_json::json!({ "reason": "explicit" }),
+        );
+    }
+    result
 }
 
 #[tauri::command]
@@ -2977,10 +3048,27 @@ pub async fn connection_is_open(state: State<'_, Arc<AppState>>, connection_id: 
 pub fn install_connection_liveness_bridge(app: &tauri::AppHandle, state: Arc<AppState>) {
     let app_handle = app.clone();
     let mut events = state.subscribe_connection_liveness();
+    // Mirror the same transitions onto the observability bus. The read-only
+    // sidebar status still comes from the Tauri event below; this tap only
+    // feeds plugins that declared `host.observe:connections`.
+    let observations = state.host_observations.clone();
     tauri::async_runtime::spawn(async move {
         loop {
             match events.recv().await {
                 Ok(message) => {
+                    if observations.is_enabled(dbx_core::models::observability::KIND_CONNECTION_LIVENESS_LOST) {
+                        if let ConnectionLivenessMessage::Lost { connection_id, failure_kind } = &message {
+                            observations.publish(
+                                dbx_core::models::observability::KIND_CONNECTION_LIVENESS_LOST,
+                                Some(connection_id.clone()),
+                                None,
+                                serde_json::json!({
+                                    "failureKind": serde_json::to_value(failure_kind)
+                                        .unwrap_or(serde_json::Value::Null),
+                                }),
+                            );
+                        }
+                    }
                     let _ = app_handle.emit("dbx-connection-liveness", message);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -3025,10 +3113,20 @@ pub fn install_connection_idle_closed_bridge(app: &tauri::AppHandle, state: Arc<
 
     let app_handle = app.clone();
     let mut events = state.subscribe_connection_idle_closed();
+    // Mirror idle closes onto the observability bus (see the liveness bridge).
+    let observations = state.host_observations.clone();
     tauri::async_runtime::spawn(async move {
         loop {
             match events.recv().await {
                 Ok(event) => {
+                    if observations.is_enabled(dbx_core::models::observability::KIND_CONNECTION_IDLE_CLOSED) {
+                        observations.publish(
+                            dbx_core::models::observability::KIND_CONNECTION_IDLE_CLOSED,
+                            Some(event.connection_id.clone()),
+                            None,
+                            serde_json::json!({ "closedAtMs": event.closed_at_ms }),
+                        );
+                    }
                     let _ = app_handle.emit("dbx:connection-idle-closed", event);
                 }
                 // 丢弃事件不影响正确性：前端下次触发查询时会经 `ensureConnected` 自动重连，

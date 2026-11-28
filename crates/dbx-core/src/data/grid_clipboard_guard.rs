@@ -160,6 +160,7 @@ mod tests {
             rows,
             selection_kind: DataGridSelectionKind::Cells,
             options: Default::default(),
+            transposed_markdown: None,
             spatial_columns: None,
             spatial_values: None,
         }

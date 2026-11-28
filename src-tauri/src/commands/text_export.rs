@@ -1,4 +1,7 @@
-use dbx_core::text_export::{format_html, format_json, format_markdown, QueryResultTextExportData};
+use dbx_core::data_grid_extractors::DataGridTransposedMarkdownLabels;
+use dbx_core::text_export::{
+    format_html, format_json, format_markdown, format_transposed_markdown, QueryResultTextExportData,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -10,6 +13,8 @@ pub struct QueryResultTextExportRequest {
     pub title: Option<String>,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
+    #[serde(default)]
+    pub transposed_markdown: Option<DataGridTransposedMarkdownLabels>,
 }
 
 impl QueryResultTextExportRequest {
@@ -32,10 +37,15 @@ pub async fn export_query_result_json(request: QueryResultTextExportRequest) -> 
 }
 
 #[tauri::command]
-pub async fn export_query_result_markdown(request: QueryResultTextExportRequest) -> Result<(), String> {
+pub async fn export_query_result_markdown(mut request: QueryResultTextExportRequest) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let file_path = request.file_path.clone();
-        let content = format_markdown(&request.into_data());
+        let labels = request.transposed_markdown.take();
+        let data = request.into_data();
+        let content = match labels {
+            Some(labels) => format_transposed_markdown(&data, &labels.field, &labels.data),
+            None => format_markdown(&data),
+        };
         std::fs::write(file_path, format!("\u{FEFF}{content}")).map_err(|err| err.to_string())
     })
     .await
@@ -67,6 +77,7 @@ mod tests {
             title: None,
             columns: vec!["id".to_string(), "name".to_string()],
             rows: vec![vec![json!(1), json!("Ada")]],
+            transposed_markdown: None,
         })
         .unwrap();
 

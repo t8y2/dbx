@@ -343,6 +343,7 @@ import { useToast } from "@/composables/useToast";
 import type { ConnectionConfig, InstalledPlugin, DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
 import { getCcSwitchPluginStatus, isCcSwitchPluginAvailable, isMagpieImportAvailable, MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION } from "@/lib/ai/ccSwitch";
 import { uuid } from "@/lib/common/utils";
+import { MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES, mergeImportedVscodeSnippets, parseVscodeSnippetsFile, readVscodeSnippetsFile, serializeVscodeSnippetsFile, type VscodeSnippetsImportError, type VscodeSnippetsParseResult } from "@/lib/sql/vscodeSnippetsImport";
 import { DEFAULT_SQL_SHORTCUT_SELECT_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
 import {
   BUILTIN_SQL_SHORTCUT_COUNT_ID,
@@ -360,6 +361,7 @@ import {
   deriveSqlShortcutDatabaseTypes,
 } from "@/lib/sql/sqlShortcutActions";
 import { applySqlShortcutBodyToAllSelected, buildSqlShortcutBodiesForSave, clearSqlShortcutFormDatabaseTypes as clearSqlShortcutFormBodies, switchSqlShortcutEditingDatabaseType, toggleSqlShortcutFormDatabaseType, type SqlShortcutFormBodies } from "@/lib/sql/sqlShortcutFormBodies";
+import { normalizePreferredTableAlias } from "@/lib/sql/sqlIdentifier";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
@@ -382,6 +384,7 @@ import {
   editorSettingsDraftFromSettings,
   editorSettingsDraftPatchFromSettings,
   editorSettingsPatchFromDraft,
+  normalizeCompletionAutoActivationDelayDraft,
   normalizeQueryResultMaxRowsDraft,
   normalizeTableOpenPageSizeDraft,
   shouldConfirmEditorSettingsDialogClose,
@@ -798,6 +801,8 @@ const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurre
 const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValueHints);
 const editShowConnectionGroupPath = ref(settingsStore.editorSettings.showConnectionGroupPath);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
+const editPreferredTableAlias = ref(settingsStore.editorSettings.preferredTableAlias);
+const preferredTableAliasInvalid = computed(() => Boolean(editPreferredTableAlias.value.trim()) && !normalizePreferredTableAlias(editPreferredTableAlias.value));
 const editQualifyColumnCompletions = ref(settingsStore.editorSettings.qualifyColumnCompletions);
 const editBatchColumnSelectionIncludeComments = ref(settingsStore.editorSettings.batchColumnSelectionIncludeComments);
 const editTableCompletionSchemaQualification = ref<SqlTableCompletionSchemaQualification>(settingsStore.editorSettings.tableCompletionSchemaQualification);
@@ -816,7 +821,7 @@ const editSequenceCompletionEnabled = ref(settingsStore.editorSettings.sequenceC
 const showSqlServerSpaceConfirmsCompletion = computed(() => hasSqlServerConnection.value || settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion || editSqlServerSpaceConfirmsCompletion.value);
 const editSortCompletionColumnsAlphabetically = ref(settingsStore.editorSettings.sortCompletionColumnsAlphabetically);
 const editSelectFirstCompletionOnOpen = ref(settingsStore.editorSettings.selectFirstCompletionOnOpen);
-const editCompletionAutoActivationDelayMs = ref(settingsStore.editorSettings.completionAutoActivationDelayMs);
+const editCompletionAutoActivationDelayMs = ref<string | number>(settingsStore.editorSettings.completionAutoActivationDelayMs);
 const editCompletionTriggerMode = ref<SqlCompletionTriggerMode>(settingsStore.editorSettings.completionTriggerMode);
 const editCompletionMatchMode = ref<SqlCompletionMatchMode>(settingsStore.editorSettings.completionMatchMode);
 const editExcludedCompletionItems = ref(settingsStore.editorSettings.excludedCompletionItems.join("\n"));
@@ -937,9 +942,8 @@ function updateTableOpenPageSizeDraft(value: string | number) {
   editTableOpenPageSize.value = normalizeTableOpenPageSizeDraft(value);
 }
 
-function updateCompletionAutoActivationDelayDraft(value: string | number) {
-  const parsed = typeof value === "number" ? value : Number.parseInt(String(value).trim(), 10);
-  editCompletionAutoActivationDelayMs.value = Number.isFinite(parsed) ? Math.min(MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.max(MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS, parsed)) : DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs;
+function commitCompletionAutoActivationDelayInput() {
+  editCompletionAutoActivationDelayMs.value = normalizeCompletionAutoActivationDelayDraft(editCompletionAutoActivationDelayMs.value);
 }
 
 function updatePageSizeDraft(value: string | number) {
@@ -1370,6 +1374,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showInsertValueHints: editShowInsertValueHints.value,
     showConnectionGroupPath: editShowConnectionGroupPath.value,
     autoAliasTables: editAutoAliasTables.value,
+    preferredTableAlias: editPreferredTableAlias.value.trim(),
     qualifyColumnCompletions: editQualifyColumnCompletions.value,
     batchColumnSelectionIncludeComments: editBatchColumnSelectionIncludeComments.value,
     tableCompletionSchemaQualification: editTableCompletionSchemaQualification.value,
@@ -1379,7 +1384,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sequenceCompletionEnabled: editSequenceCompletionEnabled.value,
     sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically.value,
     selectFirstCompletionOnOpen: editSelectFirstCompletionOnOpen.value,
-    completionAutoActivationDelayMs: editCompletionAutoActivationDelayMs.value,
+    completionAutoActivationDelayMs: normalizeCompletionAutoActivationDelayDraft(editCompletionAutoActivationDelayMs.value),
     completionTriggerMode: editCompletionTriggerMode.value,
     completionMatchMode: editCompletionMatchMode.value,
     excludedCompletionItems: normalizeExcludedCompletionItems(editExcludedCompletionItems.value),
@@ -1782,6 +1787,134 @@ function confirmDeleteSnippet(snippet: SqlSnippet) {
     deleteSnippet(snippet.id);
   }
 }
+// --- Snippet import (VS Code snippets JSON) ---
+
+const snippetsImporting = ref(false);
+const snippetsFileInputRef = ref<HTMLInputElement | null>(null);
+
+function onImportSnippetsClick() {
+  if (snippetsImporting.value) return;
+  if (isTauriRuntime()) {
+    void importSnippetsFromDesktop();
+    return;
+  }
+  snippetsFileInputRef.value?.click();
+}
+
+async function importSnippetsFromDesktop() {
+  snippetsImporting.value = true;
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "VS Code Snippets", extensions: ["json", "code-snippets"] }],
+    });
+    if (typeof selected !== "string") return;
+    const { open: openFile } = await import("@tauri-apps/plugin-fs");
+    const file = await openFile(selected, { read: true });
+    try {
+      applyImportedSnippets(await readVscodeSnippetsFile(file));
+    } finally {
+      await file.close();
+    }
+  } catch (error) {
+    toast(t("settings.snippetsImportReadFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    snippetsImporting.value = false;
+  }
+}
+
+async function handleSnippetsFileInputChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  // Reject oversized files before reading them into memory.
+  if (file.size > MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES) {
+    toast(translateSnippetsImportError({ code: "too-large" }), 5000);
+    return;
+  }
+  snippetsImporting.value = true;
+  try {
+    applyImportedSnippets(parseVscodeSnippetsFile(await file.text()));
+  } catch (error) {
+    toast(t("settings.snippetsImportReadFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    snippetsImporting.value = false;
+  }
+}
+
+// Import only updates the draft; the snippets tab is Apply-based, so the dirty
+// check and Apply footer pick the change up without touching the store here.
+function applyImportedSnippets(result: VscodeSnippetsParseResult) {
+  if (!result.ok) {
+    toast(translateSnippetsImportError(result.error), 5000);
+    return;
+  }
+  const merged = mergeImportedVscodeSnippets(editSnippets.value, result.value);
+  editSnippets.value = merged.snippets;
+  toast(merged.renamedCount > 0 ? t("settings.snippetsImportSuccessRenamed", { count: merged.importedCount, renamed: merged.renamedCount }) : t("settings.snippetsImportSuccess", { count: merged.importedCount }), 2500);
+}
+
+function translateSnippetsImportError(error: VscodeSnippetsImportError): string {
+  switch (error.code) {
+    case "too-large":
+      return t("settings.snippetsImportFileTooLarge", { limit: `${MAX_VSCODE_SNIPPETS_IMPORT_FILE_BYTES / (1024 * 1024)} MB` });
+    case "invalid-json":
+      return t("settings.snippetsImportInvalidJson");
+    case "invalid-structure":
+      return t("settings.snippetsImportInvalidStructure");
+    case "no-valid-snippets":
+      return t("settings.snippetsImportNoValidSnippets");
+  }
+}
+
+// --- Snippet export (VS Code snippets JSON) ---
+
+const snippetsExporting = ref(false);
+
+function onExportSnippetsClick() {
+  if (snippetsExporting.value || editSnippets.value.length === 0) return;
+  if (isTauriRuntime()) {
+    void exportSnippetsToDesktop();
+    return;
+  }
+  exportSnippetsToBrowser();
+}
+
+async function exportSnippetsToDesktop() {
+  snippetsExporting.value = true;
+  try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const target = await save({
+      defaultPath: "dbx-snippets.json",
+      filters: [{ name: "VS Code Snippets", extensions: ["json", "code-snippets"] }],
+    });
+    if (typeof target !== "string") return;
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    await writeTextFile(target, serializeVscodeSnippetsFile(editSnippets.value));
+    toast(t("settings.snippetsExportSuccess", { count: editSnippets.value.length }), 2500);
+  } catch (error) {
+    toast(t("settings.snippetsExportWriteFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    snippetsExporting.value = false;
+  }
+}
+
+function exportSnippetsToBrowser() {
+  try {
+    const blob = new Blob([serializeVscodeSnippetsFile(editSnippets.value)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "dbx-snippets.json";
+    anchor.click();
+    URL.revokeObjectURL(url);
+    toast(t("settings.snippetsExportSuccess", { count: editSnippets.value.length }), 2500);
+  } catch (error) {
+    toast(t("settings.snippetsExportWriteFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
 
 function openAddSqlShortcutDialog() {
   sqlShortcutEditingId.value = null;
@@ -2098,6 +2231,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowInsertValueHints.value = settingsStore.editorSettings.showInsertValueHints;
   editShowConnectionGroupPath.value = settingsStore.editorSettings.showConnectionGroupPath;
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
+  editPreferredTableAlias.value = settingsStore.editorSettings.preferredTableAlias;
   editQualifyColumnCompletions.value = settingsStore.editorSettings.qualifyColumnCompletions;
   editBatchColumnSelectionIncludeComments.value = settingsStore.editorSettings.batchColumnSelectionIncludeComments;
   editTableCompletionSchemaQualification.value = settingsStore.editorSettings.tableCompletionSchemaQualification;
@@ -2302,6 +2436,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showInsertValueHints: editShowInsertValueHints,
   showConnectionGroupPath: editShowConnectionGroupPath,
   autoAliasTables: editAutoAliasTables,
+  preferredTableAlias: editPreferredTableAlias,
   qualifyColumnCompletions: editQualifyColumnCompletions,
   batchColumnSelectionIncludeComments: editBatchColumnSelectionIncludeComments,
   tableCompletionSchemaQualification: editTableCompletionSchemaQualification,
@@ -2775,7 +2910,9 @@ const queryResultRowLimitDraftTouched = computed(
     normalizeTableOpenPageSizeDraft(editPageSize.value) !== normalizeTableOpenPageSizeDraft(editEditorSettingsBase.value.pageSize),
 );
 const hasBlockingQueryResultRowLimit = computed(() => queryResultRowLimitViolated.value && queryResultRowLimitDraftTouched.value);
-const hasApplyBlocker = computed(() => historyRetention.invalid.value || mcpHistoryRetention.invalid.value || historyRetentionSaving.value || mcpHistoryRetentionSaving.value || hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
+const hasApplyBlocker = computed(
+  () => historyRetention.invalid.value || mcpHistoryRetention.invalid.value || historyRetentionSaving.value || mcpHistoryRetentionSaving.value || hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value || preferredTableAliasInvalid.value,
+);
 
 async function cleanupMcpHistory() {
   if (mcpHistoryCleanupLoading.value) return;
@@ -2814,6 +2951,7 @@ async function persistSettings() {
   await historyRetention.save();
   await mcpHistoryRetention.save();
   editSidebarHoverDelay.value = normalizeSidebarHoverDelay(editSidebarHoverDelay.value);
+  commitCompletionAutoActivationDelayInput();
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
@@ -2948,6 +3086,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
     editShowConnectionGroupPath.value = DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+    editPreferredTableAlias.value = DEFAULT_EDITOR_SETTINGS.preferredTableAlias;
     editQualifyColumnCompletions.value = DEFAULT_EDITOR_SETTINGS.qualifyColumnCompletions;
     editBatchColumnSelectionIncludeComments.value = DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments;
     editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
@@ -3176,6 +3315,7 @@ function resetAllDefaults() {
   editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
   editShowConnectionGroupPath.value = DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+  editPreferredTableAlias.value = DEFAULT_EDITOR_SETTINGS.preferredTableAlias;
   editQualifyColumnCompletions.value = DEFAULT_EDITOR_SETTINGS.qualifyColumnCompletions;
   editBatchColumnSelectionIncludeComments.value = DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments;
   editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
@@ -8765,8 +8905,8 @@ onUnmounted(() => {
                     class="h-7 w-24 px-2 text-left text-xs tabular-nums"
                     :min="MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS"
                     :max="MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS"
-                    :model-value="editCompletionAutoActivationDelayMs"
-                    @update:model-value="updateCompletionAutoActivationDelayDraft"
+                    v-model="editCompletionAutoActivationDelayMs"
+                    @blur="commitCompletionAutoActivationDelayInput"
                   />
                 </div>
 
@@ -8848,6 +8988,15 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
+                </div>
+
+                <div class="settings-item flex flex-wrap items-start justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="min-w-0 flex-1 space-y-1">
+                    <Label for="editor-preferred-table-alias">{{ t("settings.preferredTableAlias") }}</Label>
+                    <p id="editor-preferred-table-alias-help" class="text-xs text-muted-foreground">{{ t("settings.preferredTableAliasDescription") }}</p>
+                    <p v-if="preferredTableAliasInvalid" id="editor-preferred-table-alias-error" class="text-xs text-destructive">{{ t("settings.preferredTableAliasInvalid") }}</p>
+                  </div>
+                  <Input id="editor-preferred-table-alias" v-model="editPreferredTableAlias" :aria-invalid="preferredTableAliasInvalid" :aria-describedby="preferredTableAliasInvalid ? 'editor-preferred-table-alias-error' : 'editor-preferred-table-alias-help'" class="h-8 w-36" placeholder="T" />
                 </div>
 
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
@@ -9676,6 +9825,7 @@ onUnmounted(() => {
                       <SelectContent>
                         <SelectItem value="default">{{ t("settings.tabDoubleClickActionDefault") }}</SelectItem>
                         <SelectItem value="close">{{ t("settings.tabDoubleClickActionClose") }}</SelectItem>
+                        <SelectItem value="none">{{ t("settings.tabDoubleClickActionNone") }}</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -11964,6 +12114,16 @@ onUnmounted(() => {
                     <Trash2 class="mr-2 h-4 w-4" />
                     {{ t("settings.snippetsDeleteSelected", { count: selectedSnippetCount }) }}
                   </Button>
+                  <Button variant="outline" size="sm" :disabled="snippetsImporting" @click="onImportSnippetsClick">
+                    <Loader2 v-if="snippetsImporting" class="mr-2 h-4 w-4 animate-spin" />
+                    <Upload v-else class="mr-2 h-4 w-4" />
+                    {{ t("settings.snippetsImport") }}
+                  </Button>
+                  <Button variant="outline" size="sm" :disabled="snippetsExporting || editSnippets.length === 0" @click="onExportSnippetsClick">
+                    <Loader2 v-if="snippetsExporting" class="mr-2 h-4 w-4 animate-spin" />
+                    <Download v-else class="mr-2 h-4 w-4" />
+                    {{ t("settings.snippetsExport") }}
+                  </Button>
                   <Button variant="outline" size="sm" @click="openAddSnippetDialog">
                     <Plus class="mr-2 h-4 w-4" />
                     {{ t("settings.snippetsAdd") }}
@@ -12082,6 +12242,7 @@ LIMIT 100;</pre>
                   </tbody>
                 </table>
               </div>
+              <input ref="snippetsFileInputRef" type="file" accept=".json,.code-snippets,application/json" class="hidden" @change="handleSnippetsFileInputChange" />
             </section>
 
             <section v-else-if="activeSettingsTab === 'backups'" data-settings-search-id="backups" :class="['py-2', settingsSearchTargetClass('backups')]">

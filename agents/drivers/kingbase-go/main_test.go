@@ -5177,6 +5177,71 @@ func TestNormalizeValueKingbaseTimeColumnKeepsTimeOfDay(t *testing.T) {
 	}
 }
 
+// Kingbase/PostgreSQL 的 bit / bit varying 列按位串展示。原始字节载荷（MySQL 兼容模式的
+// bit(1) 返回 0x00/0x01，或 PostgreSQL 二进制的「int32 位长 + 位数据」）此前落到通用
+// $binary 分支，网格里显示成 0x00 / 0x01 而不是 0 / 1。
+func TestNormalizeValueDecodesBitColumnPayloads(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    []byte
+		columnType string
+		want       string
+	}{
+		{name: "text protocol bit(1) zero", payload: []byte("0"), columnType: "BIT", want: "0"},
+		{name: "text protocol bit(1) one", payload: []byte("1"), columnType: "BIT", want: "1"},
+		{name: "text protocol bit(8)", payload: []byte("10101010"), columnType: "bit(8)", want: "10101010"},
+		{name: "raw bit(1) zero", payload: []byte{0x00}, columnType: "bit(1)", want: "0"},
+		{name: "raw bit(1) one", payload: []byte{0x01}, columnType: "bit(1)", want: "1"},
+		{name: "raw bit(8)", payload: []byte{0xaa}, columnType: "bit(8)", want: "10101010"},
+		{name: "raw varbit uses declared width", payload: []byte{0x05}, columnType: "varbit(4)", want: "0101"},
+		{name: "binary bit(5)", payload: []byte{0, 0, 0, 5, 0xa8}, columnType: "bit(5)", want: "10101"},
+		{name: "binary bit(1) zero", payload: []byte{0, 0, 0, 1, 0x00}, columnType: "bit(1)", want: "0"},
+		{name: "binary bit(1) one is msb aligned", payload: []byte{0, 0, 0, 1, 0x80}, columnType: "bit(1)", want: "1"},
+		{name: "binary bit(8) one", payload: []byte{0, 0, 0, 8, 0x01}, columnType: "bit(8)", want: "00000001"},
+		{name: "raw bit field without declared width", payload: []byte{0x0a}, columnType: "bit", want: "1010"},
+		// Mirror of the JDBC width guard: a raw MySQL-compat bit(n>1) value of
+		// 0x30/0x31 is NOT single-char text — it must expand LSB over the full width.
+		{name: "raw bit(8) ascii-looking byte expands", payload: []byte{0x30}, columnType: "bit(8)", want: "00110000"},
+		{name: "raw bit(8) ascii-looking one expands", payload: []byte{0x31}, columnType: "bit(8)", want: "00110001"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := normalizeValue(test.payload, test.columnType)
+			gotStr, ok := got.(string)
+			if !ok {
+				t.Fatalf("expected bit string, got %#v", got)
+			}
+			if gotStr != test.want {
+				t.Fatalf("got %q, want %q", gotStr, test.want)
+			}
+		})
+	}
+}
+
+// 位宽超出载荷容量时不能静默截断，保持原来的 $binary 编码。
+func TestNormalizeValueKeepsBinaryForUndecodableBitPayload(t *testing.T) {
+	got := normalizeValue([]byte{0x00}, "bit(9)")
+	binary, ok := got.(map[string]string)
+	if !ok || binary["$binary"] != "AA==" {
+		t.Fatalf("expected $binary fallback, got %#v", got)
+	}
+}
+
+// 非位串列不能走位串解码：bytea / 文本列的原有行为必须保持不变。
+func TestNormalizeValueLeavesNonBitColumnsUntouched(t *testing.T) {
+	for _, columnType := range []string{"bytea", "BLOB", "text", "tinyint(1)", "bit(1)[]", ""} {
+		got := normalizeValue([]byte{0x00}, columnType)
+		binary, ok := got.(map[string]string)
+		if !ok || binary["$binary"] != "AA==" {
+			t.Fatalf("columnType=%q: expected untouched $binary payload, got %#v", columnType, got)
+		}
+	}
+	if got := normalizeValue([]byte("abc"), "text"); got != "abc" {
+		t.Fatalf("text column: got %#v, want abc", got)
+	}
+}
+
 func TestCatalogColumnsPreservesJsonAndJsonbTypes(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		if !strings.Contains(query, "WHEN t.typname = 'json' THEN 'json'") ||

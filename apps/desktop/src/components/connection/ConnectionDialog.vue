@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ConnectionWatermarkSettings from "./ConnectionWatermarkSettings.vue";
 import type { ObjectDirective } from "vue";
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
@@ -49,6 +50,7 @@ import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
 import type { MqttConnectionConfig } from "@/types/mqtt";
 import type { NacosAdminConfig, NacosApiPlane, NacosAuthConfig, NacosImplementation, NacosMetricsMode, NacosNamespaceInfo, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
 import { insertSqliteRemoteTransportLayer, isSqliteRemoteTransportLayerType, sqliteRemoteTransportError } from "@/lib/connection/sqliteRemoteTransport";
@@ -87,6 +89,7 @@ import { hasGbase8cConnectionDatabase } from "@/lib/connection/gbase8cDatabase";
 import { type GbaseProfile, gbaseProfileFromConfig, isGbaseProfile } from "@/lib/connection/gbaseProfiles";
 import { loadVisibleDatabasesPickerNames } from "@/lib/connection/visibleDatabasesPickerLoad";
 import { hasXuguConnectionDatabase } from "@/lib/connection/xuguDatabase";
+import { DEFAULT_WRITE_TIMEOUT_SECS, normalizeWriteTimeoutSecs } from "@/lib/sql/queryTimeout";
 import {
   DEFAULT_IDLE_DISCONNECT_ENABLED_SECS,
   DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS,
@@ -116,7 +119,7 @@ import {
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
 import { MYSQL_DATA_CHARSETS, mysqlDataCharset, setMysqlDataCharset, mysqlDataCharsetValidation, supportsMysqlDataCharset } from "@/lib/connection/mysqlDataCharset";
 import { parseGaussdbHosts, serializeGaussdbHosts, type GaussdbHostEntry } from "@/lib/connection/gaussdbHosts";
-import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
+import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
 import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/zookeeper/zookeeperConnection";
 import { setZooKeeperAuthScheme, zooKeeperAuthScheme as resolveZooKeeperAuthScheme, type ZooKeeperAuthScheme } from "@/lib/zookeeper/zookeeperConnectionOptions";
 import { isLocalFileTypeDb } from "@/lib/connection/connectionFile";
@@ -310,7 +313,11 @@ const IGNITE_CONNECTION_PROFILES: ReadonlyArray<{ value: IgniteConnectionProfile
 // The picker merges the Ignite 2.x/3.x cards into a single "Apache Ignite"
 // entry; the version is picked inside the connection form instead.
 const MERGED_PICKER_OPTION_FOR_TYPE: Record<string, string> = { ignite3: "ignite" };
-const PICKER_SEARCH_ALIASES: Record<string, string[]> = { ignite: ["ignite3", "ignite 3"] };
+const PICKER_SEARCH_ALIASES: Record<string, string[]> = {
+  ignite: ["ignite3", "ignite 3"],
+  polardb: ["polar db"],
+  postgres: ["polardb for postgresql", "polardb postgresql", "polardb pg", "polar db"],
+};
 
 type LegacyTransportFields = {
   ssh_enabled?: boolean;
@@ -472,6 +479,7 @@ const defaultForm = (): ConnectionForm => ({
   connect_timeout_inherit: true,
   query_timeout_secs: settingsStore.editorSettings.globalQueryTimeoutSecs,
   query_timeout_inherit: true,
+  write_timeout_secs: DEFAULT_WRITE_TIMEOUT_SECS,
   idle_timeout_secs: 60,
   manual_transaction_timeout_secs: DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS,
   // 空闲自动断开默认不启用（0）。
@@ -3364,6 +3372,7 @@ watch(
         connect_timeout_inherit: config.connect_timeout_inherit === true,
         query_timeout_secs: config.query_timeout_inherit === true ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? DEFAULT_QUERY_TIMEOUT_SECS),
         query_timeout_inherit: config.query_timeout_inherit === true,
+        write_timeout_secs: config.write_timeout_secs ?? DEFAULT_WRITE_TIMEOUT_SECS,
         idle_timeout_secs: config.idle_timeout_secs ?? 60,
         manual_transaction_timeout_secs: normalizeManualTransactionTimeoutSecs(config.manual_transaction_timeout_secs),
         idle_disconnect_secs: config.idle_disconnect_secs ?? 0,
@@ -3404,6 +3413,7 @@ watch(
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
         production_badge_scope: sidebarProductionBadgeScope(config),
+        watermark: config.watermark,
         visible_databases: config.visible_databases,
         // 通配符筛选由侧栏弹窗维护；编辑连接时也要带上，否则保存会把它清掉，
         // “显示全部（含系统库）”的 `%` 也会在下次打开编辑器时丢失。
@@ -4018,6 +4028,12 @@ function isPickerOptionSelected(optionValue: string): boolean {
 }
 
 const selectedDbOptionIsVisible = computed(() => visibleDbCategories.value.some((category) => category.options.some((option) => isPickerOptionSelected(option.value))));
+const selectedDatabaseTypeLabel = computed(() => (selectedType.value === "polardb" ? (dbOptions.find((option) => option.value === "polardb")?.label ?? selectedProfile().label) : selectedProfile().label));
+const showPolarDbPickerHint = computed(() => {
+  if (selectedType.value === "polardb" && selectedDbOptionIsVisible.value) return true;
+  if (!/\bpolar/i.test(dbSearchQuery.value)) return false;
+  return visibleDbCategories.value.some((category) => category.options.some((option) => option.value === "polardb" || option.value === "postgres"));
+});
 
 function selectDbCategory(category: DbCategoryKey) {
   selectedDbCategory.value = category;
@@ -4980,26 +4996,27 @@ function ensureConnectionHostResolvedFromUrl(): boolean {
 }
 
 function formValueForSubmit(): Omit<ConnectionConfig, "id"> {
+  const config = { ...form.value, write_timeout_secs: normalizeWriteTimeoutSecs(form.value.write_timeout_secs) };
   const url = connectionUrlInput.value.trim();
   if (url && url !== appliedConnectionUrlInput.value) {
     const update = parseConnectionDeepLinkUpdate(url);
     if (update) {
       if (update.connectionId !== editingId.value || props.editConfig?.one_time) throw new Error("Open the saved connection specified by this update link before applying it.");
-      return applyConnectionDeepLinkUpdate(form.value, update);
+      return applyConnectionDeepLinkUpdate(config, update);
     }
     const draft = parseConnectionDeepLink(url);
     if (draft) {
-      return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
+      return applyConnectionDraftToConfig(config, { ...draft, oneTime: undefined });
     }
 
-    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, connectionUrlPreferredProfile()));
+    return applyParsedConnectionUrl(config, parseConnectionUrl(url, connectionUrlPreferredProfile()));
   }
 
   if (form.value.db_type === "meilisearch" && hasPendingMeilisearchHostInput()) {
-    return applyParsedConnectionUrl(form.value, parseConnectionUrl(meilisearchHostInput.value.trim(), "meilisearch"));
+    return applyParsedConnectionUrl(config, parseConnectionUrl(meilisearchHostInput.value.trim(), "meilisearch"));
   }
 
-  return form.value;
+  return config;
 }
 
 function applyDremioJdbcMetadata(config: LegacyConnectionConfig) {
@@ -5127,6 +5144,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.name = form.value.name.trim() || config.name;
     config.note = form.value.note;
     config.color = form.value.color;
+    config.watermark = form.value.watermark;
     config.transport_layers = form.value.transport_layers || [];
     config.connect_timeout_secs = form.value.connect_timeout_secs;
     // buildPluginConnectionConfig rebuilds the config from scratch and drops
@@ -5148,6 +5166,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     }
     config.query_timeout_secs = form.value.query_timeout_secs;
     config.query_timeout_inherit = form.value.query_timeout_inherit;
+    config.write_timeout_secs = normalizeWriteTimeoutSecs(form.value.write_timeout_secs);
     config.idle_timeout_secs = form.value.idle_timeout_secs;
     config.manual_transaction_timeout_secs = normalizeManualTransactionTimeoutSecs(form.value.manual_transaction_timeout_secs);
     config.idle_disconnect_secs = form.value.idle_disconnect_secs;
@@ -5735,7 +5754,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       }
       config.host = filePath;
       config.port = 0;
-      config.connection_string = isH2SplitJdbcUrl(config.connection_string) ? h2FileJdbcUrlWithPath(config.connection_string, filePath) : h2FileJdbcUrlWithPath(undefined, filePath);
+      config.connection_string = h2FileJdbcUrlWithPath(config.connection_string, filePath);
       config.transport_layers = [];
     } else {
       config.host = config.host?.trim() || "127.0.0.1";
@@ -7051,6 +7070,15 @@ function validateTransportLayers(config: LegacyConnectionConfig) {
   });
 }
 
+function clampWriteTimeoutInput(event: Event) {
+  const input = event.target as HTMLInputElement;
+  if (input.value === "") return;
+  const value = Number(input.value);
+  if (!Number.isFinite(value) || value <= MAX_QUERY_TIMEOUT_SECS) return;
+  input.value = String(MAX_QUERY_TIMEOUT_SECS);
+  form.value.write_timeout_secs = MAX_QUERY_TIMEOUT_SECS;
+}
+
 function clampQueryTimeoutInput(event: Event, target: "global" | "connection") {
   const input = event.target as HTMLInputElement;
   if (input.value === "") return;
@@ -7125,6 +7153,17 @@ function startSavedConnection(config: ConnectionConfig) {
     .connect(config)
     .then(() => {
       emit("connectSucceeded", config.name);
+      // Plugin connections have no default query tab: opening the workbench is
+      // the same path a sidebar activation would take (openConnectionQuery).
+      // Without it, "save and connect" only connects but never opens a window.
+      if (config.db_type === "plugin") {
+        const queryStore = useQueryStore();
+        void queryStore.openPluginConnection(config.id).catch((e: any) => {
+          const message = String(e?.message || e);
+          if (message.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
+          toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+        });
+      }
     })
     .catch((e: any) => {
       const message = String(e?.message || e);
@@ -7745,6 +7784,8 @@ function openExternalUrl(url: string) {
             </Button>
           </div>
 
+          <p v-if="showPolarDbPickerHint" class="shrink-0 text-sm text-muted-foreground">{{ t("connection.polarDbPostgresPickerHint") }}</p>
+
           <div class="connection-db-picker-body min-h-0 flex flex-1 flex-col gap-3 overflow-hidden sm:flex-row sm:gap-4">
             <nav data-connection-category-nav class="flex shrink-0 gap-1 overflow-x-auto border-b px-0.5 pt-0.5 pb-2.5 sm:w-40 sm:flex-col sm:overflow-y-auto sm:border-b-0 sm:border-r sm:py-0.5 sm:pr-3.5" :aria-label="t('connection.databaseCategories')">
               <button
@@ -7818,7 +7859,7 @@ function openExternalUrl(url: string) {
           <div class="mr-auto flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
             <PluginIcon v-if="isPluginConnection" :plugin-id="selectedPluginProvider?.plugin.manifest.id || ''" :icon="selectedPluginIcon" class="h-4 w-4" />
             <DatabaseIcon v-else :db-type="selectedDbIcon" class="h-4 w-4 shrink-0" />
-            <span class="truncate">{{ t("connection.selectedDatabase") }}: {{ selectedProfile().label }}</span>
+            <span class="truncate">{{ t("connection.selectedDatabase") }}: {{ selectedDatabaseTypeLabel }}</span>
           </div>
           <Button :disabled="!hasDbPickerResults || !selectedDbOptionIsVisible" @click="goToConnectionStep()">
             {{ t("connection.next") }}
@@ -7870,7 +7911,7 @@ function openExternalUrl(url: string) {
                   <button type="button" class="col-span-3 flex items-center gap-2 rounded-md border bg-muted/20 px-3 py-2 hover:bg-muted/40 cursor-pointer transition" @click="backToDatabasePicker()">
                     <PluginIcon v-if="isPluginConnection && selectedPluginProvider" :plugin-id="selectedPluginProvider.plugin.manifest.id" :icon="selectedPluginIcon" class="h-4 w-4 shrink-0" />
                     <DatabaseIcon v-else :db-type="selectedDbIcon" class="h-4 w-4 shrink-0" />
-                    <span class="min-w-0 flex-1 truncate text-sm text-left">{{ selectedProfile().label }}</span>
+                    <span class="min-w-0 flex-1 truncate text-sm text-left">{{ selectedDatabaseTypeLabel }}</span>
                     <Pencil class="h-3 w-3 text-muted-foreground" />
                   </button>
                 </div>
@@ -10984,6 +11025,17 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
                   </div>
+                  <div v-if="!isPluginConnection" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                    <Label for="connection-write-timeout" :class="connectionLabelSmallClass">{{ t("connection.writeTimeout") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <Input id="connection-write-timeout" v-model.number="form.write_timeout_secs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="w-full" @input="clampWriteTimeoutInput($event)" />
+                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.writeTimeoutHint") }}</p>
+                    </div>
+                  </div>
+                  <div v-if="!isPluginConnection" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.schemaChangeTimeout") }}</Label>
+                    <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.schemaChangeTimeoutHint") }}</p>
+                  </div>
                   <div v-show="supportsIdleTimeoutSetting" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
                     <Label for="connection-idle-timeout" :class="connectionLabelSmallClass">{{ t("connection.idleTimeout") }}</Label>
                     <Input id="connection-idle-timeout" v-model.number="form.idle_timeout_secs" type="number" min="0" :max="MAX_IDLE_TIMEOUT_SECS" step="1" class="col-span-3" @input="clampIdleTimeoutInput($event)" />
@@ -11021,6 +11073,7 @@ function openExternalUrl(url: string) {
                     <p class="col-span-3 col-start-2 text-xs leading-5 text-muted-foreground">{{ t("connection.etcdGrpcMaxInboundHint") }}</p>
                   </div>
                 </section>
+                <ConnectionWatermarkSettings v-model="form.watermark" :connection-name="form.name" />
                 <section class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4">
                   <h3 class="text-base font-bold">{{ t("connection.advancedOperationProtection") }}</h3>
                   <div class="grid grid-cols-4 items-center gap-4">

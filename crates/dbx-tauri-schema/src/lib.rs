@@ -23,6 +23,7 @@ define_registry![
     list_sqlserver_linked_server_schemas,
     list_sqlserver_linked_server_tables,
     list_tables,
+    list_table_children,
     get_table_comment,
     get_mysql_table_auto_increment,
     list_objects,

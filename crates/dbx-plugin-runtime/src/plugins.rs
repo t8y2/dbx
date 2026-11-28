@@ -16,6 +16,7 @@ mod lifecycle;
 mod lifecycle_tests;
 mod manifest;
 mod marketplace;
+pub mod observation;
 mod runtime;
 
 pub use assets::PluginUiAsset;

@@ -55,8 +55,8 @@ describe("data grid filter candidate value serialization", () => {
   it("decides the NULL mapping for every filter mode without falling through", () => {
     // Exhaustive over the union: a new mode fails the type check here until it is
     // listed, so it cannot silently inherit the positive `is-null` branch again.
-    const negated = ["not-equals", "not-like", "not-between", "not-begins-with", "not-ends-with"] as const;
-    const positive = ["equals", "like", "between", "begins-with", "ends-with", "is-null", "is-not-null", "is-blank", "is-not-blank", "less-than", "less-than-or-equal", "greater-than", "greater-than-or-equal", "in", "not-in"] as const;
+    const negated = ["not-equals", "not-like", "not-ilike", "not-between", "not-begins-with", "not-ends-with"] as const;
+    const positive = ["equals", "like", "ilike", "between", "begins-with", "ends-with", "is-null", "is-not-null", "is-blank", "is-not-blank", "less-than", "less-than-or-equal", "greater-than", "greater-than-or-equal", "in", "not-in"] as const;
     type MissingMode = Exclude<DataGridContextFilterMode, (typeof negated)[number] | (typeof positive)[number]>;
     const everyModeIsListed: [MissingMode] extends [never] ? true : never = true;
     expect(everyModeIsListed).toBe(true);
@@ -81,6 +81,18 @@ describe("data grid filter candidate value serialization", () => {
 
     const cleared = toggleAllDataGridDistinctValueOptions(selected, options);
     expect([...cleared.entries()]).toEqual([["str:manual", "manual"]]);
+  });
+
+  it("offers the case-insensitive modes only to PostgreSQL-like databases", () => {
+    for (const mode of ["ilike", "not-ilike"] as const) {
+      expect(filterModeIsSupportedForDatabase(mode, "postgres")).toBe(true);
+      expect(filterModeIsSupportedForDatabase(mode, "redshift")).toBe(true);
+      expect(filterModeIsSupportedForDatabase(mode, "mysql")).toBe(false);
+      expect(filterModeIsSupportedForDatabase(mode, undefined)).toBe(false);
+      expect(filterModeNeedsValue(mode)).toBe(true);
+      expect(filterModeUsesList(mode)).toBe(false);
+      expect(filterModeUsesRange(mode)).toBe(false);
+    }
   });
 
   it("treats the negated prefix/suffix modes as supported value filters (#14365)", () => {

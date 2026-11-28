@@ -73,6 +73,57 @@ function gapIsWhitespaceOrComment(gap: string): boolean {
   return true;
 }
 
+// A continuation word must also sit on the `END`'s own line: `END IF`/`END WHILE`/`END LOOP`/
+// `END CASE`/`END TRY`/`END CATCH` are single-line closers, while T-SQL routinely writes the next
+// statement's `IF` on the line right after a block's bare `END`. The whitespace-only gap check
+// cannot tell the two apart -- a line break is whitespace -- so "END\n\nIF @b = 2" used to read as
+// MySQL's `END IF`: that `END` never popped, the enclosing `BEGIN` stayed on the stack, and both
+// its fold marker and its BEGIN/END match highlight disappeared as soon as a second
+// `IF ... BEGIN ... END` followed the first (dbx#15561).
+function isEndContinuation(state: EditorState, end: SyntaxNode, next: SyntaxNode | undefined): next is SyntaxNode {
+  if (!next) return false;
+  if (state.doc.lineAt(end.to).number !== state.doc.lineAt(next.from).number) return false;
+  return gapIsWhitespaceOrComment(state.sliceDoc(end.to, next.from));
+}
+
+// `END IF` / `END WHILE` / `END LOOP` are statements in their own right, so MySQL and PL/SQL always
+// terminate them with `;`. A one-line T-SQL script can instead put the *next* statement's opener in
+// that same slot (`... END IF @b = 2 BEGIN ...`), which the same-line check alone still reads as a
+// continuation of a construct this service never pushed. Treat end-of-document as a terminator so
+// an unfinished `END IF` keeps the previous, harmless behaviour while the user is still typing.
+// MySQL's `END WHILE lbl;` and Oracle's `END LOOP label;` carry one trailing label identifier
+// (the `LEAVE lbl` idiom) before the terminator, so a single optional identifier is tolerated too.
+function endsStatement(state: EditorState, node: SyntaxNode): boolean {
+  const doc = state.doc;
+  let pos = node.to;
+  let labelAllowed = true;
+  while (pos < doc.length) {
+    const char = state.sliceDoc(pos, pos + 1);
+    if (/\s/.test(char)) {
+      pos++;
+      continue;
+    }
+    if (char === "-" && state.sliceDoc(pos, pos + 2) === "--") {
+      pos = doc.lineAt(pos).to + 1;
+      continue;
+    }
+    if (char === "/" && state.sliceDoc(pos, pos + 2) === "/*") {
+      const commentEnd = state.sliceDoc(pos, Math.min(doc.length, pos + 4096)).indexOf("*/");
+      if (commentEnd < 0) return true;
+      pos += commentEnd + 2;
+      continue;
+    }
+    if (labelAllowed && /[A-Za-z_$]/.test(char)) {
+      labelAllowed = false;
+      pos++;
+      while (pos < doc.length && /[A-Za-z0-9_$]/.test(state.sliceDoc(pos, pos + 1))) pos++;
+      continue;
+    }
+    return char === ";";
+  }
+  return true;
+}
+
 // T-SQL transaction openers do not have a matching `END`, so they must not consume the closer
 // of an enclosing procedural `BEGIN...END` block. Match complete keyword tokens only: `TRAN` is
 // SQL Server's documented abbreviation, while similar identifiers such as `TRANS` remain blocks.
@@ -209,12 +260,15 @@ function sqlBlockPairs(state: EditorState, tree: Tree) {
     const text = state.sliceDoc(token.from, token.to).toUpperCase();
     if (text === "END") {
       const next = tokens[i + 1];
-      const continuation = next && gapIsWhitespaceOrComment(state.sliceDoc(token.to, next.from)) ? state.sliceDoc(next.from, next.to).toUpperCase() : null;
+      const continuation = isEndContinuation(state, token, next) ? state.sliceDoc(next.from, next.to).toUpperCase() : null;
       if (continuation && UNTRACKED_END_CONTINUATIONS.has(continuation)) {
-        i++; // "END IF"/"END WHILE"/... -- closes something we don't track; skip past it untouched
-        continue;
+        if (endsStatement(state, next!)) {
+          i++; // "END IF"/"END WHILE"/... -- closes something we don't track; skip past it untouched
+          continue;
+        }
+      } else if (continuation && TRACKED_END_CONTINUATIONS.has(continuation)) {
+        i++; // "END CASE" -- consume the word, not a new opener
       }
-      if (continuation && TRACKED_END_CONTINUATIONS.has(continuation)) i++; // "END CASE" -- consume the word, not a new opener
       const opener = stack.pop();
       if (opener) pairs.push({ opener, closer: token });
     } else if (BLOCK_OPENERS.has(text) && (text !== "BEGIN" || !isSqlServerTransactionBegin(state, tokens, i))) {

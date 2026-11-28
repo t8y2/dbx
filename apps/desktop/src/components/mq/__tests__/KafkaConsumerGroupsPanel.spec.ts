@@ -6,6 +6,7 @@ import type { KafkaConsumerGroupSnapshot } from "@/types/mq";
 
 const backend = vi.hoisted(() => ({
   mqGetKafkaConsumerGroupSnapshot: vi.fn(),
+  mqDeleteSubscription: vi.fn(),
 }));
 
 vi.mock("vue-i18n", () => ({
@@ -63,10 +64,10 @@ async function flushUi() {
   await nextTick();
 }
 
-async function mountPanel(onNavigateSubscriptions?: (topic: string) => void) {
+async function mountPanel(onNavigateSubscriptions?: (topic: string) => void, confirmWrite?: (operation: string) => Promise<boolean>) {
   root = document.createElement("div");
   document.body.appendChild(root);
-  app = createApp(KafkaConsumerGroupsPanel, { connectionId: "kafka-1", onNavigateSubscriptions });
+  app = createApp(KafkaConsumerGroupsPanel, { connectionId: "kafka-1", onNavigateSubscriptions, confirmWrite });
   app.mount(root);
   await flushUi();
   return root;
@@ -174,5 +175,26 @@ describe("KafkaConsumerGroupsPanel", () => {
     await flushUi();
     expect(panel.textContent).toContain("fresh-worker");
     expect(panel.textContent).not.toContain("orders-worker");
+  });
+
+  it("does not delete a group when pending write approval resolves after unmount", async () => {
+    const approval = deferred<boolean>();
+    const confirmWrite = vi.fn(() => approval.promise);
+    const panel = await mountPanel(undefined, confirmWrite);
+    const deleteButton = panel.querySelector<HTMLButtonElement>(".mq-btn-danger");
+    expect(deleteButton).not.toBeNull();
+    deleteButton!.click();
+    await flushUi();
+
+    const confirmButton = document.querySelector<HTMLButtonElement>('[data-slot="dialog-content"] button[data-variant="destructive"]');
+    expect(confirmButton).not.toBeNull();
+    confirmButton!.click();
+    expect(confirmWrite).toHaveBeenCalledOnce();
+
+    app!.unmount();
+    app = null;
+    approval.resolve(true);
+    await flushUi();
+    expect(backend.mqDeleteSubscription).not.toHaveBeenCalled();
   });
 });

@@ -28,8 +28,9 @@ import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
 import { formatError } from "@/lib/backend/errorUtils";
 import { parseJsonPreservingLargeNumbers, stringifyJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import { tableMetaWithoutOptionalDatabaseQualifier } from "@/lib/table/tableSelectSql";
-import { isPartiallyLoadedCopy, partialLoadCopyHintKey, type PartialLoadCopyInfo } from "@/lib/dataGrid/copyPartialLoadHint";
+import { coversAllLoadedRows, isPartiallyLoadedCopy, partialLoadCopyHintKey, type PartialLoadCopyInfo } from "@/lib/dataGrid/copyPartialLoadHint";
 import { isTemporalColumnType } from "@/lib/dataGrid/columnFormatter";
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import type { DatabaseType, QueryResult } from "@/types/database";
 
@@ -105,6 +106,11 @@ interface UseDataGridExtractorOptions {
   buildMongoInsert: (extractorOptions: DataGridExtractorOptions, rowLimit?: number) => Promise<string | undefined>;
   buildMongoUpdate?: (request: DataGridExtractRequest, rowLimit?: number) => Promise<string | undefined>;
   canBuildMongoUpdate?: (request: DataGridExtractRequest) => boolean;
+}
+
+interface TransposedMarkdownExport {
+  labels: TransposedMarkdownLabels;
+  fieldOrder: readonly number[];
 }
 
 export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
@@ -189,7 +195,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return (extractor === "sql-select" || extractor === "where-clause") && (options.contextCell.value?.col ?? -1) >= 0;
   }
 
-  function buildRequest(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, fullResult?: QueryResult): DataGridExtractRequest | null {
+  function buildRequest(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, fullResult?: QueryResult, transposedMarkdown?: TransposedMarkdownExport): DataGridExtractRequest | null {
     const visibleIndexes = options.visibleColumnIndexes.value;
     const sourceNames = options.allSourceColumns.value;
     const fullColumns = options.allColumns.value;
@@ -307,7 +313,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       };
     });
     const descriptor = DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor];
-    const selectedColumnIndexes = selectedSourceIndexes.map((sourceIndex) => compactIndexBySource.get(sourceIndex)).filter((index): index is number => index !== undefined);
+    // The grid supplies visible fields in display order. Keep the source matrix in
+    // place so hydration, value formatting and input limits use the original axes.
+    const layout = extractor === "markdown" && !fullResult && selectionKind === "rows" ? transposedMarkdown : undefined;
+    const selectedColumnIndexes = (layout?.fieldOrder ?? selectedSourceIndexes).map((sourceIndex) => compactIndexBySource.get(sourceIndex)).filter((index): index is number => index !== undefined);
     const columnTypes = requiredSourceIndexes.map(columnType);
     const normalizeValues = descriptor.category === "json" || descriptor.category === "sql";
     const keepUnsafeJsonText = descriptor.category === "sql";
@@ -364,6 +373,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       selectedColumnIndexes,
       rows,
       selectionKind,
+      ...(layout && { transposedMarkdown: layout.labels }),
       // For dialects whose tableMeta keeps the schema qualifier regardless of
       // the flag (DATABASE_SCHEMA_QUALIFIED_TYPES), the backend strips every
       // namespace prefix when include_database_name=false, which would regress
@@ -546,9 +556,15 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return { text, mimeType: "application/javascript", fileExtension: "js", rowCount: rowLimit ?? request.rows.length, columnCount: request.selectedColumnIndexes.length, warnings: undefined, omittedColumns: undefined };
   }
 
-  async function extractWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, maxRows?: number, fullResult?: QueryResult): Promise<ResolvedDataGridExtraction | null> {
+  async function extractWithExtractor(
+    extractor: DataGridCopyExtractorId,
+    extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+    maxRows?: number,
+    fullResult?: QueryResult,
+    transposedMarkdown?: TransposedMarkdownExport,
+  ): Promise<ResolvedDataGridExtraction | null> {
     if (options.allowExtractor?.(extractor) === false) return null;
-    const initialRequest = buildRequest(extractor, extractorOptions, fullResult);
+    const initialRequest = buildRequest(extractor, extractorOptions, fullResult, transposedMarkdown);
     if (!initialRequest) return null;
     const rowLimit = maxRows === undefined ? undefined : Math.min(initialRequest.rows.length, maxRows);
     const request = fullResult ? initialRequest : await resolveRequestSourceValues(initialRequest, rowLimit);
@@ -592,7 +608,11 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       options.onCopied?.(result);
       showWarnings(result.warnings, result.omittedColumns);
       const partialLoadInfo = options.partialLoadInfo?.value;
-      if (partialLoadInfo && isPartiallyLoadedCopy(partialLoadInfo)) {
+      // The hint counts the rows the grid holds, so it only describes copies of
+      // those rows. A copy of two checked rows, a cell range or one right-clicked
+      // cell reports its own rows on the clipboard; claiming "copied the {loaded}
+      // loaded rows" there is wrong (#15602).
+      if (partialLoadInfo && isPartiallyLoadedCopy(partialLoadInfo) && coversAllLoadedRows(partialLoadInfo, request.rows.length)) {
         toast(t(partialLoadCopyHintKey(partialLoadInfo), { loaded: partialLoadInfo.loadedRows, total: partialLoadInfo.totalRows ?? undefined }), 5000);
       }
       return true;

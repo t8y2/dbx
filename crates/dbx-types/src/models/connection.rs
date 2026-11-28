@@ -152,6 +152,26 @@ pub enum ProductionBadgeScope {
     Table,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionWatermarkMode {
+    Auto,
+    Custom,
+    Off,
+}
+
+/// Visual settings for the connection's editor and data grids.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionWatermark {
+    pub mode: ConnectionWatermarkMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
 #[derive(Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -210,6 +230,13 @@ pub struct ConnectionConfig {
     pub connect_timeout_secs: u64,
     #[serde(default = "default_query_timeout_secs")]
     pub query_timeout_secs: u64,
+    /// Timeout for data-writing statements (INSERT/UPDATE/DELETE/MERGE/COPY).
+    /// `0` (the default) means no limit. When set, the client stops waiting after
+    /// this long but never cancels the server statement: a write that is cut off
+    /// leaves the caller unable to tell whether the rows landed.
+    /// Schema changes (CREATE/ALTER/DROP/TRUNCATE) are never bounded by it.
+    #[serde(default = "default_write_timeout_secs")]
+    pub write_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
     #[serde(default = "default_manual_transaction_timeout_secs")]
@@ -328,6 +355,8 @@ pub struct ConnectionConfig {
     pub production_databases: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production_badge_scope: Option<ProductionBadgeScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<ConnectionWatermark>,
     /// Metadata captured from the latest successful connection test for this saved config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_info: Option<DatabaseConnectionInfo>,
@@ -642,6 +671,12 @@ pub fn default_query_timeout_secs() -> u64 {
     60
 }
 
+/// Writes are unlimited by default: aborting a write transaction is not a
+/// recovery action, it is an extra failure mode (see `query::StatementTimeout`).
+pub fn default_write_timeout_secs() -> u64 {
+    0
+}
+
 pub fn default_idle_timeout_secs() -> u64 {
     60
 }
@@ -792,6 +827,8 @@ struct ConnectionConfigData {
     pub connect_timeout_secs: u64,
     #[serde(default = "default_query_timeout_secs")]
     pub query_timeout_secs: u64,
+    #[serde(default = "default_write_timeout_secs")]
+    pub write_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
     #[serde(default = "default_manual_transaction_timeout_secs")]
@@ -876,6 +913,8 @@ struct ConnectionConfigData {
     pub production_databases: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production_badge_scope: Option<ProductionBadgeScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<ConnectionWatermark>,
     #[serde(default)]
     pub database_info: Option<DatabaseConnectionInfo>,
 }
@@ -912,6 +951,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             transport_layers: data.transport_layers,
             connect_timeout_secs: data.connect_timeout_secs,
             query_timeout_secs: data.query_timeout_secs,
+            write_timeout_secs: data.write_timeout_secs,
             idle_timeout_secs: data.idle_timeout_secs,
             manual_transaction_timeout_secs: data.manual_transaction_timeout_secs,
             idle_disconnect_secs: data.idle_disconnect_secs,
@@ -954,6 +994,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             is_production: data.is_production,
             production_databases: data.production_databases,
             production_badge_scope: data.production_badge_scope,
+            watermark: data.watermark,
             database_info: data.database_info,
         }
     }
@@ -1148,6 +1189,12 @@ impl ConnectionConfig {
             self.manual_transaction_timeout_secs
                 .clamp(MIN_MANUAL_TRANSACTION_TIMEOUT_SECS, MAX_MANUAL_TRANSACTION_TIMEOUT_SECS)
         }
+    }
+
+    /// `None` means "no write deadline" (the default). A configured value never
+    /// collapses to zero, so "on" and "off" stay distinguishable.
+    pub fn effective_write_timeout_secs(&self) -> Option<u64> {
+        (self.write_timeout_secs > 0).then(|| self.write_timeout_secs.max(1))
     }
 
     pub fn effective_query_timeout_secs(&self) -> u64 {
@@ -3429,6 +3476,23 @@ mod tests {
     }
 
     #[test]
+    fn connection_watermark_round_trips_as_optional_presentation() {
+        let mut value = serde_json::to_value(mysql_config("root", "", Some("app"))).unwrap();
+        assert!(value.get("watermark").is_none());
+        assert!(serde_json::from_value::<ConnectionConfig>(value.clone()).unwrap().watermark.is_none());
+
+        for watermark in [
+            serde_json::json!({"mode": "auto"}),
+            serde_json::json!({"mode": "custom", "text": "UAT", "font_size": 48, "color": "#4488aa"}),
+            serde_json::json!({"mode": "off"}),
+        ] {
+            value["watermark"] = watermark.clone();
+            let config: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(config).unwrap()["watermark"], watermark);
+        }
+    }
+
+    #[test]
     fn production_badge_scope_legacy_and_all_options_round_trip() {
         let mut value = serde_json::to_value(mysql_config("root", "", Some("app"))).unwrap();
         value["is_production"] = serde_json::json!(true);
@@ -3526,6 +3590,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: super::default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
+            write_timeout_secs: 0,
             idle_timeout_secs: super::default_idle_timeout_secs(),
             manual_transaction_timeout_secs: super::default_manual_transaction_timeout_secs(),
             idle_disconnect_secs: super::default_idle_disconnect_secs(),
@@ -3566,6 +3631,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }

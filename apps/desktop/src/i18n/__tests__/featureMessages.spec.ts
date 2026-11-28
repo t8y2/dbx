@@ -185,6 +185,12 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "editor selection to AI (#10058)", keys: under("ai", ["selectionChipLabel", "selectionChipDetail", "externalTargetUnavailable"]) },
   { feature: "SQL formatter layout style", keys: under("settings", ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic"]) },
   { feature: "sidebar table structure shortcut", keys: ["settings.shortcutEditSidebarTableStructure"], locales: ALL_LOCALES.filter((locale) => locale !== "th") },
+  {
+    feature: "hide common table fields (#15873)",
+    keys: under("structureEditor", ["hideCommonColumns", "hideCommonColumnsDescription", "commonColumnFilterList", "commonColumnsHiddenCount", "resetCommonColumnFilter"]),
+    locales: ["en", "es", "it", "ja", "ko", "pt-BR", "ru", "th", "zh-CN", "zh-TW"],
+    translated: true,
+  },
   { feature: "MySQL AUTO_INCREMENT warnings", keys: under("structureEditor", ["mysqlAutoIncrementSingleColumn", "mysqlAutoIncrementRequiresIndex", "mysqlAutoIncrementRequiresNativeColumn"]) },
   { feature: "MySQL system database visibility", keys: under("connection", ["showSystemDatabases", "showSystemDatabasesHint"]), translated: true },
 ];

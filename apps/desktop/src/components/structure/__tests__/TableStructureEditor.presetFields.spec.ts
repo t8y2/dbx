@@ -61,35 +61,11 @@ vi.mock("vue-virtual-scroller", async () => {
   };
 });
 
-vi.mock("@lucide/vue", async () => {
+vi.mock("@lucide/vue", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@lucide/vue")>();
   const { defineComponent, h } = await import("vue");
   const Icon = defineComponent({ name: "Icon", setup: () => () => h("span") });
-  return {
-    AlertTriangle: Icon,
-    Check: Icon,
-    ChevronDown: Icon,
-    ChevronUp: Icon,
-    ClipboardList: Icon,
-    Copy: Icon,
-    Database: Icon,
-    Info: Icon,
-    Keyboard: Icon,
-    KeyRound: Icon,
-    ListChevronsUpDown: Icon,
-    Loader2: Icon,
-    Maximize2: Icon,
-    Pencil: Icon,
-    Plus: Icon,
-    RefreshCw: Icon,
-    Rows3: Icon,
-    Save: Icon,
-    Search: Icon,
-    Settings: Icon,
-    SlidersHorizontal: Icon,
-    Trash2: Icon,
-    UserRound: Icon,
-    X: Icon,
-  };
+  return new Proxy(actual as Record<string, unknown>, { get: (target, key) => target[key as string] ?? Icon });
 });
 
 vi.mock("@/components/ui/button", async () => {
@@ -378,5 +354,35 @@ describe("TableStructureEditor preset fields (#12297)", () => {
     await nextTick();
 
     expect(onOpenSettings).toHaveBeenCalledWith("data", "tableColumnTemplates");
+  });
+
+  it("filters common fields in the list without changing the table draft", async () => {
+    const draft = draftWithColumns(["id", "created_at", "name", "updated_at", "remark"]);
+    const root = await mountEditor({ tableName: "user", draft });
+
+    const columnNames = () => [...root.ownerDocument.querySelectorAll<HTMLInputElement>("[data-column-name-input]")].map((input) => input.value);
+    expect(columnNames()).toEqual(["id", "created_at", "name", "updated_at", "remark"]);
+
+    const filterToggle = root.ownerDocument.querySelector<HTMLButtonElement>("[data-common-column-filter-toggle]");
+    expect(filterToggle).not.toBeNull();
+    filterToggle!.click();
+    await nextTick();
+
+    expect(columnNames()).toEqual(["id", "name", "remark"]);
+    expect([...root.ownerDocument.querySelectorAll<HTMLElement>("[data-column-row-index]")].map((row) => row.dataset.columnRowIndex)).toEqual(["0", "2", "4"]);
+    expect(root.ownerDocument.querySelector("[data-common-column-filter-count]")?.textContent).toContain("2");
+
+    root.ownerDocument.querySelector<HTMLButtonElement>('[data-common-column-filter-column="created_at"]')!.click();
+    await nextTick();
+    expect(columnNames()).toEqual(["id", "created_at", "name", "remark"]);
+
+    root.ownerDocument.querySelector<HTMLButtonElement>('[data-common-column-filter-column="name"]')!.click();
+    await nextTick();
+    expect(columnNames()).toEqual(["id", "created_at", "remark"]);
+
+    filterToggle!.click();
+    await nextTick();
+    expect(columnNames()).toEqual(["id", "created_at", "name", "updated_at", "remark"]);
+    expect(draft.columns).toHaveLength(5);
   });
 });

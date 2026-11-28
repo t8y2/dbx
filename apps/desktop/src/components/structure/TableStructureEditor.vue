@@ -55,6 +55,7 @@ import {
   ClipboardList,
   Copy,
   Database,
+  Filter,
   Info,
   KeyRound,
   ListChevronsUpDown,
@@ -143,7 +144,7 @@ import { buildMysqlAutoIncrementCounterStatement, canEditMysqlAutoIncrementCount
 import { mysqlTableCollationSql, parseMysqlTableCharset } from "@/lib/table/mysqlTableCollation";
 import { MYSQL_STORAGE_ENGINES_SQL, mysqlTableEngineSql, mysqlTableEngineSqlOption, parseMysqlTableEngineMetadata, refreshMysqlTableEngineDraft, supportsMysqlTableEngine } from "@/lib/table/mysqlTableEngine";
 import { INCEPTOR_PHYSICAL_OPTIONS, buildInceptorCreateOptions, emptyTablePhysicalOptions, hasTablePhysicalOptions, pruneTablePhysicalOptions, restoreTablePhysicalOptions } from "@/lib/table/tablePhysicalOptions";
-import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
+import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts, tableColumnTemplateFieldNamesForDatabase } from "@/lib/table/tableColumnTemplates";
 import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
 import { getPostgresDataTypeHelp, gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { getSqliteDataTypeHelp } from "@/lib/table/sqliteDataTypeHelp";
@@ -2040,6 +2041,38 @@ function structureColumnComparisonKey(name: string): string {
   return tableStructureIdentifierComparisonKey(name, databaseType.value, connection.value?.database_info);
 }
 
+const commonColumnFilterEnabled = ref(false);
+const commonColumnFilterNames = ref<string[]>([]);
+const commonColumnFilterInitialized = ref(false);
+const commonColumnFilterNameKeys = computed(() => new Set(commonColumnFilterNames.value.filter(Boolean).map(structureColumnComparisonKey)));
+
+function presetCommonColumnFilterNames(): string[] {
+  return tableColumnTemplateFieldNamesForDatabase(settingsStore.editorSettings.tableColumnTemplateFields ?? [], databaseType.value);
+}
+
+function resetCommonColumnFilterNames() {
+  commonColumnFilterNames.value = presetCommonColumnFilterNames();
+  commonColumnFilterInitialized.value = true;
+}
+
+function setCommonColumnFilterEnabled(enabled: boolean) {
+  if (enabled && !commonColumnFilterInitialized.value) resetCommonColumnFilterNames();
+  commonColumnFilterEnabled.value = enabled;
+}
+
+function isCommonColumnHidden(column: EditableStructureColumn): boolean {
+  return commonColumnFilterEnabled.value && !!column.name.trim() && commonColumnFilterNameKeys.value.has(structureColumnComparisonKey(column.name));
+}
+
+function toggleCommonColumnFilterColumn(column: EditableStructureColumn) {
+  if (!commonColumnFilterEnabled.value || !column.name.trim()) return;
+  const key = structureColumnComparisonKey(column.name);
+  commonColumnFilterNames.value = commonColumnFilterNameKeys.value.has(key) ? commonColumnFilterNames.value.filter((name) => structureColumnComparisonKey(name) !== key) : [...commonColumnFilterNames.value, column.name];
+}
+
+const visibleColumnEntries = computed(() => columns.value.flatMap((column, index) => (isCommonColumnHidden(column) ? [] : [{ column, index }])));
+const hiddenCommonColumnCount = computed(() => columns.value.filter(isCommonColumnHidden).length);
+
 const activeColumnByName = computed(() => {
   const map = new Map<string, EditableStructureColumn>();
   for (const item of columns.value) {
@@ -2259,7 +2292,7 @@ function columnNeedsVariableGeometryHeight(column: EditableStructureColumn): boo
 const columnVirtualItemSize = computed(() => (columns.value.some(columnNeedsVariableGeometryHeight) ? null : structureColumnRowHeight.value));
 const columnVirtualRows = computed(() => {
   const geometryHintHeight = Math.ceil(structureDensityMetric.value.fontSize * structureDensityMetric.value.lineHeight) + 2;
-  return columns.value.map((column, index) => ({
+  return visibleColumnEntries.value.map(({ column, index }) => ({
     id: column.id,
     column,
     index,
@@ -2280,7 +2313,7 @@ const indexColLabels = computed(() => [
 const filteredColumnRowIds = computed(() => {
   const query = columnSearchText.value.trim().toLowerCase();
   if (!query) return new Set<string>();
-  return new Set(columns.value.filter((column) => columnMatchesSearch(column)).map((column) => column.id));
+  return new Set(visibleColumnEntries.value.filter(({ column }) => columnMatchesSearch(column)).map(({ column }) => column.id));
 });
 const columnSearchMatchCount = computed(() => (columnSearchText.value.trim() ? filteredColumnRowIds.value.size : 0));
 const filteredIndexRowIds = computed(() => {
@@ -2395,6 +2428,9 @@ onBeforeUnmount(() => {
 watch(
   () => [props.connectionId, props.database, props.schema, props.tableName, props.catalog, props.exactIdentity],
   () => {
+    commonColumnFilterEnabled.value = false;
+    commonColumnFilterNames.value = [];
+    commonColumnFilterInitialized.value = false;
     ddlLoadRequestId += 1;
     ddlLoading.value = false;
     tableCommentLoadRequestId += 1;
@@ -4661,27 +4697,28 @@ async function refreshStructureAfterSave(scope: TableStructureRefreshScope, char
   }
 }
 
-function renderedColumnRow(index: number): HTMLElement | undefined {
-  return rootRef.value?.querySelector<HTMLElement>(`[data-column-row-index="${index}"]`) ?? undefined;
+function renderedColumnRowById(columnId: string): HTMLElement | undefined {
+  return Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-column-id]") ?? []).find((row) => row.dataset.columnId === columnId);
 }
 
-async function scrollColumnRowIntoView(index: number, block: ScrollLogicalPosition = "nearest"): Promise<HTMLElement | undefined> {
+async function scrollColumnRowIntoView(columnId: string, block: ScrollLogicalPosition = "nearest"): Promise<HTMLElement | undefined> {
   await nextTick();
-  let row = renderedColumnRow(index);
+  let row = renderedColumnRowById(columnId);
   if (!row) {
+    const visibleIndex = columnVirtualRows.value.findIndex((item) => item.column.id === columnId);
+    if (visibleIndex < 0) return undefined;
     const virtualScroller = columnsScrollerRef.value;
-    if (virtualScroller && !(virtualScroller instanceof HTMLElement)) virtualScroller.scrollToItem?.(index, { align: block });
+    if (virtualScroller && !(virtualScroller instanceof HTMLElement)) virtualScroller.scrollToItem?.(visibleIndex, { align: block });
     await nextTick();
-    row = renderedColumnRow(index);
+    row = renderedColumnRowById(columnId);
   }
   row?.scrollIntoView({ block, inline: "nearest" });
   return row;
 }
 
 async function focusColumnNameInput(columnId: string) {
-  const index = columns.value.findIndex((column) => column.id === columnId);
-  if (index < 0) return;
-  const row = await scrollColumnRowIntoView(index);
+  if (!columns.value.some((column) => column.id === columnId)) return;
+  const row = await scrollColumnRowIntoView(columnId);
   const input = row?.querySelector<HTMLInputElement>("[data-column-name-input]");
   input?.focus();
   input?.select();
@@ -5597,12 +5634,12 @@ function scrollToColumnSearchMatch(direction: 1 | -1 = 1) {
     focusColumnSearch();
     return;
   }
-  const matches = columns.value.map((column, index) => ({ column, index })).filter(({ column }) => columnMatchesSearch(column));
+  const matches = visibleColumnEntries.value.filter(({ column }) => columnMatchesSearch(column));
   if (!matches.length) return;
   const currentIndex = highlightedColumnId.value ? matches.findIndex(({ column }) => column.id === highlightedColumnId.value) : -1;
   const nextMatch = matches[(currentIndex + direction + matches.length) % matches.length] ?? matches[0];
   highlightedColumnId.value = nextMatch.column.id;
-  void scrollColumnRowIntoView(nextMatch.index, "center");
+  void scrollColumnRowIntoView(nextMatch.column.id, "center");
   if (columnHighlightTimer) window.clearTimeout(columnHighlightTimer);
   columnHighlightTimer = window.setTimeout(() => {
     highlightedColumnId.value = null;
@@ -8680,6 +8717,71 @@ watch(
                   {{ columnSearchMatchCount }}
                 </button>
               </div>
+              <Popover v-if="activeTab === 'columns' && !isCreateMode">
+                <PopoverTrigger as-child>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    :class="[structureToolbarButtonClass, 'structure-toolbar-action structure-toolbar-secondary', commonColumnFilterEnabled ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary' : '']"
+                    :aria-pressed="commonColumnFilterEnabled"
+                    :title="t('structureEditor.hideCommonColumns')"
+                    :aria-label="t('structureEditor.hideCommonColumns')"
+                    data-common-column-filter-button
+                  >
+                    <Filter :class="structureIconClass" />
+                    <span class="structure-toolbar-label">{{ t("structureEditor.hideCommonColumns") }}</span>
+                    <span v-if="commonColumnFilterEnabled" class="tabular-nums text-[length:calc(var(--structure-font-size)-1px)] text-muted-foreground" data-common-column-filter-count>{{ hiddenCommonColumnCount }}</span>
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="end" class="w-80 p-3" data-common-column-filter-panel>
+                  <div class="flex items-start gap-3">
+                    <div class="min-w-0 flex-1">
+                      <p class="font-medium">{{ t("structureEditor.hideCommonColumns") }}</p>
+                      <p class="mt-1 text-xs leading-5 text-muted-foreground">{{ t("structureEditor.hideCommonColumnsDescription") }}</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      :aria-checked="commonColumnFilterEnabled"
+                      :aria-label="t('structureEditor.hideCommonColumns')"
+                      class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                      :class="commonColumnFilterEnabled ? 'border-primary bg-primary' : 'border-border bg-input'"
+                      data-common-column-filter-toggle
+                      @click="setCommonColumnFilterEnabled(!commonColumnFilterEnabled)"
+                    >
+                      <span class="block h-3.5 w-3.5 rounded-full bg-background shadow-sm transition-transform" :class="commonColumnFilterEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]'" />
+                    </button>
+                  </div>
+                  <div v-if="commonColumnFilterEnabled" class="space-y-2 border-t pt-2">
+                    <p class="text-xs text-muted-foreground" data-common-column-filter-summary>
+                      {{ t("structureEditor.commonColumnsHiddenCount", { hidden: hiddenCommonColumnCount, total: columns.length }) }}
+                    </p>
+                    <div class="max-h-64 space-y-0.5 overflow-auto" :aria-label="t('structureEditor.commonColumnFilterList')" role="group">
+                      <button
+                        v-for="column in columns"
+                        :key="column.id"
+                        type="button"
+                        role="checkbox"
+                        :aria-checked="isCommonColumnHidden(column)"
+                        :data-common-column-filter-column="column.name"
+                        class="flex w-full items-center gap-2 rounded px-1.5 py-1.5 text-left text-[length:var(--structure-font-size)] hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                        :disabled="!column.name.trim()"
+                        @click="toggleCommonColumnFilterColumn(column)"
+                      >
+                        <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="isCommonColumnHidden(column) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'">
+                          <Check v-if="isCommonColumnHidden(column)" class="h-3 w-3" />
+                        </span>
+                        <span class="min-w-0 truncate font-mono">{{ column.name || "—" }}</span>
+                        <span v-if="column.comment" class="min-w-0 truncate text-xs text-muted-foreground">{{ column.comment }}</span>
+                      </button>
+                    </div>
+                    <Button type="button" variant="ghost" size="sm" class="h-7 w-full justify-start px-1.5 text-xs" data-common-column-filter-reset @click="resetCommonColumnFilterNames">
+                      <RotateCcw :class="structureIconClass" />
+                      {{ t("structureEditor.resetCommonColumnFilter") }}
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
               <Tooltip v-if="activeTab === 'columns'" :delay-duration="FIELD_SHORTCUT_TOOLTIP_DELAY_MS" data-add-column-shortcut-tooltip>
                 <TooltipTrigger as-child>
                   <Button size="sm" :class="[structureToolbarButtonClass, 'structure-toolbar-action']" :disabled="!canAddColumn" :title="t('structureEditor.addColumn')" :aria-label="t('structureEditor.addColumn')" @click="addColumn">

@@ -8,6 +8,7 @@ import {
   PRESET_FIELDS_TEMPLATE_ID,
   tableColumnTemplateRowsToSettings,
   tableColumnTemplates,
+  tableColumnTemplateFieldNamesForDatabase,
   TABLE_COLUMN_TEMPLATE_DATABASE_TYPES,
 } from "../../apps/desktop/src/lib/table/tableColumnTemplates.ts";
 
@@ -88,6 +89,12 @@ test("filters configured fields by current database type", () => {
       { name: "common_code", dataType: "varchar(32)" },
     ],
   );
+});
+
+test("lists configured preset field names applicable to the current database", () => {
+  assert.deepEqual(tableColumnTemplateFieldNamesForDatabase(sixCustomFields, "postgres"), ["tenant_id", "request_id", "created_time", "modified_time", "creator_id", "modifier_id"]);
+  assert.deepEqual(tableColumnTemplateFieldNamesForDatabase(["mysql_only | mysql:bigint", "postgres_only | postgres:uuid"], "mysql"), ["mysql_only"]);
+  assert.deepEqual(tableColumnTemplateFieldNamesForDatabase(sixCustomFields, undefined), []);
 });
 
 test("normalizes configured preset fields without adding built-in fields", () => {

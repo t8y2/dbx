@@ -155,15 +155,22 @@ describe("codemirrorSqlDialect", () => {
     expect(nodeNameAt(dialect, doubleQuoteStatement, "col")).toBe("Identifier");
   });
 
-  it("does not nest block comments for Oracle/MySQL so a stray inner /* cannot swallow the rest of the document", () => {
+  // Verified against live servers rather than assumed:
+  //   Oracle  `SELECT /* a /* b */ 1 FROM dual`      -> 1      (doubled */ -> ORA-00923)
+  //   MySQL   `SELECT /* a /* b */ 1`                -> 1
+  //   SQLite  `SELECT /* a /* b */ 1`                -> 1      (doubled */ -> syntax error)
+  //   MSSQL   `SELECT /* a /* b */ */ 1`             -> 1      (single */ -> "missing end comment mark")
+  // PostgreSQL and T-SQL both document nested block comments; the others close
+  // at the first `*/`.
+  it("does not nest block comments for Oracle, MySQL and SQLite", () => {
     // Real-world shape from an Oracle package body: a second `/*` appears before
-    // the first `*/`. Oracle, MySQL, SQL Server and SQLite all close the comment
-    // at the first `*/`, so the code after it stays code. CodeMirror's SQL
-    // tokenizer otherwise nests `/* */` (the PostgreSQL rule) and the comment
-    // state leaks downward, painting the rest of a package body green.
+    // the first `*/`. These dialects close the comment at the first `*/`, so the
+    // code after it stays code. CodeMirror's SQL tokenizer otherwise nests
+    // `/* */` and the comment state leaks downward, painting the rest of a
+    // package body as a comment.
     const source = ["/* outer note /* inner marker */", "SELECT col FROM dual"].join("\n");
 
-    for (const databaseType of ["oracle", "mysql", "sqlserver", "sqlite"] as DatabaseType[]) {
+    for (const databaseType of ["oracle", "mysql", "sqlite"] as DatabaseType[]) {
       const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType);
       expect(dialect.spec.nestedComments, databaseType).toBe(false);
       expect(nodeNameAt(dialect, source, "SELECT"), databaseType).toBe("Keyword");
@@ -171,15 +178,22 @@ describe("codemirrorSqlDialect", () => {
     }
   });
 
-  it("keeps nested block comments for PostgreSQL, which genuinely supports them", () => {
-    const source = ["/* outer /* inner */", "SELECT 1"].join("\n");
-    const dialect = createDbxCodeMirrorSqlDialect(langSql, "postgres", "postgres");
-
+  it.each([
+    ["postgres", "postgres"],
+    ["sqlserver", "sqlserver"],
+  ] as const)("keeps nested block comments for %s, which documents them", (mode, databaseType) => {
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, mode, databaseType as DatabaseType);
     expect(dialect.spec.nestedComments).toBe(true);
-    // The inner `/*` opens a second level, so the first `*/` only drops to depth
-    // one and the trailing SELECT stays inside the comment instead of becoming a
-    // keyword — the behaviour Postgres users expect.
-    expect(nodeNameAt(dialect, source, "SELECT")).not.toBe("Keyword");
+
+    // Outer comment + nested comment + trailing SQL: both `*/` are consumed by
+    // the comment, so the statement after it is live code.
+    const closed = ["/* outer /* inner */ */", "SELECT 1"].join("\n");
+    expect(nodeNameAt(dialect, closed, "SELECT"), `${databaseType} closed`).toBe("Keyword");
+
+    // Only one `*/`: the nested level is still open, so the trailing SELECT
+    // stays inside the comment — matching what these servers report.
+    const stillOpen = ["/* outer /* inner */", "SELECT 1"].join("\n");
+    expect(nodeNameAt(dialect, stillOpen, "SELECT"), `${databaseType} still open`).not.toBe("Keyword");
   });
 
   it("tags QuotedIdentifier as tags.name so quoted columns/tables match unquoted identifiers (#12122)", async () => {

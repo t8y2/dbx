@@ -1833,9 +1833,17 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 }
             }
             for (String index : indexNames) {
-                String indexDdl = queryDbmsMetadataSource(owner, index, "INDEX");
-                if (indexDdl == null || indexDdl.isBlank()) throw new SQLException("Empty index DDL: " + index);
-                ddl = DdlBuilder.appendTrailingSql(ddl, indexDdl);
+                try {
+                    String indexDdl = queryDbmsMetadataSource(owner, index, "INDEX");
+                    if (indexDdl != null && !indexDdl.isBlank()) {
+                        ddl = DdlBuilder.appendTrailingSql(ddl, indexDdl);
+                    }
+                } catch (RuntimeException | SQLException ignored) {
+                    // Secondary index DDL is supplementary. GET_DDL does not return
+                    // usable DDL for every index (the reported case is a
+                    // function-based index), and one unreadable index must not
+                    // hide the table DDL.
+                }
             }
             String tableRef = quoteIdentifier(owner) + "." + quoteIdentifier(tableName);
             String comment = getTableComment(owner, tableName);

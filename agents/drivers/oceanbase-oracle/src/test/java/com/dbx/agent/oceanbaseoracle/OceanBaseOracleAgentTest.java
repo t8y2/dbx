@@ -1694,6 +1694,45 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void tableDdlKeepsTableWhenAnIndexDdlIsEmpty() {
+        var agent = new OceanBaseOracleAgent();
+        String nativeIndex = "CREATE INDEX \"APP\".\"IX_OK\" ON \"APP\".\"T\"(\"ID\");";
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"DDL"}, new Object[][]{{"CREATE TABLE \"T\" (\"ID\" NUMBER, \"NAME\" VARCHAR2(100))"}}),
+            resultSet(new String[]{"INDEX_NAME"}, new Object[][]{{"IX_FUNC"}, {"IX_OK"}}),
+            resultSet(new String[]{"DDL"}, new Object[][]{{" "}}),
+            resultSet(new String[]{"DDL"}, new Object[][]{{nativeIndex}}),
+            resultSet(new String[]{"COMMENTS"}, new Object[][]{{null}}),
+            resultSet(new String[]{"COLUMN_NAME", "COMMENTS"}, new Object[][]{}),
+            resultSet(new String[]{"GRANTEE", "PRIVILEGE", "GRANTABLE"}, new Object[][]{}),
+            resultSet(new String[]{"GRANTEE", "COLUMN_NAME", "PRIVILEGE", "GRANTABLE"}, new Object[][]{})
+        ));
+        String ddl = agent.getTableDdl("APP", "T");
+        Assertions.assertTrue(ddl.contains("CREATE TABLE \"APP\".\"T\""), ddl);
+        Assertions.assertTrue(ddl.contains(nativeIndex), ddl);
+        Assertions.assertFalse(ddl.contains("IX_FUNC"), ddl);
+    }
+
+    @Test
+    void tableDdlKeepsTableWhenAnIndexDdlQueryFails() {
+        var agent = new OceanBaseOracleAgent();
+        String nativeIndex = "CREATE INDEX \"APP\".\"IX_OK\" ON \"APP\".\"T\"(\"ID\");";
+        TestSupport.setPrivateConnection(agent, indexDdlFailingConnection(new ArrayList<>(), "IX_FUNC",
+            resultSet(new String[]{"DDL"}, new Object[][]{{"CREATE TABLE \"T\" (\"ID\" NUMBER, \"NAME\" VARCHAR2(100))"}}),
+            resultSet(new String[]{"INDEX_NAME"}, new Object[][]{{"IX_FUNC"}, {"IX_OK"}}),
+            resultSet(new String[]{"DDL"}, new Object[][]{{nativeIndex}}),
+            resultSet(new String[]{"COMMENTS"}, new Object[][]{{null}}),
+            resultSet(new String[]{"COLUMN_NAME", "COMMENTS"}, new Object[][]{}),
+            resultSet(new String[]{"GRANTEE", "PRIVILEGE", "GRANTABLE"}, new Object[][]{}),
+            resultSet(new String[]{"GRANTEE", "COLUMN_NAME", "PRIVILEGE", "GRANTABLE"}, new Object[][]{})
+        ));
+        String ddl = agent.getTableDdl("APP", "T");
+        Assertions.assertTrue(ddl.contains("CREATE TABLE \"APP\".\"T\""), ddl);
+        Assertions.assertTrue(ddl.contains(nativeIndex), ddl);
+        Assertions.assertFalse(ddl.contains("IX_FUNC"), ddl);
+    }
+
+    @Test
     void emptyMetadataDdlFailsInsteadOfReturningAnIncompleteTable() {
         var agent = new OceanBaseOracleAgent();
         TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
@@ -1804,6 +1843,44 @@ class OceanBaseOracleAgentTest {
         return proxy(Connection.class, (method, args) -> {
             if ("prepareStatement".equals(method.getName())) {
                 sql.add(String.valueOf(args[0]));
+                return statement;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection indexDdlFailingConnection(List<String> sql, String failingIndex, ResultSet... resultSets) {
+        int[] resultSetIndex = {0};
+        return proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                String statementSql = String.valueOf(args[0]);
+                sql.add(statementSql);
+                List<String> params = new ArrayList<>();
+                PreparedStatement statement = proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        if (statementSql.contains("DBMS_METADATA.GET_DDL")
+                            && params.size() >= 2
+                            && "INDEX".equals(params.get(0))
+                            && failingIndex.equals(params.get(1))) {
+                            throw new SQLException("index DDL unavailable");
+                        }
+                        int current = Math.min(resultSetIndex[0], resultSets.length - 1);
+                        resultSetIndex[0] += 1;
+                        return resultSets[current];
+                    }
+                    if ("setString".equals(statementMethod.getName())) {
+                        params.add(String.valueOf(statementArgs[1]));
+                        return null;
+                    }
+                    if ("setInt".equals(statementMethod.getName())
+                        || "close".equals(statementMethod.getName())) {
+                        return null;
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
                 return statement;
             }
             if ("isClosed".equals(method.getName())) {

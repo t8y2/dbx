@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { buildColumnForeignKeyMap, combineForeignKeyConditions, foreignKeyAssociationCells, foreignKeyCellNavigable, foreignKeyMetadataRequestCurrent, foreignKeyNavigationTarget, foreignKeySourceColumnName, foreignKeyTableIdentity } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
-import type { ForeignKeyInfo } from "@/types/database";
+import {
+  buildColumnForeignKeyMap,
+  combineForeignKeyConditions,
+  foreignKeyAssociationCells,
+  foreignKeyAssociationCellsForSource,
+  foreignKeyAssociationForRef,
+  foreignKeyCellNavigable,
+  foreignKeyDrillRouting,
+  foreignKeyMetadataRequestCurrent,
+  foreignKeyNavigationTarget,
+  foreignKeySourceColumnName,
+  foreignKeySourceIdentities,
+  foreignKeyTableIdentity,
+} from "@/lib/dataGrid/dataGridForeignKeyNavigation";
+import type { ForeignKeyInfo, QueryResultSourceColumnRef } from "@/types/database";
 
 function fk(overrides: Partial<ForeignKeyInfo> = {}): ForeignKeyInfo {
   return {
@@ -249,5 +262,125 @@ describe("foreignKeyNavigationTarget", () => {
     });
     expect(target.database).toBe("other_db");
     expect(target.schema).toBeUndefined();
+  });
+});
+
+describe("foreignKeySourceIdentities", () => {
+  const refs: Array<QueryResultSourceColumnRef | undefined> = [
+    { sourceKey: "orders", sourceColumn: "useruid", schema: "public", tableName: "orders" },
+    { sourceKey: "orders", sourceColumn: "total", schema: "public", tableName: "orders" },
+    { sourceKey: "users", sourceColumn: "uid", schema: "public", tableName: "users" },
+    { sourceKey: "computed", sourceColumn: "expr" },
+    undefined,
+  ];
+
+  it("deduplica por identidad física preservando el orden de aparición", () => {
+    const identities = foreignKeySourceIdentities({ connectionId: "c1", refs });
+    expect(identities.map((identity) => [identity.tableName, identity.sourceKey, identity.identity])).toEqual([
+      ["orders", "orders", foreignKeyTableIdentity({ connectionId: "c1", schema: "public", tableName: "orders" })],
+      ["users", "users", foreignKeyTableIdentity({ connectionId: "c1", schema: "public", tableName: "users" })],
+    ]);
+  });
+
+  it("sin connectionId no produce identidades", () => {
+    expect(foreignKeySourceIdentities({ refs })).toEqual([]);
+  });
+
+  it("distingue la misma tabla en schemas distintos", () => {
+    const identities = foreignKeySourceIdentities({
+      connectionId: "c1",
+      refs: [
+        { sourceKey: "a", sourceColumn: "uid", schema: "sales", tableName: "users" },
+        { sourceKey: "b", sourceColumn: "uid", schema: "hr", tableName: "users" },
+      ],
+    });
+    expect(identities).toHaveLength(2);
+  });
+});
+
+describe("foreignKeyAssociationForRef", () => {
+  const refs: Array<QueryResultSourceColumnRef | undefined> = [
+    { sourceKey: "orders", sourceColumn: "useruid", schema: "public", tableName: "orders" },
+    { sourceKey: "users", sourceColumn: "uid", schema: "public", tableName: "users" },
+    { sourceKey: "orders", sourceColumn: "uid", schema: "public", tableName: "orders" },
+    undefined,
+  ];
+  const ordersIdentity = foreignKeyTableIdentity({ connectionId: "c1", schema: "public", tableName: "orders" })!;
+  const usersIdentity = foreignKeyTableIdentity({ connectionId: "c1", schema: "public", tableName: "users" })!;
+  const maps = new Map([
+    [ordersIdentity, buildColumnForeignKeyMap([fk({ name: "fk_orders_user", column: "useruid", ref_table: "users", ref_column: "uid" })])],
+    [usersIdentity, buildColumnForeignKeyMap([fk({ name: "fk_users_tenant", column: "uid", ref_table: "tenants", ref_column: "id" })])],
+  ]);
+
+  it("resuelve por ordinal contra el map de su propia tabla fuente", () => {
+    expect(foreignKeyAssociationForRef({ connectionId: "c1", refs, columnIndex: 0, sourceForeignKeyMaps: maps })?.foreignKey.name).toBe("fk_orders_user");
+    expect(foreignKeyAssociationForRef({ connectionId: "c1", refs, columnIndex: 1, sourceForeignKeyMaps: maps })?.foreignKey.name).toBe("fk_users_tenant");
+  });
+
+  it("nunca cae al map de otra fuente con columna homónima", () => {
+    // orders.uid no es FK de orders; no debe saltar con el map de users
+    expect(foreignKeyAssociationForRef({ connectionId: "c1", refs, columnIndex: 2, sourceForeignKeyMaps: maps })).toBeNull();
+  });
+
+  it("devuelve null para ordinales sin ref o con fuente aún no cargada", () => {
+    expect(foreignKeyAssociationForRef({ connectionId: "c1", refs, columnIndex: 3, sourceForeignKeyMaps: maps })).toBeNull();
+    const onlyUsers = new Map([[usersIdentity, maps.get(usersIdentity)!]]);
+    expect(foreignKeyAssociationForRef({ connectionId: "c1", refs, columnIndex: 0, sourceForeignKeyMaps: onlyUsers })).toBeNull();
+  });
+
+  it("empareja sourceColumn sin distinguir mayúsculas", () => {
+    const caseRefs: Array<QueryResultSourceColumnRef | undefined> = [{ sourceKey: "orders", sourceColumn: "UserUid", schema: "public", tableName: "orders" }];
+    expect(foreignKeyAssociationForRef({ connectionId: "c1", refs: caseRefs, columnIndex: 0, sourceForeignKeyMaps: maps })?.foreignKey.name).toBe("fk_orders_user");
+  });
+});
+
+describe("foreignKeyAssociationCellsForSource", () => {
+  const association = buildColumnForeignKeyMap([fk({ name: "fk_comp", column: "order_id", ref_table: "order_items", ref_column: "order_id" }), fk({ name: "fk_comp", column: "line_no", ref_table: "order_items", ref_column: "line_no" })]).get("order_id")!;
+  // ordinal 1 lleva el mismo nombre de columna pero pertenece a OTRA fuente
+  const refs: Array<QueryResultSourceColumnRef | undefined> = [
+    { sourceKey: "orders", sourceColumn: "order_id", tableName: "orders" },
+    { sourceKey: "order_items", sourceColumn: "line_no", tableName: "order_items" },
+    { sourceKey: "orders", sourceColumn: "line_no", tableName: "orders" },
+  ];
+
+  it("resuelve las parejas compuestas dentro del mismo sourceKey", () => {
+    const cells = foreignKeyAssociationCellsForSource({ association, refs, columnIndex: 0, row: [42, 999, 7] });
+    expect(cells?.map((cell) => [cell.foreignKey.ref_column, cell.columnIndex, cell.value])).toEqual([
+      ["order_id", 0, 42],
+      ["line_no", 2, 7],
+    ]);
+  });
+
+  it("no satisface una pareja faltante con una columna homónima de otra fuente", () => {
+    const missingPair: Array<QueryResultSourceColumnRef | undefined> = [refs[0], refs[1]];
+    expect(foreignKeyAssociationCellsForSource({ association, refs: missingPair, columnIndex: 0, row: [42, 999] })).toBeUndefined();
+  });
+
+  it("rechaza la navegación con valores compuestos nulos o sin sourceKey", () => {
+    expect(foreignKeyAssociationCellsForSource({ association, refs, columnIndex: 0, row: [42, 999, null] })).toBeUndefined();
+    expect(foreignKeyAssociationCellsForSource({ association, refs: [undefined, refs[1], refs[2]], columnIndex: 0, row: [42, 999, 7] })).toBeUndefined();
+  });
+});
+
+describe("foreignKeyDrillRouting (unsaved-edit safety)", () => {
+  it("drills in place on the owning data tab when the grid is clean", () => {
+    expect(foreignKeyDrillRouting({ context: "table-data", owningTabId: "t1", hasPendingChanges: false })).toBe("data-tab-in-place");
+  });
+
+  it("drills in place on the owning query tab when the grid is clean", () => {
+    expect(foreignKeyDrillRouting({ context: "results", owningTabId: "t1", hasPendingChanges: false })).toBe("query-tab-in-place");
+  });
+
+  it("falls back to a new tab whenever the grid has uncommitted changes (review #1)", () => {
+    // both in-place rewrites drop edits; the data-tab path already refused via
+    // canReuseActiveDataTab, the query-tab path had no gate at all
+    expect(foreignKeyDrillRouting({ context: "table-data", owningTabId: "t1", hasPendingChanges: true })).toBe("new-tab");
+    expect(foreignKeyDrillRouting({ context: "results", owningTabId: "t1", hasPendingChanges: true })).toBe("new-tab");
+  });
+
+  it("falls back to a new tab without an owning tab (embedded grids) or in other contexts", () => {
+    expect(foreignKeyDrillRouting({ context: "results", owningTabId: undefined, hasPendingChanges: false })).toBe("new-tab");
+    expect(foreignKeyDrillRouting({ context: "table-data", owningTabId: null, hasPendingChanges: false })).toBe("new-tab");
+    expect(foreignKeyDrillRouting({ context: "admin", owningTabId: "t1", hasPendingChanges: false })).toBe("new-tab");
   });
 });

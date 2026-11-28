@@ -12,6 +12,7 @@ import { useI18n } from "vue-i18n";
 import { RecycleScroller } from "vue-virtual-scroller";
 import {
   ArrowUp,
+  ArrowLeft,
   ArrowDown,
   ArrowUpDown,
   ArrowUpRight,
@@ -365,7 +366,19 @@ import {
   type DataGridColumnSortState,
 } from "@/lib/dataGrid/dataGridContextMenu";
 import { clearAllColumnHighlights, clearColumnHighlight, computeColumnHighlightMatchKeys, hasColumnHighlight, isColumnDuplicateHighlightActive, isColumnNullHighlightActive, setColumnDuplicateHighlight, setColumnNullHighlight, type ColumnHighlightRule } from "@/lib/dataGrid/dataGridColumnHighlight";
-import { buildColumnForeignKeyMap, combineForeignKeyConditions, foreignKeyAssociationCells, foreignKeyNavigationTarget, foreignKeySourceColumnName, type ForeignKeyAssociation } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
+import {
+  buildColumnForeignKeyMap,
+  combineForeignKeyConditions,
+  foreignKeyAssociationCells,
+  foreignKeyAssociationCellsForSource,
+  foreignKeyAssociationForRef,
+  foreignKeyDrillRouting,
+  foreignKeyNavigationTarget,
+  foreignKeySourceColumnName,
+  type ForeignKeyAssociation,
+  type ForeignKeyAssociationCell,
+} from "@/lib/dataGrid/dataGridForeignKeyNavigation";
+import { foreignKeyDrillBackEntryMatchesTab, markForeignKeyDrillBackPendingArrival, peekForeignKeyDrillBack, popForeignKeyDrillBack, type ForeignKeyDrillBackView } from "@/lib/dataGrid/foreignKeyDrillBack";
 import {
   collectForeignKeyDisplayValues,
   createForeignKeyDisplayRequestCoordinator,
@@ -506,6 +519,7 @@ import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useDataGridColumnFormatter } from "@/composables/useDataGridColumnFormatter";
+import { useDataGridSourceForeignKeys } from "@/composables/useDataGridSourceForeignKeys";
 import { useDataGridTableMetadataLoaders } from "@/composables/useDataGridTableMetadataLoaders";
 import { useTableInfoHeaderLayout } from "@/composables/useTableInfoHeaderLayout";
 import { DATA_GRID_SERVER_COLUMN_FILTER_LIMIT, useDataGridColumnFilters } from "@/composables/useDataGridColumnFilters";
@@ -609,7 +623,7 @@ function fetchForeignKeys() {
   return tableMetadataLoaderFetchForeignKeys();
 }
 // 外键单元格跳转复用导航入口；对话框引用传 stub（同 AiAssistant 模式）
-const { openTableTarget } = useNavigationTargets({
+const { openTableTarget, executeTableTargetInQueryTab, executeSqlInQueryTabResults } = useNavigationTargets({
   showFieldLineageDialog: ref(false),
   showDatabaseSearchDialog: ref(false),
   showDiagramDialog: ref(false),
@@ -671,6 +685,12 @@ interface DataGridProps {
    * identity or editing.
    */
   queryDisplaySourceColumns?: Array<QueryResultSourceColumnRef | undefined>;
+  /**
+   * Tab that owns this grid. When set, foreign-key drill-through navigates that
+   * tab in place — a data tab is re-pointed to the referenced table, a query
+   * tab executes the lookup in its results pane — instead of opening a new tab.
+   */
+  foreignKeyNavigationTabId?: string;
   initialWhereInput?: string;
   initialOrderByInput?: string;
   sortColumn?: string;
@@ -7447,24 +7467,15 @@ function captureTabSwitchViewSnapshot() {
 }
 
 /**
- * Replay a tab-switch snapshot captured from a previous instance of the same
- * logical result. Every gate must pass; any mismatch degrades to a clean start
- * rather than a partial restore.
+ * Replay a captured selection + viewport on the current grid state. Shared by
+ * the tab-switch restore and the FK drill-back "Back"; callers own the identity
+ * gates (generation/probe) so a mismatch degrades to a clean start rather than
+ * a partial restore.
  */
-function restoreTabSwitchViewSnapshot() {
-  if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;
-  const ownerKey = viewSnapshotOwnerKey.value;
-  if (!ownerKey || !props.viewGeneration) return;
-  if (showTranspose.value) return;
-  const snapshot = peekDataGridViewSnapshot(ownerKey);
-  if (!snapshot) return;
-  if (snapshot.viewGeneration !== props.viewGeneration) return;
-  if (snapshot.renderer !== (useCanvasGridRows.value ? "canvas" : "dom")) return;
-  if (snapshot.probe !== currentViewProbe()) return;
-
+function replayCapturedViewState(captured: { selection?: DataGridViewSelectionSnapshot; viewport: { top: number; left: number } }, options: { onSettled?: () => void } = {}) {
   // The selection rides along for free: indexes stay valid under a generation
   // match, and out-of-range entries simply never match any display row.
-  const capturedSelection = snapshot.selection;
+  const capturedSelection = captured.selection;
   if (capturedSelection) {
     if (capturedSelection.kind === "cells") {
       if (capturedSelection.cellKeys.length) restoreCellSelectionState({ cellKeys: new Set(capturedSelection.cellKeys) });
@@ -7494,8 +7505,8 @@ function restoreTabSwitchViewSnapshot() {
     if (!scroller) return false;
     const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
     const maxLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-    const targetTop = Math.min(Math.max(0, snapshot.viewport.top), maxTop);
-    const targetLeft = Math.min(Math.max(0, snapshot.viewport.left), maxLeft);
+    const targetTop = Math.min(Math.max(0, captured.viewport.top), maxTop);
+    const targetLeft = Math.min(Math.max(0, captured.viewport.left), maxLeft);
     scroller.scrollTop = targetTop;
     scroller.scrollLeft = targetLeft;
     if (useCanvasGridRows.value) syncCanvasViewport();
@@ -7504,21 +7515,16 @@ function restoreTabSwitchViewSnapshot() {
     // scroller must be tall enough to hold the saved position AND its measured
     // geometry must hold still — an unmeasured virtual scroller clamps the
     // target to 0 and would otherwise be mistaken for a finished restore.
-    const roomForSavedTop = maxTop >= snapshot.viewport.top;
+    const roomForSavedTop = maxTop >= captured.viewport.top;
     const stable = maxTop === previousMaxTop;
     previousMaxTop = maxTop;
-    return accepted && (snapshot.viewport.top === 0 || (roomForSavedTop && stable));
+    return accepted && (captured.viewport.top === 0 || (roomForSavedTop && stable));
   };
   const attempt = (): boolean => {
     if (settled || !applyView()) return settled;
     settled = true;
     cancelViewSnapshotRestoreFrame();
-    consumeDataGridViewSnapshot(ownerKey);
-    // Report a dropped selection only once the restore it belongs to actually
-    // happened — never while merely leaving the tab.
-    if (snapshot.selectionDropped && shouldNotifyOverBudgetSelection(ownerKey, props.viewGeneration!)) {
-      toast(t("grid.viewSnapshotSelectionNotRestored"), 4000);
-    }
+    options.onSettled?.();
     return true;
   };
   if (attempt()) return;
@@ -7534,6 +7540,48 @@ function restoreTabSwitchViewSnapshot() {
     };
     viewSnapshotRestoreFrame = requestAnimationFrame(onFrame);
   });
+}
+
+/**
+ * Replay a tab-switch snapshot captured from a previous instance of the same
+ * logical result. Every gate must pass; any mismatch degrades to a clean start
+ * rather than a partial restore.
+ */
+function restoreTabSwitchViewSnapshot() {
+  if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;
+  const ownerKey = viewSnapshotOwnerKey.value;
+  if (!ownerKey || !props.viewGeneration) return;
+  if (showTranspose.value) return;
+  const snapshot = peekDataGridViewSnapshot(ownerKey);
+  if (!snapshot) return;
+  if (snapshot.viewGeneration !== props.viewGeneration) return;
+  if (snapshot.renderer !== (useCanvasGridRows.value ? "canvas" : "dom")) return;
+  if (snapshot.probe !== currentViewProbe()) return;
+  replayCapturedViewState(
+    { selection: snapshot.selection, viewport: snapshot.viewport },
+    {
+      onSettled: () => {
+        consumeDataGridViewSnapshot(ownerKey);
+        // Report a dropped selection only once the restore it belongs to actually
+        // happened — never while merely leaving the tab.
+        if (snapshot.selectionDropped && shouldNotifyOverBudgetSelection(ownerKey, props.viewGeneration!)) {
+          toast(t("grid.viewSnapshotSelectionNotRestored"), 4000);
+        }
+      },
+    },
+  );
+}
+
+/**
+ * 跳转返回后的视口重放：probe 不匹配（数据在跳转期间变了）即整体放弃，
+ * 干净起点。与 tab 切换恢复共用 replayCapturedViewState 的选区/滚动落地逻辑。
+ */
+function replayForeignKeyDrillBackView(view: ForeignKeyDrillBackView | undefined) {
+  if (!view) return;
+  if (showTranspose.value) return;
+  if (view.renderer !== (useCanvasGridRows.value ? "canvas" : "dom")) return;
+  if (view.probe !== currentViewProbe()) return;
+  replayCapturedViewState({ selection: view.selection, viewport: view.viewport });
 }
 
 const multiRowCount = computed(() => {
@@ -8236,7 +8284,7 @@ watch(columnDetailDialogOpen, (open) => {
 // The "referenced row" tab is offered for foreign-key cells; defined before the tab list because a watcher reads that list during setup.
 const foreignKeyRowPreviewAvailable = computed(() => {
   const cell = detailCell.value;
-  return !!cell && canvasCellForeignKey(cell.rowIndex, cell.col) !== null;
+  return !!cell && cellForeignKeyAssociation(cell.col) !== null;
 });
 
 const activeCellDetailTabs = computed(() => {
@@ -9819,7 +9867,7 @@ const canvasDetailButtonCell = computed(() => {
   const visibleLeft = Math.max(rowNumberWidth.value, rect.left);
   const visibleRight = viewportWidth > 0 ? Math.min(viewportWidth, rect.left + rect.width) : rect.left + rect.width;
   const canQuickDownload = canQuickDownloadCellValue(target.rowIndex, target.col);
-  const foreignKey = canvasCellForeignKey(target.rowIndex, target.col);
+  const foreignKey = cellForeignKeyInfo(target.rowIndex, target.col);
   const externalUrl = cellExternalUrl(displayItemAt(target.rowIndex)?.data[target.col]);
   if (!cellDetailButtonEnabled.value && !canQuickDownload && !foreignKey && !externalUrl) return null;
   const minWidth = canvasDataGridActionOverlayWidth(canQuickDownload, !!foreignKey, cellDetailButtonEnabled.value, !!externalUrl) + 2;
@@ -12600,6 +12648,14 @@ async function handleGridActionKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
+  // Alt+←：外键跳转返回。仅在网格持有可返回条目时消费；未命中时
+  // 不拦截——箭头键的单元格移动与全局标签历史快捷键保持原行为。
+  if (!targetAllowsNativeClipboard && event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.key === "ArrowLeft" && foreignKeyDrillBackTarget.value) {
+    event.preventDefault();
+    event.stopPropagation();
+    await goForeignKeyDrillBack();
+    return;
+  }
   if (!targetAllowsNativeClipboard && handleGridPaginationShortcut(event)) return;
   if (isModRShortcut(event)) {
     event.preventDefault();
@@ -14806,10 +14862,13 @@ watch(
 
 // ---- 外键单元格跳转 ----
 const columnForeignKeyMap = computed(() => buildColumnForeignKeyMap(foreignKeys.value));
-const foreignKeyNavigationEnabled = computed(() => !!props.connectionId && !!props.tableMeta?.tableName && tableMetadataCapabilities.value.foreignKeys);
+// 多源（JOIN）结果：逐列 source ref 指向源表时，按源表解析外键（即使结果
+// 不可编辑，queryDisplaySourceColumns 也已填充，见 QueryTab 类型注释）
+const hasSourceRefs = computed(() => props.context === "results" && !!props.queryDisplaySourceColumns?.some((ref) => !!ref?.tableName));
+const { sourceForeignKeyMaps, ensureSourceForeignKeys } = useDataGridSourceForeignKeys({ props });
+const foreignKeyNavigationEnabled = computed(() => !!props.connectionId && tableMetadataCapabilities.value.foreignKeys && (!!props.tableMeta?.tableName || hasSourceRefs.value));
 
-function cellForeignKeyAssociation(actualColIdx: number): ForeignKeyAssociation | null {
-  if (!foreignKeyNavigationEnabled.value) return null;
+function singleTableForeignKeyAssociation(actualColIdx: number): ForeignKeyAssociation | null {
   const columnName = foreignKeySourceColumnName({
     context: props.context,
     resultColumns: props.result.columns,
@@ -14820,8 +14879,24 @@ function cellForeignKeyAssociation(actualColIdx: number): ForeignKeyAssociation 
   return columnForeignKeyMap.value.get(columnName.toLowerCase()) ?? null;
 }
 
+function cellForeignKeyAssociation(actualColIdx: number): ForeignKeyAssociation | null {
+  if (!foreignKeyNavigationEnabled.value) return null;
+  if (hasSourceRefs.value) {
+    // 严格逐列解析：源未解析或该源 FK 未加载时不回退单表 map——同名列
+    // 回退会跳到错误的表
+    return foreignKeyAssociationForRef({
+      connectionId: props.connectionId,
+      refs: props.queryDisplaySourceColumns ?? [],
+      columnIndex: actualColIdx,
+      sourceForeignKeyMaps: sourceForeignKeyMaps.value,
+    });
+  }
+  return singleTableForeignKeyAssociation(actualColIdx);
+}
+
 function formatterForeignKeyForColumn(columnIndex: number): ForeignKeyInfo | undefined {
-  return singleColumnForeignKey(cellForeignKeyAssociation(columnIndex));
+  // FK 展示格式化器仍走单表解析：其配置（refSchema 等）以 tableMeta 为准
+  return singleColumnForeignKey(singleTableForeignKeyAssociation(columnIndex));
 }
 
 function savedForeignKeyDisplayConfig(columnIndex: number): ForeignKeyDisplayConfig | undefined {
@@ -14957,19 +15032,32 @@ watch(
   { immediate: true },
 );
 
-function canvasCellForeignKey(rowIndex: number, actualColIdx: number): ForeignKeyInfo | null {
-  const association = cellForeignKeyAssociation(actualColIdx);
-  if (!association) return null;
+// 单元格级 FK 各列取值：多源结果按 sourceKey 解析复合外键，单表沿用列名映射
+function foreignKeyCellsForCell(association: ForeignKeyAssociation, rowIndex: number, actualColIdx: number): ForeignKeyAssociationCell[] | undefined {
   const item = displayItems.value[rowIndex];
-  if (!item) return null;
-  const cells = foreignKeyAssociationCells({
+  if (!item) return undefined;
+  if (hasSourceRefs.value) {
+    return foreignKeyAssociationCellsForSource({
+      association,
+      refs: props.queryDisplaySourceColumns ?? [],
+      columnIndex: actualColIdx,
+      row: item.data,
+    });
+  }
+  return foreignKeyAssociationCells({
     association,
     context: props.context,
     resultColumns: props.result.columns,
     sourceColumns: props.sourceColumns,
     row: item.data,
   });
-  return cells ? association.foreignKey : null;
+}
+
+// 两种渲染模式共用的悬浮按钮判定：association 存在且本行各 FK 列均有值
+function cellForeignKeyInfo(rowIndex: number, actualColIdx: number): ForeignKeyInfo | null {
+  const association = cellForeignKeyAssociation(actualColIdx);
+  if (!association) return null;
+  return foreignKeyCellsForCell(association, rowIndex, actualColIdx) ? association.foreignKey : null;
 }
 
 // 外键跳转按钮需要 FK 元数据：表身份就绪即后台加载（fetchForeignKeys 自带去重，
@@ -14982,18 +15070,35 @@ watch(
   { immediate: true },
 );
 
+// 多源结果：结果替换后按新 source ref 集合补齐逐源 FK map（已加载身份自动跳过）
+watch(
+  () => [props.connectionId, props.database, props.queryDisplaySourceColumns] as const,
+  () => {
+    if (hasSourceRefs.value) void ensureSourceForeignKeys();
+  },
+  { immediate: true },
+);
+
+// 子列的列信息（值字面量按类型格式化用）：多源结果从对应源的 write target
+// 元数据解析；不可编辑 JOIN 无 write target 时返回 undefined（构建器按原文处理）
+function foreignKeyColumnInfo(actualColIdx: number, foreignKey: ForeignKeyInfo): ColumnInfo | undefined {
+  if (hasSourceRefs.value) {
+    const ref = props.queryDisplaySourceColumns?.[actualColIdx];
+    if (!ref?.tableName) return undefined;
+    const target = props.joinedWriteTargets?.find((candidate) => (candidate.tableMeta.database ?? "") === (ref.database ?? "") && (candidate.tableMeta.schema ?? "") === (ref.schema ?? "") && candidate.tableMeta.tableName === ref.tableName);
+    return target?.tableMeta.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase());
+  }
+  return props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase());
+}
+
+// 引用行目标：导航与单元格详情"引用行"预览共用的构造路径。
+// cells/列信息走多源感知 helper，跨库外键参数保留。
 /** Referenced table and the WHERE condition that selects the row a foreign-key cell points to. */
 async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number) {
   const association = cellForeignKeyAssociation(actualColIdx);
   const item = displayItems.value[rowIndex];
   if (!association || !item || !props.connectionId) return null;
-  let cells = foreignKeyAssociationCells({
-    association,
-    context: props.context,
-    resultColumns: props.result.columns,
-    sourceColumns: props.sourceColumns,
-    row: item.data,
-  });
+  let cells = foreignKeyCellsForCell(association, rowIndex, actualColIdx);
   if (!cells) return null;
   const resolved = await resolveLargeValueCells(
     [item.id],
@@ -15010,7 +15115,7 @@ async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number)
         databaseType: resolvedDatabaseType.value,
         identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
         columnName: foreignKey.ref_column,
-        columnInfo: props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase()),
+        columnInfo: foreignKeyColumnInfo(actualColIdx, foreignKey),
         rawValue: String(value),
       }),
     ),
@@ -15023,17 +15128,95 @@ async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number)
     currentSchema: props.tableMeta?.schema || props.schema,
     fk: association.foreignKey,
     whereInput: condition,
+    // 跨库外键：连接配置 + 实际库类型
+    // 让目标判定数据库树层级（ref_schema 承载目标库名）还是模式感知
     connection: connectionStore.getConfig(props.connectionId),
     databaseType: resolvedDatabaseType.value,
   });
 }
 
+/**
+ * 跳转瞬间的视口快照（滚动位置 + 选区 + probe 指纹）。返回落地后由
+ * replayForeignKeyDrillBackView 按 probe 匹配重放：数据在跳转期间变了就
+ * 整体放弃，宁可干净起点也不把旧滚动/选区套到新内容上。
+ */
+function captureForeignKeyDrillBackView(): ForeignKeyDrillBackView | undefined {
+  if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return undefined;
+  if (showTranspose.value) return undefined;
+  const scroller = useCanvasGridRows.value ? canvasScrollerElement() : gridScrollerElement();
+  if (!scroller) return undefined;
+  const { selection } = captureViewSelection();
+  return {
+    renderer: useCanvasGridRows.value ? "canvas" : "dom",
+    probe: currentViewProbe(),
+    viewport: { top: Math.max(0, scroller.scrollTop), left: Math.max(0, scroller.scrollLeft) },
+    selection,
+  };
+}
+
 async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) {
   try {
-    const target = await foreignKeyReferenceTarget(rowIndex, actualColIdx);
-    if (target) await openTableTarget(target);
+    const navigationTarget = await foreignKeyReferenceTarget(rowIndex, actualColIdx);
+    if (!navigationTarget) return;
+
+    // 同面板跳转路由：data tab 原地换目标（不安全状态由 canReuseActiveDataTab
+    // 拒绝后回退新建），query tab 在结果面板内执行（编辑器 SQL 不动）。网格
+    // 持有未保存编辑时两种就地改写都会丢弃编辑（query tab 没有 tab 级
+    // pendingDataChangeCount 那道闸），一律回退新建 tab，编辑留在原处。
+    const owningTabId = props.foreignKeyNavigationTabId;
+    const route = foreignKeyDrillRouting({ context: props.context, owningTabId, hasPendingChanges: hasPendingChanges.value });
+    const drillBackView = route === "new-tab" ? undefined : captureForeignKeyDrillBackView();
+    if (route === "data-tab-in-place" && owningTabId) {
+      await openTableTarget(navigationTarget, { reuseTabId: owningTabId, drillBack: true, drillBackView });
+    } else if (route === "query-tab-in-place" && owningTabId) {
+      await executeTableTargetInQueryTab(navigationTarget, { tabId: owningTabId, drillBack: true, drillBackView });
+    } else {
+      await openTableTarget(navigationTarget);
+    }
   } catch (e: any) {
     toast(String(e?.message || e), 5000);
+  }
+}
+
+// ---- 外键跳转返回 ----
+
+const foreignKeyDrillBackBusy = ref(false);
+
+/** 下一个可返回点：跳转链未被其它导航打破时才非空（失配的过期条目在窥视时丢弃） */
+const foreignKeyDrillBackTarget = computed(() => {
+  const tabId = props.foreignKeyNavigationTabId;
+  if (!tabId || foreignKeyDrillBackBusy.value) return null;
+  const tab = queryStore.tabs.find((item) => item.id === tabId);
+  if (!tab) return null;
+  return peekForeignKeyDrillBack(tabId, (entry) => foreignKeyDrillBackEntryMatchesTab(entry, tab));
+});
+
+async function goForeignKeyDrillBack() {
+  const tabId = props.foreignKeyNavigationTabId;
+  if (!tabId || foreignKeyDrillBackBusy.value) return;
+  const entry = foreignKeyDrillBackTarget.value;
+  if (!entry) return;
+  foreignKeyDrillBackBusy.value = true;
+  try {
+    const popped = popForeignKeyDrillBack(tabId, (candidate) => candidate === entry);
+    if (!popped) return;
+    // 返回途中 tab 内容被改写（旧表元数据/旧结果短暂残留），把弹出后的新
+    // 栈顶标记为等待落地，避免 computed 在过渡期把它当失配条目丢弃，链式
+    // 返回（A→B→C 连按两次返回）才走得通。
+    markForeignKeyDrillBackPendingArrival(tabId);
+    // restore: 按跳转前捕获的筛选/排序/分页重建（跳过保存的默认条件）；
+    // query 路径把捕获的页 limit/offset 一并带回
+    if (popped.restore.kind === "tableTarget") {
+      await openTableTarget(popped.restore.target, { reuseTabId: tabId, restore: true });
+    } else {
+      await executeSqlInQueryTabResults(tabId, popped.restore.sql, { pagination: popped.restore.page });
+    }
+    // 结果已落地：probe 匹配时重放跳转前的滚动/选区（失配即干净起点）
+    replayForeignKeyDrillBackView(popped.view);
+  } catch (e: any) {
+    toast(String(e?.message || e), 5000);
+  } finally {
+    foreignKeyDrillBackBusy.value = false;
   }
 }
 
@@ -15098,18 +15281,7 @@ function contextForeignKeyMenuItem(): ContextMenuItem | null {
   if (!cell || cell.col < 0) return null;
   const association = cellForeignKeyAssociation(cell.col);
   const item = contextRowItem.value;
-  if (
-    !association ||
-    !item ||
-    !foreignKeyAssociationCells({
-      association,
-      context: props.context,
-      resultColumns: props.result.columns,
-      sourceColumns: props.sourceColumns,
-      row: item.data,
-    })
-  )
-    return null;
+  if (!association || !item || !foreignKeyCellsForCell(association, cell.rowIndex, cell.col)) return null;
   const fk = association.foreignKey;
   return {
     label: t("grid.foreignKeyNavigate", { table: fk.ref_table }),
@@ -16481,6 +16653,17 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             @wheel="onDataGridTopbarFixedActionWheel"
           >
             <template #leading>
+              <Tooltip v-if="foreignKeyDrillBackTarget">
+                <TooltipTrigger as-child>
+                  <Button data-toolbar-action="foreignKeyDrillBack" variant="ghost" size="sm" class="data-grid-topbar-action-button h-5 shrink-0 px-1.5 text-xs" :disabled="foreignKeyDrillBackBusy" @click="goForeignKeyDrillBack">
+                    <ArrowLeft class="data-grid-topbar-action-icon h-3 w-3" />
+                    <span class="data-grid-topbar-action-label">{{ t("grid.foreignKeyDrillBack") }}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  {{ foreignKeyDrillBackTarget.restore.kind === "tableTarget" ? t("grid.foreignKeyDrillBackTable", { table: foreignKeyDrillBackTarget.label ?? foreignKeyDrillBackTarget.restore.target.tableName }) : t("grid.foreignKeyDrillBackResult") }}
+                </TooltipContent>
+              </Tooltip>
               <!-- Once the banner is silenced for good, the full-text entry moves
                    into the existing action row rather than keeping an empty
                    banner line of its own. -->
@@ -18027,6 +18210,16 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                                 @click.stop="openCellExternalUrl(item.displayIndex, col.actualColIdx)"
                               >
                                 <ExternalLink class="h-3 w-3" />
+                              </button>
+                              <button
+                                v-if="cellForeignKeyInfo(item.displayIndex, col.actualColIdx)"
+                                class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                                :title="t('grid.foreignKeyNavigate', { table: cellForeignKeyInfo(item.displayIndex, col.actualColIdx)!.ref_table })"
+                                :aria-label="t('grid.foreignKeyNavigate', { table: cellForeignKeyInfo(item.displayIndex, col.actualColIdx)!.ref_table })"
+                                @mousedown.stop
+                                @click.stop="navigateToForeignKeyCell(item.displayIndex, col.actualColIdx)"
+                              >
+                                <ArrowUpRight class="h-3 w-3" />
                               </button>
                               <button
                                 v-if="cellDetailButtonEnabled"

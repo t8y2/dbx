@@ -1,6 +1,6 @@
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
-import type { DatabaseType, ForeignKeyInfo } from "@/types/database";
+import type { DatabaseType, ForeignKeyInfo, QueryResultSourceColumnRef } from "@/types/database";
 import { isSchemaAware, usesDatabaseObjectTreeMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, type JdbcDialectConnection } from "@/lib/database/jdbcDialect";
 
@@ -127,4 +127,82 @@ export function foreignKeyNavigationTarget(options: { connectionId: string; data
     columnName: options.fk.ref_column,
     whereInput: options.whereInput,
   };
+}
+
+// ---- 多源（JOIN）结果的逐源外键解析 ----
+
+export interface ForeignKeySourceIdentity {
+  /** `foreignKeyTableIdentity` 键，用于关联逐源 FK map */
+  identity: string;
+  /** 该物理表首个出现的 sourceKey（自连接共用身份；FK 属于物理表级别） */
+  sourceKey: string;
+  database?: string;
+  schema?: string;
+  tableName: string;
+}
+
+/** 从逐列 source ref 提取去重的源表身份（首见顺序；跳过无 tableName 的 ref） */
+export function foreignKeySourceIdentities(options: { connectionId?: string; refs: ReadonlyArray<QueryResultSourceColumnRef | undefined> }): ForeignKeySourceIdentity[] {
+  const identities: ForeignKeySourceIdentity[] = [];
+  const seen = new Set<string>();
+  for (const ref of options.refs) {
+    if (!ref?.tableName) continue;
+    const identity = foreignKeyTableIdentity({ connectionId: options.connectionId, database: ref.database, schema: ref.schema, tableName: ref.tableName });
+    if (!identity || seen.has(identity)) continue;
+    seen.add(identity);
+    identities.push({ identity, sourceKey: ref.sourceKey, database: ref.database, schema: ref.schema, tableName: ref.tableName });
+  }
+  return identities;
+}
+
+/**
+ * 逐列严格解析：ref 未解析到源表、或该源的 FK map 尚未加载时返回 null，
+ * 绝不回退到其它源的 map（否则同名列会跳到错误的表）。
+ */
+export function foreignKeyAssociationForRef(options: { connectionId?: string; refs: ReadonlyArray<QueryResultSourceColumnRef | undefined>; columnIndex: number; sourceForeignKeyMaps: ReadonlyMap<string, ReadonlyMap<string, ForeignKeyAssociation>> }): ForeignKeyAssociation | null {
+  const ref = options.refs[options.columnIndex];
+  if (!ref?.tableName || !ref.sourceColumn) return null;
+  const identity = foreignKeyTableIdentity({ connectionId: options.connectionId, database: ref.database, schema: ref.schema, tableName: ref.tableName });
+  if (!identity) return null;
+  return options.sourceForeignKeyMaps.get(identity)?.get(ref.sourceColumn.toLowerCase()) ?? null;
+}
+
+/** 复合外键的各列在同一 sourceKey 内解析；任一列缺失或值为 NULL 则整体不可跳转（同 foreignKeyAssociationCells 契约） */
+export function foreignKeyAssociationCellsForSource(options: { association: ForeignKeyAssociation; refs: ReadonlyArray<QueryResultSourceColumnRef | undefined>; columnIndex: number; row: readonly (CellValue | undefined)[] }): ForeignKeyAssociationCell[] | undefined {
+  const sourceKey = options.refs[options.columnIndex]?.sourceKey;
+  if (!sourceKey) return undefined;
+  const sourceColumnIndexes = new Map<string, number>();
+  for (let columnIndex = 0; columnIndex < options.refs.length; columnIndex += 1) {
+    const ref = options.refs[columnIndex];
+    if (!ref?.sourceColumn || ref.sourceKey !== sourceKey) continue;
+    const columnKey = ref.sourceColumn.toLowerCase();
+    if (!sourceColumnIndexes.has(columnKey)) sourceColumnIndexes.set(columnKey, columnIndex);
+  }
+  const cells: ForeignKeyAssociationCell[] = [];
+  for (const foreignKey of options.association.columnPairs) {
+    const pairColumnIndex = sourceColumnIndexes.get(foreignKey.column.toLowerCase());
+    if (pairColumnIndex === undefined) return undefined;
+    const value = options.row[pairColumnIndex];
+    if (!foreignKeyCellNavigable(value)) return undefined;
+    cells.push({ foreignKey, columnIndex: pairColumnIndex, value });
+  }
+  return cells;
+}
+
+/** Same-pane FK drill routing: which pane rewrites and which entry owns the restore point. */
+export type ForeignKeyDrillRouting = "data-tab-in-place" | "query-tab-in-place" | "new-tab";
+
+/**
+ * 跳转路由决策：网格持有未保存编辑时绝不就地改写面板——data tab 的就地
+ * 路径靠 canReuseActiveDataTab 兜底（pendingDataChangeCount/hasPendingDataEditorDraft
+ * 拒绝复用即回退新建 tab），但 query tab 的结果面板就地执行没有那道闸
+ * （pendingDataChangeCount 只在 table-data 上下文同步到 tab），会静默丢弃
+ * 未保存编辑。这里对两种上下文统一拦截：有未保存编辑一律回退新建 tab，
+ * 跳转目标照常打开，用户编辑留在原处。
+ */
+export function foreignKeyDrillRouting(input: { context?: string; owningTabId?: string | null; hasPendingChanges: boolean }): ForeignKeyDrillRouting {
+  if (!input.owningTabId || input.hasPendingChanges) return "new-tab";
+  if (input.context === "table-data") return "data-tab-in-place";
+  if (input.context === "results") return "query-tab-in-place";
+  return "new-tab";
 }

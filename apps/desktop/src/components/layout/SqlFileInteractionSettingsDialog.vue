@@ -2,6 +2,7 @@
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
 
@@ -33,14 +34,12 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 
-function updateOpenMode(event: Event) {
-  const value = (event.target as HTMLSelectElement).value;
-  emit("update:openMode", value === "double" ? "double" : "single");
+function updateOpenMode(v: any) {
+  emit("update:openMode", v === "double" ? "double" : "single");
 }
 
-function updateDisplayMode(event: Event) {
-  const value = (event.target as HTMLSelectElement).value;
-  emit("update:displayMode", value === "connection" ? "connection" : "folder");
+function updateDisplayMode(v: any) {
+  emit("update:displayMode", v === "connection" ? "connection" : "folder");
 }
 </script>
 
@@ -52,16 +51,27 @@ function updateDisplayMode(event: Event) {
       </DialogHeader>
       <div class="grid gap-2 py-2">
         <Label :for="openModeId">{{ t("sqlFileTree.openMode") }}</Label>
-        <select :id="openModeId" :value="openMode" class="h-8 rounded-md border border-input bg-background px-2 text-sm" @change="updateOpenMode">
-          <option value="single">{{ t("sqlFileTree.openModeSingle") }}</option>
-          <option value="double">{{ t("sqlFileTree.openModeDouble") }}</option>
-        </select>
+        <Select :id="openModeId" :model-value="openMode" @update:model-value="updateOpenMode">
+          <SelectTrigger class="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="single">{{ t("sqlFileTree.openModeSingle") }}</SelectItem>
+            <SelectItem value="double">{{ t("sqlFileTree.openModeDouble") }}</SelectItem>
+          </SelectContent>
+        </Select>
+
         <template v-if="displayMode">
           <Label :for="displayModeId">{{ displayModeLabel }}</Label>
-          <select :id="displayModeId" :value="displayMode" class="h-8 rounded-md border border-input bg-background px-2 text-sm" @change="updateDisplayMode">
-            <option value="folder">{{ displayModeFolderLabel }}</option>
-            <option value="connection">{{ displayModeConnectionLabel }}</option>
-          </select>
+          <Select :id="displayModeId" :model-value="displayMode" @update:model-value="updateDisplayMode">
+            <SelectTrigger class="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="folder">{{ displayModeFolderLabel }}</SelectItem>
+              <SelectItem value="connection">{{ displayModeConnectionLabel }}</SelectItem>
+            </SelectContent>
+          </Select>
         </template>
         <slot />
       </div>

@@ -2257,6 +2257,9 @@ export default withEnglishFallback({
     httpTunnelProtocol: "Protocollo tunnel",
     httpTunnelProtocolDbx: "Script DBX TCP",
     httpTunnelProtocolNavicat: "Navicat MySQL HTTP",
+    httpTunnelProtocolSqlyog: "SQLyog MySQL HTTP",
+    httpTunnelSqlyogHint:
+      "MySQL only. Uses the SQLyog HTTP tunnel script (SQLyogTunnel.php / tunnel.php) already deployed on a PHP server; enter its full URL. The script opens a new MySQL connection for every statement, so transactions, temporary tables and session variables are not supported. MySQL SSL and other tunnel layers are not supported.",
     httpTunnelNavicatHint: "Supporta solo MySQL; supporta indirizzi HTTP/HTTPS, si consiglia HTTPS. Non è possibile abilitare contemporaneamente MySQL SSL o un altro tunnel.",
     httpTunnelNavicatNoToken: "Il protocollo Navicat non utilizza Token",
     httpTunnelNavicatScriptHelp: "Scopri come ottenere lo script PHP ufficiale",

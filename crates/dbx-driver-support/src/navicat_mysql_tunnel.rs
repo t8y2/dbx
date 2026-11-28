@@ -8,7 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 
-const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
+pub(crate) const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
 const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
 const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
 const SERVER_CAPABILITIES: u32 = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH;
@@ -277,7 +277,7 @@ async fn serve_client(stream: &mut TcpStream, endpoint: Arc<NavicatMysqlEndpoint
     }
 }
 
-fn validate_stateless_query(sql: &str) -> Result<(), String> {
+pub(crate) fn validate_stateless_query(sql: &str) -> Result<(), String> {
     let mut tokens = Vec::new();
     stateless_query_tokens(sql, &mut tokens)?;
     for statement in tokens.split(|token| *token == Token::SemiColon) {
@@ -344,7 +344,7 @@ fn stateless_query_tokens(sql: &str, output: &mut Vec<Token>) -> Result<(), Stri
     Ok(())
 }
 
-fn mysql_handshake_greeting(auth_seed: &[u8; 20]) -> Vec<u8> {
+pub(crate) fn mysql_handshake_greeting(auth_seed: &[u8; 20]) -> Vec<u8> {
     let mut greeting = vec![10];
     greeting.extend_from_slice(b"8.0.0-dbx-navicat\0");
     // MySQL's handshake places a 4-byte connection id before the first
@@ -367,21 +367,21 @@ fn mysql_handshake_greeting(auth_seed: &[u8; 20]) -> Vec<u8> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct NavicatResult {
-    affected_rows: u64,
-    last_insert_id: u64,
-    columns: Vec<NavicatColumn>,
-    rows: Vec<Vec<Option<Vec<u8>>>>,
-    info: String,
+pub(crate) struct NavicatResult {
+    pub(crate) affected_rows: u64,
+    pub(crate) last_insert_id: u64,
+    pub(crate) columns: Vec<NavicatColumn>,
+    pub(crate) rows: Vec<Vec<Option<Vec<u8>>>>,
+    pub(crate) info: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct NavicatColumn {
-    name: Vec<u8>,
-    table: Vec<u8>,
-    column_type: u8,
-    flags: u32,
-    length: u32,
+pub(crate) struct NavicatColumn {
+    pub(crate) name: Vec<u8>,
+    pub(crate) table: Vec<u8>,
+    pub(crate) column_type: u8,
+    pub(crate) flags: u32,
+    pub(crate) length: u32,
 }
 
 /// Lowest tunnel-script version whose wire format we can parse.
@@ -525,14 +525,14 @@ fn read_u32_be(data: &[u8], cursor: &mut usize) -> Result<u32, String> {
     Ok(u32::from_be_bytes(bytes))
 }
 
-fn parse_use_database(sql: &str) -> Option<String> {
+pub(crate) fn parse_use_database(sql: &str) -> Option<String> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let rest = trimmed.get(..4)?.eq_ignore_ascii_case("USE ").then(|| trimmed[4..].trim())?;
     let rest = rest.strip_prefix('`').and_then(|value| value.strip_suffix('`')).unwrap_or(rest);
     (!rest.is_empty()).then(|| rest.replace("``", "`"))
 }
 
-async fn write_query_result(stream: &mut TcpStream, result: NavicatResult) -> Result<(), String> {
+pub(crate) async fn write_query_result(stream: &mut TcpStream, result: NavicatResult) -> Result<(), String> {
     let mut sequence = 1u8;
     if result.columns.is_empty() {
         write_packet(stream, sequence, &mysql_ok_packet(result.affected_rows, result.last_insert_id, &result.info))
@@ -586,7 +586,7 @@ fn mysql_column_packet(column: &NavicatColumn) -> Vec<u8> {
     packet
 }
 
-fn mysql_ok_packet(affected_rows: u64, last_insert_id: u64, info: &str) -> Vec<u8> {
+pub(crate) fn mysql_ok_packet(affected_rows: u64, last_insert_id: u64, info: &str) -> Vec<u8> {
     let mut packet = vec![0];
     push_lenenc(&mut packet, affected_rows);
     push_lenenc(&mut packet, last_insert_id);
@@ -596,7 +596,12 @@ fn mysql_ok_packet(affected_rows: u64, last_insert_id: u64, info: &str) -> Vec<u
     packet
 }
 
-async fn send_mysql_error(stream: &mut TcpStream, sequence: u8, code: u16, message: &str) -> Result<(), String> {
+pub(crate) async fn send_mysql_error(
+    stream: &mut TcpStream,
+    sequence: u8,
+    code: u16,
+    message: &str,
+) -> Result<(), String> {
     let mut payload = vec![0xff];
     payload.extend_from_slice(&code.to_le_bytes());
     payload.extend_from_slice(b"#HY000");
@@ -604,7 +609,7 @@ async fn send_mysql_error(stream: &mut TcpStream, sequence: u8, code: u16, messa
     write_packet(stream, sequence, &payload).await
 }
 
-async fn read_packet(stream: &mut TcpStream) -> Result<(u8, Vec<u8>), String> {
+pub(crate) async fn read_packet(stream: &mut TcpStream) -> Result<(u8, Vec<u8>), String> {
     let mut header = [0; 4];
     match stream.read_exact(&mut header).await {
         Ok(_) => {}
@@ -622,7 +627,7 @@ async fn read_packet(stream: &mut TcpStream) -> Result<(u8, Vec<u8>), String> {
     Ok((header[3], payload))
 }
 
-async fn write_packet(stream: &mut TcpStream, sequence: u8, payload: &[u8]) -> Result<(), String> {
+pub(crate) async fn write_packet(stream: &mut TcpStream, sequence: u8, payload: &[u8]) -> Result<(), String> {
     if payload.len() > 0x00ff_ffff {
         return Err("MySQL response packet exceeds 16 MiB".to_string());
     }

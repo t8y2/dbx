@@ -2459,6 +2459,9 @@ export default withEnglishFallback({
     httpTunnelProtocol: "トンネルプロトコル",
     httpTunnelProtocolDbx: "DBX TCP スクリプト",
     httpTunnelProtocolNavicat: "Navicat MySQL HTTP",
+    httpTunnelProtocolSqlyog: "SQLyog MySQL HTTP",
+    httpTunnelSqlyogHint:
+      "MySQL only. Uses the SQLyog HTTP tunnel script (SQLyogTunnel.php / tunnel.php) already deployed on a PHP server; enter its full URL. The script opens a new MySQL connection for every statement, so transactions, temporary tables and session variables are not supported. MySQL SSL and other tunnel layers are not supported.",
     httpTunnelNavicatHint:
       "MySQL のみ対応。Navicat のインストール先から ntunnel_mysql.php を取得し、PHP サーバーにアップロードして、その完全な URL を入力してください。HTTP と HTTPS に対応しています。HTTP では認証情報と SQL が平文で送信されるため、信頼できるプライベートネットワークでのみ使用してください。サーバーがリダイレクトする場合は最終的な HTTPS URL を入力してください。MySQL SSL や他のトンネルとの併用には対応していません。",
     httpTunnelNavicatNoToken: "Navicat プロトコルでは Token を使用しません",

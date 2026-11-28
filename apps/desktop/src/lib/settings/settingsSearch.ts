@@ -638,6 +638,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
       "connection.httpTunnelProtocol",
       "connection.httpTunnelProtocolDbx",
       "connection.httpTunnelProtocolNavicat",
+      "connection.httpTunnelProtocolSqlyog",
       "connection.httpTunnelUrl",
       "connection.httpTunnelToken",
       "connection.httpTunnelConnectTimeout",

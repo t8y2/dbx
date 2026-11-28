@@ -44,6 +44,7 @@ describe("settings search", () => {
     ["connection.httpTunnelProtocol", "Tunnel wire protocol", "wire protocol"],
     ["connection.httpTunnelProtocolDbx", "DBX tunnel protocol", "dbx tunnel"],
     ["connection.httpTunnelProtocolNavicat", "Navicat tunnel protocol", "navicat tunnel"],
+    ["connection.httpTunnelProtocolSqlyog", "SQLyog tunnel protocol", "sqlyog tunnel"],
   ])("finds %s under the existing tunnel management entry", (translationKey, label, query) => {
     const entries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: true, visibleCategories: new Set<SettingsCategory>(["tunnels"]) }, (key) => (key === translationKey ? label : key), categoryLabels);
     expect(searchSettings(entries, query, "en")).toEqual(expect.arrayContaining([expect.objectContaining({ id: "tunnels", category: "tunnels", targetId: "tunnels" })]));

@@ -97,17 +97,17 @@ export function useSidebarDataOpenRuntime() {
     const querySchema = config ? connectionObjectTreeQuerySchema(config, node.database, tableSchema) : (tableSchema ?? "");
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const metadataDatabaseType = effectiveDbType || config?.db_type || "";
-    // Navicat's PHP tunnel turns every pooled MySQL session into a separate
-    // HTTP request. Loading columns and indexes before the first data page
-    // therefore creates several competing handshakes and makes the table
+    // Navicat's and SQLyog's PHP tunnels turn every pooled MySQL session into a
+    // separate HTTP request. Loading columns and indexes before the first data
+    // page therefore creates several competing handshakes and makes the table
     // appear stuck in "loading" even when SELECT itself is already fast.
     // Keep the existing eager metadata behavior for every other transport.
-    const isNavicatMysqlTunnel =
+    const isMysqlHttpTunnel =
       config?.transport_layers?.some((layer) => {
         if (layer.type !== "http_tunnel") return false;
-        if (layer.protocol === "navicat_mysql") return true;
+        if (layer.protocol === "navicat_mysql" || layer.protocol === "sqlyog_mysql") return true;
         const profile = tunnelProfileStore.profileById(layer.profile_id);
-        return profile?.type === "http_tunnel" && profile.protocol === "navicat_mysql";
+        return profile?.type === "http_tunnel" && (profile.protocol === "navicat_mysql" || profile.protocol === "sqlyog_mysql");
       }) ?? false;
     const dataTabTarget = {
       connectionId: node.connectionId,
@@ -409,7 +409,7 @@ export function useSidebarDataOpenRuntime() {
         logPhase("metadata-started", { tabId });
       }
 
-      const metadataRefresh = shouldRefreshTableMeta && !deferTableMetaRefresh && !isNavicatMysqlTunnel ? refreshTableMetaInBackground(tabId) : undefined;
+      const metadataRefresh = shouldRefreshTableMeta && !deferTableMetaRefresh && !isMysqlHttpTunnel ? refreshTableMetaInBackground(tabId) : undefined;
       if (!cachedTableMeta && (requiresEagerTableMetadataForDataOpen(effectiveDbType) || defaultSortMode !== "none")) {
         // No query is in flight yet, so deferred drivers can safely load metadata serially.
         if (deferTableMetaRefresh) await refreshTableMetaInBackground(tabId);
@@ -557,9 +557,9 @@ export function useSidebarDataOpenRuntime() {
         applyTableDefaultSortResult(sortedTab, defaultSort, queryStore.sortTabResultLocally);
       }
       logPhase("execute-tab-sql", { tabId });
-      if (shouldRefreshTableMeta && (deferTableMetaRefresh || isNavicatMysqlTunnel) && canApplyTableMetadata(tabId)) {
+      if (shouldRefreshTableMeta && (deferTableMetaRefresh || isMysqlHttpTunnel) && canApplyTableMetadata(tabId)) {
         void refreshTableMetaInBackground(tabId);
-        logPhase("metadata-started", { tabId, deferredForTransport: isNavicatMysqlTunnel ? "navicat_mysql" : "driver" });
+        logPhase("metadata-started", { tabId, deferredForTransport: isMysqlHttpTunnel ? "mysql_http" : "driver" });
       }
     } catch (e: any) {
       // 准备阶段（连接/元数据/SQL 构建）的失败仍按执行身份判定所有权：同页签

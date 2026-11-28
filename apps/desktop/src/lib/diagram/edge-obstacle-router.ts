@@ -316,6 +316,20 @@ export function alignWaypointsToEndpoints(waypoints: Point[], sourceX: number, s
   return cleaned;
 }
 
+export function selfRelationshipPoints(source: Point, target: Point): Point[] {
+  const right = Math.max(source.x, target.x) + EDGE_ROUTE_OFFSET;
+  // A relationship can refer to the same column or to two collapsed fields.
+  const coincident = Math.abs(source.y - target.y) < 1;
+  const sourceY = coincident ? source.y - 5 : source.y;
+  const targetY = coincident ? target.y + 5 : target.y;
+  return [
+    { x: source.x, y: sourceY },
+    { x: right, y: sourceY },
+    { x: right, y: targetY },
+    { x: target.x, y: targetY },
+  ];
+}
+
 export function pointsToSvgPath(points: Point[]): string {
   if (points.length === 0) return "";
   return points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");

@@ -7,6 +7,7 @@ import type { DiagramTable, DiagramRelationship } from "@/lib/diagram/erDiagram"
 import { isDraftTable } from "@/lib/diagram/erDiagram";
 import type { InferredRelationship } from "@/types/diagram";
 import { useLayerStore } from "@/lib/diagram/layer-store";
+import { selfRelationshipColumnHandle } from "@/lib/diagram/vue-flow-adapter";
 import { CARD_WIDTH, COLUMN_TYPE_WIDTH, COLUMN_NAME_MAX_CHARS, COLUMN_TYPE_MAX_CHARS, TABLE_NAME_MAX_CHARS, EDGE_HANDLE_OUTSET, diagramCardColumns } from "@/lib/diagram/diagram-constants";
 
 const layerStore = useLayerStore();
@@ -16,6 +17,7 @@ const props = defineProps<{
     table: DiagramTable;
     relationships?: (DiagramRelationship | InferredRelationship)[];
     isMultiSchema?: boolean;
+    selfReferenceColumns?: Set<string>;
     fieldsExpanded?: boolean;
     toggleFields?: () => void;
     fieldsToggleLabel?: string;
@@ -96,7 +98,19 @@ const handleOffsetStyle = computed(() =>
       </div>
       <div>
         <div v-for="column in columns.rows" :key="column.name" class="border-b border-border/40 last:border-b-0">
-          <div class="flex h-6 min-w-0 items-center gap-1.5 px-3 text-xs">
+          <div class="relative flex h-6 min-w-0 items-center gap-1.5 px-3 text-xs">
+            <template v-if="data.selfReferenceColumns?.has(column.name)">
+              <Handle
+                v-for="type in ['source', 'target'] as const"
+                :id="selfRelationshipColumnHandle(column.name, type)"
+                :key="type"
+                :type="type"
+                :position="Position.Right"
+                :connectable="false"
+                class="!pointer-events-none !h-2 !w-2 !min-h-0 !min-w-0 !border-0 !bg-transparent !opacity-0"
+                :style="handleOffsetStyle.right"
+              />
+            </template>
             <KeyRound v-if="column.is_primary_key" class="h-3 w-3 shrink-0 text-amber-500" />
             <Link2 v-else-if="isForeignKeyColumn(data.table, column.name)" class="h-3 w-3 shrink-0 text-primary" />
             <Link2 v-else-if="isRelationshipColumn(data.table, column.name)" class="h-3 w-3 shrink-0 text-muted-foreground" />

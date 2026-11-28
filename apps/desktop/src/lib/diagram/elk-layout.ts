@@ -252,11 +252,10 @@ function buildElkOptions(options: LayoutOptions): Record<string, string> {
     "elk.layered.crossingMinimization": "LAYER_SWEEP",
     "elk.layered.layering.strategy": "NETWORK_SIMPLEX",
     "elk.layered.separateConnectedComponents": "true",
-    "elk.spacing.nodeNode": "60",
-    "elk.spacing.layerLayer": "80",
+    "elk.spacing.nodeNode": "80",
+    "elk.layered.spacing.nodeNodeBetweenLayers": "108",
     "elk.padding": `${LAYER_PADDING}`,
     "elk.layered.edgeSpacing": "20",
-    "elk.layered.nodeSpacing": "50",
     "elk.layered.bendPointSpacing": "10",
     "elk.hierarchyHandling": "INCLUDE_CHILDREN",
   };

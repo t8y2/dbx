@@ -1,8 +1,8 @@
-import type { EngineeringDiagram, EngineeringEntityNode } from "@/lib/diagram/engineeringDiagram";
+import { buildEngineeringDiagramConnections, type EngineeringDiagram } from "@/lib/diagram/engineeringDiagram";
 import { isDroppedColumn, type DiagramPosition, type DiagramRelationship, type DiagramTable } from "@/lib/diagram/erDiagram";
 import { pickHandles } from "@/lib/diagram/vue-flow-adapter";
-import { pointAlongPolyline, pointsToSvgPath, type Point } from "@/lib/diagram/edge-obstacle-router";
-import { CARD_WIDTH, COMMENT_LINE_HEIGHT, MARGIN, diagramTableCardHeight, tableCardHeight, type DiagramCardMetrics } from "@/lib/diagram/diagram-constants";
+import { pointAlongPolyline, pointsToSvgPath, selfRelationshipPoints, type Point } from "@/lib/diagram/edge-obstacle-router";
+import { CARD_WIDTH, CARD_HEADER_HEIGHT, COLUMN_ROW_HEIGHT, COMMENT_LINE_HEIGHT, MARGIN, diagramTableCardHeight, tableCardHeight, type DiagramCardMetrics } from "@/lib/diagram/diagram-constants";
 import { escapeXml, svgNumber, svgText } from "./svgPrimitives";
 
 const SOURCE_CARDINALITY_T = 0.18;
@@ -109,6 +109,18 @@ type RelationshipGeometryInput = {
   commentLineHeight?: number;
 };
 
+function exportedColumnCenter(table: DiagramTable, columnName: string, metrics: DiagramCardMetrics): number {
+  const headerHeight = metrics.cardHeaderHeight ?? CARD_HEADER_HEIGHT;
+  const rowHeight = metrics.columnRowHeight ?? COLUMN_ROW_HEIGHT;
+  const commentHeight = metrics.commentLineHeight ?? COMMENT_LINE_HEIGHT;
+  let top = headerHeight + (commentText(table.comment) ? commentHeight : 0);
+  for (const column of tableExportColumns(table)) {
+    if (column.name === columnName) return top + rowHeight / 2;
+    top += rowHeight + (commentText(column.comment) ? commentHeight : 0);
+  }
+  return headerHeight / 2;
+}
+
 /**
  * Build relationship polylines from live waypoints or table positions.
  */
@@ -128,9 +140,19 @@ export function buildTableRelationshipPolylines(input: RelationshipGeometryInput
     heightByName.set(tableExportKey(table), height);
     heightByName.set(table.name, height);
   }
+  const tablesById = new Map(input.tables.map((table) => [tableExportKey(table), table]));
   const polylines: Record<string, Point[]> = {};
 
   for (const rel of input.relationships) {
+    if (rel.sourceTable === rel.targetTable) {
+      const table = tablesById.get(rel.sourceTable);
+      const position = input.positions[rel.sourceTable];
+      if (table && position) {
+        const x = position.x + cardWidth;
+        polylines[rel.id] = selfRelationshipPoints({ x, y: position.y + exportedColumnCenter(table, rel.sourceColumn, metrics) }, { x, y: position.y + exportedColumnCenter(table, rel.targetColumn, metrics) });
+        continue;
+      }
+    }
     const stored = input.waypoints?.[rel.id];
     if (stored && stored.length >= 2) {
       polylines[rel.id] = stored.map((p) => ({ ...p }));
@@ -336,13 +358,6 @@ export function buildTableDiagramSvg(options: TableDiagramSvgOptions): string {
   return parts.join("");
 }
 
-function nodeCenter(node: { x: number; y: number; width: number; height: number }): DiagramPosition {
-  return {
-    x: node.x + node.width / 2,
-    y: node.y + node.height / 2,
-  };
-}
-
 function cardinalityPoint(from: DiagramPosition, to: DiagramPosition): DiagramPosition {
   return {
     x: from.x + (to.x - from.x) * 0.72,
@@ -350,30 +365,22 @@ function cardinalityPoint(from: DiagramPosition, to: DiagramPosition): DiagramPo
   };
 }
 
-function entityCenterMap(entities: EngineeringEntityNode[]): Map<string, DiagramPosition> {
-  return new Map(entities.map((entity) => [entity.name, nodeCenter(entity)]));
-}
-
 export function buildEngineeringDiagramSvg(diagram: EngineeringDiagram): string {
   const parts = [svgHeader(diagram.canvas)];
-  const centers = entityCenterMap(diagram.entities);
+  const { attributeLines, relationshipLines } = buildEngineeringDiagramConnections(diagram);
+  const relationshipLinesById = new Map(relationshipLines.map((line) => [line.id, line]));
 
   parts.push('<g stroke="#52525b" stroke-width="1.2">');
-  for (const attribute of diagram.attributes) {
-    const from = centers.get(attribute.tableName);
-    if (!from) continue;
-    const to = nodeCenter(attribute);
-    parts.push(`<line x1="${svgNumber(from.x)}" y1="${svgNumber(from.y)}" x2="${svgNumber(to.x)}" y2="${svgNumber(to.y)}"/>`);
+  for (const line of [...attributeLines, ...relationshipLines]) {
+    parts.push(`<line x1="${svgNumber(line.x1)}" y1="${svgNumber(line.y1)}" x2="${svgNumber(line.x2)}" y2="${svgNumber(line.y2)}"/>`);
   }
   for (const relationship of diagram.relationships) {
-    const source = centers.get(relationship.sourceTable);
-    const target = centers.get(relationship.targetTable);
+    const source = relationshipLinesById.get(`relationship:${relationship.id}:source`);
+    const target = relationshipLinesById.get(`relationship:${relationship.id}:target`);
     if (!source || !target) continue;
-    const middle = nodeCenter(relationship);
-    parts.push(`<line x1="${svgNumber(source.x)}" y1="${svgNumber(source.y)}" x2="${svgNumber(middle.x)}" y2="${svgNumber(middle.y)}"/>`);
-    parts.push(`<line x1="${svgNumber(middle.x)}" y1="${svgNumber(middle.y)}" x2="${svgNumber(target.x)}" y2="${svgNumber(target.y)}"/>`);
-    const sourceLabel = cardinalityPoint(middle, source);
-    const targetLabel = cardinalityPoint(middle, target);
+    const middle = { x: source.x2, y: source.y2 };
+    const sourceLabel = cardinalityPoint(middle, { x: source.x1, y: source.y1 });
+    const targetLabel = cardinalityPoint(middle, { x: target.x2, y: target.y2 });
     parts.push(
       svgText(relationship.sourceCardinality, sourceLabel.x, sourceLabel.y - 8, {
         size: 13,

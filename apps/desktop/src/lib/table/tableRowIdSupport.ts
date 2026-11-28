@@ -3,33 +3,45 @@ import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import type { QueryResult } from "@/types/database";
 
 /**
- * Per-connection memory of engines that rejected the synthetic row-id locator.
+ * Session memory of tables/connections that rejected the synthetic row-id locator.
  *
  * Keyless PostgreSQL-family tables are opened with a `tableoid`/`ctid`/`xmin`
  * locator projection (see buildTableSelectSql). PostgreSQL-compatible engines
  * without system-column support — Hologres' query translation layer rejects
  * `tableoid` (issue #12647) — fail every such table open with a db error.
  * On the first failure the grid retries once without the locator; a successful
- * retry remembers the connection so later opens skip the locator entirely
+ * retry remembers the rejection so later opens skip the locator entirely
  * (keyless tables stay read-only there). Engines that also reject the
  * fallback restore the flag so the user sees the real server error again.
+ *
+ * The rejection is remembered per table when the failing table is known:
+ * on PolarDB the restriction is per access method, so one `polar_duckdb`
+ * column-store table rejecting the locator must not strip it from the heap
+ * tables on the same connection (#15865). A mark without a table key stays
+ * connection-wide for flows that cannot attribute the failure to one table.
  */
-const rowIdLocatorUnsupportedConnections = new Set<string>();
+const rowIdLocatorUnsupportedEntries = new Set<string>();
 
-export function rowIdLocatorUnsupported(connectionId: string): boolean {
-  return rowIdLocatorUnsupportedConnections.has(connectionId);
+/** Stable identity of one table for locator-support memory. */
+export function rowIdLocatorTableKey(connectionId: string, database: string | undefined, schema: string | undefined, catalog: string | undefined, tableName: string): string {
+  return JSON.stringify([connectionId, database ?? null, schema || "public", catalog ?? null, tableName]);
 }
 
-export function markRowIdLocatorUnsupported(connectionId: string): void {
-  rowIdLocatorUnsupportedConnections.add(connectionId);
+export function rowIdLocatorUnsupported(connectionId: string, tableKey?: string): boolean {
+  if (rowIdLocatorUnsupportedEntries.has(connectionId)) return true;
+  return !!tableKey && rowIdLocatorUnsupportedEntries.has(tableKey);
 }
 
-export function markRowIdLocatorSupported(connectionId: string): void {
-  rowIdLocatorUnsupportedConnections.delete(connectionId);
+export function markRowIdLocatorUnsupported(connectionId: string, tableKey?: string): void {
+  rowIdLocatorUnsupportedEntries.add(tableKey ?? connectionId);
+}
+
+export function markRowIdLocatorSupported(connectionId: string, tableKey?: string): void {
+  rowIdLocatorUnsupportedEntries.delete(tableKey ?? connectionId);
 }
 
 export function resetRowIdLocatorStateForTests(): void {
-  rowIdLocatorUnsupportedConnections.clear();
+  rowIdLocatorUnsupportedEntries.clear();
 }
 
 /** A failed data load whose SQL carried the locator is the retry trigger. */

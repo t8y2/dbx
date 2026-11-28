@@ -97,8 +97,8 @@ import { extractGraphCells, graphResultRows, mergeGraphResults } from "@/lib/gra
 import { formatRedisConsoleValue } from "@/lib/redis/redisValuePresentation";
 import { usesAgentCursorForQuery, usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
 import { connectionIsDorisFamilyCatalogCapable, defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction, usesOracleStickyTransactionState, usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
-import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, isViewTableType, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
-import { isPostgresTupleLocatorRejection, markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
+import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, isViewTableType, postgresAccessMethodSupportsTupleLocator, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { isPostgresTupleLocatorRejection, markRowIdLocatorUnsupported, rowIdLocatorTableKey, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { repairRestoredDataTabTableIdentity, tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
@@ -6194,7 +6194,8 @@ export const useQueryStore = defineStore("query", () => {
 
       // #12647：首开路径同样尊重"该连接的行定位器已被引擎拒绝"的记忆，否则
       // 被降级过的连接每次重新单击表都会再发一次注定失败的定位器查询。
-      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta.tableType) && !rowIdLocatorUnsupported(tab.connectionId) && !postgresTupleLocatorUnsupportedEngine(useConnectionStore().getConfig(tab.connectionId));
+      const locatorTableKey = rowIdLocatorTableKey(tab.connectionId, tableMeta.database, tableMeta.schema, tableMeta.catalog, tableMeta.tableName);
+      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta.tableType, tableMeta.accessMethod) && !rowIdLocatorUnsupported(tab.connectionId, locatorTableKey) && !postgresTupleLocatorUnsupportedEngine(useConnectionStore().getConfig(tab.connectionId));
       const buildRefreshSql = (includeRowId: boolean) =>
         buildTableSelectSql({
           databaseType: effectiveDbType,
@@ -6260,7 +6261,7 @@ export const useQueryStore = defineStore("query", () => {
           if (fallbackPublished === false || retryTab !== tab || retryTab.isExecuting) {
             return false;
           }
-          if (shouldKeepRowIdLocatorDisabled(retryTab.result)) markRowIdLocatorUnsupported(tab.connectionId);
+          if (shouldKeepRowIdLocatorDisabled(retryTab.result)) markRowIdLocatorUnsupported(tab.connectionId, locatorTableKey);
         } catch {
           // Fallback execution keeps its own error result visible and must not
           // change the connection capability memory.
@@ -7785,6 +7786,7 @@ export const useQueryStore = defineStore("query", () => {
         tableType: metadata.tableType,
         columns: metadata.columns,
         primaryKeys: metadata.primaryKeys,
+        ...(metadata.accessMethod ? { accessMethod: metadata.accessMethod } : {}),
         ...(metadata.virtualPrimaryKeys?.length ? { virtualPrimaryKeys: metadata.virtualPrimaryKeys } : {}),
       },
     };
@@ -8090,7 +8092,8 @@ export const useQueryStore = defineStore("query", () => {
       const primaryKeys = loaded.tableMeta.primaryKeys;
       const { connectionId, database, schema, catalog, tableName } = target.request;
       const tableKey = JSON.stringify([connectionId, database, schema || "public", catalog, tableName]);
-      const postgresCtidRowId = databaseType === "postgres" && primaryKeys.length === 0 && !postgresTupleLocatorUnsupportedEngine(conn) && !rowIdLocatorUnsupported(tab.connectionId) && !queryTablesWithoutTupleLocator.has(tableKey);
+      const postgresCtidRowId =
+        databaseType === "postgres" && primaryKeys.length === 0 && postgresAccessMethodSupportsTupleLocator(loaded.tableMeta.accessMethod) && !postgresTupleLocatorUnsupportedEngine(conn) && !rowIdLocatorUnsupported(tab.connectionId, tableKey) && !queryTablesWithoutTupleLocator.has(tableKey);
       const syntheticRowId = postgresCtidRowId || ((databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType));
       // Base tables without a natural identifier use the same physical row locator
       // as table-data tabs (Oracle, OceanBase Oracle, Xugu, and PostgreSQL). Confirm
@@ -10247,7 +10250,7 @@ export const useQueryStore = defineStore("query", () => {
         const pendingLocatorRetry = pendingQueryLocatorRetries.get(executionId);
         if (pendingLocatorRetry && pendingLocatorRetry.connectionId === executionConnectionId && queryBaseSql.trim() === pendingLocatorRetry.originalSql.trim()) {
           pendingQueryLocatorRetries.delete(executionId);
-          markRowIdLocatorUnsupported(executionConnectionId);
+          markRowIdLocatorUnsupported(executionConnectionId, pendingLocatorRetry.tableKey);
           queryExecutionLog("info", "query-locator-retry:original-sql", { traceId, elapsed: elapsed() });
           scheduleQueryLocatorRetry(tab, pendingLocatorRetry.originalSql, options);
         }
@@ -11226,7 +11229,7 @@ export const useQueryStore = defineStore("query", () => {
     const virtualColumns = analysis.selectStar ? snapshot.columns.map((name) => ({ name })) : analysis.columns.flatMap((column) => (column.sourceName ? [{ name: column.sourceName }] : []));
     const virtualPrimaryKeys = loadVirtualRowIdentifier(target.request, virtualColumns);
     const settings = { ...settingsStore.editorSettings };
-    const rowIdUnsupported = rowIdLocatorUnsupported(source.connectionId);
+    const rowIdUnsupported = rowIdLocatorUnsupported(source.connectionId, rowIdLocatorTableKey(source.connectionId, target.request.database, target.request.schema, target.request.catalog, target.request.tableName));
     const cells = snapshot.large_value_cells?.filter((cell) => !cell.value_ref) ?? [];
     return {
       read: async (signal) => {
@@ -11274,7 +11277,7 @@ export const useQueryStore = defineStore("query", () => {
               identifierQuote: source.identifierQuote,
               serverVersion: source.serverVersion,
               includeDatabaseName: settings.generateSqlIncludeDatabaseName,
-              includeRowId: shouldIncludeSyntheticRowId(source.databaseType, primaryKeys, loaded.tableMeta.tableType) && !rowIdUnsupported && !postgresTupleLocatorUnsupportedEngine(connection),
+              includeRowId: shouldIncludeSyntheticRowId(source.databaseType, primaryKeys, loaded.tableMeta.tableType, loaded.tableMeta.accessMethod) && !rowIdUnsupported && !postgresTupleLocatorUnsupportedEngine(connection),
               timeoutSecs: queryTimeoutSecsForConnection(connection, settings.globalQueryTimeoutSecs),
             },
             requests,

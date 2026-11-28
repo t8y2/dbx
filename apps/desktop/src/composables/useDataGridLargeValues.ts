@@ -5,7 +5,7 @@ import { chunkLegacyLargeValueRequests, fetchLegacyLargeValueRequestChunk, legac
 import { useConnectionStore } from "@/stores/connectionStore";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
-import { rowIdLocatorUnsupported } from "@/lib/table/tableRowIdSupport";
+import { markRowIdLocatorUnsupported, rowIdLocatorTableKey, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
@@ -47,6 +47,7 @@ interface LargeValueTableMeta {
   tableType?: string;
   columns: ColumnInfo[];
   primaryKeys: string[];
+  accessMethod?: string;
 }
 
 export interface UseDataGridLargeValuesOptions {
@@ -357,40 +358,58 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     const sourceLocator = createResultKeyLocator(sourceResult, primaryKeyIndexes, originalKeys, options.translate("grid.largeValueOriginalKeyUnavailable"));
     const predicates = await Promise.all([...requests.values()].map((request) => largeValueRowPredicate(request.sourceIndex, primaryKeyIndexes)));
     if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || options.result.value !== sourceResult) return;
-    const sql = await buildTableSelectSql({
-      databaseType: options.databaseType.value,
-      serverVersion: options.getConnectionConfig(options.connectionId.value!)?.database_info?.productVersion,
-      identifierQuote: options.connectionIdentifierQuote(options.connectionId.value),
-      database: tableMeta.database,
-      schema: tableMeta.schema,
-      tableName: tableMeta.tableName,
-      tableType: tableMeta.tableType,
-      catalog: tableMeta.catalog,
-      columns: selectedColumns,
-      columnTypes: selectedColumnTypes,
-      largeValuePreviewSize: TABLE_DATA_VISIBLE_PREVIEW_SIZE,
-      primaryKeys: tableMeta.primaryKeys,
-      whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
-      limit: requests.size,
-      offset: 0,
-      includeRowId:
-        shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType) &&
-        !(options.connectionId.value ? rowIdLocatorUnsupported(options.connectionId.value) : false) &&
+    const locatorTableKey = options.connectionId.value ? rowIdLocatorTableKey(options.connectionId.value, tableMeta.database, tableMeta.schema, tableMeta.catalog, tableMeta.tableName) : undefined;
+    const buildPreviewSql = (includeRowId: boolean) =>
+      buildTableSelectSql({
+        databaseType: options.databaseType.value,
+        serverVersion: options.getConnectionConfig(options.connectionId.value!)?.database_info?.productVersion,
+        identifierQuote: options.connectionIdentifierQuote(options.connectionId.value),
+        database: tableMeta.database,
+        schema: tableMeta.schema,
+        tableName: tableMeta.tableName,
+        tableType: tableMeta.tableType,
+        catalog: tableMeta.catalog,
+        columns: selectedColumns,
+        columnTypes: selectedColumnTypes,
+        largeValuePreviewSize: TABLE_DATA_VISIBLE_PREVIEW_SIZE,
+        primaryKeys: tableMeta.primaryKeys,
+        whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
+        limit: requests.size,
+        offset: 0,
+        includeRowId,
+      });
+    const sql = await buildPreviewSql(
+      shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType, tableMeta.accessMethod) &&
+        !(options.connectionId.value ? rowIdLocatorUnsupported(options.connectionId.value, locatorTableKey) : false) &&
         !postgresTupleLocatorUnsupportedEngine(useConnectionStore().getConfig(options.connectionId.value)),
-    });
+    );
     if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || options.result.value !== sourceResult) return;
-    const connection = options.getConnectionConfig(options.connectionId.value!);
+    const connectionId = options.connectionId.value;
+    if (!connectionId) return;
+    const connection = options.getConnectionConfig(connectionId);
     const executionId = options.uuid();
     visibleLargeValuePreviewExecutionIds.set(generation, executionId);
     let results: QueryResult[];
     try {
-      results = await api.executeMulti(options.connectionId.value, options.executionDatabase.value, sql, undefined, executionId, {
-        maxRows: requests.size,
-        fetchSize: requests.size,
-        resultKeyColumns: tableMeta.primaryKeys,
-        tableDataPreview: true,
-        timeoutSecs: queryTimeoutSecsForConnection(connection, options.globalQueryTimeoutSecs.value),
-      });
+      const executePreview = (previewSql: string) =>
+        api.executeMulti(connectionId, options.executionDatabase.value, previewSql, undefined, executionId, {
+          maxRows: requests.size,
+          fetchSize: requests.size,
+          resultKeyColumns: tableMeta.primaryKeys,
+          tableDataPreview: true,
+          timeoutSecs: queryTimeoutSecsForConnection(connection, options.globalQueryTimeoutSecs.value),
+        });
+      results = await executePreview(sql);
+      // Engines that reject the tuple locator (PolarDB column-store tables,
+      // #15865) fail this preview outright; retry once without it, mirroring
+      // the grid's main load fallback, and remember the table on success.
+      if (shouldRetryWithoutRowIdLocator(sql, results[0])) {
+        const fallbackResults = await executePreview(await buildPreviewSql(false));
+        if (shouldKeepRowIdLocatorDisabled(fallbackResults[0]) && options.connectionId.value) {
+          markRowIdLocatorUnsupported(options.connectionId.value, locatorTableKey);
+          results = fallbackResults;
+        }
+      }
     } finally {
       if (visibleLargeValuePreviewExecutionIds.get(generation) === executionId) visibleLargeValuePreviewExecutionIds.delete(generation);
     }
@@ -515,7 +534,11 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       identifierQuote: options.connectionIdentifierQuote(connectionId),
       serverVersion: connection?.database_info?.productVersion,
       includeDatabaseName: options.includeDatabaseName.value,
-      includeRowId: !!tableMeta && shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !(connectionId ? rowIdLocatorUnsupported(connectionId) : false) && !postgresTupleLocatorUnsupportedEngine(connection),
+      includeRowId:
+        !!tableMeta &&
+        shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType, tableMeta.accessMethod) &&
+        !(connectionId ? rowIdLocatorUnsupported(connectionId, rowIdLocatorTableKey(connectionId, tableMeta.database, tableMeta.schema, tableMeta.catalog, tableMeta.tableName)) : false) &&
+        !postgresTupleLocatorUnsupportedEngine(connection),
       timeoutSecs: queryTimeoutSecsForConnection(connection, options.globalQueryTimeoutSecs.value),
     };
   }

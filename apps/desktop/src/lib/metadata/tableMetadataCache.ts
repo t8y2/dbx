@@ -19,6 +19,8 @@ export interface TableMetadata {
   columns: ColumnInfo[];
   indexes: IndexInfo[];
   primaryKeys: string[];
+  /** PostgreSQL table access method (`pg_am.amname`), probed for keyless base tables. */
+  accessMethod?: string;
   virtualPrimaryKeys?: string[];
   rowIdentityResolved?: boolean;
   cachedAt: number;
@@ -294,6 +296,7 @@ export function tableMetadataToDataTabMeta(metadata: TableMetadata, overrides?: 
     database: metadata.database,
     columns: metadata.columns,
     primaryKeys: metadata.primaryKeys,
+    ...(metadata.accessMethod ? { accessMethod: metadata.accessMethod } : {}),
     ...(metadata.virtualPrimaryKeys?.length ? { virtualPrimaryKeys: metadata.virtualPrimaryKeys } : {}),
     physicalPrimaryKeys: physicalTablePrimaryKeys(metadata.columns, metadata.indexes, metadata.databaseType),
   };
@@ -348,12 +351,51 @@ function tableMetadataFromFacets(request: TableMetadataRequest, columnsResult: T
   };
 }
 
+function quoteMetadataSqlLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/**
+ * Access-method probe for keyless PostgreSQL base tables. The tuple locator
+ * decision needs `pg_class.relam -> pg_am.amname`: system columns exist in
+ * `pg_attribute` even on column-store tables that reject them at execution
+ * (PolarDB CSI `polar_duckdb`, #15865), so only the access method tells.
+ */
+export function postgresAccessMethodProbeSql(schema: string | undefined, tableName: string): string {
+  const schemaPredicate = schema ? `n.nspname = ${quoteMetadataSqlLiteral(schema)}` : "n.nspname = current_schema()";
+  return `SELECT COALESCE(am.amname, '') FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam WHERE ${schemaPredicate} AND c.relname = ${quoteMetadataSqlLiteral(tableName)} AND c.relkind IN ('r', 'p', 'f')`;
+}
+
+export function postgresAccessMethodFromResult(result: { rows: readonly (readonly unknown[])[]; execution_error?: boolean } | undefined | null): string | undefined {
+  if (!result || result.execution_error) return undefined;
+  const value = result.rows[0]?.[0];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+async function withPostgresAccessMethod(request: TableMetadataRequest, metadata: TableMetadata, read?: <T>(request: () => Promise<T>) => Promise<T>): Promise<TableMetadata> {
+  // Only keyless base tables ever receive the locator, so keyed tables and
+  // other engines skip the probe round trip entirely.
+  if (request.databaseType !== "postgres" || metadata.primaryKeys.length > 0 || metadata.columns.length === 0) return metadata;
+  const tableType = metadata.tableType?.trim().toUpperCase();
+  if (tableType !== "TABLE" && tableType !== "BASE TABLE") return metadata;
+  try {
+    const sql = postgresAccessMethodProbeSql(metadata.schema || request.schema || request.currentSchema, metadata.tableName);
+    const run = () => api.executeQuery(request.connectionId, request.database, sql, metadata.schema || request.schema, undefined, { maxRows: 1, pageSize: 1 });
+    const accessMethod = postgresAccessMethodFromResult(read ? await read(run) : await run());
+    return accessMethod ? { ...metadata, accessMethod } : metadata;
+  } catch {
+    // A failed probe keeps the previous behavior: inject the locator and let
+    // the retry fallback handle engines that reject it.
+    return metadata;
+  }
+}
+
 export async function loadTableMetadataForExport(request: TableMetadataRequest, read: <T>(request: () => Promise<T>) => Promise<T>, capturedVirtualPrimaryKeys: readonly string[] = []): Promise<TableMetadata> {
   const columnsResult = await read(() => loadTableColumns({ ...request, force: true }));
   const resolvedTarget = columnsResult.columns.find((column) => column.resolved_table);
   const indexRequest = { ...request, force: true, schema: resolvedTarget?.resolved_schema ?? (columnsResult.schema || request.schema || request.currentSchema), tableName: resolvedTarget?.resolved_table ?? request.tableName };
   const indexes = columnsResult.columns.length ? await read(() => loadTableIndexes(indexRequest)) : [];
-  const metadata = tableMetadataFromFacets(request, columnsResult, indexes, true);
+  const metadata = await withPostgresAccessMethod(request, tableMetadataFromFacets(request, columnsResult, indexes, true), read);
   const virtualPrimaryKeys = metadata.primaryKeys.length ? [] : (resolveRowIdentifierColumns(capturedVirtualPrimaryKeys, metadata.columns) ?? []);
   return virtualPrimaryKeys.length ? { ...metadata, primaryKeys: virtualPrimaryKeys, virtualPrimaryKeys } : metadata;
 }
@@ -405,7 +447,7 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
         const indexRequest = { ...request, schema: resolvedTarget?.resolved_schema ?? (resolvedSchema || request.currentSchema), tableName: resolvedTarget?.resolved_table ?? request.tableName };
         const loadedIndexes = columns.length > 0 ? await ((!resolvedTarget && indexesPromise) || loadTableIndexes(indexRequest).catch(() => undefined)) : [];
         const indexes = loadedIndexes ?? indexFailure();
-        return tableMetadataFromFacets(request, columnsResult, indexes, rowIdentityResolved);
+        return withPostgresAccessMethod(request, tableMetadataFromFacets(request, columnsResult, indexes, rowIdentityResolved));
       },
       { force: request.force, kind: scope.kind },
     );

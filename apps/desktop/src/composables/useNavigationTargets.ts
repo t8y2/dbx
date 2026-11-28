@@ -8,7 +8,7 @@ import { loadTableDataQueryDefaults, removeTableDataQueryDefaults, shouldRetryWi
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { editableRowIdentifierColumns, isViewTableType, physicalTablePrimaryKeys, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
-import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
+import { markRowIdLocatorUnsupported, rowIdLocatorTableKey, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
 import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
@@ -254,7 +254,8 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
     }
     const eagerColumns = eagerMetadata?.metadata.columns ?? [];
     const eagerPrimaryKeys = eagerMetadata?.metadata.primaryKeys ?? [];
-    const eagerIncludeRowId = Boolean(eagerMetadata) && shouldIncludeSyntheticRowId(effectiveDbType, eagerPrimaryKeys, targetTableType) && !rowIdLocatorUnsupported(target.connectionId) && !postgresTupleLocatorUnsupportedEngine(config);
+    const locatorTableKey = rowIdLocatorTableKey(target.connectionId, target.database, tableSchema, target.catalog, target.tableName);
+    const eagerIncludeRowId = Boolean(eagerMetadata) && shouldIncludeSyntheticRowId(effectiveDbType, eagerPrimaryKeys, targetTableType, eagerMetadata?.metadata.accessMethod) && !rowIdLocatorUnsupported(target.connectionId, locatorTableKey) && !postgresTupleLocatorUnsupportedEngine(config);
     const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, physicalTablePrimaryKeys(eagerColumns, eagerMetadata?.metadata.indexes, effectiveDbType), identifierQuote);
     const tableSelectSqlOptions = {
       databaseType: effectiveDbType,
@@ -316,7 +317,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
       await queryStore.executeTabSql(tabId, fallbackSql, { pagination: { limit: pageLimit, offset: 0 } });
       if (!isCurrentTarget()) return;
       const retryTab = queryStore.tabs.find((tab) => tab.id === tabId);
-      if (shouldKeepRowIdLocatorDisabled(retryTab?.result)) markRowIdLocatorUnsupported(target.connectionId);
+      if (shouldKeepRowIdLocatorDisabled(retryTab?.result)) markRowIdLocatorUnsupported(target.connectionId, locatorTableKey);
     }
     // 保存的默认筛选/排序随首查执行失败（列被删/改名，schema 漂移）：镜像
     // #12647 的降级契约——清掉过期默认值并不带它们重试一次，表仍能打开；
@@ -377,7 +378,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
       // 异步窗口内 tab 可能已被复用为其他目标：旧请求的元数据不得落地、
       // 不得解除新目标的 pending
       if (!isCurrentTarget() || !isCurrentGeneration()) return;
-      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, targetTableType) && !rowIdLocatorUnsupported(target.connectionId) && !postgresTupleLocatorUnsupportedEngine(connectionStore.getConfig(target.connectionId));
+      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, targetTableType, metadata.accessMethod) && !rowIdLocatorUnsupported(target.connectionId, locatorTableKey) && !postgresTupleLocatorUnsupportedEngine(connectionStore.getConfig(target.connectionId));
       queryStore.setTableMeta(tabId, {
         schema: tableSchema,
         catalog: target.catalog,
@@ -386,6 +387,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
         tableType: targetTableType,
         columns,
         primaryKeys,
+        ...(metadata.accessMethod ? { accessMethod: metadata.accessMethod } : {}),
       });
       if (!fellBackToLimitZero && !firstQueryFailed && ((useRowId && !eagerIncludeRowId) || config.db_type === "tdengine")) {
         const newSql = await buildTableSelectSql({

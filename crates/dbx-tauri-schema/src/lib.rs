@@ -105,8 +105,9 @@ mod tests {
 
     #[test]
     fn handles_only_schema_commands_including_native_jobs() {
-        assert_eq!(COMMANDS.len(), 68);
+        assert_eq!(COMMANDS.len(), 69);
         assert!(handles("list_databases"));
+        assert!(handles("list_table_children"));
         assert!(handles("load_schema_diff_routines"));
         assert!(handles("prepare_oracle_routine_save"));
         assert!(handles("prepare_oracle_routine_plan"));

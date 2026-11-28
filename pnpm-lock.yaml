@@ -9,6 +9,11 @@ overrides:
   '@lezer/common': 1.5.5
   '@codemirror/view': 6.43.0
 
+patchedDependencies:
+  '@codemirror/lang-sql@6.10.0':
+    hash: 911c39e8cfaadb960c0c815048cb0a2fad08dcb80cc81977f35984ed30cd2698
+    path: patches/@codemirror__lang-sql@6.10.0.patch
+
 importers:
 
   .:
@@ -29,8 +34,8 @@ importers:
         specifier: ^6.0.2
         version: 6.0.2
       '@codemirror/lang-sql':
-        specifier: ^6.10.0
-        version: 6.10.0
+        specifier: 6.10.0
+        version: 6.10.0(patch_hash=911c39e8cfaadb960c0c815048cb0a2fad08dcb80cc81977f35984ed30cd2698)
       '@codemirror/lang-xml':
         specifier: ^6.1.0
         version: 6.1.0
@@ -4145,7 +4150,7 @@ snapshots:
       '@codemirror/language': 6.13.1
       '@lezer/json': 1.0.3
 
-  '@codemirror/lang-sql@6.10.0':
+  '@codemirror/lang-sql@6.10.0(patch_hash=911c39e8cfaadb960c0c815048cb0a2fad08dcb80cc81977f35984ed30cd2698)':
     dependencies:
       '@codemirror/autocomplete': 6.20.4
       '@codemirror/language': 6.13.1

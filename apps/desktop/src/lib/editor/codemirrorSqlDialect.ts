@@ -390,6 +390,8 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
       caseInsensitiveIdentifiers: true,
       identifierQuotes: "",
       doubleDollarQuotedStrings: false,
+      // SOQL has no nested block comments.
+      nestedComments: false,
     }).configureLanguage({
       props: SQL_DIALECT_LANGUAGE_PROPS,
     });
@@ -433,6 +435,20 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
         }
       : {}),
     ...(isPlsql ? { doubleQuotedStrings: false } : {}),
+    // CodeMirror's SQL tokenizer nests /* */ block comments unconditionally,
+    // which is only right for the dialects that document nesting:
+    //   PostgreSQL - "These block comments nest, as specified in the SQL
+    //                 standard but unlike C" (Lexical Structure, 4.1.5).
+    //   T-SQL      - a `/*` inside a comment opens a nested one needing its
+    //                own `*/` (slash-star Comment, Transact-SQL).
+    //   ClickHouse - "C-style comments can be nested" (SQL Reference, Syntax).
+    // Oracle, MySQL and SQLite close at the first `*/` (verified against live
+    // servers), and for them a stray `/*` inside a comment otherwise leaks the
+    // comment state downward and paints the rest of the document as a comment.
+    // Everything else keeps the safe non-nesting behaviour until its own
+    // documentation says otherwise: wrongly nesting re-introduces that bug,
+    // while wrongly not nesting only ends a comment early.
+    nestedComments: isPostgres || isSqlServer || isClickHouse,
     doubleDollarQuotedStrings: false,
   }).configureLanguage({
     props: SQL_DIALECT_LANGUAGE_PROPS,

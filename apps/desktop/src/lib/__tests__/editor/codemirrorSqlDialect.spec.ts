@@ -155,6 +155,68 @@ describe("codemirrorSqlDialect", () => {
     expect(nodeNameAt(dialect, doubleQuoteStatement, "col")).toBe("Identifier");
   });
 
+  // Verified against live servers rather than assumed:
+  //   Oracle  `SELECT /* a /* b */ 1 FROM dual`      -> 1      (doubled */ -> ORA-00923)
+  //   MySQL   `SELECT /* a /* b */ 1`                -> 1
+  //   SQLite  `SELECT /* a /* b */ 1`                -> 1      (doubled */ -> syntax error)
+  //   MSSQL   `SELECT /* a /* b */ */ 1`             -> 1      (single */ -> "missing end comment mark")
+  // PostgreSQL and T-SQL both document nested block comments; the others close
+  // at the first `*/`.
+  it("does not nest block comments for Oracle, MySQL and SQLite", () => {
+    // Real-world shape from an Oracle package body: a second `/*` appears before
+    // the first `*/`. These dialects close the comment at the first `*/`, so the
+    // code after it stays code. CodeMirror's SQL tokenizer otherwise nests
+    // `/* */` and the comment state leaks downward, painting the rest of a
+    // package body as a comment.
+    const source = ["/* outer note /* inner marker */", "SELECT col FROM dual"].join("\n");
+
+    for (const databaseType of ["oracle", "mysql", "sqlite"] as DatabaseType[]) {
+      const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType);
+      expect(dialect.spec.nestedComments, databaseType).toBe(false);
+      expect(nodeNameAt(dialect, source, "SELECT"), databaseType).toBe("Keyword");
+      expect(nodeNameAt(dialect, source, "FROM"), databaseType).toBe("Keyword");
+    }
+  });
+
+  it.each([
+    ["postgres", "postgres"],
+    ["sqlserver", "sqlserver"],
+    // ClickHouse resolves to the StandardSQL base, so it needs its own row:
+    // the Oracle/MySQL/SQLite case below cannot stand in for it.
+    ["clickhouse", "clickhouse"],
+  ] as const)("keeps nested block comments for %s, which documents them", (mode, databaseType) => {
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, mode, databaseType as DatabaseType);
+    expect(dialect.spec.nestedComments).toBe(true);
+
+    // Outer comment + nested comment + trailing SQL: both `*/` are consumed by
+    // the comment, so the statement after it is live code.
+    const closed = ["/* outer /* inner */ */", "SELECT 1"].join("\n");
+    expect(nodeNameAt(dialect, closed, "SELECT"), `${databaseType} closed`).toBe("Keyword");
+
+    // Only one `*/`: the nested level is still open, so the trailing SELECT
+    // stays inside the comment — matching what these servers report.
+    const stillOpen = ["/* outer /* inner */", "SELECT 1"].join("\n");
+    expect(nodeNameAt(dialect, stillOpen, "SELECT"), `${databaseType} still open`).not.toBe("Keyword");
+  });
+
+  // db2, gbase8c and gbase8s resolve to the StandardSQL base, the same base
+  // ClickHouse uses. ClickHouse documents nested comments and opts in above;
+  // these three have no such documentation, so they keep the safe non-nesting
+  // behaviour. Nesting them wrongly would re-introduce the runaway-comment bug,
+  // whereas not nesting only ends a comment early — the cheaper mistake.
+  it("leaves StandardSQL-based dialects non-nesting unless the engine documents nesting", () => {
+    const source = ["/* outer note /* inner marker */", "SELECT col FROM t"].join("\n");
+
+    for (const databaseType of ["db2", "gbase8c", "gbase8s"] as DatabaseType[]) {
+      const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType);
+      expect(dialect.spec.nestedComments, databaseType).toBe(false);
+      expect(nodeNameAt(dialect, source, "SELECT"), databaseType).toBe("Keyword");
+    }
+
+    // Same base, opposite setting — proves the flag is per dialect, not per base.
+    expect(createDbxCodeMirrorSqlDialect(langSql, "clickhouse", "clickhouse").spec.nestedComments).toBe(true);
+  });
+
   it("tags QuotedIdentifier as tags.name so quoted columns/tables match unquoted identifiers (#12122)", async () => {
     const { highlightTree, tags } = await import("@lezer/highlight");
     const { HighlightStyle } = await import("@codemirror/language");

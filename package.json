@@ -56,7 +56,7 @@
     "@codemirror/commands": "^6.10.3",
     "@codemirror/lang-html": "^6.4.11",
     "@codemirror/lang-json": "^6.0.2",
-    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/lang-sql": "6.10.0",
     "@codemirror/lang-xml": "^6.1.0",
     "@codemirror/lang-yaml": "^6.1.3",
     "@codemirror/language": "^6.12.3",
@@ -163,6 +163,9 @@
       "happy-dom": "~20.10.6",
       "@lezer/common": "1.5.5",
       "@codemirror/view": "6.43.0"
+    },
+    "patchedDependencies": {
+      "@codemirror/lang-sql@6.10.0": "patches/@codemirror__lang-sql@6.10.0.patch"
     }
   }
 }

@@ -1,4 +1,5 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { DICTIONARY_EXPORT_FORMATS, type DictionaryExportFormat } from "./dataDictionary";
 
 export class DictionaryFileExistsError extends Error {
   constructor() {
@@ -7,10 +8,10 @@ export class DictionaryFileExistsError extends Error {
   }
 }
 
-export async function chooseDataDictionaryPath(suggestedName: string): Promise<string | null> {
+export async function chooseDataDictionaryPath(suggestedName: string, format: DictionaryExportFormat = "pdf"): Promise<string | null> {
   if (!isTauriRuntime()) return suggestedName;
   const { save } = await import("@tauri-apps/plugin-dialog");
-  return save({ defaultPath: suggestedName, filters: [{ name: "PDF", extensions: ["pdf"] }] });
+  return save({ defaultPath: suggestedName, filters: [{ name: DICTIONARY_EXPORT_FORMATS[format].label, extensions: [format] }] });
 }
 
 /**
@@ -18,10 +19,11 @@ export async function chooseDataDictionaryPath(suggestedName: string): Promise<s
  * `save()` just returned. Tauri's dialog grant covers that exact path, not a
  * typed path or a timestamp appended after the dialog closes.
  */
-export async function saveDataDictionaryFile(suggestedName: string, content: Uint8Array, options: { overwrite: boolean; grantedPath?: string }): Promise<string | null> {
+export async function saveDataDictionaryFile(suggestedName: string, content: Uint8Array, options: { overwrite: boolean; grantedPath?: string; format?: DictionaryExportFormat }): Promise<string | null> {
+  const format = options.format ?? "pdf";
   if (isTauriRuntime()) {
     const fs = await import("@tauri-apps/plugin-fs");
-    const granted = options.grantedPath ?? (await chooseDataDictionaryPath(suggestedName));
+    const granted = options.grantedPath ?? (await chooseDataDictionaryPath(suggestedName, format));
     if (!granted) return null;
     if (!options.overwrite && (await fs.exists(granted))) throw new DictionaryFileExistsError();
     await fs.writeFile(granted, content);
@@ -29,7 +31,7 @@ export async function saveDataDictionaryFile(suggestedName: string, content: Uin
   }
 
   const downloadName = suggestedName.split(/[/\\]/).pop() || suggestedName;
-  const blob = new Blob([content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength) as ArrayBuffer], { type: "application/pdf" });
+  const blob = new Blob([content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength) as ArrayBuffer], { type: DICTIONARY_EXPORT_FORMATS[format].mimeType });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;

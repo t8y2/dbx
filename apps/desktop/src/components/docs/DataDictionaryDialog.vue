@@ -23,7 +23,9 @@ import {
   warningsForSelection,
   toggleOrderedKey,
   moveOrderedKey,
-  type DataDictionaryLabels,
+  DICTIONARY_EXPORT_FORMATS,
+  withDictionaryFileFormat,
+  type DictionaryExportFormat,
   type DictionaryLayout,
   type DictionaryObjectRef,
   type DictionaryProfile,
@@ -31,6 +33,7 @@ import {
   type DictionaryTemplateId,
 } from "@/lib/docs/dataDictionary";
 import { buildDataDictionaryPdf } from "@/lib/docs/dataDictionaryPdf";
+import type { DictionaryTabularLabels } from "@/lib/docs/renderDataDictionaryTabular";
 import { DictionaryFileExistsError, chooseDataDictionaryPath } from "@/lib/docs/saveDataDictionaryFile";
 import { hasActiveDictionaryExport, startDataDictionaryExport } from "@/lib/docs/dataDictionaryExportTask";
 import { useToast } from "@/composables/useToast";
@@ -66,6 +69,7 @@ const appendTimestamp = ref(false);
 const overwrite = ref(true);
 const continueOnError = ref(true);
 const outputPath = ref("");
+const outputFormat = ref<DictionaryExportFormat>("pdf");
 const previewUrl = ref("");
 let generation = 0;
 
@@ -73,6 +77,7 @@ const steps = computed(() => [t("dataDictionary.stepDatabases"), t("dataDictiona
 const dbType = computed(() => connectionStore.getConfig(props.prefillConnectionId || "")?.db_type);
 const schemaAware = computed(() => isSchemaAware(dbType.value));
 const checkedDatabases = computed(() => databases.value.filter((item) => item.checked).map((item) => item.name));
+const outputFileName = computed(() => withDictionaryFileFormat(dataDictionaryFileName(checkedDatabases.value[0] || "DataDictionary", false), outputFormat.value));
 const checkedSchemas = computed(() => schemas.value.filter((item) => item.checked && checkedDatabases.value.includes(item.database)));
 const filteredObjects = computed(() => {
   const query = objectSearch.value.trim().toLowerCase();
@@ -90,8 +95,10 @@ function blankLayout(): DictionaryLayout {
   return applyTemplate("standard", { title: "", introduction: "", detailedIntroduction: "", leftFooter: "" });
 }
 
-function labels(): DataDictionaryLabels {
+function labels(): DictionaryTabularLabels {
   return {
+    object: t("dataDictionary.exportObjectHeading"),
+    warnings: t("dataDictionary.exportWarningsHeading"),
     column: t("dataDictionary.column"),
     type: t("dataDictionary.type"),
     length: t("dataDictionary.length"),
@@ -306,8 +313,7 @@ async function goNext(): Promise<void> {
 
 async function browse(): Promise<void> {
   if (!isTauriRuntime()) return;
-  const { save } = await import("@tauri-apps/plugin-dialog");
-  const path = await save({ defaultPath: dataDictionaryFileName(checkedDatabases.value[0] || "DataDictionary", appendTimestamp.value), filters: [{ name: "PDF", extensions: ["pdf"] }] });
+  const path = await chooseDataDictionaryPath(resolveDictionaryExportPath("", outputFileName.value, appendTimestamp.value), outputFormat.value);
   if (path) outputPath.value = path;
 }
 
@@ -321,9 +327,9 @@ async function exportDictionary(): Promise<void> {
   exporting.value = true;
   exportError.value = null;
   try {
-    const fallback = dataDictionaryFileName(checkedDatabases.value[0] || "DataDictionary", false);
-    const suggested = resolveDictionaryExportPath(outputPath.value, fallback, appendTimestamp.value);
-    const path = await chooseDataDictionaryPath(suggested);
+    const format = outputFormat.value;
+    const suggested = resolveDictionaryExportPath(withDictionaryFileFormat(outputPath.value, format), outputFileName.value, appendTimestamp.value);
+    const path = await chooseDataDictionaryPath(suggested, format);
     if (!path) return;
     const started = startDataDictionaryExport({
       connectionId,
@@ -334,6 +340,7 @@ async function exportDictionary(): Promise<void> {
       layout: { ...layout.value },
       labels: labels(),
       outputPath: path,
+      format,
       overwrite: overwrite.value,
       continueOnError: continueOnError.value,
       warningText: (warning) => warningText(warning),
@@ -363,6 +370,7 @@ function profilePayload(): DictionaryProfile {
     overwrite: overwrite.value,
     continueOnError: continueOnError.value,
     fileName: outputPath.value,
+    format: outputFormat.value,
   };
 }
 
@@ -394,6 +402,7 @@ async function loadProfile(): Promise<void> {
     overwrite.value = parsed.overwrite;
     continueOnError.value = parsed.continueOnError;
     outputPath.value = parsed.fileName;
+    outputFormat.value = parsed.format ?? "pdf";
     databases.value = databases.value.map((item) => ({ ...item, checked: parsed.databases.includes(item.name) }));
     await loadSchemas();
     schemas.value = schemas.value.map((item) => ({ ...item, checked: parsed.schemas.some((schema) => schema.database === item.database && schema.name === item.name) }));
@@ -442,6 +451,7 @@ watch(
     step.value = 0;
     exportError.value = null;
     outputPath.value = "";
+    outputFormat.value = "pdf";
     appendTimestamp.value = false;
     overwrite.value = true;
     continueOnError.value = true;
@@ -598,9 +608,15 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-else class="flex max-w-xl flex-col gap-3">
+          <label class="grid gap-1 text-sm">
+            {{ t("grid.exportFormat") }}
+            <select v-model="outputFormat" class="w-fit rounded border bg-transparent px-2 py-1 text-sm" @change="outputPath = withDictionaryFileFormat(outputPath, outputFormat)">
+              <option v-for="(format, extension) in DICTIONARY_EXPORT_FORMATS" :key="extension" :value="extension">{{ format.label }}</option>
+            </select>
+          </label>
           <Label>{{ t("dataDictionary.exportToFile") }}</Label>
           <div class="flex gap-2">
-            <Input v-model="outputPath" :placeholder="dataDictionaryFileName(checkedDatabases[0] || 'DataDictionary', appendTimestamp)" />
+            <Input v-model="outputPath" :placeholder="resolveDictionaryExportPath('', outputFileName, appendTimestamp)" />
             <Button v-if="isTauriRuntime()" type="button" variant="outline" @click="browse()">{{ t("dataDictionary.browse") }}</Button>
           </div>
           <label class="flex items-center justify-between gap-2 text-sm"

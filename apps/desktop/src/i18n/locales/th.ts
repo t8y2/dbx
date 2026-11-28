@@ -571,6 +571,8 @@ export default withEnglishFallback({
     },
   },
   dataDictionary: {
+    exportObjectHeading: "ออบเจ็กต์",
+    exportWarningsHeading: "คำเตือน",
     title: "ส่งออกพจนานุกรมข้อมูล",
     includeIndexes: "รวม Index และ Foreign Key",
     loading: "กำลังอ่านโครงสร้าง…",

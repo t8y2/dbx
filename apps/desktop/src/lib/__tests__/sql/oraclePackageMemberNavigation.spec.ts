@@ -172,6 +172,25 @@ END BZ_EM_PRO;`;
       expect(resolveAt(QUOTED, bodyContext, `"MIXEDCASE"('hi')`)).toBeNull();
     });
 
+    it("does not bind an unquoted call to a quoted mixed-case member", () => {
+      // 不带引号的 MixedCase 在 Oracle 里就是 MIXEDCASE，不是带引号创建的 "MixedCase"。
+      const source = QUOTED.replace(`"MIXEDCASE"('hi');`, "MixedCase('hi');");
+      expect(resolveAt(source, bodyContext, "MixedCase('hi')")).toBeNull();
+    });
+
+    it("resolves an unquoted call to the upper-case member whatever the source casing", () => {
+      const source = BODY.replace("BZ_EM_CLEAN_REC_E(V0, IRET, SRET);", "bz_em_clean_rec_e(V0, IRET, SRET);");
+      expect(resolveAt(source, bodyContext, "bz_em_clean_rec_e(V0")?.kind).toBe("document");
+    });
+
+    it("does not treat an unquoted qualifier as a quoted mixed-case package", () => {
+      const mixedContext: OraclePackageSourceContext = { name: "MixedPkg", schema: "LLMES", objectType: "PACKAGE_BODY" };
+      const unquoted = BODY.replace("BZ_EM_CLEAN_REC_E(V0, IRET, SRET);", "MixedPkg.BZ_EM_CLEAN_REC_E(V0, IRET, SRET);");
+      expect(resolveAt(unquoted, mixedContext, "MixedPkg.BZ_EM_CLEAN_REC_E")).toBeNull();
+      const quoted = BODY.replace("BZ_EM_CLEAN_REC_E(V0, IRET, SRET);", `"MixedPkg".BZ_EM_CLEAN_REC_E(V0, IRET, SRET);`);
+      expect(resolveAt(quoted, mixedContext, `"MixedPkg".BZ_EM_CLEAN_REC_E`, 13)?.kind).toBe("document");
+    });
+
     it("keeps an unquoted package qualifier case-insensitive", () => {
       const source = BODY.replace("BZ_EM_CLEAN_REC_E(V0, IRET, SRET);", "bz_em_pro.BZ_EM_CLEAN_REC_E(V0, IRET, SRET);");
       expect(resolveAt(source, bodyContext, "bz_em_pro.BZ_EM_CLEAN_REC_E")?.kind).toBe("document");

@@ -2509,12 +2509,6 @@ function openTableStructureEditor() {
 }
 
 /**
- * Double-clicking a routine opens its source as an editable query tab
- * (issue #10202), the same container the sidebar and editor navigation use.
- * The store owns connection setup, source loading and tab de-duplication, so
- * this path deliberately does not fall back to the side panel.
- */
-/**
  * 源码面板显示的包。编辑器拿它把包内的裸名解析成这个包的成员，而不是去数据字典里
  * 找一个同名的独立过程 —— 包成员不是独立对象，那样只会取回空源码。
  */
@@ -2545,6 +2539,12 @@ function openPackageMemberSource(target: SqlObjectNavigationTarget) {
   });
 }
 
+/**
+ * Double-clicking a routine opens its source as an editable query tab
+ * (issue #10202), the same container the sidebar and editor navigation use.
+ * The store owns connection setup, source loading and tab de-duplication, so
+ * this path deliberately does not fall back to the side panel.
+ */
 function openSourceTab(row: ObjectBrowserRow) {
   queryStore.openObjectSourceTabPending({
     connectionId: props.connection.id,

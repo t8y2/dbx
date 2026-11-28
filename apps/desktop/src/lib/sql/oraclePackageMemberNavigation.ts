@@ -37,10 +37,16 @@ function memberSignature(entry: OraclePackageMemberEntry): string | undefined {
 }
 
 /**
- * 带引号的引用在 Oracle 里大小写敏感，`"MyPkg"` 不等于 `MYPKG`；不带引号的才按大小写不敏感比。
+ * 源码里的引用对应的数据字典名：带引号的按原样，不带引号的 Oracle 会折成全大写。
+ * `MyProc` 因此是 `MYPROC`，不会命中带引号创建的 `"MyProc"`。
  */
+function dictionaryName(reference: string, referenceQuoted: boolean | undefined): string {
+  return referenceQuoted ? reference : reference.toUpperCase();
+}
+
+/** `stored` 是数据字典里存的名字（带引号创建的混合大小写保持原样）。 */
 function referencesSameIdentifier(reference: string, referenceQuoted: boolean | undefined, stored: string): boolean {
-  return referenceQuoted ? reference === stored : reference.toUpperCase() === stored.toUpperCase();
+  return dictionaryName(reference, referenceQuoted) === stored;
 }
 
 /**
@@ -66,6 +72,8 @@ export function resolveOraclePackageMemberNavigation(options: { source: string; 
   // 否则 Ctrl/Cmd+点击会悄悄跳到错误的重载。拿不准就交回元数据解析链。
   const found = header ?? findOraclePackageMember(source, { name: wanted, nameQuoted: identity.nameQuoted });
   if (!found) return null;
+  // 成员名也按引用方式折叠后再比：找回来的成员必须正是这个引用在 Oracle 里指向的那个。
+  if (found.databaseName !== dictionaryName(wanted, identity.nameQuoted)) return null;
 
   const signature = memberSignature(found);
 

@@ -5,7 +5,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
 import { BackendErrorException } from "@/lib/backend/errorUtils";
 import type { ColumnGenerateConfig, TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
-import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, supportsGeneratedMultiRowValues, UniqueValueGenerationError } from "@/lib/dataGrid/dataGenerate";
+import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, nextIntegerSequenceStart, supportsGeneratedMultiRowValues, UniqueValueGenerationError } from "@/lib/dataGrid/dataGenerate";
 import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { constrainMysqlGenerateColumns, mysqlGeneratePartitionQuery, MysqlGeneratePartitionError, type MysqlGeneratePartition } from "@/lib/dataGrid/mysqlGeneratePartitions";
 import { uniqueConstraintColumns } from "@/lib/table/uniqueConstraintColumns";
@@ -424,8 +424,8 @@ function displayPreviewCell(cell: unknown): string {
   return displayGeneratedValue(cell);
 }
 
-async function fetchMaxValues(cfg: TableGenerateConfig): Promise<Record<string, number>> {
-  const starts: Record<string, number> = {};
+async function fetchMaxValues(cfg: TableGenerateConfig): Promise<Record<string, number | string>> {
+  const starts: Record<string, number | string> = {};
   const aiCols = cfg.columns.filter((c) => {
     const ck = colKey(cfg.schema, cfg.tableName, c.columnName);
     return c.isAutoIncrement && checkedColumns[ck] !== false;
@@ -438,8 +438,7 @@ async function fetchMaxValues(cfg: TableGenerateConfig): Promise<Record<string, 
       const schemaPart = cfg.schema ? `${quoteTableIdentifier(dbType.value, cfg.schema)}.` : "";
       const sql = `SELECT COALESCE(MAX(${quoteTableIdentifier(dbType.value, col.columnName)}), 0) FROM ${schemaPart}${quoteTableIdentifier(dbType.value, cfg.tableName)}`;
       const result = await api.executeQuery(cid, db, sql, cfg.schema, undefined, { maxRows: 1 });
-      const val = result.rows.length > 0 ? Number(result.rows[0][0]) : 0;
-      starts[col.columnName] = (Number.isNaN(val) ? 0 : val) + 1;
+      starts[col.columnName] = result.rows.length > 0 ? nextIntegerSequenceStart(result.rows[0][0]) : 1;
     } catch {
       starts[col.columnName] = 1;
     }

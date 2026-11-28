@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test, vi } from "vitest";
-import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, generateValue, supportsGeneratedMultiRowValues } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
+import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, generateValue, nextIntegerSequenceStart, supportsGeneratedMultiRowValues } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
 
 test("recognizes Oracle-compatible NUMBER column types as numeric", () => {
   assert.equal(findGeneratorKey("value", "NUMBER"), "number");
@@ -9,6 +9,51 @@ test("recognizes Oracle-compatible NUMBER column types as numeric", () => {
   assert.equal(findGeneratorKey("value", "NUMBER(10)", true), "sequence");
   assert.equal(findGeneratorKey("value", "serial_number_code"), "text");
   assert.equal(findGeneratorKey("value", "NUMBER CODE"), "text");
+});
+
+test("generates exact twenty-digit integer sequences without rounding", () => {
+  const start = "12345678901234567890";
+  const result = generateTableData(
+    {
+      tableName: "events",
+      schema: "public",
+      database: "app",
+      rowCount: 3,
+      columns: [{ columnName: "id", dataType: "bigint", rowCount: 3, generatorKey: "sequence", generatorParams: { startValue: start, increment: "1", unique: true } }],
+    },
+    "postgres",
+  );
+
+  assert.deepEqual(result.rows, [[12345678901234567890n], [12345678901234567891n], [12345678901234567892n]]);
+  assert.match(result.sql, /\(12345678901234567890\),\n\(12345678901234567891\),\n\(12345678901234567892\)/);
+  assert.equal(displayGeneratedValue(result.rows[0][0]), start);
+});
+
+test("derives exact sequence starts from string-encoded large integer query results", () => {
+  assert.equal(nextIntegerSequenceStart("12345678901234567890"), "12345678901234567891");
+  assert.equal(nextIntegerSequenceStart("12345678901234567890.0"), "12345678901234567891");
+  assert.equal(nextIntegerSequenceStart("9007199254740991"), "9007199254740992");
+  assert.equal(nextIntegerSequenceStart(41), 42);
+  assert.equal(nextIntegerSequenceStart("not-an-integer"), 1);
+});
+
+test("generates exact integers within twenty-digit random bounds", () => {
+  const random = vi.spyOn(Math, "random").mockReturnValue(0);
+  try {
+    const generated = generateValue("id", "bigint", "number", 0, { min: "12345678901234567890", max: "12345678901234567899" });
+    assert.equal(generated, 12345678901234567890n);
+    assert.equal(formatGeneratedValue(generated), "12345678901234567890");
+    assert.equal(generateValue("id", "integer", "number", 0, { min: 1, max: 10 }), 1);
+  } finally {
+    random.mockRestore();
+  }
+});
+
+test("keeps exact sequence bounds and decimal sequence compatibility", () => {
+  assert.equal(generateValue("id", "bigint", "sequence", 2, { startValue: "12345678901234567890", increment: "1", sequenceMin: "12345678901234567890", sequenceMax: "12345678901234567891", sequenceCycle: true }), 12345678901234567890n);
+  assert.equal(generateValue("id", "numeric", "sequence", 2, { startValue: 0.5, increment: 0.25 }), 1);
+  assert.equal(generateValue("id", "integer", "sequence", 4, { startValue: 1, increment: 1 }), 5);
+  assert.equal(generateValue("id", "bigint", "sequence", 1, { startValue: "1e20", increment: "2" }), 100000000000000000002n);
 });
 
 test("keeps schema defaults optional for generated columns", () => {

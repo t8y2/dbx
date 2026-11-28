@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
-import { randInt, randDecimal } from "@/lib/dataGrid/dataGenerate";
+import { generateRandomDecimal, generateRandomInteger } from "@/lib/dataGrid/dataGenerate";
 import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 
 const props = defineProps<{ params: GeneratorParams }>();
@@ -18,9 +18,9 @@ const previewVal = computed(() => {
   const min = p.min ?? 1;
   const max = p.max ?? 1000;
   if (p.numberType === "decimal") {
-    return randDecimal(min, max, p.decimalPlaces ?? 2).toString();
+    return generateRandomDecimal(min, max, p.decimalPlaces ?? 2).toString();
   }
-  return randInt(min, max).toString();
+  return generateRandomInteger(min, max).toString();
 });
 
 const isDecimal = computed(() => props.params.numberType === "decimal");
@@ -42,11 +42,11 @@ function refresh() {
     <div class="rounded-md border bg-muted/10 p-3">
       <div class="grid grid-cols-[80px_1fr] items-center gap-2 text-xs">
         <Label class="text-muted-foreground">{{ t("dataGenerate.min") }}</Label>
-        <Input v-model.number="params.min" type="number" placeholder="1" class="h-7 text-xs" />
+        <Input v-model="params.min" type="text" inputmode="decimal" placeholder="1" class="h-7 text-xs" />
       </div>
       <div class="grid grid-cols-[80px_1fr] items-center gap-2 text-xs mt-2">
         <Label class="text-muted-foreground">{{ t("dataGenerate.max") }}</Label>
-        <Input v-model.number="params.max" type="number" placeholder="1000" class="h-7 text-xs" />
+        <Input v-model="params.max" type="text" inputmode="decimal" placeholder="1000" class="h-7 text-xs" />
       </div>
     </div>
 

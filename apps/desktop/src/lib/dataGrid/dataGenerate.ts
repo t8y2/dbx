@@ -106,8 +106,8 @@ export interface GeneratorParams {
   // range
   start?: string;
   end?: string;
-  min?: number;
-  max?: number;
+  min?: number | string;
+  max?: number | string;
   // text
   minLength?: number;
   maxLength?: number;
@@ -119,10 +119,10 @@ export interface GeneratorParams {
   weekdayMode?: "all" | "weekday" | "custom";
   weekdays?: number[];
   // sequence
-  startValue?: number;
-  increment?: number;
-  sequenceMin?: number;
-  sequenceMax?: number;
+  startValue?: number | string;
+  increment?: number | string;
+  sequenceMin?: number | string;
+  sequenceMax?: number | string;
   sequenceCycle?: boolean;
   // enum
   values?: string;
@@ -1709,6 +1709,153 @@ export function getGeneratorCategoryAndLabel(key: string): { category: string; c
   return { category: "general", categoryLabel: "通用", label: key };
 }
 
+type NumericInput = { readonly integer: true; readonly value: bigint } | { readonly integer: false; readonly value: number };
+
+const MAX_EXACT_NUMERIC_INPUT_DIGITS = 10000;
+
+function parseExactDecimalInteger(text: string): bigint | undefined {
+  const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:e([+-]?\d+))?$/i.exec(text);
+  if (!match) return undefined;
+  const [, sign, integerPart = "", fractionPart = "", leadingFraction = "", exponentText] = match;
+  const fractional = integerPart ? fractionPart : leadingFraction;
+  const digits = `${integerPart}${fractional}`.replace(/^0+/, "");
+  if (!digits) return 0n;
+  const exponent = exponentText ? Number(exponentText) : 0;
+  if (!Number.isSafeInteger(exponent)) return undefined;
+  const shift = exponent - fractional.length;
+  let integerDigits: string;
+  if (shift >= 0) {
+    if (digits.length + shift > MAX_EXACT_NUMERIC_INPUT_DIGITS) return undefined;
+    integerDigits = digits + "0".repeat(shift);
+  } else {
+    const fractionalZeros = -shift;
+    if (fractionalZeros >= digits.length || !/^0+$/.test(digits.slice(-fractionalZeros))) return undefined;
+    integerDigits = digits.slice(0, -fractionalZeros);
+  }
+  const value = BigInt(integerDigits);
+  return sign === "-" ? -value : value;
+}
+
+function parseNumericInput(value: number | string | undefined): NumericInput | undefined {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return undefined;
+    if (Number.isInteger(value)) return { integer: true, value: BigInt(value) };
+    return { integer: false, value };
+  }
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(trimmed)) return undefined;
+  const exactInteger = parseExactDecimalInteger(trimmed);
+  if (exactInteger !== undefined) return { integer: true, value: exactInteger };
+  const numeric = Number(trimmed);
+  if (!Number.isFinite(numeric)) return undefined;
+  return { integer: false, value: numeric };
+}
+
+function numericInputAsNumber(parsed: NumericInput): number {
+  return parsed.integer ? Number(parsed.value) : parsed.value;
+}
+
+export function numericInputValueAsNumber(value: number | string | undefined, fallback: number): number {
+  const parsed = parseNumericInput(value);
+  return parsed === undefined ? fallback : numericInputAsNumber(parsed);
+}
+
+function positiveModulo(value: bigint, divisor: bigint): bigint {
+  return ((value % divisor) + divisor) % divisor;
+}
+
+function generatedIntegerValue(value: bigint): number | bigint {
+  return value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value;
+}
+
+/** Returns the next exact integer sequence start for an integer query value. */
+export function nextIntegerSequenceStart(value: unknown): number | string {
+  let next: bigint | undefined;
+  if (typeof value === "bigint") next = value + 1n;
+  else if (typeof value === "number" && Number.isSafeInteger(value)) next = BigInt(value) + 1n;
+  else if (typeof value === "string") {
+    const integer = parseExactDecimalInteger(value.trim());
+    if (integer !== undefined) next = integer + 1n;
+  }
+  if (next === undefined) return 1;
+  return next >= BigInt(Number.MIN_SAFE_INTEGER) && next <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(next) : next.toString();
+}
+
+function randomBigIntBelow(limit: bigint): bigint {
+  const bits = limit.toString(2).length;
+  const firstBits = bits % 30 || 30;
+  while (true) {
+    let value = BigInt(Math.floor(Math.random() * 2 ** firstBits));
+    for (let remaining = bits - firstBits; remaining > 0; remaining -= 30) {
+      value = (value << 30n) + BigInt(Math.floor(Math.random() * 2 ** 30));
+    }
+    if (value < limit) return value;
+  }
+}
+
+/** Generates a uniformly distributed integer, keeping arbitrarily large integer bounds exact. */
+export function generateRandomInteger(minimumInput: number | string | undefined, maximumInput: number | string | undefined): number | bigint {
+  const minimum = parseNumericInput(minimumInput) ?? { integer: true as const, value: 1n };
+  const maximum = parseNumericInput(maximumInput) ?? { integer: true as const, value: 1000n };
+  if (minimum.integer && maximum.integer) {
+    const minValue = minimum.value;
+    const maxValue = maximum.value;
+    if (minValue >= BigInt(Number.MIN_SAFE_INTEGER) && maxValue <= BigInt(Number.MAX_SAFE_INTEGER)) {
+      return randInt(Number(minValue), Number(maxValue));
+    }
+    const range = maxValue - minValue + 1n;
+    if (range <= 0n) return generatedIntegerValue(minValue);
+    return generatedIntegerValue(minValue + randomBigIntBelow(range));
+  }
+  return randInt(numericInputAsNumber(minimum), numericInputAsNumber(maximum));
+}
+
+/** Generates a decimal using the same numeric-input normalization as integer generation. */
+export function generateRandomDecimal(minimumInput: number | string | undefined, maximumInput: number | string | undefined, decimals: number): number {
+  return randDecimal(numericInputValueAsNumber(minimumInput, 1), numericInputValueAsNumber(maximumInput, 1000), decimals);
+}
+
+/** Calculates a sequence value exactly for integer inputs while preserving decimal-sequence compatibility. */
+export function generateSequenceValue(rowIndex: number, params?: GeneratorParams): number | bigint {
+  const start = parseNumericInput(params?.startValue) ?? { integer: true as const, value: 1n };
+  const increment = parseNumericInput(params?.increment) ?? { integer: true as const, value: 1n };
+  const minimum = parseNumericInput(params?.sequenceMin);
+  const maximum = parseNumericInput(params?.sequenceMax);
+  const exactInteger = [start, increment, minimum, maximum].every((value) => value === undefined || value.integer);
+
+  if (!exactInteger) {
+    const startNumber = numericInputAsNumber(start);
+    const incrementNumber = numericInputAsNumber(increment);
+    let value = startNumber + rowIndex * incrementNumber;
+    if (minimum !== undefined && maximum !== undefined && params?.sequenceCycle) {
+      const minNumber = numericInputAsNumber(minimum);
+      const maxNumber = numericInputAsNumber(maximum);
+      const range = maxNumber - minNumber + 1;
+      value = minNumber + ((((value - minNumber) % range) + range) % range);
+    } else if (minimum !== undefined && value < numericInputAsNumber(minimum)) {
+      value = numericInputAsNumber(minimum);
+    } else if (maximum !== undefined && value > numericInputAsNumber(maximum)) {
+      value = numericInputAsNumber(maximum);
+    }
+    return value;
+  }
+
+  let value = start.value as bigint;
+  value += BigInt(rowIndex) * (increment.value as bigint);
+  const minValue = minimum?.value as bigint | undefined;
+  const maxValue = maximum?.value as bigint | undefined;
+  if (minValue !== undefined && maxValue !== undefined && params?.sequenceCycle && maxValue >= minValue) {
+    const range = maxValue - minValue + 1n;
+    value = minValue + positiveModulo(value - minValue, range);
+  } else if (minValue !== undefined && value < minValue) {
+    value = minValue;
+  } else if (maxValue !== undefined && value > maxValue) {
+    value = maxValue;
+  }
+  return generatedIntegerValue(value);
+}
+
 export function generateValue(columnName: string, dataType: string, generatorKey: string | undefined, rowIndex: number, params?: GeneratorParams, columnDefault?: string | null): unknown {
   // null / default overrides
   if (params?.includeNull && params.nullPercent && Math.random() * 100 < params.nullPercent) return null;
@@ -1728,23 +1875,12 @@ export function generateValue(columnName: string, dataType: string, generatorKey
     const min = params?.min ?? 1;
     const max = params?.max ?? 1000;
     if (params?.numberType === "decimal") {
-      return randDecimal(min, max, params.decimalPlaces ?? 2);
+      return generateRandomDecimal(min, max, params.decimalPlaces ?? 2);
     }
-    return randInt(min, max);
+    return generateRandomInteger(min, max);
   }
   if (key === "sequence") {
-    const start = params?.startValue ?? 1;
-    const inc = params?.increment ?? 1;
-    let val = start + rowIndex * inc;
-    if (params?.sequenceMin !== undefined && params?.sequenceMax !== undefined && params?.sequenceCycle) {
-      const range = params.sequenceMax - params.sequenceMin + 1;
-      val = params.sequenceMin + ((((val - params.sequenceMin) % range) + range) % range);
-    } else if (params?.sequenceMin !== undefined && val < params.sequenceMin) {
-      val = params.sequenceMin;
-    } else if (params?.sequenceMax !== undefined && val > params.sequenceMax) {
-      val = params.sequenceMax;
-    }
-    return val;
+    return generateSequenceValue(rowIndex, params);
   }
   if (key === "datetime") {
     const start = params?.start ? parseLocalDate(params.start) : new Date("2020-01-01");
@@ -1860,7 +1996,7 @@ export function generateValue(columnName: string, dataType: string, generatorKey
     return params?.uuidHyphens !== false ? uuid.join("-") : uuid.join("");
   }
   if (key === "foreign_key") {
-    return randInt(params?.min ?? 1, params?.max ?? 500);
+    return randInt(numericInputValueAsNumber(params?.min, 1), numericInputValueAsNumber(params?.max, 500));
   }
   if (key === "image") return `0x${Array.from({ length: 16 }, () => randInt(0, 255).toString(16).padStart(2, "0")).join("")}`;
   if (key === "regex") {
@@ -1914,7 +2050,7 @@ function formatOracleTemporalValue(value: string, dataType: string): string | nu
 export function formatGeneratedValue(value: unknown, databaseType?: DatabaseType, dataType?: string): string {
   if (isGeneratedSqlExpression(value)) return value.sql;
   if (value === null || value === undefined) return "NULL";
-  if (typeof value === "number") return String(value);
+  if (typeof value === "number" || typeof value === "bigint") return String(value);
   if (typeof value === "boolean") return value ? "1" : "0";
   const stringValue = String(value);
   const bitLiteral = formatBitStringLiteral(stringValue, databaseType, dataType);
@@ -2001,6 +2137,7 @@ function generatedValueIdentity(value: unknown): string {
   if (value === null) return "null";
   if (value === undefined) return "undefined";
   if (typeof value === "number") return `number:${value}`;
+  if (typeof value === "bigint") return `bigint:${value}`;
   if (typeof value === "boolean") return `boolean:${value}`;
   if (typeof value === "string") return `string:${value}`;
   return `${typeof value}:${JSON.stringify(value)}`;

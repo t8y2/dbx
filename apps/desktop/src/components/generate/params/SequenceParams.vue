@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
-import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
+import { generateSequenceValue, type GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 
 const props = defineProps<{ params: GeneratorParams }>();
 
@@ -13,9 +13,7 @@ const { t } = useI18n();
 
 const previewVal = computed(() => {
   void previewKey.value;
-  const s = props.params.startValue ?? 1;
-  const inc = props.params.increment ?? 1;
-  return Array.from({ length: 5 }, (_, i) => s + i * inc).join(", ") + ", ...";
+  return Array.from({ length: 5 }, (_, i) => generateSequenceValue(i, props.params)).join(", ") + ", ...";
 });
 
 const previewKey = ref(0);
@@ -29,22 +27,22 @@ function refresh() {
     <div class="rounded-md border bg-muted/10 p-3">
       <div class="grid grid-cols-[80px_1fr] items-center gap-2 text-xs">
         <Label class="text-muted-foreground">{{ t("dataGenerate.start") }}</Label>
-        <Input v-model.number="params.startValue" type="number" placeholder="1" class="h-7 text-xs" />
+        <Input v-model="params.startValue" type="text" inputmode="decimal" placeholder="1" class="h-7 text-xs" />
       </div>
       <div class="grid grid-cols-[80px_1fr] items-center gap-2 text-xs mt-2">
         <Label class="text-muted-foreground">{{ t("dataGenerate.increment") }}</Label>
-        <Input v-model.number="params.increment" type="number" placeholder="1" class="h-7 text-xs" />
+        <Input v-model="params.increment" type="text" inputmode="decimal" placeholder="1" class="h-7 text-xs" />
       </div>
     </div>
 
     <div class="rounded-md border bg-muted/10 p-3">
       <div class="grid grid-cols-[80px_1fr] items-center gap-2 text-xs">
         <Label class="text-muted-foreground">{{ t("dataGenerate.min") }}</Label>
-        <Input v-model.number="params.sequenceMin" type="number" placeholder="-" class="h-7 text-xs" />
+        <Input v-model="params.sequenceMin" type="text" inputmode="decimal" placeholder="-" class="h-7 text-xs" />
       </div>
       <div class="grid grid-cols-[80px_1fr] items-center gap-2 text-xs mt-2">
         <Label class="text-muted-foreground">{{ t("dataGenerate.max") }}</Label>
-        <Input v-model.number="params.sequenceMax" type="number" placeholder="-" class="h-7 text-xs" />
+        <Input v-model="params.sequenceMax" type="text" inputmode="decimal" placeholder="-" class="h-7 text-xs" />
       </div>
       <div class="flex items-center gap-2 text-xs mt-2 ml-[88px]">
         <input id="seq-cycle" type="checkbox" class="h-3.5 w-3.5 accent-primary" :checked="!!params.sequenceCycle" @change="params.sequenceCycle = !params.sequenceCycle" />

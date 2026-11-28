@@ -1050,6 +1050,7 @@ export interface EditorSettings {
   colorizeConnectionTabsScope: ConnectionTabColorScope;
   tabGroupMode: TabGroupMode;
   tabGroupCustomizations: Record<string, TabGroupCustomization>;
+  tabGroupOrders: Partial<Record<TabGroupMode, string[]>>;
   tabSortMode: TabSortMode;
   /** 水平标签页最大显示宽度（像素，0 表示不限制）。 */
   tabMaxWidth: number;
@@ -1512,6 +1513,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   colorizeConnectionTabsScope: "all",
   tabGroupMode: "none",
   tabGroupCustomizations: {},
+  tabGroupOrders: {},
   tabSortMode: "manual",
   tabMaxWidth: 0,
   tabDoubleClickAction: "default",
@@ -1806,6 +1808,19 @@ export function normalizeTabGroupCustomizations(value: unknown): Record<string, 
     if (name || color) customizations[key] = { ...(name ? { name } : {}), ...(color ? { color } : {}) };
   }
   return customizations;
+}
+
+function normalizeTabGroupOrders(value: unknown): EditorSettings["tabGroupOrders"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const orders = value as Record<string, unknown>;
+  const normalized: EditorSettings["tabGroupOrders"] = {};
+  for (const mode of TAB_GROUP_MODES) {
+    const order = orders[mode];
+    if (mode === "none" || !Array.isArray(order)) continue;
+    const keys = [...new Set(order.filter((key): key is string => typeof key === "string"))];
+    if (keys.length) normalized[mode] = keys;
+  }
+  return normalized;
 }
 
 function normalizeTabSortMode(value: unknown): TabSortMode {
@@ -2304,6 +2319,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     colorizeConnectionTabsScope: normalizeConnectionTabColorScope(settings.colorizeConnectionTabsScope),
     tabGroupMode: normalizeTabGroupMode(settings.tabGroupMode),
     tabGroupCustomizations: normalizeTabGroupCustomizations(settings.tabGroupCustomizations),
+    tabGroupOrders: normalizeTabGroupOrders(settings.tabGroupOrders),
     tabSortMode: normalizeTabSortMode(settings.tabSortMode),
     tabMaxWidth: normalizeTabMaxWidth(settings.tabMaxWidth),
     tabDoubleClickAction: normalizeTabDoubleClickAction(settings.tabDoubleClickAction),
@@ -3343,6 +3359,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.colorizeConnectionTabsScope !== undefined) editorSettings.value.colorizeConnectionTabsScope = normalizeConnectionTabColorScope(partial.colorizeConnectionTabsScope);
     if (partial.tabGroupMode !== undefined) editorSettings.value.tabGroupMode = normalizeTabGroupMode(partial.tabGroupMode);
     if (partial.tabGroupCustomizations !== undefined) editorSettings.value.tabGroupCustomizations = normalizeTabGroupCustomizations(partial.tabGroupCustomizations);
+    if (partial.tabGroupOrders !== undefined) editorSettings.value.tabGroupOrders = normalizeTabGroupOrders(partial.tabGroupOrders);
     if (partial.tabSortMode !== undefined) editorSettings.value.tabSortMode = normalizeTabSortMode(partial.tabSortMode);
     if (partial.tabMaxWidth !== undefined) editorSettings.value.tabMaxWidth = normalizeTabMaxWidth(partial.tabMaxWidth);
     if (partial.tabDoubleClickAction !== undefined) editorSettings.value.tabDoubleClickAction = normalizeTabDoubleClickAction(partial.tabDoubleClickAction);

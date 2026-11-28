@@ -6,7 +6,7 @@ import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { buildTransferObjectSelectionField, countTransferObjects } from "./transferSelections";
-import { createTaskLoadTracker } from "./taskLoadTracker";
+import { createTaskLoadTracker, type TaskLoadToken } from "./taskLoadTracker";
 import { describeTransferStructureOperation, summarizeTransferStructureOperations } from "./structurePlanSummary";
 import {
   confirmTransferWithProductionSafety,
@@ -319,6 +319,7 @@ const savedConfigSnapshot = ref("");
 const showUnsavedConfirm = ref(false);
 let pendingDiscardAction: (() => void) | null = null;
 const taskLoadTracker = createTaskLoadTracker();
+const restoringTaskScopes = shallowRef<TaskLoadToken | null>(null);
 
 function connectionType(id: string): DatabaseType | undefined {
   return store.connections.find((c) => c.id === id)?.db_type;
@@ -480,6 +481,7 @@ const operationTimeoutHint = computed(() => {
 });
 
 const canStart = computed(() => {
+  if (restoringTaskScopes.value) return false;
   if (mysqlDataCharsetEnabled(store.getConfig(sourceConnectionId.value)) || mysqlDataCharsetEnabled(store.getConfig(targetConnectionId.value))) return false;
   const effectiveSourceSchema = sourceSchema.value || sourceDatabaseName.value;
   const effectiveTargetSchema = targetSchema.value || targetDatabaseName.value;
@@ -962,7 +964,10 @@ watch(
 );
 
 function resetState(cancelTaskLoad = true) {
-  if (cancelTaskLoad) taskLoadTracker.cancel();
+  if (cancelTaskLoad) {
+    taskLoadTracker.cancel();
+    restoringTaskScopes.value = null;
+  }
   cancelPendingTransfer();
   packageDeployment.value = null;
   savedPackageDrafts.value = null;
@@ -1261,7 +1266,7 @@ function configSnapshot(config: TransferTaskConfig) {
 const formHasContent = computed(() => !!sourceConnectionId.value || !!targetConnectionId.value);
 const isConfigDirty = computed(() => !!activeTaskId.value && configSnapshot(currentConfig()) !== savedConfigSnapshot.value);
 const needsDiscardConfirm = computed(() => isConfigDirty.value || (!activeTaskId.value && formHasContent.value));
-const canSaveConfig = computed(() => !!sourceConnectionId.value && isTransferDatabaseSelected(sourceDatabase.value) && !!targetConnectionId.value && isTransferDatabaseSelected(targetDatabase.value) && operationTimeoutValid.value);
+const canSaveConfig = computed(() => !restoringTaskScopes.value && !!sourceConnectionId.value && isTransferDatabaseSelected(sourceDatabase.value) && !!targetConnectionId.value && isTransferDatabaseSelected(targetDatabase.value) && operationTimeoutValid.value);
 
 // Invalidate before asynchronous callbacks can publish a preview for an old form,
 // including a task switch whose new values happen to equal the previous task.
@@ -1375,11 +1380,20 @@ async function loadConfigIntoForm(config: TransferTaskConfig, taskId = "") {
   } else {
     sourceSchema.value = config.sourceDatabase;
   }
-  // The schema watcher may trigger a concurrent loadObjects; both converge on
-  // the same groups and the pending selection is consumed by the first one.
-  await loadObjects(isTaskLoadStale);
-  if (isTaskLoadStale()) return;
+  restoringTaskScopes.value = taskLoadToken;
+  try {
+    // The source object list and target namespace use independent metadata requests.
+    await Promise.all([loadObjects(isTaskLoadStale), loadSavedTaskTarget(config, isTaskLoadStale)]);
+    if (isTaskLoadStale()) return;
+    savedPackageDrafts.value = config.oraclePackageDrafts?.length ? { context: packageDraftContext(config), drafts: JSON.parse(JSON.stringify(config.oraclePackageDrafts)) } : null;
+    savedConfigSnapshot.value = configSnapshot(currentConfig());
+    if (!taskId) activeTaskId.value = "";
+  } finally {
+    if (restoringTaskScopes.value === taskLoadToken) restoringTaskScopes.value = null;
+  }
+}
 
+async function loadSavedTaskTarget(config: TransferTaskConfig, isTaskLoadStale: () => boolean) {
   skipTargetWatch.value = true;
   targetConnectionId.value = config.targetConnectionId;
   if (isCatalogCapable(config.targetConnectionId)) {
@@ -1412,11 +1426,6 @@ async function loadConfigIntoForm(config: TransferTaskConfig, taskId = "") {
   } else {
     targetSchema.value = config.targetDatabase;
   }
-
-  if (isTaskLoadStale()) return;
-  savedPackageDrafts.value = config.oraclePackageDrafts?.length ? { context: packageDraftContext(config), drafts: JSON.parse(JSON.stringify(config.oraclePackageDrafts)) } : null;
-  savedConfigSnapshot.value = configSnapshot(currentConfig());
-  if (!taskId) activeTaskId.value = "";
 }
 
 /** Applies a saved task to the form, loading catalogs/databases/schemas/objects with explicit awaits. */

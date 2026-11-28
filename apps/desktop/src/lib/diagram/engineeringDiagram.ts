@@ -36,6 +36,7 @@ interface EngineeringCluster {
   entityX: number;
   entityY: number;
   attributes: EngineeringAttributeNode[];
+  selfRelationships: Array<{ id: string; x: number; y: number }>;
 }
 
 export interface EngineeringEntityNode {
@@ -197,7 +198,7 @@ function localAttributeNode(table: DiagramTable, item: AttributeDraft, x: number
   };
 }
 
-function buildEngineeringCluster(table: DiagramTable): EngineeringCluster {
+function buildEngineeringCluster(table: DiagramTable, selfRelationships: DiagramRelationship[]): EngineeringCluster {
   const groups = distributeAttributes(table);
   const topSize = horizontalBlockSize(groups.top);
   const rightSize = verticalBlockSize(groups.right);
@@ -242,13 +243,23 @@ function buildEngineeringCluster(table: DiagramTable): EngineeringCluster {
     attributes.push(localAttributeNode(table, item, (leftSize.width - item.width) / 2, centerY + (centerHeight - leftSize.height) / 2 + index * (ENGINEERING_ATTRIBUTE_HEIGHT + ATTRIBUTE_GAP_Y)));
   });
 
+  const width = leftSize.width + leftGap + centerWidth + rightGap + rightSize.width;
+  const height = topSize.height + topGap + centerHeight + bottomGap + bottomSize.height;
+  const relationshipStep = ENGINEERING_RELATIONSHIP_HEIGHT + ATTRIBUTE_GAP_Y;
+  const relationshipHeight = selfRelationships.length * relationshipStep - ATTRIBUTE_GAP_Y;
+  // Put self-relationships beside their own cluster so the diamond is not hidden by its entity or attributes.
   return {
     tableName: table.name,
-    width: leftSize.width + leftGap + centerWidth + rightGap + rightSize.width,
-    height: topSize.height + topGap + centerHeight + bottomGap + bottomSize.height,
+    width: width + (selfRelationships.length ? ATTRIBUTE_ENTITY_GAP + ENGINEERING_RELATIONSHIP_WIDTH : 0),
+    height: Math.max(height, relationshipHeight),
     entityX,
     entityY,
     attributes,
+    selfRelationships: selfRelationships.map((relationship, index) => ({
+      id: relationship.id,
+      x: width + ATTRIBUTE_ENTITY_GAP,
+      y: Math.max(0, (height - relationshipHeight) / 2) + index * relationshipStep,
+    })),
   };
 }
 
@@ -389,8 +400,16 @@ function attributeCenter(attribute: EngineeringAttributeNode): DiagramPosition {
 }
 
 export function buildEngineeringDiagram(tables: DiagramTable[], relationships: DiagramRelationship[], positions: Record<string, DiagramPosition>): EngineeringDiagram {
-  const clusters = new Map(tables.map((table) => [table.name, buildEngineeringCluster(table)]));
+  const selfRelationshipsByTable = new Map<string, DiagramRelationship[]>();
+  for (const relationship of relationships) {
+    if (relationship.sourceTable !== relationship.targetTable) continue;
+    const selfRelationships = selfRelationshipsByTable.get(relationship.sourceTable) ?? [];
+    selfRelationships.push(relationship);
+    selfRelationshipsByTable.set(relationship.sourceTable, selfRelationships);
+  }
+  const clusters = new Map(tables.map((table) => [table.name, buildEngineeringCluster(table, selfRelationshipsByTable.get(table.name) ?? [])]));
   const rows = orderedTableRows(tables, positions);
+  const selfRelationshipPositions = new Map<string, DiagramPosition>();
   const entities: EngineeringEntityNode[] = [];
   const attributes: EngineeringAttributeNode[] = [];
   let nextRowY = 0;
@@ -420,6 +439,9 @@ export function buildEngineeringDiagram(tables: DiagramTable[], relationships: D
         })),
       );
 
+      for (const relationship of cluster.selfRelationships) {
+        selfRelationshipPositions.set(relationship.id, { x: originX + relationship.x, y: originY + relationship.y });
+      }
       nextX += cluster.width + ENGINEERING_CLUSTER_GAP_X;
     });
 
@@ -438,6 +460,7 @@ export function buildEngineeringDiagram(tables: DiagramTable[], relationships: D
 
     const sourceCenter = sourceAttr ? attributeCenter(sourceAttr) : entityCenter(sourceEntity);
     const targetCenter = targetAttr ? attributeCenter(targetAttr) : entityCenter(targetEntity);
+    const selfPosition = selfRelationshipPositions.get(relationship.id);
     return [
       {
         id: relationship.id,
@@ -448,8 +471,8 @@ export function buildEngineeringDiagram(tables: DiagramTable[], relationships: D
         targetColumn: relationship.targetColumn,
         sourceCardinality: relationship.sourceCardinality ?? "N",
         targetCardinality: relationship.targetCardinality ?? "1",
-        x: (sourceCenter.x + targetCenter.x) / 2 - ENGINEERING_RELATIONSHIP_WIDTH / 2,
-        y: (sourceCenter.y + targetCenter.y) / 2 - ENGINEERING_RELATIONSHIP_HEIGHT / 2,
+        x: selfPosition?.x ?? (sourceCenter.x + targetCenter.x) / 2 - ENGINEERING_RELATIONSHIP_WIDTH / 2,
+        y: selfPosition?.y ?? (sourceCenter.y + targetCenter.y) / 2 - ENGINEERING_RELATIONSHIP_HEIGHT / 2,
         width: ENGINEERING_RELATIONSHIP_WIDTH,
         height: ENGINEERING_RELATIONSHIP_HEIGHT,
       },

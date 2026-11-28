@@ -5,7 +5,7 @@ import type { DiagramRelationship } from "@/lib/diagram/erDiagram";
 import type { InferredRelationship } from "@/types/diagram";
 import { DIAGRAM_HOVERED_EDGE_KEY, DIAGRAM_EDGE_OBSTACLES_KEY, EDGE_ROUTE_OFFSET, EDGE_STROKE_IDLE, EDGE_STROKE_HOVER } from "@/lib/diagram/diagram-constants";
 import type { RelationshipEdgeData } from "@/lib/diagram/vue-flow-adapter";
-import { alignWaypointsToEndpoints, endpointRectsFromObstacles, pathSkimsEndpoints, pointAlongPolyline, pointsToSvgPath, polylineLength, routeOrthogonalAroundObstacles, type ObstacleRect, type Point } from "@/lib/diagram/edge-obstacle-router";
+import { alignWaypointsToEndpoints, endpointRectsFromObstacles, pathSkimsEndpoints, pointAlongPolyline, pointsToSvgPath, polylineLength, routeOrthogonalAroundObstacles, selfRelationshipPoints, type ObstacleRect, type Point } from "@/lib/diagram/edge-obstacle-router";
 
 const HOVER_BLUE = "#2563eb";
 /** Prefer live obstacle routing when it is at most this fraction of aligned ELK path length. */
@@ -33,6 +33,10 @@ function snapRoutedToHandles(points: Point[]): Point[] {
 }
 
 function buildRoutedPoints(): Point[] | null {
+  if (props.source === props.target) {
+    return selfRelationshipPoints({ x: props.sourceX, y: props.sourceY }, { x: props.targetX, y: props.targetY });
+  }
+
   const obstacleList = obstacles?.value ?? [];
   const endpointIds: [string, string] = [props.source, props.target];
   const endpointRects = endpointRectsFromObstacles(obstacleList, endpointIds);

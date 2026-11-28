@@ -42,7 +42,7 @@ import { buildDiagramDbml, buildDiagramJson, buildDiagramMermaid, diagramExportF
 import { saveDiagramBinaryExport, saveDiagramTextExport } from "@/lib/export/saveDiagramExport";
 import { inferRelationships, filterByStorage } from "@/lib/diagram/match-engine";
 import { loadMatchConfirms, saveMatchConfirms, loadMatchIgnores, saveMatchIgnores, isAutoMatchEnabled } from "@/lib/diagram/match-storage";
-import { toVueFlowNodes, toVueFlowEdges, toDiagramEdges, toVueFlowLayerNodes, toAbsolutePosition, isTableCanvasVisible } from "@/lib/diagram/vue-flow-adapter";
+import { toVueFlowNodes, toVueFlowEdges, toDiagramEdges, toVueFlowLayerNodes, toAbsolutePosition, isTableCanvasVisible, selfRelationshipColumnHandle } from "@/lib/diagram/vue-flow-adapter";
 import {
   CARD_WIDTH,
   CARD_HEADER_HEIGHT,
@@ -603,7 +603,13 @@ const canvasSize = computed(() => {
   return { width, height };
 });
 
-const engineeringDiagram = computed(() => buildEngineeringDiagram(visibleTables.value, visibleRelationships.value, positions.value));
+const engineeringDiagram = computed(() =>
+  buildEngineeringDiagram(
+    visibleTables.value.map((table) => ({ ...table, name: getTableKey(table) })),
+    visibleRelationships.value,
+    positions.value,
+  ),
+);
 const engineeringConnections = computed(() => buildEngineeringDiagramConnections(engineeringDiagram.value));
 const virtualizeTableDiagram = computed(() => visibleTables.value.length > LARGE_TABLE_DIAGRAM_THRESHOLD);
 const virtualizeEngineeringDiagram = computed(() => engineeringDiagram.value.entities.length + engineeringDiagram.value.attributes.length + engineeringDiagram.value.relationships.length > LARGE_ENGINEERING_DIAGRAM_THRESHOLD);
@@ -1041,16 +1047,45 @@ function syncVueFlowNodes() {
   const tableNodes = toVueFlowNodes(visibleTables.value, positions.value, isMultiSchema.value);
   const layerNodes = toVueFlowLayerNodes(layerStore.layers);
   const vueEdges = toVueFlowEdges(visibleRelationships.value, positions.value, edgeWaypoints.value, heights, edgeHandleHints.value);
+  const selfEdgesByTable = new Map<string, typeof vueEdges>();
+  for (const edge of vueEdges) {
+    if (edge.source !== edge.target) continue;
+    const tableEdges = selfEdgesByTable.get(edge.source) ?? [];
+    tableEdges.push(edge);
+    selfEdgesByTable.set(edge.source, tableEdges);
+  }
+
   const displayNodes = tableNodes.map((node) => {
     const table = node.data!.table;
     const key = diagramIdentityKey(table);
     const expanded = expandedFields.value.has(key);
-    const { total, canToggle } = diagramCardColumns(table, expanded);
+    const { rows, total, canToggle } = diagramCardColumns(table, expanded);
+    const selfReferenceColumns = new Set<string>();
+    const selfEdges = selfEdgesByTable.get(node.id);
+    if (selfEdges) {
+      const visibleColumns = new Set(rows.map((column) => column.name));
+      for (const edge of selfEdges) {
+        const { sourceColumn, targetColumn } = edge.data!.relationship;
+        if (visibleColumns.has(sourceColumn)) {
+          selfReferenceColumns.add(sourceColumn);
+          edge.sourceHandle = selfRelationshipColumnHandle(sourceColumn, "source");
+        } else {
+          edge.sourceHandle = "right";
+        }
+        if (visibleColumns.has(targetColumn)) {
+          selfReferenceColumns.add(targetColumn);
+          edge.targetHandle = selfRelationshipColumnHandle(targetColumn, "target");
+        } else {
+          edge.targetHandle = "right-target";
+        }
+      }
+    }
     return {
       ...node,
       selected: selected.has(node.id),
       data: {
         ...node.data,
+        selfReferenceColumns,
         fieldsExpanded: expanded,
         fieldsToggleLabel: canToggle ? (expanded ? t("diagram.collapseFields") : t("diagram.showMoreFields", { count: total - COLLAPSED_DIAGRAM_COLUMNS })) : undefined,
         toggleFields: canToggle
@@ -2619,7 +2654,7 @@ onUnmounted(() => {
                   v-for="entity in engineeringRenderSlice.entities"
                   :key="entity.id"
                   class="absolute flex cursor-pointer items-center justify-center border border-blue-500/70 bg-blue-100/80 px-3 text-center text-sm font-semibold text-blue-950 shadow-sm dark:bg-blue-950/35 dark:text-blue-100"
-                  :class="entity.name === focusTableName ? 'ring-2 ring-primary/40' : ''"
+                  :class="entity.name === focusTableName || tableMap.get(entity.name)?.name === focusTableName ? 'ring-2 ring-primary/40' : ''"
                   :style="{ width: `${entity.width}px`, height: `${entity.height}px`, transform: `translate(${entity.x}px, ${entity.y}px)` }"
                   @dblclick.stop="openTableData(entity.name)"
                 >

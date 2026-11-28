@@ -8,6 +8,10 @@ import { handlesFromWaypoints, type Point } from "./edge-obstacle-router";
 const LAYER_Z_INDEX = 0;
 const TABLE_Z_INDEX = 10;
 
+export function selfRelationshipColumnHandle(column: string, type: "source" | "target"): string {
+  return `self-column-${type}:${column}`;
+}
+
 export type RelationshipEdgeData = {
   relationship: DiagramRelationship | InferredRelationship;
   waypoints?: Point[];

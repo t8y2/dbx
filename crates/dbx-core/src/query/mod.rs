@@ -7632,14 +7632,19 @@ async fn begin_transaction_session(
 }
 
 pub struct ManualTransactionKeepAlive {
-    task: tokio::task::JoinHandle<()>,
+    /// Asks the keep-alive task to stop. The task is never aborted: aborting it
+    /// while a ping is in flight would cancel a request/response exchange half
+    /// way and leave the held connection out of sync with the server.
+    stop: Arc<tokio::sync::Notify>,
     sessions: Arc<tokio::sync::RwLock<std::collections::HashMap<String, TransactionSession>>>,
     txn_session_id: String,
 }
 
 impl Drop for ManualTransactionKeepAlive {
     fn drop(&mut self) {
-        self.task.abort();
+        // `notify_one` stores a permit when the task is not waiting yet, so the
+        // stop request is not lost while a ping is still running.
+        self.stop.notify_one();
         spawn_txn_idle_watcher_for_sessions(Arc::clone(&self.sessions), self.txn_session_id.clone());
     }
 }
@@ -7659,6 +7664,13 @@ fn manual_transaction_keepalive_interval(idle_timeout: Duration) -> Duration {
 /// connection. A ping keeps the connection warm without touching the
 /// transaction snapshot. Failures are ignored: the next real operation
 /// surfaces the connection error itself.
+///
+/// The ping must run to completion. Dropping it half way (for example behind a
+/// timeout) abandons a request/response exchange on the held connection: the
+/// MySQL driver then marks the connection disconnected and a late reply could be
+/// read as the answer to the next command. A connection that never answers is
+/// already unusable for the export itself, so there is nothing to gain by
+/// cancelling.
 async fn ping_manual_txn_connection(conn: &mut TxnConnection) {
     match conn {
         TxnConnection::Mysql(Some(conn)) => {
@@ -7693,9 +7705,14 @@ pub async fn keep_manual_transaction_alive(
     let txn_session_id = txn_session_id.to_string();
     let keep_alive_txn_session_id = txn_session_id.clone();
     let interval = manual_transaction_keepalive_interval(idle_timeout);
-    let task = tokio::spawn(async move {
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let task_stop = Arc::clone(&stop);
+    tokio::spawn(async move {
         loop {
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                _ = task_stop.notified() => break,
+            }
             let ping_connection = {
                 let mut guard = sessions.write().await;
                 if let Some(session) = guard.get_mut(&keep_alive_txn_session_id) {
@@ -7714,12 +7731,12 @@ pub async fn keep_manual_transaction_alive(
                 // busy check owns the connection; skip this tick instead of
                 // queueing behind the whole stream.
                 if let Ok(mut conn) = connection.try_lock() {
-                    let _ = tokio::time::timeout(Duration::from_secs(5), ping_manual_txn_connection(&mut conn)).await;
+                    ping_manual_txn_connection(&mut conn).await;
                 }
             }
         }
     });
-    Ok(ManualTransactionKeepAlive { task, sessions: keep_alive_sessions, txn_session_id })
+    Ok(ManualTransactionKeepAlive { stop, sessions: keep_alive_sessions, txn_session_id })
 }
 
 /// Clears a manual transaction session's `busy` flag when the execution that

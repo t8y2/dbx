@@ -574,12 +574,15 @@ function filterSidebarTreeWithMatcher(
         filteredNodes.push({ node, score: selfMatch?.score ?? 0 });
       } else {
         const children = filteredChildren ?? [];
+        // An unopened database can already carry its Queries folder. Matching
+        // the database name should not reveal the folder on its own.
+        const onlySavedQueries = preservesSubtree && node.type === "database" && children.every((child) => child.type === "saved-sql-root");
         filteredNodes.push({
           node: {
             ...node,
             children,
             isLoading: node.isLoading,
-            isExpanded: children.length > 0 && !collapsedIds.has(node.id),
+            isExpanded: children.length > 0 && !collapsedIds.has(node.id) && (!onlySavedQueries || !!node.isExpanded),
           },
           score: selfMatch?.score ?? 0,
         });

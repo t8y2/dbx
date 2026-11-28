@@ -261,7 +261,16 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
         }),
         // Keep the compact detail-editor baseline; gutters and wrapping are opt-in.
         ...(options.lineNumbers ? [lineNumbers(), highlightActiveLineGutter()] : []),
-        ...(options.folding ? [createConsistentFoldGutter()] : []),
+        ...(options.folding
+          ? [
+              createConsistentFoldGutter({
+                markerLabels: {
+                  fold: () => i18n.global.t("editor.contextMenu.toggleFold"),
+                  unfold: () => i18n.global.t("editor.contextMenu.toggleFold"),
+                },
+              }),
+            ]
+          : []),
         highlightSpecialChars(),
         history(),
         ...(options.preserveLineEndings ? preserveSourceHistory(doc) : []),

@@ -224,10 +224,23 @@ function addQueryStructureFoldRanges(state: EditorState, tree: Tree, ranges: Map
   });
 
   for (const { scope, tokens, hasUnion } of scopes.values()) {
-    if (!hasUnion) continue;
-    const branchRanges = collectUnionBranchFoldRanges(tokens, queryScopeEnd(state, scope));
-    for (const range of branchRanges) {
-      addMultilineFoldRange(state, ranges, range.from, range.to);
+    const scopeEnd = queryScopeEnd(state, scope);
+    if (hasUnion) {
+      const branchRanges = collectUnionBranchFoldRanges(tokens, scopeEnd);
+      for (const range of branchRanges) {
+        addMultilineFoldRange(state, ranges, range.from, range.to);
+      }
+      continue;
+    }
+
+    // A top-level SELECT is a foldable query region in DataGrip-style editors.
+    // Nested SELECTs already belong to a parenthesized scope, whose surrounding
+    // parentheses provide the fold marker, so only add the Statement-level query
+    // here and keep ordinary nested expressions from gaining duplicate markers.
+    if (scope.name === "Statement") {
+      for (const token of tokens) {
+        if (token.keyword === "SELECT") addMultilineFoldRange(state, ranges, token.from, scopeEnd);
+      }
     }
   }
 }
@@ -330,7 +343,7 @@ export const sqlBeginEndMatching = ViewPlugin.fromClass(
   { decorations: (plugin) => plugin.decorations },
 );
 
-/** Creates folding for REST requests, procedural blocks, query parentheses, and UNION branches. */
+/** Creates folding for REST requests, procedural blocks, query regions, parentheses, and UNION branches. */
 export function createSqlBlockFoldService(databaseType?: DatabaseType | (() => DatabaseType | undefined), cachedRange?: (state: EditorState, lineStart: number) => FoldRange | null | undefined) {
   return foldService.of((state, lineStart) => {
     const cached = cachedRange?.(state, lineStart);

@@ -184,10 +184,110 @@ impl TdengineDriver {
             return Ok(Vec::new());
         }
         let database = effective_database(database, &self.current_database)?.to_string();
+        if let Some(parent) = constraints.parent_name.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            return self.list_child_tables(&database, parent, &constraints, token).await;
+        }
+        // 无搜索词时侧栏只需要根表：超级表很多子表时，读出全部子表既慢又占内存。
+        // 有搜索词仍走完整快照，子表名也要能被搜到。
+        if constraints.page_table_roots && constraints.filter.trim().is_empty() {
+            let roots = self.root_tables(&database, token).await?;
+            return Ok(filter_tables(roots.as_slice(), &constraints));
+        }
         // 元数据接口的返回顺序没有保证，服务端翻页会让 offset 在两次请求间跳行；
         // 这里始终读取完整列表（进程级快照），在本地排序切片。
         let tables = self.all_tables(&database, token).await?;
         Ok(filter_tables(tables.as_slice(), &constraints))
+    }
+
+    /// 读取某个超级表的子表（按子表名排序分页）。
+    ///
+    /// 3.x 直接让 `ins_tables` 按 `stable_name` 过滤并在服务端翻页，不触碰其他超级表的
+    /// 子表；`ORDER BY table_name` 保证 offset 翻页稳定。带搜索词时需要本地模糊匹配，
+    /// 此时读出该超级表的全部子表再切片。2.x 的 `SHOW TABLES` 已带所属超级表，沿用快照。
+    async fn list_child_tables(
+        &self,
+        database: &str,
+        parent: &str,
+        constraints: &MetadataListConstraints,
+        token: &CancellationToken,
+    ) -> Result<Vec<TableInfo>> {
+        if !uses_information_schema_tables(self.server_version.as_deref()) {
+            let tables = self.all_tables(database, token).await?;
+            let children: Vec<TableInfo> = tables
+                .iter()
+                .filter(|table| table.parent_name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case(parent)))
+                .cloned()
+                .collect();
+            return Ok(filter_tables(&children, constraints));
+        }
+        let server_paged = constraints.filter.trim().is_empty();
+        let page = if !server_paged || constraints.limit == 0 {
+            String::new()
+        } else {
+            format!(" LIMIT {} OFFSET {}", constraints.limit, constraints.offset)
+        };
+        let sql = format!(
+            "SELECT table_name FROM information_schema.ins_tables WHERE db_name = {} AND stable_name = {} ORDER BY table_name{}",
+            quote_literal(database),
+            quote_literal(parent),
+            page
+        );
+        let rows = self.query_rows_with_retry(&sql, token).await?;
+        let children: Vec<TableInfo> = tables_from_information_schema_rows(
+            rows.into_iter()
+                .map(|row| vec![row.into_iter().next().unwrap_or(Value::Null), Value::String(parent.to_string())])
+                .collect(),
+        );
+        if server_paged && constraints.limit != 0 {
+            // 偏移已在服务端应用，本地只需按类型/搜索词过滤，不能再跳过 offset。
+            let local = MetadataListConstraints { offset: 0, ..constraints.clone() };
+            return Ok(filter_tables(&children, &local));
+        }
+        Ok(filter_tables(&children, constraints))
+    }
+
+    /// 根表快照：全部超级表 + 不属于任何超级表的普通表。
+    async fn root_tables(&self, database: &str, token: &CancellationToken) -> Result<Arc<Vec<TableInfo>>> {
+        if !uses_information_schema_tables(self.server_version.as_deref()) {
+            // 2.x 没有按超级表过滤的元数据视图，直接从完整快照里取根表。
+            let tables = self.all_tables(database, token).await?;
+            let roots: Vec<TableInfo> = tables.iter().filter(|table| table.parent_name.is_none()).cloned().collect();
+            return Ok(Arc::new(roots));
+        }
+        let cache_key = format!("{}|roots", self.table_cache_key(database));
+        let generation = METADATA_GENERATION.load(Ordering::Relaxed);
+        if let Some(tables) = cached_table_snapshot(&cache_key, generation) {
+            return Ok(tables);
+        }
+        let mut tables = self
+            .query_tables(&format!("SHOW {}STABLES", quote_qualified_prefix(database)), "STABLE", false, token)
+            .await?;
+        let sql = format!(
+            "SELECT table_name, stable_name FROM information_schema.ins_tables WHERE db_name = {} AND stable_name IS NULL",
+            quote_literal(database)
+        );
+        let rows = self.query_rows_with_retry(&sql, token).await?;
+        tables.extend(tables_from_information_schema_rows(rows));
+        let mut seen = HashSet::new();
+        tables.retain(|table| seen.insert(format!("{}:{}", table.table_type, table.name)));
+        sort_tables_for_hierarchy(&mut tables);
+        let tables = Arc::new(tables);
+        store_table_snapshot(&cache_key, generation, tables.clone());
+        Ok(tables)
+    }
+
+    /// 元数据查询失败时重试一次；取消不重试。仍失败则把错误抛给调用方，让侧栏显示错误
+    /// 而不是残缺列表。
+    async fn query_rows_with_retry(&self, sql: &str, token: &CancellationToken) -> Result<Vec<Vec<Value>>> {
+        let mut last_error = None;
+        for _ in 0..2 {
+            match self.query_rows(sql, token, 0).await {
+                Ok(rows) => return Ok(rows),
+                Err(error) if token.is_cancelled() => return Err(error),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow!("TDengine table metadata query failed")))
     }
 
     pub async fn list_objects(
@@ -585,15 +685,7 @@ impl TdengineDriver {
             "SELECT table_name, stable_name FROM information_schema.ins_tables WHERE db_name = {}",
             quote_literal(database)
         );
-        let mut last_error = None;
-        for _ in 0..2 {
-            match self.query_rows(&sql, token, 0).await {
-                Ok(rows) => return Ok(tables_from_information_schema_rows(rows)),
-                Err(error) if token.is_cancelled() => return Err(error),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        Err(last_error.unwrap_or_else(|| anyhow!("TDengine table metadata query failed")))
+        Ok(tables_from_information_schema_rows(self.query_rows_with_retry(&sql, token).await?))
     }
 
     async fn query_tables(

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
-import { mysqlTableCharsetFromCollation } from "@/lib/table/mysqlTableCollation";
+import { createDatabaseCollationOptionsForCharset, parseCreateDatabaseCharsetMetadata, type CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import { MYSQL_CHARACTER_SETS_SQL, MYSQL_COLLATIONS_SQL, mysqlTableCharsetChangeSql, mysqlTableCharsetFromCollation, mysqlTableCollationBelongsToCharset } from "@/lib/table/mysqlTableCollation";
+import { MYSQL_STORAGE_ENGINES_SQL, mysqlTableEngineChangeSql, parseMysqlTableEngineMetadata, quoteMysqlTableIdentifier, supportsMysqlTableEngine } from "@/lib/table/mysqlTableEngine";
 import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { uuid } from "@/lib/common/utils";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
@@ -83,6 +85,7 @@ import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMe
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import ObjectNameLabel from "@/components/objects/ObjectNameLabel.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import { launchPlDebug } from "@/components/debug/plDebugLaunch";
@@ -94,6 +97,7 @@ import * as api from "@/lib/backend/api";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
 import { objectDependencyTarget, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import { oraclePackageMemberSourceRequest, type OraclePackageSourceContext } from "@/lib/sql/oraclePackageMemberNavigation";
 import type { QueryTab } from "@/types/database";
 import type {
   ColumnInfo,
@@ -276,7 +280,7 @@ import { createLocateTabMenuItem } from "@/lib/tabs/tabMenu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type ObjectFilter = ObjectBrowserFilter;
-type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
+type ObjectBrowserColumnKey = "select" | "name" | "type" | "engine" | "estimatedRows" | "totalBytes" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -288,7 +292,7 @@ const props = defineProps<{
   initialEventOpenRequestId?: number;
   /** 显式"新建事件"请求号：每次菜单点击递增，用于打开/重新进入 CREATE 编辑器 */
   initialEventCreateRequestId?: number;
-  initialObjectFilter?: "tables" | "events" | "indexes";
+  initialObjectFilter?: ObjectFilter;
   initialIndexCreateRequestId?: number;
   initialViewTarget?: SchemaIndexIdentity;
   initialViewRequestId?: number;
@@ -399,13 +403,22 @@ let objectBrowserUnmounted = false;
 const rows = ref<ObjectBrowserRow[]>([]);
 const rootRef = ref<HTMLElement>();
 const search = ref(props.initialSearchQuery ?? "");
-function initialObjectBrowserFilter(): ObjectFilter {
-  const preferred = props.selectedObjectFilter ?? props.initialObjectFilter;
+/**
+ * Single normalization for the first mount and for tab reuse. The sidebar sets
+ * the preferred category when a group row is double-clicked; resolving it in one
+ * place keeps that group opening the same category whether the tab already
+ * exists or is created on the spot.
+ */
+function resolvedObjectBrowserFilter(preferred: ObjectFilter | undefined): ObjectFilter {
   if (preferred === "indexes") return "indexes";
   if (props.connection.db_type === "oceanbase-oracle") return preferred ?? "tables";
-  return preferred === "triggers" && oracleTriggerObjectReadOptions(props.connection, ["TRIGGER"], props.catalog) ? "triggers" : "all";
+  // 非 OceanBase-Oracle 连接：显式分类（表/视图/存储过程/函数/触发器/事件…）
+  // 都要生效。此前把「触发器」分类绑定到 Oracle 精确读取能力，会让双击
+  // MySQL 的「触发器」分组先落到「全部」；而对象列表本来就会带出触发器，
+  // 该分类可以直接生效（空分类另有「全部」入口兜底）。
+  return preferred ?? "all";
 }
-const objectFilter = ref<ObjectFilter>(initialObjectBrowserFilter());
+const objectFilter = ref<ObjectFilter>(resolvedObjectBrowserFilter(props.selectedObjectFilter ?? props.initialObjectFilter));
 const userHasSelectedFilter = ref(false);
 const sortKey = ref<ObjectBrowserSortKey>("name");
 const sortDirection = ref<ObjectBrowserSortDirection>("asc");
@@ -606,6 +619,10 @@ const showTableStatistics = computed(() => !usesServerObjectPaging.value && effe
 const showObjectRowStats = computed(() => showTableStatistics.value);
 const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
 const showMysqlTableCharsetColumns = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
+// 存储引擎只在 MySQL 原生连接上既展示又可改；其它方言的统计接口不返回 engine。
+const showMysqlTableEngineColumn = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
+// 表级元数据（引擎、字符集、排序规则）只在原生 MySQL 连接上可改，与后端 DDL 构造器一致。
+const canChangeMysqlTableMetadata = computed(() => showMysqlTableCharsetColumns.value && supportsMysqlTableEngine(props.connection));
 // Only the native MySQL statistics read returns AUTO_INCREMENT (same query and gate as the collation).
 const showMysqlAutoIncrementColumn = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
 const isTiDb = computed(() => {
@@ -773,6 +790,7 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   type: 110,
   estimatedRows: 110,
   totalBytes: 100,
+  engine: 110,
   autoIncrement: 130,
   characterSet: 120,
   collation: 220,
@@ -787,6 +805,7 @@ const objectColumnOrderStorageKey = computed(() => `${objectColumnVisibilityStor
 const availableObjectColumnDefinitions = computed(() => [
   { key: "name" as const, label: t("objects.name") },
   { key: "type" as const, label: t("objects.type") },
+  ...(showMysqlTableEngineColumn.value ? [{ key: "engine" as const, label: t("grid.tableInfoEngine") }] : []),
   ...(showObjectRowStats.value ? [{ key: "estimatedRows" as const, label: objectRowsLabel.value }] : []),
   { key: "comment" as const, label: t("objects.comment") },
   ...(showObjectSizeStats.value ? [{ key: "totalBytes" as const, label: t("objects.size") }] : []),
@@ -964,29 +983,44 @@ const supportsVacuumTable = computed(() => !connectionIsEffectivelyReadOnly(prop
 const vacuumRiskMessage = computed(() => (vacuumExecuting.value ? t("contextMenu.vacuumTableRunningHint") : vacuumTableFull.value ? t("contextMenu.vacuumTableFullRisk") : vacuumTableAnalyze.value ? t("contextMenu.vacuumTableAnalyzeRisk") : t("contextMenu.vacuumTableDefaultRisk")));
 const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(effectiveDatabaseType.value));
+function objectFiltersForCounts(filters: ObjectFilter[]): ObjectFilter[] {
+  // 选中的分类必须始终可选：空分组（只有表的库里的「视图」分组）在计数为 0
+  // 时会被过滤掉，连整条分类控件都可能被判定为冗余而隐藏，用户就再也回不到
+  // 「全部」，只能看一个空列表。
+  if (objectFilter.value === "all" || filters.includes(objectFilter.value)) return filters;
+  return [filters[0], objectFilter.value, ...filters.slice(1)];
+}
+
 const objectFilters = computed<ObjectFilter[]>(() =>
-  props.connection.db_type === "oceanbase-oracle"
-    ? ["all", "tables", "views", "procedures", "functions", "triggers", "sequences", ...(supportsSchemaIndexes.value ? ["indexes" as const] : []), "packages", "types"]
-    : (
-        [
-          ["all", objectCounts.value.all],
-          ["tables", objectCounts.value.tables],
-          ["views", objectCounts.value.views],
-          ["materializedViews", objectCounts.value.materializedViews],
-          ["procedures", objectCounts.value.procedures],
-          ["functions", objectCounts.value.functions],
-          ["triggers", objectCounts.value.triggers],
-          ["events", objectCounts.value.events],
-          ["sequences", objectCounts.value.sequences],
-          ["indexes", objectCounts.value.indexes],
-          ["packages", objectCounts.value.packages],
-          ["types", objectCounts.value.types],
-        ] as Array<[ObjectFilter, number]>
-      )
-        .filter(([filter, count]) => filter === "all" || count > 0 || (filter === "triggers" && supportsExactTriggerDiscovery.value) || (filter === "indexes" && supportsSchemaIndexes.value))
-        .map(([filter]) => filter),
+  objectFiltersForCounts(
+    props.connection.db_type === "oceanbase-oracle"
+      ? ["all", "tables", "views", "procedures", "functions", "triggers", "sequences", ...(supportsSchemaIndexes.value ? ["indexes" as const] : []), "packages", "types"]
+      : (
+          [
+            ["all", objectCounts.value.all],
+            ["tables", objectCounts.value.tables],
+            ["views", objectCounts.value.views],
+            ["materializedViews", objectCounts.value.materializedViews],
+            ["procedures", objectCounts.value.procedures],
+            ["functions", objectCounts.value.functions],
+            ["triggers", objectCounts.value.triggers],
+            ["events", objectCounts.value.events],
+            ["sequences", objectCounts.value.sequences],
+            ["indexes", objectCounts.value.indexes],
+            ["packages", objectCounts.value.packages],
+            ["types", objectCounts.value.types],
+          ] as Array<[ObjectFilter, number]>
+        )
+          .filter(([filter, count]) => filter === "all" || count > 0 || (filter === "triggers" && supportsExactTriggerDiscovery.value) || (filter === "indexes" && supportsSchemaIndexes.value))
+          .map(([filter]) => filter),
+  ),
 );
-const showObjectFilter = computed(() => objectFilters.value.length > 2 || (supportsExactTriggerDiscovery.value && objectFilters.value.length > 1) || (supportsSchemaIndexes.value && objectFilters.value.includes("indexes")));
+// A category other than 全部 that happens to be empty still needs its strip: that
+// chip row is the only control that can take the user back to 全部. A non-empty
+// selection keeps the #11624 behaviour (single-kind scopes stay a plain count).
+const showObjectFilter = computed(
+  () => objectFilters.value.length > 2 || (supportsExactTriggerDiscovery.value && objectFilters.value.length > 1) || (supportsSchemaIndexes.value && objectFilters.value.includes("indexes")) || (objectFilter.value !== "all" && objectCounts.value[objectFilter.value] === 0),
+);
 // A scope that holds a single object kind makes "全部 14" and "表 14" the same number, so the
 // strip is dropped as redundant — which used to drop the only object count the toolbar could
 // show at all (t8y2/dbx#11624, the common MySQL "tables only" database). Keep that one kind's
@@ -1439,6 +1473,7 @@ watch(sortKeyOptions, (options) => {
 function sortKeyLabel(key: ObjectBrowserSortKey): string {
   if (key === "name") return t("objects.name");
   if (key === "type") return t("objects.type");
+  if (key === "engine") return t("grid.tableInfoEngine");
   if (key === "characterSet") return t("structureEditor.characterSet");
   if (key === "collation") return t("structureEditor.collation");
   if (key === "estimatedRows") return objectRowsLabel.value;
@@ -2471,6 +2506,37 @@ function openTableStructureEditor() {
   const row = sidePanelRow.value;
   if (!row || row.type !== "TABLE" || !canOpenTableStructureEditor.value) return;
   queryStore.openTableStructure(props.connection.id, props.database, row.schema || selectedSchema.value, row.name, tableInfoTab.value === "relations" ? "columns" : tableInfoTab.value, undefined, props.catalog);
+}
+
+/**
+ * 源码面板显示的包。编辑器拿它把包内的裸名解析成这个包的成员，而不是去数据字典里
+ * 找一个同名的独立过程 —— 包成员不是独立对象，那样只会取回空源码。
+ */
+const sourcePackageIdentity = computed<OraclePackageSourceContext | undefined>(() => {
+  const row = sourceRow.value;
+  if (!row || (row.type !== "PACKAGE" && row.type !== "PACKAGE_BODY")) return undefined;
+  const type = effectiveDatabaseType.value;
+  if (type !== "oracle" && type !== "oceanbase-oracle" && type !== "dameng") return undefined;
+  return { name: row.name, schema: row.schema || selectedSchema.value || props.database, objectType: row.type };
+});
+
+/**
+ * 包头里 Ctrl+点击一个成员声明。面板本身只装得下一个对象的源码，所以把包体开成源码
+ * tab，并让光标落在该成员的实现上。
+ */
+function openPackageMemberSource(target: SqlObjectNavigationTarget) {
+  const request = oraclePackageMemberSourceRequest(target, selectedSchema.value || props.database);
+  if (!request) return;
+  queryStore.openObjectSourceTabPending({
+    connectionId: props.connection.id,
+    database: props.database,
+    title: `Source - ${request.name}`,
+    schema: request.schema || props.database,
+    catalog: props.catalog,
+    initialEditing: false,
+    request: { name: request.name, objectType: request.objectType },
+    focusMember: request.focusMember,
+  });
 }
 
 /**
@@ -4656,6 +4722,7 @@ function objectBrowserTableCopyColumns() {
           if (key === "type") return typeLabel(row);
           if (key === "estimatedRows") return formatObjectBrowserCount(row.estimatedRows);
           if (key === "totalBytes") return formatObjectBrowserBytes(row.totalBytes);
+          if (key === "engine") return row.engine ?? "";
           if (key === "autoIncrement") return formatObjectBrowserAutoIncrement(row.autoIncrement);
           if (key === "characterSet") return row.characterSet ?? "";
           if (key === "collation") return row.collation ?? "";
@@ -5677,7 +5744,9 @@ function openInitialEventIfNeeded() {
 
 function finishObjectBrowserRowsLoad() {
   loadingObjects.value = false;
-  const preferredFilter = props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables");
+  // 首次加载完成后会再对齐一次分类，这里也必须走与挂载/复用相同的归一化，
+  // 否则同一个分组会因为「谁的判定生效」不同而落到不同分类。
+  const preferredFilter = props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : resolvedObjectBrowserFilter(props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables");
   if (!usesServerObjectPaging.value && !userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
     // The default table filter is a presentation choice, not a user query
     // change, so preserve the tab's saved scroll offset across remounts.
@@ -6000,10 +6069,19 @@ async function revalidateCachedObjectStatistics(request: ObjectBrowserRowsLoadHa
 }
 
 function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined, detailsComplete = true) {
-  const statsByKey = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
+  const exactStats = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
+  // MySQL with lower_case_table_names=0 keeps `Orders` and `orders` as two
+  // different tables. Fold case only when the folded key is unambiguous so a
+  // case-sensitive pair never shares one table's engine/charset statistics.
+  const foldedStats = new Map<string, ObjectStatistics | null>();
+  for (const stat of stats) {
+    const foldedKey = objectStatisticKey(stat.schema || fallbackSchema, stat.name).toLowerCase();
+    foldedStats.set(foldedKey, foldedStats.has(foldedKey) ? null : stat);
+  }
   rows.value = rows.value.map((row) => {
     if (row.type !== "TABLE") return row;
-    const stat = statsByKey.get(objectStatisticKey(row.schema || fallbackSchema, row.name));
+    const key = objectStatisticKey(row.schema || fallbackSchema, row.name);
+    const stat = exactStats.get(key) ?? foldedStats.get(key.toLowerCase()) ?? undefined;
     if (!stat) return row;
     return {
       ...row,
@@ -6011,18 +6089,201 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
       created_at: stat.created_at ?? row.created_at ?? null,
       updated_at: stat.updated_at ?? row.updated_at ?? null,
-      ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null, autoIncrement: stat.auto_increment?.trim() || null } : {}),
+      ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null, engine: stat.engine?.trim() || null, autoIncrement: stat.auto_increment?.trim() || null } : {}),
     };
   });
   cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt, detailsComplete });
 }
 
 function objectStatisticKey(schema: string | undefined, name: string) {
-  return `${schema || ""}\0${name}`.toLowerCase();
+  // Case-preserving on purpose: callers fold the key themselves only after the
+  // exact key misses, and never fold an ambiguous pair.
+  return `${schema || ""}\0${name}`;
 }
 
 function normalizeStatisticNumber(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+// ---- MySQL 存储引擎列：下拉选择后执行 ALTER TABLE ... ENGINE ----
+const mysqlEngineOptions = ref<string[]>([]);
+const mysqlEngineOptionsLoading = ref(false);
+const mysqlEngineOptionsError = ref("");
+let mysqlEngineOptionsRequestId = 0;
+/** 只允许同时打开一行引擎菜单，避免虚拟滚动复用行时残留多个弹层。 */
+const mysqlEngineMenuRowId = ref<string | null>(null);
+const mysqlEngineChangeTarget = ref<{ row: ObjectBrowserRow; engine: string } | null>(null);
+const showMysqlEngineChangeConfirm = ref(false);
+const mysqlEngineChangeExecuting = ref(false);
+const mysqlEngineChangeSql = computed(() => {
+  const target = mysqlEngineChangeTarget.value;
+  if (!target) return "";
+  return mysqlTableEngineChangeSql({ database: target.row.schema || props.database, table: target.row.name, engine: target.engine }) ?? "";
+});
+/** 确认弹窗展示带反引号的原始标识符，首尾空格不会被 HTML 折叠。 */
+const mysqlEngineChangeTableLabel = computed(() => (mysqlEngineChangeTarget.value ? quoteMysqlTableIdentifier(mysqlEngineChangeTarget.value.row.name) : ""));
+
+async function loadMysqlEngineOptions(force = false) {
+  if (!canChangeMysqlTableMetadata.value) return;
+  if (!force && (mysqlEngineOptionsLoading.value || mysqlEngineOptions.value.length > 0)) return;
+  const requestId = ++mysqlEngineOptionsRequestId;
+  mysqlEngineOptionsLoading.value = true;
+  mysqlEngineOptionsError.value = "";
+  try {
+    await connectionStore.ensureConnected(props.connection.id);
+    const result = await api.executeQuery(props.connection.id, props.database, MYSQL_STORAGE_ENGINES_SQL, undefined, undefined, { maxRows: 100 });
+    if (requestId !== mysqlEngineOptionsRequestId) return;
+    mysqlEngineOptions.value = parseMysqlTableEngineMetadata(result).engines;
+  } catch (e: any) {
+    if (requestId !== mysqlEngineOptionsRequestId) return;
+    mysqlEngineOptionsError.value = e?.message || String(e);
+  } finally {
+    if (requestId === mysqlEngineOptionsRequestId) mysqlEngineOptionsLoading.value = false;
+  }
+}
+
+function setMysqlEngineMenuOpen(row: ObjectBrowserRow, open: boolean) {
+  mysqlEngineMenuRowId.value = open ? row.id : mysqlEngineMenuRowId.value === row.id ? null : mysqlEngineMenuRowId.value;
+  if (open) void loadMysqlEngineOptions();
+}
+
+function selectMysqlTableEngine(row: ObjectBrowserRow, engine: string) {
+  mysqlEngineMenuRowId.value = null;
+  const next = engine.trim();
+  if (!next || next.toLowerCase() === (row.engine ?? "").trim().toLowerCase()) return;
+  mysqlEngineChangeTarget.value = { row, engine: next };
+  showMysqlEngineChangeConfirm.value = true;
+}
+
+async function confirmMysqlTableEngineChange() {
+  const target = mysqlEngineChangeTarget.value;
+  if (!target || mysqlEngineChangeExecuting.value) return;
+  const sql = mysqlTableEngineChangeSql({ database: target.row.schema || props.database, table: target.row.name, engine: target.engine });
+  if (!sql) {
+    toast(t("objects.engineChangeInvalid"), 5000);
+    return;
+  }
+  const schema = target.row.schema || selectedSchema.value;
+  mysqlEngineChangeExecuting.value = true;
+  try {
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
+    if (!executed) return;
+    toast(t("objects.engineChangeSuccess", { name: target.row.name, engine: target.engine }));
+    showMysqlEngineChangeConfirm.value = false;
+    mysqlEngineChangeTarget.value = null;
+    await reload({ preserveExistingRows: true });
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
+  } catch (e: any) {
+    toast(t("objects.engineChangeFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    mysqlEngineChangeExecuting.value = false;
+  }
+}
+
+// ---- MySQL 字符集 / 排序规则列：下拉选择后执行 ALTER TABLE ... DEFAULT CHARACTER SET ----
+/** `SHOW CHARACTER SET` + `SHOW COLLATION` 的结果，两个下拉共用一次读取。 */
+const mysqlCharsetMetadata = ref<CreateDatabaseCharsetMetadata | undefined>();
+const mysqlCharsetMetadataLoading = ref(false);
+const mysqlCharsetMetadataError = ref("");
+let mysqlCharsetMetadataRequestId = 0;
+/** 同一时刻只允许打开一个字符集/排序规则弹层，避免虚拟滚动复用行时残留多个浮层。 */
+const mysqlCharsetMenuTarget = ref<{ rowId: string; kind: "charset" | "collation" } | null>(null);
+const mysqlTableCharsetOptions = computed<string[]>(() => mysqlCharsetMetadata.value?.charsets ?? []);
+const mysqlCharsetChangeTarget = ref<{ row: ObjectBrowserRow; charset: string; collation: string } | null>(null);
+const showMysqlCharsetChangeConfirm = ref(false);
+const mysqlCharsetChangeExecuting = ref(false);
+const mysqlCharsetChangeSql = computed(() => {
+  const target = mysqlCharsetChangeTarget.value;
+  if (!target) return "";
+  return mysqlTableCharsetChangeSql({ database: target.row.schema || props.database, table: target.row.name, charset: target.charset, collation: target.collation }) ?? "";
+});
+const mysqlCharsetChangeTableLabel = computed(() => (mysqlCharsetChangeTarget.value ? quoteMysqlTableIdentifier(mysqlCharsetChangeTarget.value.row.name) : ""));
+
+function mysqlCollationOptionsForCharset(charset: string): string[] {
+  const metadata = mysqlCharsetMetadata.value;
+  if (!metadata) return [];
+  // 统计信息里没有表排序规则时（例如权限不足），退回全量列表，选中后由排序规则反推字符集。
+  if (!charset.trim()) return Array.from(new Set(Object.values(metadata.collationsByCharset).flat()));
+  return createDatabaseCollationOptionsForCharset(charset, metadata.collationsByCharset);
+}
+
+async function loadMysqlCharsetMetadata(force = false) {
+  if (!canChangeMysqlTableMetadata.value) return;
+  if (!force && (mysqlCharsetMetadataLoading.value || mysqlCharsetMetadata.value)) return;
+  const requestId = ++mysqlCharsetMetadataRequestId;
+  mysqlCharsetMetadataLoading.value = true;
+  mysqlCharsetMetadataError.value = "";
+  try {
+    await connectionStore.ensureConnected(props.connection.id);
+    const [charsetResult, collationResult] = await Promise.all([
+      api.executeQuery(props.connection.id, props.database, MYSQL_CHARACTER_SETS_SQL, undefined, undefined, { maxRows: 1000 }),
+      api.executeQuery(props.connection.id, props.database, MYSQL_COLLATIONS_SQL, undefined, undefined, { maxRows: 10000 }),
+    ]);
+    if (requestId !== mysqlCharsetMetadataRequestId) return;
+    mysqlCharsetMetadata.value = parseCreateDatabaseCharsetMetadata(charsetResult, collationResult);
+  } catch (e: any) {
+    if (requestId !== mysqlCharsetMetadataRequestId) return;
+    mysqlCharsetMetadataError.value = e?.message || String(e);
+  } finally {
+    if (requestId === mysqlCharsetMetadataRequestId) mysqlCharsetMetadataLoading.value = false;
+  }
+}
+
+function setMysqlCharsetMenuOpen(row: ObjectBrowserRow, kind: "charset" | "collation", open: boolean) {
+  const current = mysqlCharsetMenuTarget.value;
+  mysqlCharsetMenuTarget.value = open ? { rowId: row.id, kind } : current?.rowId === row.id && current?.kind === kind ? null : current;
+  if (open) void loadMysqlCharsetMetadata();
+}
+
+/** 换字符集时保留仍然合法的排序规则，否则退回该字符集的默认排序规则（服务端返回的首项）。 */
+function mysqlCollationForCharset(row: ObjectBrowserRow, charset: string): string {
+  const current = (row.collation ?? "").trim();
+  if (current && mysqlTableCollationBelongsToCharset(current, charset)) return current;
+  return mysqlCollationOptionsForCharset(charset)[0] ?? "";
+}
+
+function selectMysqlTableCharset(row: ObjectBrowserRow, charset: string) {
+  mysqlCharsetMenuTarget.value = null;
+  const next = charset.trim();
+  if (!next) return;
+  const collation = mysqlCollationForCharset(row, next);
+  if (next.toLowerCase() === (row.characterSet ?? "").trim().toLowerCase() && collation.toLowerCase() === (row.collation ?? "").trim().toLowerCase()) return;
+  mysqlCharsetChangeTarget.value = { row, charset: next, collation };
+  showMysqlCharsetChangeConfirm.value = true;
+}
+
+function selectMysqlTableCollation(row: ObjectBrowserRow, collation: string) {
+  mysqlCharsetMenuTarget.value = null;
+  const next = collation.trim();
+  if (!next || next.toLowerCase() === (row.collation ?? "").trim().toLowerCase()) return;
+  const charset = (row.characterSet ?? "").trim() || mysqlTableCharsetFromCollation(next);
+  mysqlCharsetChangeTarget.value = { row, charset, collation: next };
+  showMysqlCharsetChangeConfirm.value = true;
+}
+
+async function confirmMysqlTableCharsetChange() {
+  const target = mysqlCharsetChangeTarget.value;
+  if (!target || mysqlCharsetChangeExecuting.value) return;
+  const sql = mysqlTableCharsetChangeSql({ database: target.row.schema || props.database, table: target.row.name, charset: target.charset, collation: target.collation });
+  if (!sql) {
+    toast(t("objects.charsetChangeInvalid"), 5000);
+    return;
+  }
+  const schema = target.row.schema || selectedSchema.value;
+  mysqlCharsetChangeExecuting.value = true;
+  try {
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
+    if (!executed) return;
+    toast(t("objects.charsetChangeSuccess", { name: target.row.name, charset: target.charset, collation: target.collation }));
+    showMysqlCharsetChangeConfirm.value = false;
+    mysqlCharsetChangeTarget.value = null;
+    await reload({ preserveExistingRows: true });
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
+  } catch (e: any) {
+    toast(t("objects.charsetChangeFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    mysqlCharsetChangeExecuting.value = false;
+  }
 }
 
 async function reload(options?: { allowCachedObjects?: boolean; contextEpoch?: number; preserveExistingRows?: boolean }) {
@@ -6072,7 +6333,7 @@ function onSchemaChange(value: any) {
   selectedSchema.value = typeof value === "string" && value ? value : undefined;
   emit("schemaChange", selectedSchema.value);
   userHasSelectedFilter.value = false;
-  objectFilter.value = initialObjectBrowserFilter();
+  objectFilter.value = resolvedObjectBrowserFilter(props.selectedObjectFilter ?? props.initialObjectFilter);
   void loadObjects();
 }
 
@@ -6124,7 +6385,12 @@ function selectObjectFilter(filter: ObjectFilter) {
 watch(
   () => props.selectedObjectFilter ?? props.initialObjectFilter,
   (filter) => {
-    if (filter && (filter === "indexes" || objectFilter.value === "indexes")) selectObjectFilter(filter);
+    if (!filter) return;
+    // 复用标签页时双击另一个分组只会改 initialObjectFilter，因此除了 indexes
+    // 的既有语义，任何显式分类也要跟着切换——并且必须走与首次挂载相同的
+    // 归一化，否则同一个分组在首次打开和复用时会落到不同分类。
+    const resolved = resolvedObjectBrowserFilter(filter);
+    if (resolved === "indexes" || objectFilter.value === "indexes" || resolved !== "all") selectObjectFilter(resolved);
   },
 );
 
@@ -6206,7 +6472,7 @@ watch(
     const contextEpoch = schemaListLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
-    objectFilter.value = initialObjectBrowserFilter();
+    objectFilter.value = resolvedObjectBrowserFilter(props.selectedObjectFilter ?? props.initialObjectFilter);
     clearTableSelection();
     selectedRowId.value = null;
     // Close side panel and invalidate any pending source/table-info requests
@@ -6650,11 +6916,11 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button v-if="effectiveDatabaseType === 'firebird'" variant="outline" size="sm" @click="firebirdManagerOpen = true">{{ t("tree.firebirdObjectManager") }}</Button>
       <Button v-if="canCreateSchemaIndex" data-create-schema-index variant="outline" size="sm" class="h-7 shrink-0 gap-1 px-2 text-xs" @click="createSchemaIndex"> <CopyPlus class="h-3.5 w-3.5" />{{ t("structureEditor.addIndex") }} </Button>
       <Button v-if="oracleInvalidObjectsSupported" variant="ghost" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="setOracleInvalidObjectsOpen(true)">{{ t("processList.oracleInvalidObjects.title") }}</Button>
-      <div class="flex min-w-12 items-center gap-2">
-        <span class="inline-flex max-w-[14rem] min-w-0 items-center rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium truncate" :title="selectedSchema || props.database">
+      <div class="flex min-w-12 items-center gap-2" :class="{ 'shrink-0': showDatabaseChip }">
+        <span class="max-w-[14rem] min-w-0 truncate rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium" :title="selectedSchema || props.database">
           {{ selectedSchema || props.database }}
         </span>
-        <span v-if="selectedSchema && showDatabaseChip" class="inline-flex max-w-[14rem] min-w-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground truncate" :title="props.database">
+        <span v-if="selectedSchema && showDatabaseChip" class="max-w-[14rem] min-w-0 truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground" :title="props.database">
           {{ props.database }}
         </span>
         <DatabaseActionsMenu :connection="connection" :database="database" :catalog="catalog" />
@@ -6939,6 +7205,21 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <GripVertical class="h-3 w-3" />
                     </div>
                   </div>
+                  <div v-if="columnKey === 'engine'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('engine')">
+                      <span class="truncate">{{ t("grid.tableInfoEngine") }}</span>
+                      <component :is="sortIconFor('engine')" v-if="sortIconFor('engine')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('engine')"
+                      data-object-column-resize="engine"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('engine', $event)"
+                      @dblclick="resetObjectColumnWidth('engine', 110, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
                   <div v-if="columnKey === 'characterSet'" class="relative flex min-w-0 items-center">
                     <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('characterSet')">
                       <span class="truncate">{{ t("structureEditor.characterSet") }}</span>
@@ -7142,7 +7423,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                         <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
                         <CircleX v-if="item.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
                       </span>
-                      <span class="truncate text-[13px] font-medium text-foreground" :title="item.displayName">{{ item.displayName }}</span>
+                      <ObjectNameLabel :row="item" class="truncate text-[13px] font-medium text-foreground" />
                       <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
                         {{ t("objects.partitions", { count: item.partitionCount }) }}
                       </span>
@@ -7153,11 +7434,105 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                         {{ t(item.valid ? "objects.validStatus" : "objects.invalidStatus") }}
                       </span>
                     </div>
-                    <div v-if="columnKey === 'characterSet'" class="truncate text-xs text-muted-foreground" :title="item.characterSet || ''">
-                      {{ item.characterSet || "" }}
+                    <div v-if="columnKey === 'engine'" class="min-w-0">
+                      <Popover v-if="canChangeMysqlTableMetadata && item.type === 'TABLE'" :open="mysqlEngineMenuRowId === item.id" @update:open="setMysqlEngineMenuOpen(item, $event)">
+                        <PopoverTrigger as-child>
+                          <button type="button" class="flex h-6 w-full min-w-0 items-center gap-1 truncate rounded px-1 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.engineChangeTitle')" data-object-engine-trigger @click.stop>
+                            <span class="truncate">{{ item.engine || "—" }}</span>
+                            <ChevronDown class="h-3 w-3 shrink-0 opacity-60" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent align="start" class="w-56 p-1" @click.stop>
+                          <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.engineChangeTitle") }}</div>
+                          <div v-if="mysqlEngineOptionsLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+                            <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                            {{ t("common.loading") }}
+                          </div>
+                          <div v-else-if="mysqlEngineOptionsError" class="space-y-2 px-2 py-2 text-xs text-destructive">
+                            <p class="whitespace-normal leading-4">{{ t("objects.engineLoadFailed", { message: mysqlEngineOptionsError }) }}</p>
+                            <Button variant="outline" size="sm" class="h-7 w-full text-xs" @click="loadMysqlEngineOptions(true)">{{ t("objects.engineLoadRetry") }}</Button>
+                          </div>
+                          <div v-else class="max-h-64 overflow-auto">
+                            <button v-for="engine in mysqlEngineOptions" :key="engine" type="button" class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :data-object-engine-option="engine" @click="selectMysqlTableEngine(item, engine)">
+                              <Check v-if="(item.engine || '').toLowerCase() === engine.toLowerCase()" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                              <span v-else class="h-3.5 w-3.5 shrink-0" />
+                              <span class="truncate">{{ engine }}</span>
+                            </button>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                      <div v-else class="truncate text-xs text-muted-foreground" :title="item.engine || ''">
+                        {{ item.engine || "" }}
+                      </div>
                     </div>
-                    <div v-if="columnKey === 'collation'" class="truncate text-xs text-muted-foreground" :title="item.collation || ''">
-                      {{ item.collation || "" }}
+                    <div v-if="columnKey === 'characterSet'" class="min-w-0">
+                      <Popover v-if="canChangeMysqlTableMetadata && item.type === 'TABLE'" :open="mysqlCharsetMenuTarget?.rowId === item.id && mysqlCharsetMenuTarget?.kind === 'charset'" @update:open="setMysqlCharsetMenuOpen(item, 'charset', $event)">
+                        <PopoverTrigger as-child>
+                          <button type="button" class="flex h-6 w-full min-w-0 items-center gap-1 truncate rounded px-1 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.charsetChangeTitle')" data-object-charset-trigger @click.stop>
+                            <span class="truncate">{{ item.characterSet || "—" }}</span>
+                            <ChevronDown class="h-3 w-3 shrink-0 opacity-60" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent align="start" class="w-64 p-1" @click.stop>
+                          <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.charsetChangeTitle") }}</div>
+                          <div v-if="mysqlCharsetMetadataLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+                            <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                            {{ t("common.loading") }}
+                          </div>
+                          <div v-else-if="mysqlCharsetMetadataError" class="space-y-2 px-2 py-2 text-xs text-destructive">
+                            <p class="whitespace-normal leading-4">{{ t("objects.charsetLoadFailed", { message: mysqlCharsetMetadataError }) }}</p>
+                            <Button variant="outline" size="sm" class="h-7 w-full text-xs" @click="loadMysqlCharsetMetadata(true)">{{ t("objects.engineLoadRetry") }}</Button>
+                          </div>
+                          <div v-else class="max-h-64 overflow-auto">
+                            <button v-for="charset in mysqlTableCharsetOptions" :key="charset" type="button" class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :data-object-charset-option="charset" @click="selectMysqlTableCharset(item, charset)">
+                              <Check v-if="(item.characterSet || '').toLowerCase() === charset.toLowerCase()" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                              <span v-else class="h-3.5 w-3.5 shrink-0" />
+                              <span class="truncate">{{ charset }}</span>
+                            </button>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                      <div v-else class="truncate text-xs text-muted-foreground" :title="item.characterSet || ''">
+                        {{ item.characterSet || "" }}
+                      </div>
+                    </div>
+                    <div v-if="columnKey === 'collation'" class="min-w-0">
+                      <Popover v-if="canChangeMysqlTableMetadata && item.type === 'TABLE'" :open="mysqlCharsetMenuTarget?.rowId === item.id && mysqlCharsetMenuTarget?.kind === 'collation'" @update:open="setMysqlCharsetMenuOpen(item, 'collation', $event)">
+                        <PopoverTrigger as-child>
+                          <button type="button" class="flex h-6 w-full min-w-0 items-center gap-1 truncate rounded px-1 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.collationChangeTitle')" data-object-collation-trigger @click.stop>
+                            <span class="truncate">{{ item.collation || "—" }}</span>
+                            <ChevronDown class="h-3 w-3 shrink-0 opacity-60" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent align="start" class="w-64 p-1" @click.stop>
+                          <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.collationChangeTitle") }}</div>
+                          <div v-if="mysqlCharsetMetadataLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+                            <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                            {{ t("common.loading") }}
+                          </div>
+                          <div v-else-if="mysqlCharsetMetadataError" class="space-y-2 px-2 py-2 text-xs text-destructive">
+                            <p class="whitespace-normal leading-4">{{ t("objects.charsetLoadFailed", { message: mysqlCharsetMetadataError }) }}</p>
+                            <Button variant="outline" size="sm" class="h-7 w-full text-xs" @click="loadMysqlCharsetMetadata(true)">{{ t("objects.engineLoadRetry") }}</Button>
+                          </div>
+                          <div v-else class="max-h-64 overflow-auto">
+                            <button
+                              v-for="collation in mysqlCollationOptionsForCharset(item.characterSet || '')"
+                              :key="collation"
+                              type="button"
+                              class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent"
+                              :data-object-collation-option="collation"
+                              @click="selectMysqlTableCollation(item, collation)"
+                            >
+                              <Check v-if="(item.collation || '').toLowerCase() === collation.toLowerCase()" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                              <span v-else class="h-3.5 w-3.5 shrink-0" />
+                              <span class="truncate">{{ collation }}</span>
+                            </button>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                      <div v-else class="truncate text-xs text-muted-foreground" :title="item.collation || ''">
+                        {{ item.collation || "" }}
+                      </div>
                     </div>
                     <div v-if="columnKey === 'estimatedRows'" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
                       {{ formatObjectBrowserCount(item.estimatedRows) }}
@@ -7207,7 +7582,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <component :is="iconFor(item)" class="h-6 w-6" :class="iconClass(item.type)" />
                       <CircleX v-if="item.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-0.5 -bottom-0.5 h-4 w-4 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
                     </div>
-                    <span class="w-full truncate text-sm font-medium leading-tight text-foreground">{{ item.displayName }}</span>
+                    <ObjectNameLabel :row="item" class="w-full truncate text-sm font-medium leading-tight text-foreground" />
                     <div class="flex items-center gap-1.5">
                       <span class="text-xs text-muted-foreground">{{ typeLabel(item) }}</span>
                       <span v-if="item.valid != null" class="rounded border px-1 py-px text-[10px] font-medium" :class="item.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
@@ -7251,7 +7626,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <Square v-else class="h-3.5 w-3.5" />
                     </button>
                     <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" aria-hidden="true" />
-                    <span class="min-w-0 truncate font-medium">{{ item.displayName }}</span>
+                    <ObjectNameLabel :row="item" class="min-w-0 truncate font-medium" />
                   </div>
                 </CustomContextMenu>
               </div>
@@ -7607,8 +7982,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 :database-type="props.connection.db_type"
                 :dialect="sourceDialect"
                 :format-dialect="sourceFormatDialect"
+                :package-source="sourcePackageIdentity"
                 force-word-wrap
                 @save="sourceSection === 'source' && saveSource()"
+                @open-object-source="openPackageMemberSource"
               />
             </div>
             <QueryEditor
@@ -7622,9 +7999,11 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               :database-type="props.connection.db_type"
               :dialect="sourceDialect"
               :format-dialect="sourceFormatDialect"
+              :package-source="sourcePackageIdentity"
               force-word-wrap
               read-only
               data-object-source-preview
+              @open-object-source="openPackageMemberSource"
             />
             <div v-if="sourceSaveError" class="shrink-0 whitespace-pre-wrap break-words border-t px-3 py-2 text-xs text-destructive">
               {{ sourceSaveError }}
@@ -7892,6 +8271,26 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </label>
     </template>
   </DangerConfirmDialog>
+
+  <DangerConfirmDialog
+    v-model:open="showMysqlEngineChangeConfirm"
+    :title="t('objects.engineChangeTitle')"
+    :message="t('objects.engineChangeMessage', { name: mysqlEngineChangeTableLabel, from: mysqlEngineChangeTarget?.row.engine || '—', to: mysqlEngineChangeTarget?.engine ?? '' })"
+    :sql="mysqlEngineChangeSql"
+    :loading="mysqlEngineChangeExecuting"
+    :confirm-label="t('objects.engineChangeConfirm')"
+    @confirm="confirmMysqlTableEngineChange"
+  />
+
+  <DangerConfirmDialog
+    v-model:open="showMysqlCharsetChangeConfirm"
+    :title="t('objects.charsetChangeTitle')"
+    :message="t('objects.charsetChangeMessage', { name: mysqlCharsetChangeTableLabel, charset: mysqlCharsetChangeTarget?.charset ?? '', collation: mysqlCharsetChangeTarget?.collation || '—' })"
+    :sql="mysqlCharsetChangeSql"
+    :loading="mysqlCharsetChangeExecuting"
+    :confirm-label="t('objects.charsetChangeConfirm')"
+    @confirm="confirmMysqlTableCharsetChange"
+  />
 
   <DangerConfirmDialog v-model:open="showEmptyConfirm" :title="t('contextMenu.confirmEmptyTableTitle')" :message="t('contextMenu.confirmEmptyTableMessage', { name: emptyTarget?.name ?? '' })" :sql="emptyPreviewSql" :confirm-label="t('contextMenu.emptyTable')" @confirm="confirmEmptyTable" />
 

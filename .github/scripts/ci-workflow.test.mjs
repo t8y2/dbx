@@ -197,6 +197,31 @@ test("Neo4j Windows x64 release and CI use the Windows-compatible build", () => 
   assert.ok(compatibilitySteps.includes('build-windows-legacy.sh "$RUNNER_TEMP/dbx-agent-neo4j-windows-x64.exe"'));
 });
 
+test("Oracle thin Go 1.20 build and OCI modfile split stay covered in release and CI", () => {
+  const release = readFileSync(new URL("../workflows/agents-release.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const thin = job("build-oracle-native", release);
+  assert.match(thin, /go-version: "1\.20\.14"/);
+  assert.ok(thin.includes("cache-dependency-path: agents/drivers/oracle-go/go.sum"));
+
+  const oci = job("build-oracle-oci-native", release);
+  assert.ok(oci.includes("cache-dependency-path: agents/drivers/oracle-go/go.oci.sum"));
+  assert.ok(oci.includes("go test -mod=readonly -modfile=go.oci.mod -tags oci ./..."));
+  assert.ok(oci.includes("go build -mod=readonly -modfile=go.oci.mod -tags oci"));
+
+  const ci = job("agent-go");
+  const oracleSteps = ci.slice(ci.indexOf("- name: Setup Oracle Windows-compatible Go"));
+  assert.equal((oracleSteps.match(/if: matrix\.driver == 'oracle-go'/g) ?? []).length, 2);
+  assert.match(oracleSteps, /go-version: "1\.20\.14"/);
+  assert.ok(oracleSteps.includes("go test -mod=readonly ./..."));
+  assert.ok(oracleSteps.includes("grep -q ': go1\\.20\\.14$'"));
+
+  const thinMod = readFileSync(new URL("../../agents/drivers/oracle-go/go.mod", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  assert.match(thinMod, /^go 1\.20$/m);
+  assert.doesNotMatch(thinMod, /github\.com\/godror\/godror/);
+  const ociMod = readFileSync(new URL("../../agents/drivers/oracle-go/go.oci.mod", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  assert.match(ociMod, /github\.com\/godror\/godror/);
+});
+
 test("shared Rust caches publish only complete builds outside the old cache namespace", () => {
   for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust", "agent-integration"]) {
     const content = job(name);

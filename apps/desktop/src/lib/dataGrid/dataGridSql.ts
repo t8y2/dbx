@@ -21,6 +21,7 @@ export interface DataGridColumnInfo {
   column_default?: string | null;
   extra?: string | null;
   comment?: string | null;
+  collation?: string | null;
 }
 
 export interface DataGridSaveStatementOptions {
@@ -76,6 +77,8 @@ export type DataGridContextFilterMode =
   | "is-not-blank"
   | "like"
   | "not-like"
+  | "ilike"
+  | "not-ilike"
   | "begins-with"
   | "ends-with"
   | "not-begins-with"

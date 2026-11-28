@@ -8,15 +8,21 @@ use dbx_core::models::connection::DatabaseType;
 use dbx_core::persistence::task_history::{TaskHistoryStorageError, TaskLifecycleOwner, TransferTaskJournal};
 pub use dbx_core::transfer::{get_db_type, TransferOwnershipPreview, TransferProgress, TransferRequest};
 
-fn emit_progress(app: &AppHandle, progress: TransferProgress) {
+fn emit_progress(app: &AppHandle, state: &AppState, progress: TransferProgress) {
+    crate::commands::observability::publish_transfer_progress(state, "transfer", &progress.transfer_id, &progress);
     let _ = app.emit("transfer-progress", progress);
 }
 
-async fn emit_terminal_progress(app: &AppHandle, history: Option<&TransferTaskJournal>, progress: TransferProgress) {
+async fn emit_terminal_progress(
+    app: &AppHandle,
+    state: &AppState,
+    history: Option<&TransferTaskJournal>,
+    progress: TransferProgress,
+) {
     if let Some(history) = history {
         history.finish(&progress).await;
     }
-    emit_progress(app, progress);
+    emit_progress(app, state, progress);
 }
 
 #[tauri::command]
@@ -89,6 +95,9 @@ pub async fn start_transfer(
     };
 
     tokio::spawn(async move {
+        // The runner takes ownership of `state`; keep a clone for the
+        // observation tap inside the progress callback.
+        let observation_state = state.clone();
         let terminal = dbx_core::transfer_runner::run_transfer(
             state,
             request,
@@ -98,10 +107,10 @@ pub async fn start_transfer(
             target_pool_key,
             history.clone(),
             operation_timeout_secs,
-            |progress| emit_progress(&app, progress),
+            |progress| emit_progress(&app, &observation_state, progress),
         )
         .await;
-        emit_terminal_progress(&app, history.as_ref(), terminal).await;
+        emit_terminal_progress(&app, &observation_state, history.as_ref(), terminal).await;
     });
 
     Ok(())

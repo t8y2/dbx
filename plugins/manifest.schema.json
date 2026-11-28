@@ -30,7 +30,7 @@
       "uniqueItems": true,
       "items": {
         "anyOf": [
-          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.schema:read", "host.storage", "host.ai", "host.clipboard:read", "host.data:read", "host.connections:read", "host.connections::read", "host.connections:edit"] },
+          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.schema:read", "host.storage", "host.ai", "host.clipboard:read", "host.data:read", "host.connections:read", "host.connections::read", "host.connections:edit", "host.observe:queries", "host.observe:connections", "host.observe:ai", "host.observe:transfers", "host.observe:plugins"] },
           { "type": "string", "pattern": "^host\\.network:https://[A-Za-z0-9._-]+(:[0-9]+)?$" },
           { "type": "string", "pattern": "^host\\.openUrl:https?://[^\\s/?#@*\\\\]+$", "maxLength": 4109 }
         ]

@@ -175,6 +175,36 @@ describe("data grid visual runtimes", () => {
     expect(frames.callbacks.size).toBe(0);
   });
 
+  it("keeps observing unchanged scroll targets across repeated result refreshes", () => {
+    const frames = createFrameDriver();
+    const resize = createObserver();
+    const createResizeObserver = vi.fn(() => resize.observer);
+    const child = {} as Element;
+    const replacement = {} as Element;
+    const scroller = { children: [child] };
+    const runtime = useDataGridScrollbars({
+      update: vi.fn(),
+      getScroller: () => scroller as unknown as Element,
+      applyHorizontalDrag: vi.fn(),
+      applyVerticalDrag: vi.fn(),
+      frameDriver: frames.driver,
+      createResizeObserver,
+    });
+
+    runtime.observeScroller();
+    runtime.observeScroller();
+    expect(createResizeObserver).toHaveBeenCalledOnce();
+    expect(resize.disconnect).not.toHaveBeenCalled();
+    expect(frames.callbacks.size).toBe(1);
+
+    scroller.children = [replacement];
+    runtime.observeScroller();
+    expect(createResizeObserver).toHaveBeenCalledTimes(2);
+    expect(resize.disconnect).toHaveBeenCalledOnce();
+    expect(resize.observe).toHaveBeenLastCalledWith(replacement);
+    runtime.dispose();
+  });
+
   it("tears down pending canvas work when its Vue scope stops", () => {
     const frames = createFrameDriver();
     const resize = createObserver();

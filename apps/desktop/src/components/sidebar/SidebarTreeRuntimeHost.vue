@@ -190,7 +190,9 @@ import {
   isDirectNavigationTreeNode,
   isDocumentBrowserTreeNode,
   isRepeatableNavigationTreeNode,
+  objectBrowserFilterForGroupNode,
   objectSourceTargetForTreeNode,
+  packageMemberFocusForTreeNode,
   shouldOpenQueryOnTreeNodeActivation,
   shouldRunTreeNodeRowAction,
   treeNodeRowAction,
@@ -243,10 +245,11 @@ import type { DuplicateTableStructurePlan } from "@/lib/database/dbAdminSql";
 import { useOceanbaseCloneDialog } from "@/composables/useOceanbaseCloneDialog";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { redisFlushDbPreview } from "@/lib/redis/redisCommandPreview";
-import { buildRenameObjectSql, buildRenameDatabaseSql, buildRenameDatabasePreflightSql, databaseRenameMaintenanceDatabase, supportsDatabaseRename, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
+import { buildRenameObjectSql, buildRenameDatabaseSql, buildRenameDatabasePreflightSql, databaseRenameMaintenanceDatabase, isMysqlDatabaseRename, supportsDatabaseRename, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
 import { prepareOracleViewRename, executeOracleViewRename, OracleViewRenameFailure, type OracleViewRenamePlan } from "@/lib/table/oracleViewRename";
 import { prepareOracleRoutineRename, executeOracleRoutineRename, OracleRoutineRenameFailure, type OracleRoutineRenamePlan } from "@/lib/table/oracleRoutineRename";
 import { prepareOracleTableRename, executeOracleTableRename, OracleTableRenameFailure, type OracleTableRenamePlan } from "@/lib/table/oracleTableRename";
+import { executeMysqlDatabaseRename, formatMysqlDatabaseRenameBlockers, loadMysqlDatabaseInventory, MysqlDatabaseRenameBlockedError, MysqlDatabaseRenameIncompleteError, prepareMysqlDatabaseRename, type MysqlDatabaseInventory } from "@/lib/table/mysqlDatabaseRename";
 import { prepareOraclePackageSaveAsExecution, OraclePackageSaveAsFailure, prepareOraclePackageSaveAs, type OraclePackageSaveAsPlan } from "@/lib/table/oraclePackageSaveAs";
 import { buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
@@ -351,6 +354,7 @@ import {
   showRenameObjectDialog,
   renameObjectName,
   renameObjectError,
+  renameObjectWarning,
   renameObjectPreviewSql,
   dropTablePreviewSql,
   dropTableCascade,
@@ -1405,11 +1409,6 @@ function runRowClickAction(clickDetail: number) {
     void openObjectBrowser(false, true);
     return;
   }
-  if (node.type === "group-events") {
-    beginNavigationRequest();
-    void openObjectBrowser();
-    return;
-  }
   const action = treeNodeRowAction(
     node.type,
     canExpand.value,
@@ -1954,9 +1953,17 @@ function onDoubleClick(event: MouseEvent) {
     void openObjectBrowser(false, true);
     return;
   }
-  if (activeNode.value.type === "group-events") {
+  // 双击对象分组行：打开对象浏览器并直接选中该分组的分类。
+  // 表级触发器分组带 tableName，属于表节点自身，继续走后面的展开逻辑。
+  const groupObjectFilter = objectBrowserFilterForGroupNode(activeNode.value.type, activeNode.value.tableName);
+  if (groupObjectFilter) {
     beginNavigationRequest();
-    void openObjectBrowser();
+    void openObjectBrowser(false, false, false, groupObjectFilter);
+    return;
+  }
+  // “查询”分组不是数据库对象，没有对应分类；双击只保证列表处于展开状态。
+  if (activeNode.value.type === "saved-sql-root") {
+    if (!activeNode.value.isExpanded) void toggle(beginNavigationRequest());
     return;
   }
   const action = treeNodeRowDoubleClickAction(
@@ -2182,7 +2189,7 @@ async function confirmDeleteSavedSqlFile() {
   releaseActiveNodeReference([node.id]);
 }
 
-async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean | "create" = false, focusSearch = false) {
+async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean | "create" = false, focusSearch = false, filterOverride?: import("@/types/database").ObjectBrowserFilter) {
   const node = activeNode.value;
   if (!node.connectionId) return;
   try {
@@ -2191,7 +2198,7 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean
 
     const eventName = openEventEditor === true && node.type === "event" ? node.objectName || node.label : undefined;
     const eventCreateRequestId = openEventEditor === "create" && node.type === "group-events" ? ++mysqlEventCreateRequestSeq : undefined;
-    const objectFilter = node.type === "event" || node.type === "group-events" ? "events" : undefined;
+    const objectFilter = filterOverride ?? (node.type === "event" || node.type === "group-events" ? "events" : undefined);
 
     const connection = connectionStore.getConfig(node.connectionId);
     if (!connection) return;
@@ -3384,6 +3391,10 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
   const sourceTarget = objectSourceTargetForTreeNode(sourceNode);
   if (!sourceTarget) return;
   const schema = sourceTarget.schema || database;
+  // 包成员打开的是整个包体，标题就该是那个包：成员名放进标题的话，复用同一个
+  // tab 打开第二个成员时标题还停在第一个成员上，反而指错了内容。
+  const focusMember = packageMemberFocusForTreeNode(sourceNode);
+  const title = `Source - ${focusMember ? sourceTarget.name : node.label}`;
   // issue #9035：两个分支都不再 await 连接与取源。先把容器挂出来（源码 tab /
   // 源码弹窗），ensureConnected 与 getObjectSource 都发生在已挂载的 UI 之内，
   // 加载中有状态、失败就地重试，而不是点击后一段时间毫无反应。
@@ -3391,12 +3402,13 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
     queryStore.openObjectSourceTabPending({
       connectionId,
       database,
-      title: `Source - ${node.label}`,
+      title,
       schema,
       catalog: node.catalog,
       initialEditing,
       initialSection,
-      request: { name: sourceTarget.name, objectType: sourceTarget.objectType, signature: sourceNode.signature },
+      request: { name: sourceTarget.name, objectType: sourceTarget.objectType, signature: sourceTarget.signature },
+      ...(focusMember ? { focusMember } : {}),
     });
     return;
   }
@@ -4310,6 +4322,7 @@ function openRenameObjectDialog() {
   if (targetKey !== renameObjectDialogTargetKey) renameObjectName.value = node.objectName || node.label;
   renameObjectDialogTargetKey = targetKey;
   renameObjectError.value = "";
+  renameObjectWarning.value = "";
   renameObjectPreviewSql.value = "";
   viewRenamePlan.value = undefined;
   routineRenamePlan.value = undefined;
@@ -4343,11 +4356,45 @@ function openRenameDatabaseDialog() {
   renameObjectName.value = activeNode.value.label;
   renameObjectDialogTargetKey = "";
   renameObjectError.value = "";
+  renameObjectWarning.value = "";
   renameObjectPreviewSql.value = "";
   viewRenamePlan.value = undefined;
   viewRenameDrafts.value = {};
   routineRenamePlan.value = undefined;
+  mysqlDatabaseRenameInventory = undefined;
   showRenameObjectDialog.value = true;
+}
+
+function isMysqlDatabaseRenameNode(node: TreeNode): boolean {
+  const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
+  return node.type === "database" && !!config && isMysqlDatabaseRename(config.db_type, config.driver_profile);
+}
+
+function cachedMysqlDatabaseRenameInventory(connectionId: string, database: string): Promise<MysqlDatabaseInventory> {
+  const key = JSON.stringify([connectionId, database]);
+  if (mysqlDatabaseRenameInventory?.key !== key) {
+    const inventory = loadMysqlDatabaseInventory(connectionId, database);
+    mysqlDatabaseRenameInventory = { key, inventory };
+    inventory.catch(() => {
+      if (mysqlDatabaseRenameInventory?.inventory === inventory) mysqlDatabaseRenameInventory = undefined;
+    });
+  }
+  return mysqlDatabaseRenameInventory.inventory;
+}
+
+const MYSQL_RENAME_GRANTEE_PREVIEW_LIMIT = 5;
+
+function mysqlDatabaseRenameGrantWarning(database: string, grantees: readonly string[]): string {
+  if (grantees.length === 0) return "";
+  const shown = grantees.slice(0, MYSQL_RENAME_GRANTEE_PREVIEW_LIMIT).join(", ");
+  const hidden = grantees.length - MYSQL_RENAME_GRANTEE_PREVIEW_LIMIT;
+  return t("contextMenu.renameDatabaseMysqlGrantsNotMigrated", { name: database, grantees: hidden > 0 ? `${shown} (+${hidden})` : shown });
+}
+
+function mysqlDatabaseRenameErrorMessage(error: unknown): string {
+  if (error instanceof MysqlDatabaseRenameBlockedError) return t("contextMenu.renameDatabaseMysqlUnsupportedObjects", { name: error.database, objects: formatMysqlDatabaseRenameBlockers(error.blockers) });
+  if (error instanceof MysqlDatabaseRenameIncompleteError) return t("contextMenu.renameDatabaseMysqlIncomplete", { oldName: error.oldName, newName: error.newName, objects: formatMysqlDatabaseRenameBlockers(error.remaining) });
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function executeTreeNodeSqlWithProductionGuard(
@@ -4401,6 +4448,8 @@ const viewRenameDrafts = ref<Record<string, string>>({});
 const routineRenamePlan = ref<OracleRoutineRenamePlan>();
 const routineRenameDrafts = ref<Record<string, string>>({});
 const tableRenamePlan = ref<OracleTableRenamePlan>();
+// MySQL database rename: the source inventory does not depend on the new name, so it is loaded once per dialog.
+let mysqlDatabaseRenameInventory: { key: string; inventory: Promise<MysqlDatabaseInventory> } | undefined;
 const tableRenameDrafts = ref<Record<string, string>>({});
 const packageSaveAsOpen = ref(false);
 const packageSaveAsTarget = ref<TreeNode | null>(null);
@@ -4434,6 +4483,24 @@ async function refreshRenameObjectPreviewSql() {
     return;
   }
   // Database rename path
+  if (node.type === "database" && isMysqlDatabaseRenameNode(node) && node.connectionId) {
+    try {
+      const inventory = await cachedMysqlDatabaseRenameInventory(node.connectionId, node.label);
+      const plan = await prepareMysqlDatabaseRename({ connectionId: node.connectionId, oldName: node.label, newName }, inventory);
+      if (requestId === renameObjectPreviewRequestId) {
+        renameObjectError.value = "";
+        renameObjectWarning.value = mysqlDatabaseRenameGrantWarning(node.label, inventory.grantees);
+        renameObjectPreviewSql.value = plan.previewSql;
+      }
+    } catch (error) {
+      if (requestId === renameObjectPreviewRequestId) {
+        renameObjectPreviewSql.value = "";
+        renameObjectWarning.value = "";
+        renameObjectError.value = mysqlDatabaseRenameErrorMessage(error);
+      }
+    }
+    return;
+  }
   if (node.type === "database") {
     try {
       const sql = await buildRenameDatabaseSql({
@@ -4783,6 +4850,19 @@ async function renamePostgresSchema(node: TreeNode, newName: string) {
   }
 }
 
+function applyDatabaseRenameToTree(node: TreeNode, newName: string) {
+  toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
+  showRenameObjectDialog.value = false;
+  const previousDatabaseNode = { ...node };
+  const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
+  liveNode.label = newName;
+  liveNode.database = newName;
+  connectionStore.updateDatabaseVGroupMember(previousDatabaseNode, newName);
+  const renamedNode: TreeNode = { ...liveNode, label: newName, database: newName };
+  connectionStore.replacePinnedTreeNode(liveNode, renamedNode);
+  void connectionStore.refreshTreeNode(liveNode);
+}
+
 async function confirmRenameObject() {
   const node = sidebarFormTarget.value ?? activeNode.value;
   let newName = renameObjectName.value.trim();
@@ -4804,6 +4884,32 @@ async function confirmRenameObject() {
     await connectionStore.ensureConnected(node.connectionId);
 
     // Database rename path
+    if (node.type === "database" && isMysqlDatabaseRenameNode(node)) {
+      const connectionId = node.connectionId;
+      let moveStarted = false;
+      try {
+        // Re-inventory at execution time: the dialog preview may be stale.
+        const plan = await prepareMysqlDatabaseRename({ connectionId, oldName: node.label, newName });
+        renameObjectPreviewSql.value = plan.previewSql;
+        const executed = await executeTreeNodeSqlWithProductionGuard(node, plan.previewSql, {
+          database: "",
+          beforeExecute: () => connectionStore.closeDatabaseConnection(connectionId, node.label),
+          execute: async () => {
+            moveStarted = true;
+            await executeMysqlDatabaseRename(plan);
+            return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+          },
+        });
+        if (executed === undefined) return;
+      } catch (error) {
+        // The server state may have changed (e.g. tables moved but the source kept); resync the database list.
+        if (moveStarted) void connectionStore.loadDatabases(connectionId, { force: true }).catch(() => undefined);
+        throw new Error(mysqlDatabaseRenameErrorMessage(error));
+      }
+      renameApplied = true;
+      applyDatabaseRenameToTree(node, newName);
+      return;
+    }
     if (node.type === "database") {
       const maintenanceDatabase = databaseRenameMaintenanceDatabase(connectionStore.getConfig(node.connectionId)?.database, node.label);
       // Preflight: check permissions, prepared transactions, and active connections
@@ -4845,16 +4951,7 @@ async function confirmRenameObject() {
       });
       if (executed === undefined) return;
       renameApplied = true;
-      toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
-      showRenameObjectDialog.value = false;
-      const previousDatabaseNode = { ...node };
-      const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
-      liveNode.label = newName;
-      liveNode.database = newName;
-      connectionStore.updateDatabaseVGroupMember(previousDatabaseNode, newName);
-      const renamedNode: TreeNode = { ...liveNode, label: newName, database: newName };
-      connectionStore.replacePinnedTreeNode(liveNode, renamedNode);
-      void connectionStore.refreshTreeNode(liveNode);
+      applyDatabaseRenameToTree(node, newName);
       return;
     }
 
@@ -5545,7 +5642,7 @@ const canRenameDatabase = computed(() => {
   const node = activeNode.value;
   if (node.type !== "database" || !node.database) return false;
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
-  return !!config && !connectionIsEffectivelyReadOnly(config) && supportsDatabaseRename(config.db_type);
+  return !!config && !connectionIsEffectivelyReadOnly(config) && supportsDatabaseRename(config.db_type, config.driver_profile);
 });
 
 const renameObjectDialogTitle = computed(() => {
@@ -5726,7 +5823,10 @@ async function confirmEditDatabaseProperties() {
     const options = propertyGroups.includes("charsetCollation") ? { ...base, charset: editDatabaseCharset.value, collation: editDatabaseCollation.value } : propertyGroups.includes("databaseComment") ? { ...base, comment: editDatabaseCommentText.value } : null;
     if (!options) return;
     const sql = await buildUpdateDatabasePropertiesSql(options);
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database || node.label });
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database || node.label });
+    // The shared production gate declined the DDL (confirmation cancelled or a
+    // read-only connection), so nothing was sent and nothing succeeded.
+    if (!executed) return;
     toast(t("contextMenu.editDatabasePropertiesSuccess", { name: node.label }), 3000);
     showEditDatabasePropertiesDialog.value = false;
     await connectionStore.loadDatabases(node.connectionId, { force: true });
@@ -5800,7 +5900,8 @@ async function confirmEditSchemaComment() {
       comment: schemaCommentText.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    if (!executed) return;
     toast(t("contextMenu.editSchemaCommentSuccess", { name: node.label }), 3000);
     showEditSchemaCommentDialog.value = false;
     await connectionStore.loadSchemas(node.connectionId, node.database, { force: true });
@@ -7434,6 +7535,7 @@ function objectDialogCapabilities() {
     renameObjectDialogTitle,
     renameObjectPreviewSql,
     renameObjectError,
+    renameObjectWarning,
     viewRenamePlan,
     viewRenameDrafts,
     routineRenamePlan,

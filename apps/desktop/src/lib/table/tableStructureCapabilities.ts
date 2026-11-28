@@ -304,7 +304,9 @@ const informixCapabilities = capabilities({
 
 const sapHanaCapabilities = capabilities({
   dialect: "oracle",
+  createTable: true,
   addColumn: true,
+  addPrimaryKey: true,
   dropColumn: true,
   renameColumn: true,
   alterExistingColumn: true,

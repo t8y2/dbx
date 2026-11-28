@@ -59,6 +59,7 @@ import {
   Columns3,
   PencilRuler,
   Pin,
+  Bookmark,
   Settings2,
   WandSparkles,
   Camera,
@@ -74,7 +75,8 @@ import { Input } from "@/components/ui/input";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import DataGridBusyOverlay from "@/components/grid/DataGridBusyOverlay.vue";
 import { DATA_GRID_CLIPBOARD_BATCH_CHARS, DataGridClipboardCapacityError, dataGridPendingRowLimit, dataGridPreparationBatchSize, type DataGridRowPreparationOptions, type DataGridRowPreparationProgress } from "@/lib/dataGrid/dataGridRowPreparation";
-import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
+import ConnectionWatermark from "@/components/common/ConnectionWatermark.vue";
+import { resolveConnectionWatermark } from "@/lib/connection/connectionWatermark";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdownMenu from "@/components/ui/LightDropdownMenu.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -98,6 +100,7 @@ import { formatDataGridColumnMetadataForCopy } from "@/lib/dataGrid/dataGridColu
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import DataGridFilterModeOrderDialog from "@/components/grid/DataGridFilterModeOrderDialog.vue";
+import DataGridFilterGroupControls from "@/components/grid/DataGridFilterGroupControls.vue";
 import DataGridFilterWorkbench from "@/components/grid/DataGridFilterWorkbench.vue";
 import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWorkbench.vue";
 import DataGridSortWorkbench from "@/components/grid/DataGridSortWorkbench.vue";
@@ -148,6 +151,7 @@ import {
   isSalesforceExistingRowReadonlyColumn,
   isSalesforceNewRowReadonlyColumn,
   isTdengineExistingRowReadonlyColumn,
+  isTdengineStableTableType,
   shouldIncludeSyntheticRowId,
   showsKeylessEditWarning,
   postgresTupleLocatorUnsupportedEngine,
@@ -437,7 +441,16 @@ import type { PluginDecodeRequest } from "@/lib/dataGrid/sqlPluginCodec";
 import { createDataGridFilterConditionCache, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import { DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT, useDataGridDistinctValueLoader } from "@/composables/useDataGridDistinctValueLoader";
 import { dataGridDistinctValueKey, dataGridNullSuggestionFilterMode, toggleAllDataGridDistinctValueOptions, type DataGridDistinctValueSource, type DataGridDistinctValueSuggestionState, type DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
-import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, removeDataGridStructuredFilterColumnsForTab, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
+import {
+  cloneDataGridStructuredFilterRules,
+  loadDataGridStructuredFilterState,
+  removeDataGridAppliedFilterColumns,
+  removeDataGridStructuredFilterColumnsForTab,
+  saveDataGridStructuredFilterState,
+  type DataGridCachedServerColumnFilter,
+  type DataGridStructuredFilterCacheState,
+} from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { createDataGridSearchScopeKey } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
@@ -490,6 +503,7 @@ import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
 import { buildColumnIndexMap, columnIndexCacheAction, columnIndexColorClass, columnIndexNameKey, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { isSchemaAware, supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
+import { loadTableDataQueryDefaults, removeTableDataQueryDefaults, saveTableDataQueryDefaults, type TableDataQueryDefaultsScope } from "@/lib/table/tableDataQueryDefaults";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 import { buildDataGridLocalFilterOptions, restoreDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint } from "@/lib/database/jdbcDialect";
@@ -980,7 +994,10 @@ const tableDependencyTarget = computed(() => {
 function viewRelationSql(context: ObjectDependencyTarget, sql: string) {
   queryStore.createTab(context.connectionId, context.database, t("objectDependencies.viewSql"), "query", context.schema, sql, context.catalog, { forceNew: true });
 }
-const productionContext = computed(() => productionContextForDatabase(resolvedConnectionConfig.value, props.database));
+const watermark = computed(() => {
+  const connection = resolvedConnectionConfig.value;
+  return resolveConnectionWatermark(connection, productionContextForDatabase(connection, props.database).active);
+});
 // The collection grid and Mongo query-result grids share the document-grid value
 // encoding (BSON null sentinel + JSON-prefixed containers), so every display,
 // editor and clipboard path must decode it whenever MongoDB values are on screen.
@@ -1325,7 +1342,11 @@ const dataGridSearch = useDataGridSearch({
   columns: () => props.result.columns,
   suggestionColumns: () => props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns,
   rows: () => displayItems.value,
-  getCellSearchText: (row, columnIndex) => (row.data[columnIndex] === null ? "" : rowLowerTextCache.get(row.data, columnIndex)),
+  getCellSearchText: (row, columnIndex) => {
+    if (row.data[columnIndex] === null) return "";
+    const preview = props.context === "table-data" && !replaceOpen.value && !row.isDirtyCol[columnIndex] ? largeValueRuntime?.visibleLargeValuePreviewSearchText(row.sourceIndex, columnIndex) : undefined;
+    return preview ?? rowLowerTextCache.get(row.data, columnIndex);
+  },
   getCellRawSearchText: (row, columnIndex) => (typeof row.data[columnIndex] === "string" ? (row.data[columnIndex] as string) : replaceOpen.value ? "" : String(row.data[columnIndex] ?? "")),
   caseSensitive: () => replaceOpen.value && replaceCaseSensitive.value,
   literalQuery: replaceOpen,
@@ -1453,6 +1474,8 @@ const allFilterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
   { value: "like", labelKey: "grid.filterBuilderContains" },
   { value: "not-like", labelKey: "grid.filterBuilderNotContains" },
+  { value: "ilike", labelKey: "grid.filterBuilderContainsCaseInsensitive" },
+  { value: "not-ilike", labelKey: "grid.filterBuilderNotContainsCaseInsensitive" },
   { value: "begins-with", labelKey: "grid.filterBuilderBeginsWith" },
   { value: "ends-with", labelKey: "grid.filterBuilderEndsWith" },
   { value: "not-begins-with", labelKey: "grid.filterBuilderNotBeginsWith" },
@@ -1565,11 +1588,30 @@ function invalidateConditionalBulkEditMatchCountPreview() {
 watch([conditionalBulkEditConditionSource, conditionalBulkEditCurrentWhereInput, conditionalBulkEditWhereInput, conditionalBulkEditRules], invalidateConditionalBulkEditMatchCountPreview, { deep: true });
 
 const structuredFilterRules = filterBuilder.rules;
+// Group drafts belong to this filter scope. The applied SQL stays independent
+// so inspecting or editing another group does not silently change the result.
+const activeFilterGroupNumber = ref(1);
+const inactiveFilterGroupRules = shallowRef(new Map<number, StructuredFilterRule[]>());
+const filterGroupNumbers = computed(() => [activeFilterGroupNumber.value, ...inactiveFilterGroupRules.value.keys()].sort((a, b) => a - b));
+const allFilterRulesDisabled = computed(() => structuredFilterRules.value.every((rule) => rule.disabled));
+const filterGroupControlBindings = computed(() => ({
+  groupNumbers: filterGroupNumbers.value,
+  activeGroup: activeFilterGroupNumber.value,
+  hasRules: structuredFilterRules.value.some((rule) => !!rule.columnName),
+  allDisabled: allFilterRulesDisabled.value,
+  disabled: applyingOnlyStructuredFilter.value || isApplyingWhere.value,
+  onAddGroup: addStructuredFilterGroup,
+  onSelectGroup: selectStructuredFilterGroup,
+  onDeleteGroup: deleteStructuredFilterGroup,
+  onToggleAll: toggleAllStructuredFilterRules,
+}));
 const filterBuilderOpen = filterBuilder.open;
 const filterWorkbenchRef = ref<{ focusRuleValue: (ruleId: string) => void }>();
 const filterBuilderColumnSearch = filterBuilder.columnSearch;
 const filteredFilterBuilderColumnOptions = filterBuilder.filteredColumns;
-const appliedStructuredWhereInput = filterBuilder.appliedWhereInput;
+// Keep the applied WHERE independent from edits to the active draft.
+const appliedStructuredWhereInput = ref("");
+const appliedStructuredRules = shallowRef<StructuredFilterRule[]>();
 const filterValueSuggestionRuleId = ref<string>();
 const filterValueSuggestionTarget = ref<DataGridDistinctValueSuggestionTarget>();
 const filterValueSuggestionSearch = ref("");
@@ -1648,11 +1690,6 @@ const filterValueSuggestionState = computed<DataGridDistinctValueSuggestionState
     canUseServerFilter: canUseServerColumnFilter.value,
   };
 });
-// Structured filter rules are restored asynchronously. A tab-switch snapshot's
-// probe includes the applied condition, so restoring before this hydration
-// settles would reject an otherwise valid snapshot and never retry it.
-const structuredFilterHydrationReady = ref(true);
-let structuredFilterHydrationRequestId = 0;
 const draftStructuredWhereInput = ref("");
 const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFilterEditorView);
 const dataGridOrderByVisible = computed(() => settingsStore.editorSettings.dataGridOrderByVisible);
@@ -2035,7 +2072,12 @@ function persistStructuredFilterState() {
   saveDataGridStructuredFilterState(structuredFilterCacheKey.value, {
     scopeKey: structuredFilterScopeKey.value,
     manualWhereInput: whereFilterInput.value,
-    rules: cloneDataGridStructuredFilterRules(structuredFilterRules.value),
+    rules: structuredFilterRules.value,
+    groups: {
+      active: activeFilterGroupNumber.value,
+      inactive: [...inactiveFilterGroupRules.value].map(([number, rules]) => ({ number, rules })),
+    },
+    appliedRules: appliedStructuredWhereInput.value ? appliedStructuredRules.value : undefined,
     appliedWhereInput: appliedStructuredWhereInput.value,
     // Vue wraps ref-held objects in proxies; structuredClone cannot clone those proxies.
     serverColumnFilters: structuredClone(toRaw(serverColumnFilters.value)),
@@ -2043,35 +2085,26 @@ function persistStructuredFilterState() {
 }
 
 function loadStructuredFilterStateForScope() {
-  const requestId = ++structuredFilterHydrationRequestId;
-  structuredFilterHydrationReady.value = false;
   const cached = cachedStructuredFilterState();
+  activeFilterGroupNumber.value = cached?.groups?.active ?? 1;
+  inactiveFilterGroupRules.value = new Map(cached?.groups?.inactive.map(({ number, rules }) => [number, rules]));
+  appliedStructuredRules.value = cached?.appliedRules;
   if (cached) {
     const cacheKey = structuredFilterCacheKey.value;
     const scopeKey = structuredFilterScopeKey.value;
-    structuredFilterRules.value = cloneDataGridStructuredFilterRules(cached.rules);
+    structuredFilterRules.value = cached.rules;
+    // The active group contains drafts. Restore the last applied SQL directly.
     appliedStructuredWhereInput.value = cached.appliedWhereInput;
     serverColumnFilters.value = structuredClone(cached.serverColumnFilters ?? {});
     // Restore the applied SQL before the manual input so the whereInput watcher
     // emits the combined condition instead of a brief empty WHERE (#8831).
     whereFilterInput.value = cached.manualWhereInput;
-    void buildStructuredWhereFromRules(structuredFilterRules.value)
-      .then((whereInput) => {
-        if (requestId !== structuredFilterHydrationRequestId || structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
-        appliedStructuredWhereInput.value = whereInput;
-        nextTick(() => {
-          emit("update:whereInput", currentWhereInput() ?? "");
-          markConditionInputsApplied();
-        });
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (requestId !== structuredFilterHydrationRequestId || structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
-        structuredFilterHydrationReady.value = true;
-        // The initial mounted restore may have run while the applied condition
-        // was empty; retry exactly after the async condition is settled.
-        nextTick(restoreTabSwitchViewSnapshot);
-      });
+    nextTick(() => {
+      if (structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
+      emit("update:whereInput", currentWhereInput() ?? "");
+      markConditionInputsApplied();
+      restoreTabSwitchViewSnapshot();
+    });
     return;
   }
   appliedStructuredWhereInput.value = "";
@@ -2079,7 +2112,37 @@ function loadStructuredFilterStateForScope() {
   whereFilterInput.value = props.initialWhereInput ?? "";
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
   markConditionInputsApplied();
-  structuredFilterHydrationReady.value = true;
+}
+
+function switchStructuredFilterGroup(number: number, rules: StructuredFilterRule[], discardActive = false) {
+  closeFilterValueSuggestions();
+  const groups = new Map(inactiveFilterGroupRules.value);
+  if (!discardActive) groups.set(activeFilterGroupNumber.value, cloneDataGridStructuredFilterRules(structuredFilterRules.value));
+  groups.delete(number);
+  inactiveFilterGroupRules.value = groups;
+  activeFilterGroupNumber.value = number;
+  structuredFilterRules.value = cloneDataGridStructuredFilterRules(rules);
+  ensureStructuredFilterRule();
+}
+
+function addStructuredFilterGroup() {
+  switchStructuredFilterGroup(Math.max(...filterGroupNumbers.value) + 1, []);
+}
+
+function selectStructuredFilterGroup(number: number) {
+  const rules = inactiveFilterGroupRules.value.get(number);
+  if (rules) switchStructuredFilterGroup(number, rules);
+}
+
+function deleteStructuredFilterGroup() {
+  const next = inactiveFilterGroupRules.value.entries().next();
+  if (!next.done) switchStructuredFilterGroup(next.value[0], next.value[1], true);
+}
+
+function toggleAllStructuredFilterRules() {
+  closeFilterValueSuggestions();
+  const disabled = !allFilterRulesDisabled.value;
+  structuredFilterRules.value = structuredFilterRules.value.map((rule) => ({ ...rule, disabled }));
 }
 
 function ensureStructuredFilterRule() {
@@ -2113,8 +2176,19 @@ function resetStructuredFilters() {
   filterBuilder.reset();
 }
 
+// Structured WHERE building is async; every apply/clear entry point takes a
+// ticket so an older build resolving late cannot overwrite a newer outcome.
+let structuredFilterApplySeq = 0;
+function beginStructuredFilterApply(): () => boolean {
+  const seq = ++structuredFilterApplySeq;
+  return () => seq === structuredFilterApplySeq;
+}
+
 async function clearAllFilters() {
+  beginStructuredFilterApply();
   whereFilterInput.value = "";
+  appliedStructuredWhereInput.value = "";
+  appliedStructuredRules.value = undefined;
   resetStructuredFilters();
   clearLocalFilter(undefined, false);
   if (canUseWhereSearch.value) await applyWhereFilter();
@@ -2155,7 +2229,8 @@ function buildGroupedWhere(conditions: string[], rules: StructuredFilterRule[]):
   return result;
 }
 
-async function applyStructuredWhere(where: string) {
+async function applyStructuredWhere(where: string, rules: StructuredFilterRule[]) {
+  appliedStructuredRules.value = where ? rules : undefined;
   appliedStructuredWhereInput.value = where;
   if (filterEditorView.value === "quick") filterBuilderOpen.value = false;
   await applyWhereFilter();
@@ -2163,7 +2238,13 @@ async function applyStructuredWhere(where: string) {
 
 async function applyStructuredFilters() {
   if (!canUseWhereSearch.value) return;
-  await applyStructuredWhere(await buildStructuredWhereFromRules(structuredFilterRules.value));
+  const scopeKey = structuredFilterScopeKey.value;
+  const cacheKey = structuredFilterCacheKey.value;
+  const isLatestApply = beginStructuredFilterApply();
+  const rules = cloneDataGridStructuredFilterRules(structuredFilterRules.value);
+  const where = await buildStructuredWhereFromRules(rules);
+  if (!isLatestApply() || structuredFilterScopeKey.value !== scopeKey || structuredFilterCacheKey.value !== cacheKey) return;
+  await applyStructuredWhere(where, rules);
 }
 
 const applyingOnlyStructuredFilter = ref(false);
@@ -2179,16 +2260,18 @@ async function applyOnlyStructuredFilter(ruleId: string) {
   const scopeKey = structuredFilterScopeKey.value;
   const cacheKey = structuredFilterCacheKey.value;
   const rulesSnapshot = JSON.stringify(structuredFilterRules.value);
+  const isLatestApply = beginStructuredFilterApply();
   try {
     // Build before changing enabled states so an invalid condition cannot clear the filter.
-    const where = await buildStructuredWhereFromRules([{ ...rule, disabled: false }]);
-    if (scopeKey !== structuredFilterScopeKey.value || cacheKey !== structuredFilterCacheKey.value || rulesSnapshot !== JSON.stringify(structuredFilterRules.value)) return;
+    const rules = [{ ...rule, disabled: false }];
+    const where = await buildStructuredWhereFromRules(rules);
+    if (!isLatestApply() || scopeKey !== structuredFilterScopeKey.value || cacheKey !== structuredFilterCacheKey.value || rulesSnapshot !== JSON.stringify(structuredFilterRules.value)) return;
     if (!where) {
       toast(t("grid.filterBuilderCompleteRuleFirst"));
       return;
     }
     filterBuilder.enableOnlyRule(ruleId);
-    await applyStructuredWhere(where);
+    await applyStructuredWhere(where, rules);
   } catch (error: unknown) {
     toast(error instanceof Error ? error.message : String(error));
   } finally {
@@ -2243,7 +2326,7 @@ watch(
 );
 
 watch(
-  [structuredFilterRules, appliedStructuredWhereInput, serverColumnFilters],
+  [structuredFilterRules, activeFilterGroupNumber, inactiveFilterGroupRules, appliedStructuredRules, appliedStructuredWhereInput, serverColumnFilters],
   () => {
     const columns = filterBuilderColumnOptions.value;
     if (columns.length > 0 && structuredFilterRules.value.some((rule) => rule.columnName && !columns.includes(rule.columnName))) {
@@ -2274,14 +2357,12 @@ function focusWhere(): boolean {
 }
 
 function focusSearch(target: Element | null = null): boolean {
-  const tableInfoDrawer = target?.closest<HTMLElement>("[data-table-info-drawer]");
-  if (tableInfoDrawer) {
-    const input = tableInfoDrawer.querySelector<HTMLInputElement>("[data-table-info-search]");
-    if (input) {
-      input.focus();
-      input.select();
-      return true;
-    }
+  const panel = target?.closest("[data-column-lookup-panel], [data-table-info-drawer]");
+  const input = panel?.querySelector<HTMLInputElement>("[data-column-lookup-search], [data-table-info-search]");
+  if (input) {
+    input.focus();
+    input.select();
+    return true;
   }
   searchOverlayVisible.value = true;
   nextTick(() => {
@@ -2293,6 +2374,16 @@ function focusSearch(target: Element | null = null): boolean {
 function closeSearch() {
   replaceOpen.value = false;
   dataGridSearch.close();
+}
+
+function handleGridFindShortcut(event: KeyboardEvent): boolean {
+  const shortcuts = settingsStore.editorSettings.shortcuts;
+  if (event.defaultPrevented || !isFocusSearchShortcut(event, shortcuts)) return false;
+  const target = event.target instanceof Element ? event.target : document.activeElement;
+  if (isGoToColumnShortcut(event, shortcuts) && !target?.closest("[data-column-lookup-panel]")) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  return focusSearch(target);
 }
 
 const PAIRS: Record<string, string> = { "'": "'", '"': '"', "(": ")" };
@@ -2650,6 +2741,8 @@ const {
   invertColumnVisibility,
   showColumn,
   persistColumnOrder,
+  previewColumnOrder,
+  hasTemporaryColumnOrder,
   resetColumnOrder: resetColumnOrderInLayout,
   toggleAllNullColumns,
   resetColumnVisibility,
@@ -2863,7 +2956,35 @@ function moveGoToColumnSelection(delta: number) {
   scrollGoToColumnSelectionIntoView();
 }
 
+let goToColumnComposition: "composing" | "saw-enter" | undefined;
+let goToColumnCommit: { timeStamp: number; acceptEqualTimeStamp: boolean } | undefined;
+
+function finishGoToColumnComposition(event?: CompositionEvent) {
+  goToColumnCommit = undefined;
+  if (goToColumnComposition === "composing" && event && event.data !== "") {
+    // WebKit can deliver an earlier physical keydown after compositionend.
+    const commit = { timeStamp: event.timeStamp, acceptEqualTimeStamp: true };
+    goToColumnCommit = commit;
+    // Rounded timestamps can tie. Expire only the tie so a later press at the same precision can select a column.
+    window.setTimeout(() => {
+      commit.acceptEqualTimeStamp = false;
+    }, 0);
+  }
+  goToColumnComposition = undefined;
+}
+
+function onGoToColumnInputKeydown(event: KeyboardEvent) {
+  const commit = goToColumnCommit;
+  goToColumnCommit = undefined;
+  const plainEnter = event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+  const trailingImeEnter = plainEnter && commit && (event.timeStamp < commit.timeStamp || (event.timeStamp === commit.timeStamp && commit.acceptEqualTimeStamp));
+  if (!trailingImeEnter && !isAiPromptImeCompositionEvent(event, goToColumnComposition !== undefined)) return;
+  if (goToColumnComposition && (event.key === "Enter" || event.code === "Enter" || event.code === "NumpadEnter")) goToColumnComposition = "saw-enter";
+  event.stopPropagation();
+}
+
 function onGoToColumnKeydown(event: KeyboardEvent) {
+  if (handleGridFindShortcut(event)) return;
   if (event.key === "ArrowDown") {
     event.preventDefault();
     event.stopPropagation();
@@ -2872,7 +2993,7 @@ function onGoToColumnKeydown(event: KeyboardEvent) {
     event.preventDefault();
     event.stopPropagation();
     moveGoToColumnSelection(-1);
-  } else if (event.key === "Enter") {
+  } else if (matchesShortcut(event, "Enter")) {
     const selected = filteredGoToColumns.value[goToColumnSelectedIndex.value];
     if (!selected) return;
     event.preventDefault();
@@ -2888,6 +3009,7 @@ function onGoToColumnKeydown(event: KeyboardEvent) {
 
 watch(goToColumnOpen, (open) => {
   if (!open) {
+    finishGoToColumnComposition();
     goToColumnSearch.value = "";
     return;
   }
@@ -3129,6 +3251,24 @@ function requestColumnOrderPersistence(indexes: number[]) {
   pendingColumnOrder.value = { scope: tableColumnOrderScopeKey.value, keys: [...columnOrderKeys.value], current: [...current], next: indexes };
 }
 
+function applyColumnHeaderOrder(indexes: number[]) {
+  if (props.context === "table-data" && !settingsStore.editorSettings.dataGridConfirmColumnHeaderReorder) {
+    applyColumnOrderChange(() => previewColumnOrder(indexes));
+    return;
+  }
+  requestColumnOrderPersistence(indexes);
+}
+
+const confirmColumnHeaderReorder = computed(() => (props.context === "table-data" ? settingsStore.editorSettings.dataGridConfirmColumnHeaderReorder : undefined));
+
+function setConfirmColumnHeaderReorder(value: boolean) {
+  settingsStore.updateEditorSettings({ dataGridConfirmColumnHeaderReorder: value });
+}
+
+function savePreviewColumnOrder() {
+  if (hasTemporaryColumnOrder.value) applyColumnOrderChange(() => persistColumnOrder(orderedDisplayableColumnIndexes.value));
+}
+
 function moveDisplayableColumn(fromDisplayableIndex: number, toDisplayableIndex: number) {
   const next = moveDisplayableColumnIndex({
     orderedIndexes: orderedDisplayableColumnIndexes.value,
@@ -3330,7 +3470,7 @@ const {
     if (headerRef.value) headerRef.value.scrollLeft = scroller.scrollLeft;
   },
   onRefreshMetrics: scheduleColumnLayoutRefresh,
-  onPersistColumnOrder: requestColumnOrderPersistence,
+  onPersistColumnOrder: applyColumnHeaderOrder,
   frozenColumnCount,
   columnReferenceDrag: columnHeaderReferenceDragController,
 });
@@ -3771,6 +3911,16 @@ function refreshGridScrollerMetrics() {
   }
   observeGridHorizontalScrollbarScroller();
   scheduleVisibleLargeValuePreviewHydration();
+}
+
+let scrollerMetricsRefreshFrame: number | null = null;
+
+function scheduleScrollerMetricsRefresh() {
+  if (!gridScrollbarsRuntime.active || scrollerMetricsRefreshFrame !== null) return;
+  scrollerMetricsRefreshFrame = requestAnimationFrame(() => {
+    scrollerMetricsRefreshFrame = null;
+    if (gridScrollbarsRuntime.active) refreshGridScrollerMetrics();
+  });
 }
 
 let columnLayoutRefreshFrame = 0;
@@ -4252,6 +4402,39 @@ watch(
 );
 function currentWhereInput(): string | undefined {
   return combineWhereInputs(whereFilterInput.value, appliedStructuredWhereInput.value);
+}
+
+const tableQueryDefaultsScope = computed<TableDataQueryDefaultsScope | undefined>(() => {
+  const meta = props.tableMeta;
+  const database = meta?.database ?? props.database;
+  if (props.context !== "table-data" || !props.connectionId || database === undefined || !meta?.tableName) return undefined;
+  return { connectionId: props.connectionId, database, schema: meta.schema ?? props.schema, catalog: meta.catalog, tableName: meta.tableName };
+});
+const hasSavedTableQueryDefaults = ref(false);
+const canSaveTableQueryDefaults = computed(() => !gridSurfaceBusy.value && !props.result.execution_error && !hasPendingConditionInputs() && !!(currentWhereInput() || (dataGridOrderByVisible.value && effectiveOrderBy())));
+
+function refreshTableQueryDefaults() {
+  const scope = tableQueryDefaultsScope.value;
+  hasSavedTableQueryDefaults.value = !!scope && !!loadTableDataQueryDefaults(scope);
+}
+
+watch(tableQueryDefaultsScope, refreshTableQueryDefaults, { immediate: true });
+
+function saveCurrentTableQueryDefaults() {
+  const scope = tableQueryDefaultsScope.value;
+  if (!scope || !canSaveTableQueryDefaults.value) return;
+  if (!saveTableDataQueryDefaults(scope, { whereInput: currentWhereInput(), orderBy: dataGridOrderByVisible.value ? effectiveOrderBy() : undefined })) {
+    toast(t("grid.tableQueryDefaultsSaveFailed"));
+    return;
+  }
+  refreshTableQueryDefaults();
+}
+
+function clearSavedTableQueryDefaults() {
+  const scope = tableQueryDefaultsScope.value;
+  if (!scope) return;
+  removeTableDataQueryDefaults(scope);
+  refreshTableQueryDefaults();
 }
 
 function effectiveOrderBy(): string | undefined {
@@ -5953,16 +6136,17 @@ async function forgetDroppedColumnQueryState(names: string[]): Promise<boolean> 
     whereFilterInput.value = "";
     cleared = true;
   }
-  const remainingRules = structuredFilterRules.value.filter((rule) => !rule.columnName || !dropped.has(dropColumnKey(rule.columnName)));
+  const keepRules = (rules: StructuredFilterRule[]) => rules.filter((rule) => !dropped.has(dropColumnKey(rule.columnName)));
+  const remainingRules = keepRules(structuredFilterRules.value);
   if (remainingRules.length !== structuredFilterRules.value.length) {
     structuredFilterRules.value = remainingRules.length > 0 ? remainingRules : [defaultStructuredFilterRule()];
-    try {
-      appliedStructuredWhereInput.value = await buildStructuredWhereFromRules(structuredFilterRules.value);
-    } catch {
-      appliedStructuredWhereInput.value = "";
-    }
-    cleared = true;
   }
+  inactiveFilterGroupRules.value = new Map([...inactiveFilterGroupRules.value].map(([number, rules]) => [number, keepRules(rules)]));
+  const previousAppliedWhere = appliedStructuredWhereInput.value;
+  const applied = await removeDataGridAppliedFilterColumns({ appliedWhereInput: previousAppliedWhere, appliedRules: appliedStructuredRules.value }, names, dropColumnCaseSensitive(), buildStructuredWhereFromRules, resolveSqlDialectId({ databaseType: resolvedDatabaseType.value }));
+  appliedStructuredWhereInput.value = applied.appliedWhereInput;
+  appliedStructuredRules.value = applied.appliedRules;
+  if (applied.appliedWhereInput !== previousAppliedWhere) cleared = true;
   if (sortCol.value && dropped.has(dropColumnKey(sortCol.value))) {
     clearSort();
     syncOrderByInputWithSort(null, null);
@@ -6006,6 +6190,7 @@ async function patchOpenDataTabsAfterColumnDrop(target: DropColumnTarget, names:
       names,
       dropColumnCaseSensitive(),
       buildStructuredWhereFromRules,
+      resolveSqlDialectId({ databaseType: resolvedDatabaseType.value }),
     );
     if (cached) tab.whereInput = combineWhereInputs(cached.manualWhereInput, cached.appliedWhereInput) ?? "";
     if (tab.result?.local_column_filters) {
@@ -6202,7 +6387,8 @@ const sortedRows = computed(() => {
       const data = rows[sourceIndex];
       return data.some((cell, columnIndex) => {
         if (cell === null) return false;
-        const text = rowLowerTextCache.get(data, columnIndex);
+        const preview = props.context === "table-data" ? largeValueRuntime?.visibleLargeValuePreviewSearchText(sourceIndex, columnIndex) : undefined;
+        const text = preview ?? rowLowerTextCache.get(data, columnIndex);
         if (text.includes(q)) return true;
         // The display cache is truncated at the cell display cap, so a match
         // past the cut would wrongly hide a row that a WHERE clause finds;
@@ -6736,14 +6922,11 @@ const deleteRowDetails = computed(() => {
 const hasVisibleRows = computed(() => displayRowCount.value > 0);
 const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !replaceOpen.value && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value || hasServerColumnFilters.value);
 const emptyTitle = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRows") : t("grid.noRows")));
-const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription")));
-watch(
-  () => [hasVisibleRows.value, props.result.columns.length] as const,
-  () => {
-    nextTick(refreshGridScrollerMetrics);
-  },
-  { immediate: true },
-);
+// A TDengine super table is never read without a condition (the SQL builder returns an empty
+// page), so an empty grid there means "add a condition", not "no data".
+const tdengineStableAwaitsCondition = computed(() => resolvedDatabaseType.value === "tdengine" && isTdengineStableTableType(props.tableMeta?.tableType) && !currentWhereInput()?.trim());
+const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : tdengineStableAwaitsCondition.value ? t("grid.tdengineStableNeedsCondition") : t("grid.noRowsDescription")));
+watch([hasVisibleRows, () => props.result.columns.length], scheduleScrollerMetricsRefresh, { flush: "post", immediate: true });
 const isErrorResult = computed(() => isQueryExecutionErrorResult(props.result) && props.result.rows.length > 0);
 const errorMessage = computed(() => (isErrorResult.value ? String(props.result.rows[0]?.[0] ?? "") : ""));
 // --- Selection composable ---
@@ -7289,7 +7472,6 @@ function captureTabSwitchViewSnapshot() {
  */
 function restoreTabSwitchViewSnapshot() {
   if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;
-  if (!structuredFilterHydrationReady.value) return;
   const ownerKey = viewSnapshotOwnerKey.value;
   if (!ownerKey || !props.viewGeneration) return;
   if (showTranspose.value) return;
@@ -7649,8 +7831,17 @@ function exportSelectedRowsJson() {
 function exportSelectedRowsMarkdown() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
-  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
-  return exportMarkdown({ rowIds, columnIndexes });
+  let columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  const transposeRecords = isTransposeMode.value;
+  if (transposeRecords) {
+    const visibleIndexBySource = new Map(visibleColumnIndexes.value.map((sourceIndex, visibleIndex) => [sourceIndex, visibleIndex]));
+    const selectedColumns = columnIndexes ? new Set(columnIndexes) : undefined;
+    columnIndexes = transposeRows.value.flatMap(({ columnIndex }) => {
+      const visibleIndex = visibleIndexBySource.get(columnIndex);
+      return visibleIndex === undefined || (selectedColumns && !selectedColumns.has(visibleIndex)) ? [] : [visibleIndex];
+    });
+  }
+  return exportMarkdown({ rowIds, columnIndexes, transposeRecords });
 }
 
 function exportSelectedRowsHtml() {
@@ -8979,16 +9170,9 @@ const { elapsedMs: resultViewUpdateMs, canvasDrawCompleted: completeResultCanvas
   () => (useCanvasGridRows.value ? "canvas" : "dom"),
 );
 
-watch(
-  () => [totalWidth.value, displayRowCount.value, useCanvasGridRows.value, props.result.columns.join("\u0000")],
-  () => {
-    nextTick(() => {
-      refreshGridScrollerMetrics();
-      observeGridHorizontalScrollbarScroller();
-    });
-  },
-  { flush: "post" },
-);
+// Width reads can force a full WebKit layout. Coalesce result changes outside
+// Vue's flush so the refresh cannot keep re-entering the same render cycle.
+watch([totalWidth, displayRowCount, useCanvasGridRows, () => props.result.columns.join("\u0000")], scheduleScrollerMetricsRefresh, { flush: "post" });
 
 function canvasScrollerElement(): HTMLElement | null {
   const scroller = scrollerRef.value;
@@ -9846,6 +10030,8 @@ function pauseCanvasGridWork() {
   lastPresentedCanvasBackingKey = null;
   stopCanvasResizeTracking();
   gridScrollbarsRuntime.pause();
+  if (scrollerMetricsRefreshFrame !== null) cancelAnimationFrame(scrollerMetricsRefreshFrame);
+  scrollerMetricsRefreshFrame = null;
   disconnectCellEditResizeObserver();
   dataGridTopbarResizeObserver?.disconnect();
   dataGridTopbarResizeObserver = null;
@@ -9869,8 +10055,7 @@ function resumeCanvasGridWork() {
     attachCanvasResizeObserver();
     observeDataGridTopbarWidth();
     observeTransposeViewport();
-    refreshGridScrollerMetrics();
-    observeGridHorizontalScrollbarScroller();
+    scheduleScrollerMetricsRefresh();
   });
 }
 
@@ -10873,8 +11058,15 @@ async function onTransposeCellDblClick(rowIndex: number, actualColIdx: number, d
 }
 
 function onTransposeCellContext(rowIndex: number, actualColIdx: number, event: MouseEvent) {
-  selectTransposeCell(rowIndex, actualColIdx, event);
   const item = displayItemAt(rowIndex);
+  if (item && isRowSelected(item.id)) {
+    // Keep the selected records for export, but target this cell for actions such as filtering.
+    invalidateContextMenuTarget();
+    transposeRowIndex.value = rowIndex;
+    gridRef.value?.focus({ preventScroll: true });
+  } else {
+    selectTransposeCell(rowIndex, actualColIdx, event);
+  }
   contextCell.value = item ? { rowId: item.id, rowIndex, col: actualColIdx } : null;
 }
 
@@ -12378,7 +12570,14 @@ function cancelPendingRowOrRestoreCell(): boolean {
   return restoreCellValue(item.id, actualColumnIndex(position.colIndex));
 }
 
-async function onGridKeydown(event: KeyboardEvent) {
+function onGridKeydown(event: KeyboardEvent) {
+  // Grid actions claim their key synchronously, including those that continue asynchronously.
+  const action = handleGridActionKeydown(event);
+  handleGridFindShortcut(event);
+  return action;
+}
+
+async function handleGridActionKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
 
   if (pendingPasteAsNewRows.value) {
@@ -12422,11 +12621,6 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (!targetAllowsNativeClipboard && handleGridPaginationShortcut(event)) return;
-  if (isFocusSearchShortcut(event) && !isGoToColumnShortcut(event, settingsStore.editorSettings.shortcuts)) {
-    event.preventDefault();
-    focusSearch(event.target instanceof Element ? event.target : document.activeElement instanceof Element ? document.activeElement : null);
-    return;
-  }
   if (isModRShortcut(event)) {
     event.preventDefault();
     event.stopPropagation();
@@ -13416,6 +13610,14 @@ function selectTransposeRecord(rowIndex: number, event?: MouseEvent) {
     }
     contextCell.value = { rowId: item.id, rowIndex, col: -1 };
   }
+  gridRef.value?.focus({ preventScroll: true });
+}
+
+function onTransposeRecordContext(rowIndex: number) {
+  const item = displayItemAt(rowIndex);
+  if (!item) return;
+  transposeRowIndex.value = rowIndex;
+  onRowContext(item.id, rowIndex);
   gridRef.value?.focus({ preventScroll: true });
 }
 
@@ -15466,6 +15668,10 @@ defineExpose({
   invertColumnVisibility,
   hasCustomColumnOrder,
   moveDisplayableColumn,
+  hasTemporaryColumnOrder,
+  confirmColumnHeaderReorder,
+  setConfirmColumnHeaderReorder,
+  savePreviewColumnOrder,
   resetColumnOrder,
   autoFitAllColumns,
   resetColumnWidths,
@@ -15654,7 +15860,8 @@ function buildExtractorContextItems(destination: "copy" | "export" = "copy"): Co
           // the saved default stays controlled by the toolbar/settings dialog.
           const wholeQueryResult = extractor === "sql-updates" && isResultsContext.value && props.databaseType === "mysql" && props.fullExportResult && !hasCompleteLocalResult.value && isSelectingAll.value && selectedCellCount.value === visibleDisplayItems.value.length * visibleColumns.value.length;
           const scope = wholeQueryResult ? "result" : "selection";
-          void (destination === "copy" ? copyWithExtractor(extractor) : exportWithExtractor(extractor, undefined, scope));
+          const fieldOrder = destination === "export" && extractor === "markdown" && isTransposeMode.value ? transposeRows.value.map((row) => row.columnIndex) : undefined;
+          void (destination === "copy" ? copyWithExtractor(extractor) : exportWithExtractor(extractor, undefined, scope, fieldOrder));
         },
         disabled: !canCopyWithExtractor(extractor),
       });
@@ -16327,7 +16534,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
                   @apply-value-suggestions="applyFilterValueSuggestions"
                   @custom-mode-order="openFilterModeOrderDialog"
-                />
+                >
+                  <template #filter-group-controls><DataGridFilterGroupControls v-bind="filterGroupControlBindings" /></template>
+                </DataGridQueryControls>
                 <div class="flex shrink-0 items-center border-r px-1">
                   <Tooltip>
                     <TooltipTrigger as-child>
@@ -16337,6 +16546,17 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     </TooltipTrigger>
                     <TooltipContent side="bottom">{{ t("grid.copyQuerySql") }}</TooltipContent>
                   </Tooltip>
+                  <DropdownMenu v-if="tableQueryDefaultsScope && canUseWhereSearch" @update:open="(open) => open && refreshTableQueryDefaults()">
+                    <DropdownMenuTrigger as-child>
+                      <Button type="button" variant="ghost" size="icon" class="h-5 w-5" :class="{ 'text-primary': hasSavedTableQueryDefaults }" :title="t('grid.tableQueryDefaults')" :aria-label="t('grid.tableQueryDefaults')">
+                        <Bookmark class="h-3 w-3" :class="{ 'fill-current': hasSavedTableQueryDefaults }" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" class="min-w-52">
+                      <DropdownMenuItem :disabled="!canSaveTableQueryDefaults" @select="saveCurrentTableQueryDefaults">{{ t("grid.tableQueryDefaultsSave") }}</DropdownMenuItem>
+                      <DropdownMenuItem :disabled="!hasSavedTableQueryDefaults" @select="clearSavedTableQueryDefaults">{{ t("grid.tableQueryDefaultsClear") }}</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </div>
               </template>
 
@@ -16486,7 +16706,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
           @apply-value-suggestions="applyFilterValueSuggestions"
           @custom-mode-order="openFilterModeOrderDialog"
-        />
+        >
+          <template #filter-group-controls><DataGridFilterGroupControls v-bind="filterGroupControlBindings" /></template>
+        </DataGridFilterWorkbench>
         <DataGridTextFilterWorkbench
           v-if="canUseWhereSearch && filterEditorView === 'text' && filterBuilderOpen"
           :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
@@ -16524,7 +16746,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
           @apply-value-suggestions="applyFilterValueSuggestions"
           @custom-mode-order="openFilterModeOrderDialog"
-        />
+        >
+          <template #filter-group-controls><DataGridFilterGroupControls v-bind="filterGroupControlBindings" /></template>
+        </DataGridTextFilterWorkbench>
         <DataGridSortWorkbench
           v-if="canUseWhereSearch && dataGridOrderByVisible && filterEditorView === 'conditions' && sortBuilderOpen"
           :sql-preview="sortSqlPreview"
@@ -16665,7 +16889,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 </Button>
               </div>
               <div class="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-                <ProductionWatermark v-if="productionContext.active" />
+                <ConnectionWatermark v-if="watermark" v-bind="watermark" />
                 <div data-grid-transpose-header class="data-grid-transpose-header data-grid-header-shell relative z-20 h-7 w-full shrink-0 overflow-hidden border-b border-border font-semibold text-muted-foreground">
                   <div class="absolute left-0 top-0 z-30 h-full" :style="{ width: `${transposePinnedWidth}px` }">
                     <div class="data-grid-header-cell relative flex h-full w-full shrink-0 items-center border-r border-border px-3 py-1.5 truncate">
@@ -16711,7 +16935,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                         width: `${getTransposeRecordWidth(recordIndex)}px`,
                       }"
                       @click="selectTransposeRecord(recordIndex, $event)"
-                      @contextmenu="selectTransposeRecord(recordIndex, $event)"
+                      @contextmenu="onTransposeRecordContext(recordIndex)"
                     >
                       {{ rowNumberText(displayItems[recordIndex]) }}
                       <div data-grid-transpose-record-resize-handle class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeRecordResizeStart(recordIndex, $event)" @dblclick.stop="autoFitTransposeRecord(recordIndex)" />
@@ -17505,7 +17729,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                    `top`/`inset` offsets are measured from the body instead of from the
                    grid's outer relative container (which starts at the header row). -->
               <div class="data-grid-scroll-body relative min-h-0 flex-1 flex flex-col overflow-hidden" :class="{ 'has-vertical-scrollbar': hasGridVerticalOverflow }">
-                <ProductionWatermark v-if="productionContext.active" />
+                <ConnectionWatermark v-if="watermark" v-bind="watermark" />
                 <div v-if="!hasVisibleRows" class="relative min-h-0 flex-1">
                   <div class="data-grid-scroller h-full overflow-x-auto overflow-y-hidden overscroll-none" :class="{ 'is-scrolling': isScrolling }" @scroll="onScrollerScroll" @wheel="onDomGridWheel">
                     <div class="h-full min-h-[220px]" :style="{ width: 'max(100%, var(--total-w))' }" />
@@ -17982,6 +18206,12 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               <input
                 ref="goToColumnSearchInput"
                 v-model="goToColumnSearch"
+                data-column-lookup-search
+                @compositionstart="goToColumnComposition = 'composing'"
+                @compositionend="finishGoToColumnComposition"
+                @blur="finishGoToColumnComposition()"
+                @keydown="onGoToColumnInputKeydown"
+                @keyup="goToColumnCommit = undefined"
                 :placeholder="t('grid.searchColumn')"
                 :aria-label="t('grid.searchColumn')"
                 class="h-8 w-full rounded-md border bg-transparent pl-7 pr-28 text-xs outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
@@ -17993,6 +18223,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     class="absolute right-7 top-1/2 inline-flex -translate-y-1/2 items-center gap-0.5 rounded px-1 text-[10px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
                     :title="goToColumnMatchMode === 'exact' ? t('grid.useFuzzyColumnSearch') : t('grid.useExactColumnSearch')"
                     :aria-label="goToColumnMatchMode === 'exact' ? t('grid.useFuzzyColumnSearch') : t('grid.useExactColumnSearch')"
+                    @keydown.capture="handleGridFindShortcut"
                     @keydown.stop
                   >
                     {{ goToColumnMatchMode === "exact" ? t("grid.exactColumnSearch") : t("grid.fuzzyColumnSearch") }}
@@ -18576,6 +18807,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       :preference="selectedCopyPreference"
       :single-column-format="settingsStore.editorSettings.dataGridSmartSingleColumnFormat"
       :source-table-name="props.tableMeta?.tableName"
+      :database-type="props.databaseType"
       :visible-copy-extractors="settingsStore.editorSettings.dataGridVisibleCopyExtractors"
       :options="settingsStore.editorSettings.dataGridExtractorOptions"
       :items="copyPreferenceMenuItems"
@@ -18588,6 +18820,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       mode="copy"
       :preference="selectedCopyPreference"
       :source-table-name="props.tableMeta?.tableName"
+      :database-type="props.databaseType"
       :visible-copy-extractors="settingsStore.editorSettings.dataGridVisibleCopyExtractors"
       :options="settingsStore.editorSettings.dataGridExtractorOptions"
       :items="copyPreferenceMenuItems"

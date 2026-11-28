@@ -21,7 +21,8 @@ import {
   type PluginWorkbenchContext,
   type PluginAiRecommendationHostUpdate,
 } from "@/lib/plugins/pluginHostBridge";
-import { getCachedPluginUiHtml, getOrLoadPluginUiHtml, pluginUiAssetBaseUrl } from "@/lib/plugins/pluginUiHtmlCache";
+import { getCachedPluginUiHtml, getOrLoadPluginUiHtml, getSandboxDocument, invalidatePluginUiHtml, pluginUiAssetBaseUrl, type PluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
+import { declaresAnyObservationPermission } from "@/lib/plugins/pluginObservation";
 import { isPluginGraphicsEngineEnabled } from "@/lib/plugins/pluginGraphicsEngine";
 import { beginFloatingWindowDrag, closeFloatingWindows, endFloatingWindowDrag, openFloatingWindow, setFloatingWindowSize } from "@/lib/plugins/pluginFloatingWindow";
 import { isFloatingPluginWindow } from "@/lib/app/windowContext";
@@ -162,6 +163,13 @@ const frameReady = ref(false);
 const error = ref("");
 let bridge: PluginHostBridge | undefined;
 let unsubscribeEvents: (() => void) | undefined;
+let unsubscribeObservationEvents: (() => void) | undefined;
+// Host observation interest is registered per workbench mount, because the
+// shell's Tauri bridges stay subscribed for the whole process and therefore
+// cannot tell the Rust bus whether anyone is watching. Two tabs of one plugin
+// hold two owners and are refcounted independently.
+const observationOwnerId = `plugin-workbench:${props.plugin.manifest.id}:${Math.random().toString(36).slice(2)}`;
+let observationInterestRegistered = false;
 let disposed = false;
 let loadGeneration = 0;
 // Boot timing (§8.3 loading lifecycle): one console.debug line per iframe load
@@ -551,6 +559,9 @@ function createBridge() {
       invoke: api.invokePlugin,
       notify: api.notifyPlugin,
       sendBinary: api.sendPluginBinary,
+      // Desktop-only for now (web SSE delivery is a follow-up), so the bridge
+      // advertises `observations` only when this entry exists.
+      ...(isTauriRuntime() ? { subscribeHostObservations: api.subscribeHostObservations } : {}),
       readAsset: api.readPluginUiAsset,
       openAiConversation,
       connectionEditor,
@@ -805,7 +816,7 @@ async function loadWorkbench() {
   try {
     if (!props.plugin.compatibility.compatible) throw new Error((props.plugin.compatibility.errors || []).join("; ") || t("pluginPlatform.pluginIncompatible"));
     // The read/decode/inline pipeline over a multi-megabyte ui build dominates
-    // workbench open time; cache the inlined html per plugin id+version so
+    // workbench open time; cache the processed ui per plugin id+version so
     // reopening panels (new dock entries, workbench reloads) skips it. Theme
     // is applied per load via the sandbox document, so the cache never pins a
     // stale appearance. getOrLoadPluginUiHtml coalesces with an in-flight
@@ -817,20 +828,30 @@ async function loadWorkbench() {
       cachedHtml = await getOrLoadPluginUiHtml(htmlCacheKey, props.plugin.manifest.id);
       if (disposed || generation !== loadGeneration) return;
     }
-    const { html, entryDirectory } = cachedHtml;
-    // The final sandbox document is cached alongside the html: generating it
-    // re-runs megabyte-scale string surgery on every boot.
+    // The final sandbox document is cached in place of the inlined html:
+    // generating it re-runs megabyte-scale string surgery on every boot, and
+    // keeping both would hold two copies of a tens-of-MB string per plugin.
     const allowUnsafeEval = graphicsEngineEnabled.value;
-    if (!cachedHtml.sandboxDoc || cachedHtml.sandboxDoc.allowUnsafeEval !== allowUnsafeEval) {
-      cachedHtml.sandboxDoc = {
-        allowUnsafeEval,
-        doc: pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
-          baseUrl: pluginUiAssetBaseUrl(props.plugin.manifest.id, entryDirectory),
+    const sandboxDocumentOf = (entry: PluginUiHtml) =>
+      getSandboxDocument(entry, allowUnsafeEval, (html) =>
+        pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
+          baseUrl: pluginUiAssetBaseUrl(props.plugin.manifest.id, entry.entryDirectory),
           allowUnsafeEval,
         }),
-      };
+      );
+    let sandboxDoc = sandboxDocumentOf(cachedHtml);
+    if (sandboxDoc === undefined) {
+      // The unsafe-eval grant flipped after the html was released, so the cached
+      // document carries the wrong CSP. Re-read the build instead of keeping the
+      // html resident for a setting that rarely changes.
+      invalidatePluginUiHtml(htmlCacheKey);
+      bootCacheHit = false;
+      cachedHtml = await getOrLoadPluginUiHtml(htmlCacheKey, props.plugin.manifest.id);
+      if (disposed || generation !== loadGeneration) return;
+      sandboxDoc = sandboxDocumentOf(cachedHtml);
+      if (sandboxDoc === undefined) throw new Error(`Plugin ui document for ${htmlCacheKey} is unavailable`);
     }
-    source.value = cachedHtml.sandboxDoc.doc;
+    source.value = sandboxDoc;
     await nextTick();
     if (disposed || generation !== loadGeneration) return;
     createBridge();
@@ -876,11 +897,37 @@ onMounted(async () => {
     (event) => bridge?.forwardEvent(event),
     (event) => bridge?.forwardBinary(event),
   );
+  // Only a plugin that declared `host.observe:*` can receive observations, so
+  // anything else skips both the interest registration and the event
+  // subscription: an unobserved workbench must not keep the host building
+  // payloads.
+  const observesHostEvents = isTauriRuntime() && declaresAnyObservationPermission(props.plugin.manifest.permissions);
+  let unsubscribeObservations: (() => void) | undefined;
+  if (observesHostEvents) {
+    try {
+      await api.setPluginObservationInterest(observationOwnerId, props.plugin.manifest.id);
+      observationInterestRegistered = true;
+    } catch (interestError) {
+      // Observation is additive: a registration failure must not break the
+      // workbench, it only silences the observation stream for this tab.
+      console.error("[DBX][plugin-workbench:observation-interest]", interestError);
+    }
+    unsubscribeObservations = await api.subscribeHostObservations(
+      (event) => bridge?.forwardObservation(event),
+      (gap) => bridge?.forwardObservationGap(gap),
+    );
+  }
   if (disposed) {
     unsubscribe();
+    unsubscribeObservations?.();
+    if (observationInterestRegistered) {
+      observationInterestRegistered = false;
+      void api.clearPluginObservationInterest(observationOwnerId).catch(() => undefined);
+    }
     return;
   }
   unsubscribeEvents = unsubscribe;
+  unsubscribeObservationEvents = unsubscribeObservations;
   await loadWorkbench();
 });
 
@@ -935,6 +982,11 @@ onBeforeUnmount(() => {
   document.removeEventListener("dbx:tauri-file-drop", onHostFileDrop);
   disposeLocalFileHandles();
   unsubscribeEvents?.();
+  unsubscribeObservationEvents?.();
+  if (observationInterestRegistered) {
+    observationInterestRegistered = false;
+    void api.clearPluginObservationInterest(observationOwnerId).catch(() => undefined);
+  }
 });
 </script>
 

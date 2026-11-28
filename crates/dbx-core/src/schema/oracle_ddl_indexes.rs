@@ -613,7 +613,7 @@ pub(super) async fn index_metadata_query(
                         sql,
                         Some(database),
                         None,
-                        QueryExecutionOptions { max_rows: Some(10000), ..Default::default() },
+                        QueryExecutionOptions { skip_server_output: true, max_rows: Some(10000), ..Default::default() },
                     ),
                     timeout,
                 )

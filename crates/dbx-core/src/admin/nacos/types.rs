@@ -908,6 +908,12 @@ pub struct NacosConfigHistoryItem {
     pub operation: Option<String>,
     #[serde(default)]
     pub operator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_type: Option<String>,
     #[serde(default)]
     pub last_modified_time: Option<String>,
     #[serde(default)]

@@ -85,9 +85,14 @@ import QueryMessagesView from "@/components/layout/QueryMessagesView.vue";
 import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarActions.vue";
 import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
-import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
+import ConnectionWatermark from "@/components/common/ConnectionWatermark.vue";
+import { resolveConnectionWatermark } from "@/lib/connection/connectionWatermark";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
 import OraclePackageMembers from "@/components/objects/OraclePackageMembers.vue";
+import type { OraclePackageSourceContext } from "@/lib/sql/oraclePackageMemberNavigation";
+import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
+import type { OraclePackageMemberEntry } from "@/lib/sql/oraclePackageMembers";
+import type { OraclePackageProcedureTarget } from "@/lib/table/routineParameters";
 import OracleTriggerStatus from "@/components/objects/OracleTriggerStatus.vue";
 import type { OracleTriggerSnapshot, OracleTriggerTarget, OracleTriggerExecutionResult } from "@/lib/database/oracleTriggerPlan";
 const OracleInvalidObjectsDialog = defineAsyncComponent(() => import("@/components/objects/OracleInvalidObjectsDialog.vue"));
@@ -474,6 +479,44 @@ const showPackageMembers = computed(() => {
   const source = props.activeTab.objectSource?.objectType ?? props.activeTab.objectDetails?.objectType;
   return (type === "oracle" || type === "oceanbase-oracle" || type === "dameng") && (source === "PACKAGE" || source === "PACKAGE_BODY");
 });
+/**
+ * 源码 tab 正在显示的包。编辑器拿它把包内的裸名解析成这个包的成员：包头里点声明跳到包体
+ * 实现，包体里点调用就地跳转，而不是按名字去数据字典找一个并不存在的独立过程。
+ */
+const packageSourceIdentity = computed<OraclePackageSourceContext | undefined>(() => {
+  if (!showPackageMembers.value) return undefined;
+  const tab = props.activeTab;
+  const objectType = tab.objectSource?.objectType ?? tab.objectDetails?.objectType;
+  if (objectType !== "PACKAGE" && objectType !== "PACKAGE_BODY") return undefined;
+  const name = tab.objectSource?.name ?? tab.objectDetails?.name;
+  if (!name) return undefined;
+  return { name, schema: tab.objectSource?.schema ?? tab.objectDetails?.schema ?? tab.schema, objectType };
+});
+const packageProcedureContext = computed(() => {
+  const tab = props.activeTab;
+  const source = tab.objectSource ?? tab.objectDetails;
+  const schema = source?.schema ?? tab.schema;
+  if (effectiveDatabaseTypeForConnection(props.activeConnection) !== "oracle" || !schema || !source || (source.objectType !== "PACKAGE" && source.objectType !== "PACKAGE_BODY")) return undefined;
+  return { connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog, schema, packageName: source.name };
+});
+const packageProcedureTarget = shallowRef<OraclePackageProcedureTarget & { catalog?: string }>();
+const packageProcedureOpen = ref(false);
+
+function openPackageProcedure(member: OraclePackageMemberEntry) {
+  const context = packageProcedureContext.value;
+  if (!context || member.isFunction || queryStore.isTabDirty(props.activeTab)) return;
+  packageProcedureTarget.value = { ...context, member };
+  packageProcedureOpen.value = true;
+}
+
+async function openPackageProcedureSql(sql: string, execute = false) {
+  const target = packageProcedureTarget.value;
+  if (!target) return;
+  const title = `Execute - ${target.packageName}.${target.member.databaseName}`;
+  const tabId = queryStore.createTab(target.connectionId, target.database, title, "query", target.schema, sql, target.catalog, { forceNew: true });
+  if (execute) await queryStore.executeTabSql(tabId, sql);
+}
+
 const unfinishedTypeChange = computed(() => !!props.activeTab.typeManagementDraft && props.activeTab.typeManagementDraft.state !== "complete");
 const verifiedTypeDeletion = computed(() => props.activeTab.typeManagementDraft?.state === "complete" && props.activeTab.typeManagementDraft.operation.startsWith("delete"));
 function resumeTypeManagement() {
@@ -594,6 +637,7 @@ const activeSqlStatementParameterOptions = computed(() =>
   sqlStatementParameterOptionsForCompatibility(activeEffectiveDatabaseType.value, activeEffectiveDatabaseType.value === "opengauss" ? connectionStore.databaseCompatibilityMode(activeResultConnectionId.value, activeResultDatabase.value) : undefined),
 );
 const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
+const activeWatermark = computed(() => resolveConnectionWatermark(props.activeConnection, activeProductionContext.value.active));
 const productionSessionDetail = computed(() => {
   if (!activeProductionContext.value.active) return "";
   if (activeProductionContext.value.reason === "connection") return t("production.connection");
@@ -2395,7 +2439,7 @@ defineExpose({
               <Button v-if="!unfinishedTypeChange && !verifiedTypeDeletion" variant="outline" size="sm" @click="refreshTypeSource">{{ t("structureEditor.refresh") }}</Button>
               <span v-if="verifiedTypeDeletion" role="status" class="text-sm text-muted-foreground">{{ t("objects.typeManagementDeleted") }}</span>
             </div>
-            <ProductionWatermark v-if="activeProductionContext.active" />
+            <ConnectionWatermark v-if="activeWatermark" v-bind="activeWatermark" />
             <ObjectDependenciesPanel :target="activeObjectDependencyTarget" :section="activeObjectSection" @update:section="setObjectSection" @view-sql="viewObjectDependencySql" @open-object="(context, target) => emit('openDependencyObject', context, target)">
               <OracleTriggerStatus
                 v-if="queryStore.oracleTriggerSourceState(activeTab.id)"
@@ -2433,7 +2477,19 @@ defineExpose({
                 </Button>
               </div>
               <div v-else :class="showPackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
-                <OraclePackageMembers v-if="showPackageMembers" :key="activeTab.id" :source="activeTab.sql" @navigate="queryEditorRef?.focusPackageMember($event)" />
+                <OraclePackageMembers v-if="showPackageMembers" :key="activeTab.id" :source="activeTab.sql" :can-execute-procedure="!!packageProcedureContext && !queryStore.isTabDirty(activeTab)" @navigate="queryEditorRef?.focusPackageMember($event)" @execute-procedure="openPackageProcedure" />
+                <ProcedureExecutionDialog
+                  v-if="packageProcedureTarget"
+                  v-model:open="packageProcedureOpen"
+                  :connection-id="packageProcedureTarget.connectionId"
+                  :database="packageProcedureTarget.database"
+                  database-type="oracle"
+                  :schema="packageProcedureTarget.schema"
+                  :routine-name="packageProcedureTarget.member.databaseName"
+                  :package-procedure="packageProcedureTarget"
+                  @open-sql="openPackageProcedureSql($event)"
+                  @execute="openPackageProcedureSql($event, true)"
+                />
                 <QueryEditor
                   ref="queryEditorRef"
                   class="relative z-0 flex-1"
@@ -2446,6 +2502,7 @@ defineExpose({
                   :catalog="activeTab.catalog"
                   :database="activeTab.database"
                   :schema="activeTab.schema"
+                  :package-source="packageSourceIdentity"
                   :debug-routine="debugRoutine"
                   :client-session-id="activeTab.id"
                   :completion-context-version="activeTab.completionContextVersion"

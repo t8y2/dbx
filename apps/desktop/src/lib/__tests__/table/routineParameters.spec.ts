@@ -7,7 +7,9 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/backend/api", () => apiMocks);
 
-import { loadRoutineParameters, routineParametersQuery } from "@/lib/table/routineParameters";
+import { oraclePackageMemberEntries } from "@/lib/sql/oraclePackageMembers";
+import { buildProcedureExecutionSqlFromValues } from "@/lib/table/routineExecutionSql";
+import { loadOraclePackageProcedureParameters, loadRoutineParameters, routineParametersQuery } from "@/lib/table/routineParameters";
 import type { QueryResult } from "@/types/database";
 
 function queryResult(columns: string[], rows: unknown[][]): QueryResult {
@@ -88,5 +90,72 @@ describe("Oracle standalone routine loading", () => {
       maxRows: 200,
       pageSize: 200,
     });
+  });
+});
+
+describe("Oracle package procedure execution", () => {
+  const spec = `CREATE PACKAGE "Owner"."Pkg" AS
+    PROCEDURE no_args;
+    PROCEDURE "Run.It"("inValue" NUMBER DEFAULT 42, "outValue" OUT VARCHAR2);
+  END;`;
+  const body = `CREATE PACKAGE BODY "Owner"."Pkg" AS
+    PROCEDURE "Run.It"("inValue" NUMBER, "outValue" OUT VARCHAR2) IS BEGIN NULL; END;
+    PROCEDURE "Run.It"("inValue" VARCHAR2, "outValue" OUT VARCHAR2) IS BEGIN NULL; END;
+  END;`;
+  const [publicMember, privateOverload] = oraclePackageMemberEntries(body);
+  const target = { connectionId: "connection-1", database: "dbatest", schema: "Owner", packageName: "Pkg", member: publicMember! };
+  const columns = ["name", "data_type", "mode", "ordinal", "has_default", "signature_count"];
+
+  beforeEach(() => {
+    apiMocks.getObjectSource.mockReset().mockResolvedValue({ source: spec });
+    apiMocks.executeQuery.mockReset();
+  });
+
+  it("loads the exact public member and generates a three-part call with defaults and output", async () => {
+    apiMocks.executeQuery.mockResolvedValue(
+      queryResult(columns, [
+        ["inValue", "NUMBER", "IN", 1, "Y", 1],
+        ["outValue", "VARCHAR2", "OUT", 2, "N", 1],
+      ]),
+    );
+    const result = await loadOraclePackageProcedureParameters(target);
+    expect(apiMocks.getObjectSource).toHaveBeenCalledWith("connection-1", "dbatest", "Owner", "Pkg", "PACKAGE");
+    expect(apiMocks.executeQuery.mock.calls[0]?.[2]).toContain("p.PROCEDURE_NAME = 'Run.It'");
+    expect(result).toHaveProperty("parameters");
+    if (!("parameters" in result)) throw new Error("Expected public procedure parameters");
+    const sql = buildProcedureExecutionSqlFromValues({
+      databaseType: "oracle",
+      schema: target.schema,
+      packageName: target.packageName,
+      routineName: target.member.databaseName,
+      parameters: result.parameters.map((parameter) => ({ ...parameter, value: "", useDefault: parameter.hasDefault })),
+    });
+    expect(sql).toContain('"Owner"."Pkg"."Run.It"("outValue" => dbx_output_2);');
+    expect(sql).toContain("DBMS_OUTPUT.PUT_LINE('outValue = '");
+  });
+
+  it.each([null, 0])("keeps no-argument procedures with dictionary position %s", async (position) => {
+    apiMocks.executeQuery.mockResolvedValue(queryResult(columns, [[null, null, null, position, null, 1]]));
+    await expect(loadOraclePackageProcedureParameters({ ...target, member: oraclePackageMemberEntries(spec)[0]! })).resolves.toEqual({ parameters: [] });
+  });
+
+  it("does not treat a private body overload as the public procedure with the same name", async () => {
+    await expect(loadOraclePackageProcedureParameters({ ...target, member: privateOverload! })).resolves.toEqual({ unavailable: "notCallable" });
+    expect(apiMocks.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("blocks ambiguous overloads even if the response contains rows for only the first signature", async () => {
+    apiMocks.executeQuery.mockResolvedValue(
+      queryResult(columns, [
+        ["inValue", "NUMBER", "IN", 1, "Y", "2"],
+        ["outValue", "VARCHAR2", "OUT", 2, "N", "2"],
+      ]),
+    );
+    await expect(loadOraclePackageProcedureParameters(target)).resolves.toEqual({ unavailable: "overloaded" });
+  });
+
+  it("blocks a partial protocol result for a procedure with parameters", async () => {
+    apiMocks.executeQuery.mockResolvedValue(queryResult(columns, [["inValue", "NUMBER", "IN", 1, "Y", 1]]));
+    await expect(loadOraclePackageProcedureParameters(target)).resolves.toEqual({ unavailable: "notCallable" });
   });
 });

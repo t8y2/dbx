@@ -397,7 +397,12 @@ function formatStructureDdl(ddl: string): Promise<string> {
       databaseType: databaseType.value,
       database: props.database,
       catalog: props.catalog,
-      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      // Kingbase can resolve an unqualified DDL target to a system table with
+      // the same name (#15579), so the editable DDL tab must keep the backend's
+      // schema qualifier. `ddlQualifiedPartCount` has no kingbase entry, so
+      // forcing the flag on only skips the stripping pass — no database segment
+      // is ever inserted.
+      includeDatabaseName: databaseType.value === "kingbase" ? true : settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
     },
     settingsStore.editorSettings.sqlFormatter,
@@ -555,9 +560,10 @@ function scheduleDdlEditorInit() {
  * quoted names are uppercased before their quotes are removed.
  */
 function applyDdlGenerationPreferences(sql: string, dialect: SqlFormatDialect): string {
-  const unqualified = applyDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
-  if (settingsStore.editorSettings.generateSqlQuoteIdentifiers) return unqualified;
-  return formatGeneratedDdlIdentifierQuotes(unqualified, dialect, false, { preserveCaseSensitiveIdentifiers: tableStoresCaseSensitiveIdentifiers.value });
+  // Kingbase can resolve an unqualified DDL target to a system table with the same name.
+  const targetSql = databaseType.value === "kingbase" ? sql : applyDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
+  if (settingsStore.editorSettings.generateSqlQuoteIdentifiers) return targetSql;
+  return formatGeneratedDdlIdentifierQuotes(targetSql, dialect, false, { preserveCaseSensitiveIdentifiers: tableStoresCaseSensitiveIdentifiers.value });
 }
 
 type StructureDdlRequest = {
@@ -2600,6 +2606,7 @@ function addExistingPrimaryKeyColumn() {
 // Mirrors Rust `supports_named_primary_key`: engines that persist a user-supplied
 // PK constraint name. Other dialects ignore the symbol, so the field is hidden.
 const canNamePrimaryKey = computed(() => {
+  if (databaseType.value === "saphana") return false;
   if (connection.value?.driver_profile?.toLowerCase() === "gaussdb-m") return true;
   const dialect = structureCapabilities.value.dialect;
   return dialect === "mysql" || dialect === "postgres" || dialect === "sqlserver" || dialect === "oracle";

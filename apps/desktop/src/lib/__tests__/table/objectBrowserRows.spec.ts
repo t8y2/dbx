@@ -43,6 +43,51 @@ describe("buildObjectBrowserRows", () => {
     }
   });
 
+  it("keeps space-padded MySQL-family table identifiers distinct while trimming only the display name", () => {
+    for (const databaseType of ["mysql", "doris", "starrocks", "goldendb"] as const) {
+      const rows = buildObjectBrowserRows({
+        objects: [
+          { name: " orders", object_type: "TABLE", schema: " app " },
+          { name: "orders", object_type: "TABLE", schema: " app " },
+        ],
+        database: "app",
+        fallbackSchema: "app",
+        databaseType,
+      });
+
+      expect(
+        rows.map((row) => row.name),
+        databaseType,
+      ).toEqual([" orders", "orders"]);
+      expect(
+        rows.map((row) => row.displayName),
+        databaseType,
+      ).toEqual(["orders", "orders"]);
+      expect(
+        rows.map((row) => row.schema),
+        databaseType,
+      ).toEqual([" app ", " app "]);
+      expect(new Set(rows.map((row) => row.id)).size, databaseType).toBe(2);
+    }
+  });
+
+  it("normalizes non-MySQL table names and schemas, leaving only exact INDEX identities untouched", () => {
+    const rows = buildObjectBrowserRows({
+      objects: [
+        { name: " orders ", object_type: "TABLE", schema: " Mixed " },
+        { name: " Ix (a) ", object_type: "INDEX", schema: " Mixed ", parent_name: " T(a) " },
+      ],
+      database: "app",
+      fallbackSchema: "app",
+      databaseType: "oceanbase-oracle",
+    });
+
+    expect(rows.map((row) => [row.type, row.name, row.displayName, row.schema])).toEqual([
+      ["TABLE", "orders", "orders", "Mixed"],
+      ["INDEX", " Ix (a) ", " Ix (a) ", " Mixed "],
+    ]);
+  });
+
   it("does not turn synonyms and jobs into table rows", () => {
     const rows = buildObjectBrowserRows({
       objects: [

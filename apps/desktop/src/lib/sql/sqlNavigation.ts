@@ -2,7 +2,7 @@
  * Utilities for SQL identifier navigation (Ctrl/Cmd + click on table/column names).
  */
 
-import type { ObjectSourceKind, QueryTab } from "@/types/database";
+import type { ObjectSourceKind, PackageMemberFocus, QueryTab } from "@/types/database";
 import { isSqlIdentifierPart, isSqlIdentifierStart } from "@/lib/sql/sqlIdentifierCharacters";
 
 const SQL_KEYWORDS_SET = new Set([
@@ -272,6 +272,17 @@ export function sqlObjectNavigationSourceKind(table: SqlObjectNavigationTarget):
     default:
       return undefined;
   }
+}
+
+/**
+ * The package member a navigation target names, if it names one.
+ *
+ * `sqlObjectNavigationSourceKind` loads the owning package body for these; this is the
+ * member inside it, so the cursor can land on the implementation rather than line 1.
+ */
+export function sqlObjectNavigationPackageMember(table: SqlObjectNavigationTarget): PackageMemberFocus | null {
+  if (!table.parentName || (table.type !== "procedure" && table.type !== "function") || !table.name) return null;
+  return { name: table.name, kind: table.type, ...(table.signature ? { signature: table.signature } : {}) };
 }
 
 /** Object name to pass to getObjectSource (package body uses the package name). */

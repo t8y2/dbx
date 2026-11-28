@@ -15,8 +15,9 @@ hive-go only.
 
 Most files are kept byte-identical to hive-go. Fixes landing in hive-go that
 touch `metadata.go` or `main.go` must be ported here (adjusting only the
-argo-specific branding, the unconditional `supportsRoutines()`, and log
-prefixes), including their regression tests.
+argo-specific branding, the unconditional `supportsRoutines()`, the ArgoDB
+table-comment enrichment that reads `system.tables_v`, and log prefixes),
+including their regression tests.
 
 ## Validation
 

@@ -55,6 +55,11 @@ BEGIN
   result := ` + call + `;
   :1 := result;
   :2 := run_info.line#;
+  -- Oracle may omit TERMINATED at a valid suspension. Use the independent
+  -- running flag to confirm a pause without treating a missing value as zero.
+  IF result = 0 AND run_info.terminated IS NULL AND SYS.DBMS_DEBUG.TARGET_PROGRAM_RUNNING THEN
+    run_info.terminated := 0;
+  END IF;
   :3 := run_info.terminated;
   :4 := run_info.breakpoint;
   :5 := run_info.stackdepth;

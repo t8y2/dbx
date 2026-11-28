@@ -301,8 +301,20 @@ function main() {
   mkdirSync(downloadDir);
   mkdirSync(options.outputDir, { recursive: true });
 
+  let release = null;
   try {
-    const release = JSON.parse(gh(["api", `repos/${options.repo}/releases/tags/${options.tag}`]));
+    release = JSON.parse(gh(["api", `repos/${options.repo}/releases/tags/${options.tag}`]));
+  } catch (error) {
+    // A missing previous release (for example a tag whose release run never
+    // completed) must degrade to a full rebuild, not abort the release.
+    if (/Not Found|HTTP 404/.test(String(error))) {
+      console.warn(`Previous release ${options.tag} not found; rebuilding all agent artifacts from source.`);
+      return;
+    }
+    throw error;
+  }
+
+  try {
     const assets = releaseAssetMap(release);
     const registryReleaseAsset = assets.get(REGISTRY_ASSET);
     if (!registryReleaseAsset?.digest?.startsWith("sha256:")) {

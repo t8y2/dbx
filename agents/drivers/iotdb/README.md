@@ -53,8 +53,11 @@ for TLS or mTLS connections.
 - Query results annotate timestamp columns as `TIMESTAMP(ms|us|ns)` using the
   server-reported `TimestampPrecision`. Raw timestamp integers are transported
   as decimal strings so nanosecond values are not rounded by JavaScript.
-- Tree `max_time`/`min_time` aggregates also return epoch values; they are
-  annotated as `TIMESTAMP(ms|us|ns)` too so the grid renders standard times.
+- Tree `max_time`/`min_time` and `max_by`/`min_by(Time, …)` aggregates also
+  return epoch values; they are annotated as `TIMESTAMP(ms|us|ns)` too so the
+  grid and exports render standard times. An `AS alias` replaces the column
+  name the aggregate is recognised by, so the SELECT list is parsed to find the
+  aliased ones (the server reports the alias unquoted, casing preserved).
 - The pinned client is vendored under `agents/go-common/iotdb-client-go` with
   one patch: upstream drops the 1.3.x `ColumnNameIndexMap` fallback, which
   misaligned aggregate result values against the SELECT column order on 1.3.x

@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { shouldPinResultRunOnClick } from "@/lib/tabs/resultRunPin";
 
 describe("shouldPinResultRunOnClick", () => {
-  it("pins an unpinned run while the option is enabled", () => {
-    expect(shouldPinResultRunOnClick({ pinned: false }, true)).toBe(true);
-    expect(shouldPinResultRunOnClick({}, true)).toBe(true);
+  it("pins an unpinned run when its tab is already shown and clicked again (#9975, #15037)", () => {
+    expect(shouldPinResultRunOnClick({ pinned: false }, true, true)).toBe(true);
+    expect(shouldPinResultRunOnClick({}, true, true)).toBe(true);
   });
 
   it("unpins the pinned run that is already shown when it is clicked again (#13306)", () => {
@@ -16,9 +16,10 @@ describe("shouldPinResultRunOnClick", () => {
     expect(shouldPinResultRunOnClick({ pinned: true }, true)).toBe(false);
   });
 
-  it("pins an unpinned run whether or not it was already shown", () => {
-    expect(shouldPinResultRunOnClick({ pinned: false }, true, true)).toBe(true);
-    expect(shouldPinResultRunOnClick({ pinned: false }, true, false)).toBe(true);
+  it("does not pin an unpinned run when switching to it from another result tab (#15037)", () => {
+    expect(shouldPinResultRunOnClick({ pinned: false }, true, false)).toBe(false);
+    expect(shouldPinResultRunOnClick({ pinned: false }, true)).toBe(false);
+    expect(shouldPinResultRunOnClick({}, true, false)).toBe(false);
   });
 
   it("does not toggle when the user disabled click-to-pin", () => {

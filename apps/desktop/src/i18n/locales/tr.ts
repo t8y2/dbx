@@ -1947,6 +1947,7 @@ export default withEnglishFallback({
     showLabels: "Değerleri Göster",
   },
   grid: {
+    savingBulkChanges: "{count} değişiklik kaydediliyor",
     setTablePageSizeDefault: "Bu tablo için varsayılan yap",
     resetTablePageSizeDefault: "Genel varsayılanı kullan",
     showStatusSql: "Alt Bilgide SQL Göster",

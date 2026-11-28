@@ -1949,6 +1949,7 @@ export default withEnglishFallback({
     showLabels: "Dəyərləri göstər",
   },
   grid: {
+    savingBulkChanges: "{count} dəyişiklik saxlanılır",
     showStatusSql: "Alt paneldə SQL göstər",
     showStatusSqlHint: "Bütün sorğu nəticələrinin və cədvəl məlumatlarının alt panelində SQL göstər.",
     rows: "{count} sətir",

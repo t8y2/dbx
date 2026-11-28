@@ -3057,6 +3057,7 @@ export default withEnglishFallback({
     showLabels: "显示数值",
   },
   grid: {
+    savingBulkChanges: "正在保存 {count} 项更改",
     setTablePageSizeDefault: "设为此表的默认值",
     resetTablePageSizeDefault: "使用全局默认值",
     exportSelectedRowsScope: "选中行",

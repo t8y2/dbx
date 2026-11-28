@@ -2738,6 +2738,7 @@ export default withEnglishFallback({
     showLabels: "Mostra valori",
   },
   grid: {
+    savingBulkChanges: "Salvataggio di {count} modifiche",
     setTablePageSizeDefault: "Imposta come predefinito per questa tabella",
     resetTablePageSizeDefault: "Usa il valore predefinito globale",
     exportSelectedRowsScope: "Righe selezionate",

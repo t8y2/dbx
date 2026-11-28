@@ -2279,6 +2279,7 @@ export default withEnglishFallback({
     showLabels: "Pokaż wartości",
   },
   grid: {
+    savingBulkChanges: "Zapisywanie {count} zmian",
     rows: "Wiersze: {count}",
     totalRows: "Łącznie {count} wierszy",
     loadedRows: "Wczytano {count} wierszy",

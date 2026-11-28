@@ -6338,6 +6338,11 @@ const saveToolbarCapability = computed<DataGridToolbarSaveCapability>(() => ({
   shortcutLabel: saveShortcutLabel.value,
   onTrigger: onToolbarCommit,
 }));
+const BULK_SAVE_PROGRESS_MIN_ROWS = 1000;
+const bulkSaveStatus = computed(() => {
+  if (!isSaving.value || pendingChangeCount.value < BULK_SAVE_PROGRESS_MIN_ROWS) return "";
+  return t("grid.savingBulkChanges", { count: pendingChangeCount.value.toLocaleString() });
+});
 const rollbackToolbarCapability = computed<DataGridToolbarActionCapability>(() => ({
   label: t(saveActionMode.value.secondaryActionKey),
   visible: saveToolbarState.value.showActions,
@@ -16310,6 +16315,12 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     @focusout="onGridFocusOut"
   >
     <p v-if="compatibilityReadOnly" class="shrink-0 border-b px-3 py-1 text-xs text-muted-foreground" :title="t('connection.mysqlDataCharsetReadOnly')">{{ t("connection.mysqlDataCharsetExportHint") }}</p>
+    <div v-if="bulkSaveStatus" class="flex shrink-0 items-center gap-3 border-b bg-muted/20 px-3 py-1.5 text-xs">
+      <span role="status">{{ bulkSaveStatus }}</span>
+      <div role="progressbar" :aria-label="bulkSaveStatus" class="h-1.5 min-w-12 max-w-44 flex-1 overflow-hidden rounded-full bg-muted">
+        <div class="data-grid-bulk-save-bar h-full w-2/5 rounded-full bg-primary" />
+      </div>
+    </div>
     <CustomContextMenu :items="currentGridContextMenuItems" @open="onGridContextMenuOpen" @close="onGridContextMenuClose" v-slot="{ onContextMenu }">
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->
@@ -18894,6 +18905,21 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 </template>
 
 <style scoped>
+@media (prefers-reduced-motion: no-preference) {
+  .data-grid-bulk-save-bar {
+    animation: data-grid-bulk-save-slide 1.15s ease-in-out infinite;
+  }
+}
+
+@keyframes data-grid-bulk-save-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
 @reference "../../styles/globals.css";
 
 [data-grid-root] {

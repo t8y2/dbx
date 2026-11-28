@@ -2834,6 +2834,7 @@ export default withEnglishFallback({
     showLabels: "Показывать значения",
   },
   grid: {
+    savingBulkChanges: "Сохранение изменений ({count})",
     setTablePageSizeDefault: "Сохранить значение для этой таблицы",
     resetTablePageSizeDefault: "Использовать глобальное значение",
     exportSelectedRowsScope: "Выбранные строки",

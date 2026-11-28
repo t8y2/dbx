@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isProxy } from "vue";
 import {
   AI_PROVIDER_PARTNER_PRESETS,
+  AI_PROVIDER_VARIANT_PRESETS,
   CC_SWITCH_PROVIDER_ID,
   CC_SWITCH_PROVIDER_PRESET,
   AI_PROVIDER_PRESETS,
@@ -1656,6 +1657,29 @@ describe("settingsStore AI API key normalization", () => {
     expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.zhipu, "zh-CN")).toBe("https://open.bigmodel.cn/api/paas/v4");
     expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.zhipu, "zh-TW")).toBe("https://api.z.ai/api/paas/v4");
     expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.zhipu, "en")).toBe("https://api.z.ai/api/paas/v4");
+  });
+
+  it("offers a Zhipu Coding Plan variant that stays on the zhipu provider", () => {
+    const preset = getAiProviderPresetOption("zhipu-coding-plan");
+
+    expect(AI_PROVIDER_VARIANT_PRESETS).toContain(preset);
+    expect(preset).toMatchObject({
+      id: "zhipu-coding-plan",
+      provider: "zhipu",
+      endpoint: "https://open.bigmodel.cn/api/coding/paas/v4",
+      apiStyle: "completions",
+      authMethod: "bearer",
+      requiresApiKey: true,
+    });
+    expect(getAiProviderPresetDefaultEndpoint(preset, "zh-CN")).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
+    expect(getAiProviderPresetDefaultEndpoint(preset, "en")).toBe("https://api.z.ai/api/coding/paas/v4");
+
+    // Saved configs map back to the variant by endpoint, in either region, and the plain Zhipu endpoints stay on the plain preset.
+    expect(getAiProviderPresetId("zhipu", "https://open.bigmodel.cn/api/coding/paas/v4/")).toBe("zhipu-coding-plan");
+    expect(getAiProviderPresetId("zhipu", " HTTPS://API.Z.AI/api/coding/paas/v4 ")).toBe("zhipu-coding-plan");
+    expect(getAiProviderPresetId("zhipu", "https://open.bigmodel.cn/api/paas/v4")).toBe("zhipu");
+    expect(getAiProviderPreset("zhipu", "https://api.z.ai/api/paas/v4")).toBe(AI_PROVIDER_PRESETS.zhipu);
+    expect(normalizeAiConfig({ endpoint: "https://api.z.ai/api/coding/paas/v4", model: "glm-5.3" }).provider).toBe("zhipu");
   });
 
   it("keeps the CC-SWITCH provider entry UI-only", () => {

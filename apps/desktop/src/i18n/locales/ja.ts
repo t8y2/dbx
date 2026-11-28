@@ -3631,6 +3631,7 @@ export default withEnglishFallback({
     layerPreviewSkipped: "{count} 件をスキップ",
     layerPreviewNoSupportedCrs: "プレビューできません: 座標系がないか対応していません",
     layerPreviewNoGeometryData: "プレビューできません: 有効なジオメトリデータがありません",
+    layerPreviewAttributeFilter: "属性値で絞り込む",
     layerPreviewLabel: "ラベル",
     layerPreviewExport: "画像を書き出す",
     layerPreviewMaximize: "最大化",

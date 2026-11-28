@@ -3479,6 +3479,7 @@ export default withEnglishFallback({
     layerPreviewSkipped: "{count} elemento(s) omitido(s)",
     layerPreviewNoSupportedCrs: "No se puede previsualizar: sistema de coordenadas ausente o no compatible",
     layerPreviewNoGeometryData: "No se puede previsualizar: no hay datos geométricos válidos",
+    layerPreviewAttributeFilter: "Filtrar por valor de atributo",
     layerPreviewLabel: "Etiqueta",
     layerPreviewExport: "Exportar imagen",
     layerPreviewMaximize: "Maximizar",

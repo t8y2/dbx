@@ -2926,6 +2926,7 @@ export default withEnglishFallback({
     layerPreviewSkipped: "{count} fitur dilewati",
     layerPreviewNoSupportedCrs: "Tidak dapat mempratinjau: sistem koordinat hilang atau tidak didukung",
     layerPreviewNoGeometryData: "Tidak dapat mempratinjau: tidak ada data geometri yang valid",
+    layerPreviewAttributeFilter: "Filter menurut nilai atribut",
     layerPreviewLabel: "Label",
     layerPreviewExport: "Ekspor gambar",
     layerPreviewMaximize: "Maksimalkan",

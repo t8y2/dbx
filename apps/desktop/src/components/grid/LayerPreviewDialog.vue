@@ -229,6 +229,23 @@ const dialogTitle = computed(() => props.title || t("grid.layerPreview"));
 // ── Label property ─────────────────────────────────────────────────────────
 const labelProperties = ref<string[]>([]);
 const labelProperty = ref<string>("");
+const attributeFilterInput = ref("");
+const attributeFilter = ref("");
+const noMatchingFeatures = ref(false);
+
+function visiblePreviewFeatures(): PreviewFeature[] {
+  const features: PreviewFeature[] = _geojsonData?.features ?? [];
+  const filter = attributeFilter.value;
+  if (!filter) return features;
+  return features.filter((feature) => Object.values(feature.properties ?? {}).some((value) => value != null && String(value).toLocaleLowerCase().includes(filter)));
+}
+
+function applyAttributeFilter() {
+  const filter = attributeFilterInput.value.trim().toLocaleLowerCase();
+  if (filter === attributeFilter.value) return;
+  attributeFilter.value = filter;
+  void refreshLayer();
+}
 
 function parseLabelProperties(data: any) {
   const keys = new Set<string>();
@@ -259,8 +276,7 @@ function updateLabels() {
   const L = _L;
   labelLayer = L.layerGroup().addTo(map);
 
-  const features = _geojsonData.features || [];
-  for (const f of features) {
+  for (const f of visiblePreviewFeatures()) {
     const value = f.properties?.[prop];
     if (value == null) continue;
     const coords = getLabelCoords(f.geometry, featureSrid(f));
@@ -340,7 +356,7 @@ function popupContent(feature: any): string {
     }
   }
   const geom = feature.geometry?.type ?? "?";
-  return `<div class="text-xs leading-relaxed"><div class="mb-1 font-semibold text-[#ff6600]">${geom}</div><table>${rows.join("")}</table></div>`;
+  return `<div class="layer-preview-popup-details text-xs leading-relaxed" tabindex="0"><div class="mb-1 font-semibold text-[#ff6600]">${geom}</div><table>${rows.join("")}</table></div>`;
 }
 
 async function initMap() {
@@ -424,10 +440,12 @@ async function renderLayer(generation: number) {
   if (!map || !_geojsonData || !_L) return;
   skippedFeatureCount.value = 0;
   const leaflet = _L;
-  const data = _geojsonData;
 
   try {
-    const features = (data.features ?? []) as PreviewFeature[];
+    const features = visiblePreviewFeatures();
+    noMatchingFeatures.value = Boolean(attributeFilter.value) && features.length === 0;
+    if (noMatchingFeatures.value) return;
+
     const sridsNeeded = new Set<number>();
     for (const feature of features) {
       const srid = featureSrid(feature);
@@ -490,8 +508,12 @@ async function renderLayer(generation: number) {
   }
 }
 
-async function applySrid(next: number) {
+function applySrid(next: number) {
   selectedSrid.value = next;
+  return refreshLayer();
+}
+
+async function refreshLayer() {
   mapError.value = "";
   if (!map) return;
   mapGeneration++;
@@ -614,6 +636,9 @@ function cleanupMap() {
   showCustomSrid.value = false;
   customSridInput.value = "";
   labelProperty.value = "";
+  attributeFilterInput.value = "";
+  attributeFilter.value = "";
+  noMatchingFeatures.value = false;
   isLoadingMap.value = false;
   skippedFeatureCount.value = 0;
 }
@@ -709,6 +734,18 @@ onBeforeUnmount(() => cleanupMap());
           </option>
         </select>
 
+        <form class="flex min-w-0 items-center gap-1.5" @submit.prevent="applyAttributeFilter">
+          <input
+            v-model="attributeFilterInput"
+            type="search"
+            :aria-label="t('grid.layerPreviewAttributeFilter')"
+            :placeholder="t('grid.layerPreviewAttributeFilter')"
+            :disabled="isLoadingMap"
+            class="h-6 w-40 min-w-0 rounded border bg-background px-1.5 text-[11px] outline-none focus-visible:border-ring"
+          />
+          <Button type="submit" size="sm" variant="outline" :disabled="isLoadingMap" class="h-6 shrink-0 px-2 text-[11px]">{{ t("grid.filter") }}</Button>
+        </form>
+
         <!-- Basemap selector -->
         <Popover v-model:open="customBasemapOpen">
           <PopoverAnchor as-child>
@@ -778,6 +815,9 @@ onBeforeUnmount(() => cleanupMap());
         <div v-if="mapError" class="absolute inset-0 z-20 flex items-center justify-center bg-background/90 p-4 text-sm text-destructive">
           {{ mapError }}
         </div>
+        <div v-if="noMatchingFeatures" role="status" class="pointer-events-none absolute inset-x-0 top-3 z-[1000] flex justify-center px-3">
+          <span class="rounded border bg-background px-2 py-1 text-xs text-muted-foreground shadow">{{ t("tabs.noMatchingResults") }}</span>
+        </div>
       </div>
 
       <!-- Resize handles -->
@@ -802,6 +842,12 @@ onBeforeUnmount(() => cleanupMap());
 }
 .layer-preview-dialog .leaflet-popup-content {
   margin: 8px 12px;
+}
+.layer-preview-popup-details {
+  max-height: min(240px, 40vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
 }
 .layer-preview-label span {
   display: inline-block;

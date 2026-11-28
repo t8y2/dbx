@@ -3626,6 +3626,7 @@ export default withEnglishFallback({
     layerPreviewSkipped: "Пропущено объектов: {count}",
     layerPreviewNoSupportedCrs: "Не удалось выполнить предпросмотр: система координат отсутствует или не поддерживается",
     layerPreviewNoGeometryData: "Не удалось выполнить предпросмотр: нет допустимых данных геометрии",
+    layerPreviewAttributeFilter: "Фильтр по значению атрибута",
     layerPreviewLabel: "Подпись",
     layerPreviewExport: "Экспортировать изображение",
     layerPreviewMaximize: "Развернуть",

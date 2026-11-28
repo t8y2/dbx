@@ -3472,6 +3472,7 @@ export default withEnglishFallback({
     layerPreviewSkipped: "{count} recurso(s) ignorado(s)",
     layerPreviewNoSupportedCrs: "Não foi possível visualizar: sistema ausente ou não suportado",
     layerPreviewNoGeometryData: "Não foi possível visualizar: não há dados geométricos válidos",
+    layerPreviewAttributeFilter: "Filtrar pelo valor do atributo",
     layerPreviewLabel: "Rótulo",
     layerPreviewExport: "Exportar imagem",
     layerPreviewMaximize: "Maximizar",

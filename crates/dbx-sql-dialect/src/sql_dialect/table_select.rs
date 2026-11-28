@@ -352,6 +352,18 @@ pub fn build_table_data_select_sql_with_database(
     } else {
         predicate
     };
+    // A TDengine super table is a union of every child table: reading it without a
+    // tag/time condition scans all of them and can exhaust server memory. Data-tab
+    // callers (open, refresh, paging) therefore get the structure only, an empty page,
+    // until the user supplies a condition. Sampling and export callers keep the full read.
+    let limit = if options.inject_default_time_series_where
+        && effective_predicate.is_empty()
+        && is_tdengine_stable_table(database_type, options.table_type.as_deref())
+    {
+        0
+    } else {
+        limit
+    };
     let where_clause =
         if effective_predicate.is_empty() { String::new() } else { format!(" WHERE ({effective_predicate})") };
     let default_order_by = if matches!(database_type, Some(DatabaseType::InfluxDb) | Some(DatabaseType::InfluxDb3)) {
@@ -920,7 +932,7 @@ pub(super) fn is_tdengine_tbname(database_type: Option<DatabaseType>, name: &str
     database_type == Some(DatabaseType::Tdengine) && name.eq_ignore_ascii_case(DBX_TDENGINE_TBNAME_COLUMN)
 }
 
-fn tdengine_should_include_tbname(database_type: Option<DatabaseType>, table_type: Option<&str>) -> bool {
+fn is_tdengine_stable_table(database_type: Option<DatabaseType>, table_type: Option<&str>) -> bool {
     if database_type != Some(DatabaseType::Tdengine) {
         return false;
     }
@@ -928,6 +940,11 @@ fn tdengine_should_include_tbname(database_type: Option<DatabaseType>, table_typ
         table_type.map(|value| value.trim().to_ascii_uppercase()),
         Some(value) if value == "STABLE" || value == "SUPER TABLE" || value == "SUPERTABLE"
     )
+}
+
+/// Only super tables expose the `tbname` pseudo column that identifies the child table.
+fn tdengine_should_include_tbname(database_type: Option<DatabaseType>, table_type: Option<&str>) -> bool {
+    is_tdengine_stable_table(database_type, table_type)
 }
 
 pub(super) fn build_select_columns(

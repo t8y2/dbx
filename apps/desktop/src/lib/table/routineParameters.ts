@@ -1,4 +1,5 @@
 import * as api from "@/lib/backend/api";
+import { oraclePackageMemberEntries, type OraclePackageMemberEntry } from "@/lib/sql/oraclePackageMembers";
 import type { DatabaseType, QueryResult, RoutineParameterMetadata } from "@/types/database";
 import type { RoutineParameter, RoutineParameterMode } from "@/lib/table/routineExecutionSql";
 
@@ -22,6 +23,58 @@ export async function loadRoutineParameters(options: LoadRoutineParametersOption
     pageSize: 200,
   });
   return routineParametersFromResult(result, options.databaseType);
+}
+
+export type OraclePackageProcedureTarget = {
+  connectionId: string;
+  database: string;
+  schema: string;
+  packageName: string;
+  member: OraclePackageMemberEntry;
+};
+
+export async function loadOraclePackageProcedureParameters(target: OraclePackageProcedureTarget): Promise<{ parameters: RoutineParameter[] } | { unavailable: "notCallable" | "overloaded" }> {
+  const { connectionId, database, schema, packageName, member } = target;
+  const specification = await api.getObjectSource(connectionId, database, schema, packageName, "PACKAGE");
+  const isPublic = oraclePackageMemberEntries(specification.source).some(
+    (entry) =>
+      !entry.isFunction &&
+      entry.databaseName === member.databaseName &&
+      entry.databaseParameterNames.length === member.databaseParameterNames.length &&
+      entry.databaseParameterNames.every((name, index) => name === member.databaseParameterNames[index] && entry.parameterTypes[index] === member.parameterTypes[index]),
+  );
+  if (!isPublic) return { unavailable: "notCallable" };
+
+  // ALL_PROCEDURES includes no-argument members. Join each signature separately
+  // so parameter rows from overloads, standalone procedures and functions cannot mix.
+  const sql = `
+SELECT
+  a.ARGUMENT_NAME AS "name",
+  a.DATA_TYPE AS "data_type",
+  a.IN_OUT AS "mode",
+  a.POSITION AS "ordinal",
+  a.DEFAULTED AS "has_default",
+  COUNT(DISTINCT p.SUBPROGRAM_ID) OVER () AS "signature_count"
+FROM ALL_PROCEDURES p
+LEFT JOIN ALL_ARGUMENTS a ON a.OWNER = p.OWNER
+  AND a.OBJECT_ID = p.OBJECT_ID
+  AND a.SUBPROGRAM_ID = p.SUBPROGRAM_ID
+  AND a.DATA_LEVEL = 0
+WHERE p.OWNER = ${quoteSqlLiteral(schema)}
+  AND p.OBJECT_NAME = ${quoteSqlLiteral(packageName)}
+  AND p.OBJECT_TYPE = 'PACKAGE'
+  AND p.PROCEDURE_NAME = ${quoteSqlLiteral(member.databaseName)}
+ORDER BY p.SUBPROGRAM_ID, a.SEQUENCE`.trim();
+  // One extra row distinguishes a complete signature from a truncated result.
+  const maxRows = Math.max(member.databaseParameterNames.length + 1, 2);
+  const result = await api.executeQuery(connectionId, database, sql, schema, undefined, { maxRows, pageSize: maxRows });
+  const signatureCount = Number(result.rows[0]?.[5]);
+  if (signatureCount > 1) return { unavailable: "overloaded" };
+  if (signatureCount !== 1) return { unavailable: "notCallable" };
+  if (result.rows.some((row) => Number(row[3]) === 0 && row[1])) return { unavailable: "notCallable" };
+  const rows = result.rows.filter((row) => Number(row[3]) > 0);
+  if (rows.length !== member.databaseParameterNames.length || !rows.every((row, index) => row[0] === member.databaseParameterNames[index])) return { unavailable: "notCallable" };
+  return { parameters: routineParametersFromResult({ ...result, rows }, "oracle") };
 }
 
 export function supportsRoutineParameterMetadata(databaseType?: DatabaseType): boolean {

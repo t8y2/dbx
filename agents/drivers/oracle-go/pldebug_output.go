@@ -103,7 +103,10 @@ BEGIN
     SYS.DBMS_LOB.CREATETEMPORARY($OUTPUT, TRUE);
     LOOP
       SYS.DBMS_OUTPUT.GET_LINE($LINE, $STATUS);
-      IF $STATUS = 1 THEN $COMPLETE := 1; EXIT; END IF;
+      IF $STATUS = 1 THEN
+      IF $RETAINED = 0 THEN $COMPLETE := 2; ELSE $COMPLETE := 1; END IF;
+      EXIT;
+    END IF;
       IF $STATUS <> 0 THEN RAISE_APPLICATION_ERROR(-20000, 'Unexpected DBMS_OUTPUT status'); END IF;
       $KEEP := LEAST(NVL(LENGTH($LINE), 0), GREATEST(%d - $RETAINED, 0));
       IF $KEEP > 0 THEN
@@ -205,6 +208,7 @@ type plDebugCaptureReferences struct {
 	released                bool
 	statementCloseAttempted bool
 	lobs                    []*plDebugLobOutput
+	cursors                 []*plDebugCursorOutput
 }
 
 func plDebugExecuteNativeCapture(ctx context.Context, tx *sql.Tx, allocation *plDebugAllocation, oci bool, block plDebugNativeBlock, inputs []interface{}) (plDebugNativeCapture, error) {
@@ -215,6 +219,7 @@ type plDebugCaptureObserver struct {
 	dispatch func() error
 	returned func(plDebugNativeCapture, error)
 	lobs     []*plDebugLobOutput
+	cursors  []*plDebugCursorOutput
 }
 
 func plDebugExecuteObservedCapture(ctx context.Context, tx *sql.Tx, allocation *plDebugAllocation, oci bool, block plDebugNativeBlock, inputs []interface{}, observer *plDebugCaptureObserver) (plDebugNativeCapture, error) {
@@ -238,12 +243,16 @@ func plDebugExecuteCaptureWith(ctx context.Context, tx *sql.Tx, allocation *plDe
 	capture.references = &plDebugCaptureReferences{statement: stmt, clob: clob}
 	if observer != nil {
 		capture.references.lobs = observer.lobs
+		capture.references.cursors = observer.cursors
 	}
 	capture.ReferencesPending = true
 	args := append([]interface{}{}, inputs...)
 	args = append(args, plDebugOutArg(oci, &capture.Code), plDebugOutArg(oci, &capture.Message), plDebugOutArg(oci, &capture.SavepointRollback), clob.bind, plDebugOutArg(oci, &capture.NativeOutputError), plDebugOutArg(oci, &capture.NativeTruncated), plDebugOutArg(oci, &capture.NativeComplete))
 	if observer != nil && observer.dispatch != nil {
 		if err := observer.dispatch(); err != nil {
+			for _, cursor := range capture.references.cursors {
+				cursor.released = true
+			}
 			for _, lob := range capture.references.lobs {
 				lob.readAttempted, lob.releaseAttempted, lob.released = true, true, true
 			}
@@ -273,6 +282,13 @@ func (capture *plDebugNativeCapture) finishReferences(ctx context.Context, alloc
 	if refs == nil {
 		return
 	}
+	cursorsReleased := true
+	cursorBudget := plDebugCursorPreviewBytes
+	for _, cursor := range refs.cursors {
+		cursor.collect(ctx, allocation, cursorBudget)
+		cursorBudget -= cursor.previewBytes
+		cursorsReleased = cursorsReleased && cursor.released
+	}
 	remaining := plDebugTypedResultBytes
 	for _, lob := range refs.lobs {
 		lob.collect(ctx, allocation, remaining)
@@ -286,6 +302,11 @@ func (capture *plDebugNativeCapture) finishReferences(ctx context.Context, alloc
 		read := func(context.Context) (driver.Result, error) {
 			refs.readAttempted = true
 			capture.utf16Text = nil
+			// The wrapper confirms an empty output independently of the LOB bind.
+			if capture.NativeComplete.Valid && capture.NativeComplete.Int64 == 2 {
+				capture.Output, refs.readComplete = "", true
+				return nil, nil
+			}
 			var err error
 			capture.Output, err = refs.clob.read()
 			refs.readComplete = err == nil
@@ -305,7 +326,7 @@ func (capture *plDebugNativeCapture) finishReferences(ctx context.Context, alloc
 		}
 	}
 	capture.Truncated = capture.Truncated || (capture.NativeTruncated.Valid && capture.NativeTruncated.Int64 != 0)
-	capture.OutputComplete = refs.readComplete && capture.NativeComplete.Valid && capture.NativeComplete.Int64 == 1 && capture.NativeTruncated.Valid && capture.NativeTruncated.Int64 == 0 && capture.OutputError == ""
+	capture.OutputComplete = refs.readComplete && capture.NativeComplete.Valid && (capture.NativeComplete.Int64 == 1 || capture.NativeComplete.Int64 == 2) && capture.NativeTruncated.Valid && capture.NativeTruncated.Int64 == 0 && capture.OutputError == ""
 	if !refs.releaseAttempted {
 		capture.ReleaseError = ""
 		release := func(context.Context) (driver.Result, error) {
@@ -337,13 +358,16 @@ func (capture *plDebugNativeCapture) finishReferences(ctx context.Context, alloc
 			capture.ReleaseError = joinPLDebugOutputError(capture.ReleaseError, "typed LOB release not confirmed")
 		}
 	}
-	if refs.released && lobsReleased && !refs.statementCloseAttempted {
+	if !cursorsReleased {
+		capture.ReleaseError = joinPLDebugOutputError(capture.ReleaseError, "cursor release not confirmed")
+	}
+	if refs.released && lobsReleased && cursorsReleased && !refs.statementCloseAttempted {
 		refs.statementCloseAttempted = true
 		if err := refs.statement.Close(); err != nil {
 			capture.ReleaseError = err.Error()
 		}
 	}
-	if refs.released && lobsReleased && refs.statementCloseAttempted {
+	if refs.released && lobsReleased && cursorsReleased && refs.statementCloseAttempted {
 		allocation.mu.Lock()
 		finished := allocation.active == nil && !allocation.unknown && len(allocation.statements) == 0 && len(allocation.rows) == 0
 		allocation.mu.Unlock()

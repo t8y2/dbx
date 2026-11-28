@@ -201,6 +201,11 @@ pub struct BuildRenameDatabaseSqlRequest {
 }
 
 #[derive(Deserialize)]
+pub struct BuildMysqlRenameDatabaseSqlRequest {
+    pub options: dbx_core::db_admin_sql::MysqlRenameDatabaseSqlOptions,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildRenameDatabasePreflightSqlRequest {
     pub database_type: Option<dbx_core::models::connection::DatabaseType>,
@@ -1335,6 +1340,12 @@ pub async fn build_rename_database_preflight_sql(
     dbx_core::db_admin_sql::build_rename_database_preflight_sql(req.database_type, &req.database_name)
         .map(Json)
         .map_err(AppError::from)
+}
+
+pub async fn build_mysql_rename_database_sql(
+    Json(req): Json<BuildMysqlRenameDatabaseSqlRequest>,
+) -> Result<Json<dbx_core::db_admin_sql::MysqlRenameDatabaseStatements>, AppError> {
+    dbx_core::db_admin_sql::build_mysql_rename_database_sql(req.options).map(Json).map_err(AppError::from)
 }
 
 pub async fn build_create_database_sql(

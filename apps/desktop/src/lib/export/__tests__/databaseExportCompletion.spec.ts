@@ -108,6 +108,18 @@ describe("native queued database export completion", () => {
       }),
     ).rejects.toMatchObject({ status: "unknown", message: "rollback reply lost" });
   });
+  it("keeps the export failure when the backend already discarded the snapshot session", async () => {
+    mocks.rollback.mockRejectedValueOnce(new Error("Transaction session not found"));
+    await expect(
+      runWithDatabaseBackupSnapshot({ connectionId: "mysql-1", database: "app", enabled: true, reportCompletion: true }, async () => {
+        throw new SnapshotCompletionError("failed", "Query timed out after 60 seconds. Transaction was auto-rolled back.");
+      }),
+    ).rejects.toMatchObject({ status: "failed", message: "Query timed out after 60 seconds. Transaction was auto-rolled back." });
+  });
+  it("keeps a successful export when the snapshot session is already gone at cleanup", async () => {
+    mocks.rollback.mockRejectedValueOnce(new Error("Transaction session not found"));
+    await expect(runWithDatabaseBackupSnapshot({ connectionId: "mysql-1", database: "app", enabled: true, reportCompletion: true }, async () => done)).resolves.toEqual(done);
+  });
   it("preserves an earlier unknown even if snapshot cleanup also fails", async () => {
     mocks.rollback.mockRejectedValueOnce(new Error("rollback reply lost"));
     const unknown = new SnapshotCompletionError("unknown", "export reply lost");

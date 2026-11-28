@@ -149,6 +149,29 @@ describe("QueryEditor completion metadata ownership", () => {
     expect(items.find((item) => item.label === "s.*")?.apply).toBe(column);
   });
 
+  it.each([
+    ["test.Id", "NAME", "QUOTED_FIELD"],
+    ['"test".Id', "QUOTED_FIELD", "NAME"],
+    ['test."Id"', "MIXED_FIELD", "NAME"],
+  ])("checks only the columns of the Oracle table referenced by %s", async (source, valid, missing) => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", dialect: "oracle", schema: "TEST" });
+    for (const [owner, table, column] of [
+      ["TEST", "ID", "NAME"],
+      ["test", "ID", "QUOTED_FIELD"],
+      ["TEST", "Id", "MIXED_FIELD"],
+    ]) {
+      store.listCompletionColumns.mockResolvedValueOnce([{ name: column, table, schema: owner }]);
+      await metadata.ensureColumnsForTable({ name: table, schema: owner, nameQuoted: true, schemaQuoted: true });
+    }
+    const sql = `SELECT ${valid}, ${missing} FROM ${source}`;
+    const table = getSqlCompletionContext(sql, 8, { databaseType: "oracle" }).referencedTables[0]!;
+    const span = (text: string) => ({ start_line: 1, start_column: sql.indexOf(text) + 1, end_line: 1, end_column: sql.indexOf(text) + text.length });
+    const analysis = { tables: [{ name: table.name, schema: table.schema, span: span(source) }], columns: [valid, missing].map((name) => ({ name, span: span(name) })) };
+    const diagnostics = buildSqlSemanticDiagnostics(analysis, { sql, databaseType: "oracle", tables: [], columnsByTable: metadata.cachedColumnsByTable, loadedColumnTables: metadata.loadedColumnsByTable });
+    expect(diagnostics.map(({ message }) => message)).toEqual([`Unknown column ${missing}`]);
+    expect(metadata.getCachedColumnsForTable(table)?.map(({ name }) => name)).toEqual([valid]);
+  });
+
   it.each(["Alias", "APP.Alias", '"Alias"'])("uses the same OceanBase cache identity for diagnostics on %s", async (source) => {
     const { metadata, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP" });
     store.listCompletionColumns.mockResolvedValue([{ name: "ID", table: "Alias" }]);
@@ -234,6 +257,38 @@ describe("QueryEditor completion metadata ownership", () => {
     await metadata.ensureColumnsForTable({ name: "users" });
     expect(store.listCompletionColumns).toHaveBeenCalledTimes(2);
     expect(metadata.cachedColumnsByTable.get("public.users")).toBe(columns);
+  });
+
+  it("shares Oracle columns cached under dictionary casing with schema-qualified diagnostics", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", dialect: "oracle", schema: "APP" });
+    const orderColumns: SqlCompletionColumn[] = [{ name: "ID", table: "ORDERS", schema: "APP", dataType: "NUMBER" }];
+    metadata.cachedColumnsByTable.set("APP.ORDERS", orderColumns);
+    metadata.loadedColumnsByTable.add("app.orders");
+
+    expect(await metadata.ensureColumnsForTable({ name: "orders", schema: "app" })).toBe(true);
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+    expect(metadata.cachedColumnsByTable.get("APP.ORDERS")).toBe(orderColumns);
+
+    const sql = "SELECT o.ID FROM app.orders o";
+    const diagnostics = buildSqlSemanticDiagnostics(
+      {
+        tables: [{ name: "orders", schema: "app", alias: "o", span: { start_line: 1, start_column: 18, end_line: 1, end_column: 27 } }],
+        columns: [{ name: "ID", qualifier: "o", span: { start_line: 1, start_column: 8, end_line: 1, end_column: 12 } }],
+      },
+      { tables: [], columnsByTable: metadata.cachedColumnsByTable, loadedColumnTables: metadata.loadedColumnsByTable, sql, databaseType: "oracle" },
+    );
+    expect(diagnostics).toEqual([]);
+  });
+
+  it("retries an empty Oracle column cache entry stored under dictionary casing", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", dialect: "oracle", schema: "APP" });
+    const orderColumns: SqlCompletionColumn[] = [{ name: "ID", table: "ORDERS", schema: "APP", dataType: "NUMBER" }];
+    metadata.cachedColumnsByTable.set("APP.ORDERS", []);
+    store.listCompletionColumns.mockResolvedValue(orderColumns);
+
+    expect(await metadata.ensureColumnsForTable({ name: "orders", schema: "app" })).toBe(true);
+    expect(store.listCompletionColumns).toHaveBeenCalledOnce();
+    expect(metadata.cachedColumnsByTable.get("APP.ORDERS")).toBe(orderColumns);
   });
 
   it("isolates quoted names and prefix caches by table and schema", () => {

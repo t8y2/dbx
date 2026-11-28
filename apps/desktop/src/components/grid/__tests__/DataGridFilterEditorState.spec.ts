@@ -364,6 +364,90 @@ describe("DataGrid custom filter menu", () => {
   });
 });
 
+describe("DataGrid structured filter apply ordering", () => {
+  // Conditions resolve only when the test releases them, keyed by the rule value.
+  function deferConditionsByValue() {
+    const pending = new Map<string, { promise: Promise<string>; resolve: (value: string) => void }>();
+    const entry = (value: string) => {
+      let item = pending.get(value);
+      if (!item) {
+        let resolve!: (condition: string) => void;
+        const promise = new Promise<string>((done) => (resolve = done));
+        item = { promise, resolve };
+        pending.set(value, item);
+      }
+      return item;
+    };
+    backendMocks.buildDataGridContextFilterCondition.mockImplementation(({ columnName, value }: { columnName: string; value: unknown }) => entry(String(value)).promise.then(() => `\`${columnName}\` = ${String(value)}`));
+    return { release: (value: string) => entry(value).resolve(value) };
+  }
+
+  async function seedRule(host: HTMLElement) {
+    await openCellCustomFilter(host);
+    const editor = [...host.querySelectorAll<HTMLInputElement>("[data-filter-value-editor]")].find((input) => input.value === "1");
+    if (!editor) throw new Error("Seeded value editor not found");
+    return editor;
+  }
+
+  // Lets any stale continuation run to completion before asserting nothing happened.
+  const flushPendingWork = () => new Promise<void>((resolve) => setTimeout(resolve, 30));
+
+  function setValue(input: HTMLInputElement, value: string) {
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function workbenchButton(host: HTMLElement, label: string): HTMLButtonElement {
+    const button = [...(host.querySelector("[data-grid-filter-workbench]")?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((candidate) => candidate.textContent?.trim() === label);
+    if (!button) throw new Error(`Filter workbench button not found: ${label}`);
+    return button;
+  }
+
+  afterEach(() => {
+    backendMocks.buildDataGridContextFilterCondition.mockImplementation(async ({ columnName, value }: { columnName: string; value: unknown }) => `\`${columnName}\` = ${String(value)}`);
+  });
+
+  it("keeps the newest apply when an older apply resolves last", async () => {
+    const { host, onExecuteSql } = mountGrid("conditions", false);
+    await settle();
+    const conditions = deferConditionsByValue();
+    const editor = await seedRule(host);
+
+    workbenchButton(host, "Apply Filter").click();
+    await settle();
+    setValue(editor, "2");
+    await settle();
+    workbenchButton(host, "Apply Filter").click();
+    await settle();
+
+    conditions.release("2");
+    await vi.waitFor(() => expect(onExecuteSql).toHaveBeenCalledOnce());
+    conditions.release("1");
+    await flushPendingWork();
+
+    expect(onExecuteSql).toHaveBeenCalledOnce();
+    expect(onExecuteSql.mock.calls[0][0]).toContain("`id` = 2");
+  });
+
+  it("does not restore a cleared filter when an earlier apply resolves afterwards", async () => {
+    const { host, onExecuteSql } = mountGrid("conditions", false);
+    await settle();
+    const conditions = deferConditionsByValue();
+    await seedRule(host);
+
+    workbenchButton(host, "Apply Filter").click();
+    await settle();
+    workbenchButton(host, "Clear Filter").click();
+    await vi.waitFor(() => expect(onExecuteSql).toHaveBeenCalledOnce());
+    expect(onExecuteSql.mock.calls[0][0]).not.toContain("WHERE");
+
+    conditions.release("1");
+    await flushPendingWork();
+
+    expect(onExecuteSql).toHaveBeenCalledOnce();
+  });
+});
+
 describe("DataGrid quick filter editor state", () => {
   it("continues to close its popover after apply", async () => {
     const { host, onExecuteSql } = mountGrid("quick", true);

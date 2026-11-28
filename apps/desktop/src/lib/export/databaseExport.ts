@@ -6,6 +6,7 @@ import { SINGLE_DATABASE_TYPES } from "@/lib/database/databaseCapabilitySets";
 import { isXuguSyntheticScope } from "@/lib/sidebar/xuguPublicSynonyms";
 import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
+import { isManualTransactionSessionExpired } from "@/lib/backend/errorUtils.ts";
 
 export const DATABASE_EXPORT_ROW_LIMIT = 10_000;
 export const DATABASE_EXPORT_PAGE_SIZE = 500;
@@ -198,6 +199,15 @@ export async function runWithDatabaseBackupSnapshot<T>(options: DatabaseBackupSn
     try {
       await api.rollbackManualTransaction(sessionId);
     } catch (error) {
+      // A failed export stream already rolled the snapshot back on the
+      // backend, so "session not found" confirms cleanup instead of leaving
+      // it unknown. Keep the export's own outcome rather than masking its
+      // real error (timeout, dropped connection) behind the cleanup reply.
+      const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+      if (message === "Transaction session not found" || isManualTransactionSessionExpired(error)) {
+        if (failed) throw operationError;
+        return result as T;
+      }
       if (operationError instanceof SnapshotCompletionError && operationError.status === "unknown") throw operationError;
       throw new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
     }

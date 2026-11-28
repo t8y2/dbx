@@ -88,7 +88,7 @@ defineExpose({
     const group = groupForElement(element) ?? activeEditorGroup();
     return group?.refreshData() ?? resultSurfaceRef.value?.refreshData() ?? false;
   },
-  toggleResultsPane: () => (activeQueryTab.value ? toggleSharedResultsPane() : (activeEditorGroup()?.toggleResultsPane() ?? false)),
+  toggleResultsPane: () => (sharedResultTab.value ? toggleSharedResultsPane() : (activeEditorGroup()?.toggleResultsPane() ?? false)),
   refreshQueryEditorCompletionCache: () => activeEditorGroup()?.refreshQueryEditorCompletionCache() ?? false,
   handleModRTarget: (target: Element) => {
     if (sharedResultOwnsTarget(target)) {

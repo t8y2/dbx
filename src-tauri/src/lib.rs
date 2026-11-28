@@ -2879,6 +2879,7 @@ pub fn run() {
             commands::query::build_rename_object_sql,
             commands::query::build_rename_database_sql,
             commands::query::build_rename_database_preflight_sql,
+            commands::query::build_mysql_rename_database_sql,
             commands::query::build_create_database_sql,
             #[cfg(feature = "duckdb-sidecar")]
             commands::query::build_duckdb_attach_database_sql,

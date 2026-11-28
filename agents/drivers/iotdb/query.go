@@ -88,7 +88,7 @@ func (s *server) queryValues(sql, database string, limit, timeoutSecs int) (quer
 		}
 		defer dataset.Close()
 		columns := append([]string(nil), dataset.GetColumnNames()...)
-		columnTypes := normalizedColumnTypes(dataset.GetColumnTypes(), columns, connected.dialect, connected.timestampPrecision)
+		columnTypes := normalizedColumnTypes(dataset.GetColumnTypes(), columns, connected.dialect, connected.timestampPrecision, sql)
 		rows, truncated, err := readDataset(ctx, dataset, connected, columns, columnTypes, limit)
 		if err != nil {
 			return queryResult{}, err
@@ -164,7 +164,7 @@ func (s *server) executeQueryPage(options queryOptions, requestedPageSize int) (
 			dataset:     dataset,
 			client:      connected,
 			columns:     append([]string(nil), dataset.GetColumnNames()...),
-			columnTypes: normalizedColumnTypes(dataset.GetColumnTypes(), dataset.GetColumnNames(), connected.dialect, connected.timestampPrecision),
+			columnTypes: normalizedColumnTypes(dataset.GetColumnTypes(), dataset.GetColumnNames(), connected.dialect, connected.timestampPrecision, sql),
 			remaining:   limit,
 		}
 		rows, hasMore, truncated, err := s.readQuerySessionPage(ctx, queryState, pageSize)
@@ -470,8 +470,12 @@ func normalizeIoTDBValue(value any, columnType string) any {
 	}
 }
 
-func normalizedColumnTypes(values, columns []string, dialect, timestampPrecision string) []string {
+// normalizedColumnTypes types a result set for the grid. sql is the statement
+// that produced it: an `AS alias` hides the aggregate behind a time aggregate's
+// column name, so the SELECT list is consulted to find the aliased ones.
+func normalizedColumnTypes(values, columns []string, dialect, timestampPrecision, sql string) []string {
 	result := make([]string, len(columns))
+	var aliases map[string]struct{}
 	for index := range result {
 		if index < len(values) {
 			result[index] = strings.ToUpper(values[index])
@@ -485,31 +489,18 @@ func normalizedColumnTypes(values, columns []string, dialect, timestampPrecision
 		}
 		// max_time/min_time aggregates return INT64 epoch values in the tree
 		// dialect; type them as timestamps so the grid renders standard times.
-		if dialect == client.TreeSqlDialect && iotdbColumnTypeBase(result[index]) == "INT64" && isTimeAggregationColumn(columns[index]) {
+		if dialect != client.TreeSqlDialect || iotdbColumnTypeBase(result[index]) != "INT64" {
+			continue
+		}
+		if aliases == nil {
+			aliases = timeAggregationAliases(sql)
+		}
+		_, aliased := aliases[columns[index]]
+		if aliased || isTimeAggregationExpression(columns[index]) {
 			result[index] = timestampColumnType(timestampPrecision)
 		}
 	}
 	return result
-}
-
-func isTimeAggregationColumn(column string) bool {
-	trimmed := strings.TrimSpace(column)
-	for _, prefix := range []string{"max_time(", "min_time("} {
-		if len(trimmed) > len(prefix) && strings.EqualFold(trimmed[:len(prefix)], prefix) {
-			return true
-		}
-	}
-	for _, prefix := range []string{"max_by(", "min_by("} {
-		if len(trimmed) <= len(prefix) || !strings.EqualFold(trimmed[:len(prefix)], prefix) {
-			continue
-		}
-		arguments := trimmed[len(prefix):]
-		comma := strings.IndexByte(arguments, ',')
-		if comma > 0 && strings.EqualFold(strings.TrimSpace(arguments[:comma]), "time") {
-			return true
-		}
-	}
-	return false
 }
 
 func timestampColumnType(precision string) string {

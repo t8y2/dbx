@@ -154,7 +154,10 @@ fn gemini_capability(model: &str, source: AiCapabilitySource) -> Option<AiEffort
 }
 
 fn deepseek_capability(model: &str, source: AiCapabilitySource) -> Option<AiEffortCapability> {
-    if matches_family(model, "deepseek-v4-flash") || matches_family(model, "deepseek-v4-pro") {
+    if matches_family(model, "deepseek-flash")
+        || matches_family(model, "deepseek-v4-flash")
+        || matches_family(model, "deepseek-v4-pro")
+    {
         let mut capability = enum_capability(&["high", "max"], source);
         if let AiEffortCapability::Enum { options, default, .. } = &mut capability {
             options.insert(0, option("off", "Off", AiEffortSelection::Disabled));
@@ -707,6 +710,18 @@ mod tests {
         apply_runtime_effort(&mut body, &config);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn deepseek_flash_alias_has_thinking_capability() {
+        let config = config(AiProvider::Deepseek, "deepseek-flash");
+        let capability = static_effort_capability(&config, "deepseek-flash").unwrap();
+        let AiEffortCapability::Enum { options, default, .. } = capability else {
+            panic!("expected enum capability");
+        };
+        assert_eq!(options[0].selection, AiEffortSelection::Disabled);
+        assert_eq!(default, AiEffortSelection::Disabled);
+        assert!(options.iter().any(|option| option.selection == AiEffortSelection::Enum("max".to_string())));
     }
 
     #[test]

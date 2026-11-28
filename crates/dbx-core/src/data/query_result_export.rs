@@ -1,4 +1,5 @@
 use super::duckdb_export::DuckDbExportSnapshot;
+use futures::future::{FusedFuture, FutureExt};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
@@ -163,6 +164,16 @@ pub struct QueryResultExportRequest {
     /// 没有表元数据（例如自由 SQL 查询）时为空，此时无法排除主键。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub primary_keys: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryResultExportInvocation {
+    #[serde(flatten)]
+    pub request: QueryResultExportRequest,
+    /// A live MySQL query's session. The export only borrows it and keeps
+    /// `request.client_session_id` for any export-owned resources.
+    pub source_client_session_id: Option<String>,
 }
 
 pub struct StagedExportTarget {
@@ -786,6 +797,8 @@ fn supports_streaming_offset_pagination(request: &QueryResultExportRequest, page
         use_agent_cursor: false,
         first_page_uses_actual_sql: true,
         execution_hint: None,
+        server_version: None,
+        server_comment: None,
     });
     let second_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
         sql: request.sql.clone(),
@@ -795,6 +808,8 @@ fn supports_streaming_offset_pagination(request: &QueryResultExportRequest, page
         use_agent_cursor: false,
         first_page_uses_actual_sql: true,
         execution_hint: None,
+        server_version: None,
+        server_comment: None,
     });
 
     let (Some(first_sql), Some(second_sql)) = (first_page.page_sql.as_deref(), second_page.page_sql.as_deref()) else {
@@ -1061,7 +1076,7 @@ pub async fn export_query_result_core(
     cancel_token: Option<CancellationToken>,
     on_progress: impl Fn(TableExportProgress),
 ) -> Result<(), String> {
-    export_query_result_with_cleanup(state, request, cancel_token, on_progress, false).await.result
+    export_query_result_with_cleanup(state, request, cancel_token, on_progress, false, None).await.result
 }
 
 /// The caller owns the staged destination and confirms its commit or removal.
@@ -1071,15 +1086,16 @@ pub async fn export_query_result_core_with_completion(
     cancel_token: Option<CancellationToken>,
     on_progress: impl Fn(TableExportProgress),
 ) -> crate::table_export::ExportCompletion {
-    export_query_result_with_cleanup(state, request, cancel_token, on_progress, true).await
+    export_query_result_with_cleanup(state, request, cancel_token, on_progress, true, None).await
 }
 
-async fn export_query_result_with_cleanup(
+pub async fn export_query_result_with_cleanup(
     state: &AppState,
     request: &QueryResultExportRequest,
     cancel_token: Option<CancellationToken>,
     on_progress: impl Fn(TableExportProgress),
     report_completion: bool,
+    source_client_session_id: Option<&str>,
 ) -> crate::table_export::ExportCompletion {
     let policy_check: Result<(), String> = async {
         crate::query::mysql_data_charset_policy::check_export(state, &request.connection_id, &request.format).await?;
@@ -1109,6 +1125,7 @@ async fn export_query_result_with_cleanup(
         &mut session_id,
         report_completion,
         &mut duckdb_snapshot,
+        source_client_session_id,
     )
     .await;
 
@@ -1173,6 +1190,7 @@ async fn export_query_result_core_inner(
     session_id: &mut Option<String>,
     externally_staged: bool,
     duckdb_snapshot: &mut Option<DuckDbExportSnapshot>,
+    source_client_session_id: Option<&str>,
 ) -> Result<(), String> {
     let format = request.format.to_lowercase();
     if format != "csv" && format != "xlsx" && format != "json" && format != "txt" && format != "sql" {
@@ -1205,15 +1223,16 @@ async fn export_query_result_core_inner(
     let use_agent_cursor = export_can_use_agent_cursor(request, txn_supports_agent_cursor);
 
     if txn_session_id.is_none() {
-        if try_export_postgres_query_result_stream(
-            state,
-            request,
-            &format,
-            cancel_token.clone(),
-            on_progress,
-            externally_staged,
-        )
-        .await?
+        if (request.database_type != DatabaseType::Mysql || source_client_session_id.is_none())
+            && try_export_postgres_query_result_stream(
+                state,
+                request,
+                &format,
+                cancel_token.clone(),
+                on_progress,
+                externally_staged,
+            )
+            .await?
         {
             return Ok(());
         }
@@ -1240,6 +1259,7 @@ async fn export_query_result_core_inner(
             cancel_token.clone(),
             on_progress,
             externally_staged,
+            source_client_session_id,
         )
         .await?
         {
@@ -1360,6 +1380,8 @@ async fn export_query_result_core_inner(
                 use_agent_cursor,
                 first_page_uses_actual_sql: true,
                 execution_hint: None,
+                server_version: None,
+                server_comment: None,
             });
             if let Some(error) = plan.pagination_error {
                 return Err(error);
@@ -1849,29 +1871,53 @@ async fn try_export_mysql_query_result_stream(
     cancel_token: Option<CancellationToken>,
     on_progress: &impl Fn(TableExportProgress),
     externally_staged: bool,
+    source_client_session_id: Option<&str>,
 ) -> Result<bool, String> {
     if request.use_agent_cursor {
         return Ok(false);
     }
 
-    let pool_key = if request.database.trim().is_empty() {
-        state.get_or_create_pool_for_session(&request.connection_id, None, request.client_session_id.as_deref()).await?
+    let database = request.database.trim();
+    let database_scope = (!database.is_empty()).then_some(database);
+    let source = if let Some(session_id) = source_client_session_id.filter(|id| {
+        !id.trim().is_empty()
+            && request.database_type == DatabaseType::Mysql
+            && crate::sql_risk::prove_read_only_for_database(&request.sql, DatabaseType::Mysql)
+                == crate::sql_risk::ReadProof::ProvenReadOnly
+    }) {
+        match state.existing_workload_pool_for_session(&request.connection_id, database_scope, Some(session_id)).await {
+            Some((key, PoolKind::Mysql(pool, mode)))
+                if pool.is_client_session_pool()
+                    && !pool.is_stateless_http_tunnel()
+                    && !state.has_preserved_explicit_transaction(&key).await =>
+            {
+                state
+                    .mysql_client_session_physical_id(&key, &pool, database)
+                    .await
+                    .map(|physical_id| (key, pool, mode, Some(physical_id)))
+            }
+            _ => None,
+        }
     } else {
-        state
-            .get_or_create_pool_for_session(
-                &request.connection_id,
-                Some(request.database.as_str()),
-                request.client_session_id.as_deref(),
-            )
-            .await?
+        None
     };
-    let pool_handle = state.pool_handle(&pool_key).await;
-    let Some((pool, bare)) = pool_handle.as_ref().and_then(|pool| match pool {
-        PoolKind::Mysql(pool, mode) => Some((pool.clone(), *mode == crate::connection::MysqlMode::Bare)),
-        _ => None,
-    }) else {
-        return Ok(false);
+    let (pool_key, pool, mode, borrowed_physical_id) = match source {
+        Some(source) => source,
+        None => {
+            let key = state
+                .get_or_create_pool_for_session(
+                    &request.connection_id,
+                    database_scope,
+                    request.client_session_id.as_deref(),
+                )
+                .await?;
+            let Some(PoolKind::Mysql(pool, mode)) = state.pool_handle(&key).await else {
+                return Ok(false);
+            };
+            (key, pool, mode, None)
+        }
     };
+    let bare = mode == crate::connection::MysqlMode::Bare;
 
     if let Some(execution_id) = request.execution_id.as_deref() {
         state.running_queries.set_pool_key(execution_id, pool_key.clone());
@@ -1923,14 +1969,22 @@ async fn try_export_mysql_query_result_stream(
         cancel_token.as_ref(),
     )
     .await?;
-    for setup in mysql_user_variable_setup_sql(&request.setup_sql) {
-        conn.query_drop(setup)
-            .await
-            .map_err(|error| format!("Failed to restore session variables for export: {error}"))?;
+    if let Some(physical_id) = borrowed_physical_id {
+        if conn.id() != physical_id
+            || state.mysql_client_session_physical_id(&pool_key, &pool, database).await != Some(physical_id)
+        {
+            return Err("MYSQL_CLIENT_SESSION_LOST: The source MySQL session is no longer available for export.".into());
+        }
+    } else {
+        for setup in mysql_user_variable_setup_sql(&request.setup_sql) {
+            conn.query_drop(setup)
+                .await
+                .map_err(|error| format!("Failed to restore session variables for export: {error}"))?;
+        }
     }
     let mysql_connection_id = conn.id();
     let kill_opts = conn.opts().clone();
-    if let Some(execution_id) = request.execution_id.clone() {
+    if let Some(execution_id) = request.execution_id.clone().filter(|_| borrowed_physical_id.is_none()) {
         let interrupt_kill_opts = kill_opts.clone();
         let kill_timeout = operation_budget.checkout_timeout;
         state.running_queries.register_interrupt(&execution_id, move || {
@@ -2062,48 +2116,77 @@ async fn try_export_mysql_query_result_stream(
             Ok(())
         },
     );
+    let stream_started = AtomicBool::new(false);
+    let mut stream_future = Box::pin(
+        async {
+            stream_started.store(true, Ordering::Relaxed);
+            stream_future.await
+        }
+        .fuse(),
+    );
     let timeout_error =
         format!("Query timed out after {} seconds", query_timeout.map_or(0, |timeout| timeout.as_secs()));
     let stream_result = await_stream_with_progress_timeout(
-        stream_future,
+        stream_future.as_mut(),
         query_timeout,
         progress_clock,
         cancel_token.as_ref(),
         timeout_error.clone(),
     )
     .await;
-    if stream_result.as_ref().is_err_and(|error| error == &timeout_error) {
+    let canceled = stream_result.is_err()
+        && (export_cancelled.load(Ordering::SeqCst)
+            || cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
+            || is_export_cancelled(&request.export_id).await);
+    // Kill a borrowed session's query synchronously so the cancellation cannot
+    // reach the next query that checks out this connection after the export.
+    if stream_started.load(Ordering::Relaxed)
+        && stream_result.as_ref().is_err_and(|error| {
+            error == &timeout_error || (borrowed_physical_id.is_some() && (canceled || error == QUERY_CANCELED))
+        })
+    {
         let _ =
             crate::db::mysql::kill_query_with_opts(kill_opts, mysql_connection_id, operation_budget.checkout_timeout)
                 .await;
+        if borrowed_physical_id.is_some() && !stream_future.is_terminated() {
+            // Let the interrupted driver operation consume its response. Dropping
+            // it while reading a packet can strand the live session.
+            let _ = tokio::time::timeout(operation_budget.cleanup_timeout, stream_future.as_mut()).await;
+        }
     }
+    drop(stream_future);
     watcher_done.cancel();
 
     if let Err(error) = stream_result {
         // A timed-out, cancelled, or failed MySQL result stream may leave an
         // incomplete protocol packet on the connection. Explicitly disconnect
         // it so mysql_async cannot recycle the poisoned connection into the pool.
-        match disconnect_with_timeout(conn, operation_budget.cleanup_timeout, |conn| async move {
-            conn.disconnect().await.map_err(|error| error.to_string())
-        })
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(disconnect_error)) => {
-                log::warn!(
-                    "Failed to disconnect MySQL export connection {mysql_connection_id} after stream error: {disconnect_error}"
-                );
-            }
-            Err(_) => {
-                log::warn!("Timed out disconnecting MySQL export connection {mysql_connection_id} after stream error");
+        let reusable_source = borrowed_physical_id.is_some()
+            && (!stream_started.load(Ordering::Relaxed)
+                || tokio::time::timeout(operation_budget.cleanup_timeout, conn.ping())
+                    .await
+                    .is_ok_and(|ping| !ping.is_err_and(|error| error.is_fatal())));
+        if !reusable_source {
+            match disconnect_with_timeout(conn, operation_budget.cleanup_timeout, |conn| async move {
+                conn.disconnect().await.map_err(|error| error.to_string())
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(disconnect_error)) => {
+                    log::warn!(
+                        "Failed to disconnect MySQL export connection {mysql_connection_id} after stream error: {disconnect_error}"
+                    );
+                }
+                Err(_) => {
+                    log::warn!(
+                        "Timed out disconnecting MySQL export connection {mysql_connection_id} after stream error"
+                    );
+                }
             }
         }
 
-        if error == QUERY_CANCELED
-            || export_cancelled.load(Ordering::SeqCst)
-            || cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
-            || is_export_cancelled(&request.export_id).await
-        {
+        if error == QUERY_CANCELED || canceled {
             on_progress(progress(
                 request,
                 rows_exported,
@@ -3673,6 +3756,8 @@ mod tests {
             use_agent_cursor: false,
             first_page_uses_actual_sql: true,
             execution_hint: None,
+            server_version: None,
+            server_comment: None,
         });
         assert_eq!(
             plan1.page_sql.as_deref(),
@@ -3687,6 +3772,8 @@ mod tests {
             use_agent_cursor: false,
             first_page_uses_actual_sql: true,
             execution_hint: None,
+            server_version: None,
+            server_comment: None,
         });
         assert_eq!(
             plan2.page_sql.as_deref(),

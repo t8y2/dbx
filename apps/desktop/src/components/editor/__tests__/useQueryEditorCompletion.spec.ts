@@ -65,7 +65,9 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
     listElasticsearchCompletionFields: vi.fn(async () => []),
   };
   const connectionStore = store as unknown as Options["connectionStore"];
-  const settings = reactive({ editorSettings: { completionTriggerMode: "positional", snippets: [], sqlFormatter: { keywordCase: "upper", functionCase: "upper" }, autoAliasTables: false, tableCompletionSchemaQualification: "collision", generateSqlQuoteIdentifiers: false } });
+  const settings = reactive({
+    editorSettings: { completionTriggerMode: "positional", completionAutoActivationDelayMs: 0, snippets: [], sqlFormatter: { keywordCase: "upper", functionCase: "upper" }, autoAliasTables: false, tableCompletionSchemaQualification: "collision", generateSqlQuoteIdentifiers: false },
+  });
   const metadata = useQueryEditorCompletionMetadata({ props, view, connectionStore, sqlBehaviorDialect: () => props.dialect, remoteLatencyBudgetMs: 40, maxCompletionTables: 100, onDemandMinPrefix: 2, semanticCompletionEnabled });
   configureMetadata?.(metadata);
   const startCompletion = vi.fn(() => true);
@@ -341,6 +343,16 @@ describe.each([false, true])("Snowflake namespace completion (semantic=%s)", (se
     expect(metadata.cachedTables.map((table) => table.name)).toContain("TIS_ORDER");
   });
 
+  it("prefetches the active schema tables for schema-scoped editors like Dameng (#15630)", async () => {
+    const { metadata, store } = createHarness({ databaseType: "dameng", dialect: "oracle", database: "", schema: "YJ1235" });
+    store.listCompletionTables.mockResolvedValue([{ name: "SYS_USER", schema: "YJ1235", database: "" }]);
+
+    await metadata.prefetchCompletionTables();
+
+    expect(store.listCompletionTables).toHaveBeenCalledWith("connection", "", "", 500, undefined, false, "YJ1235", undefined, { activateConnection: false });
+    expect(metadata.cachedTables.map((table) => table.name)).toContain("SYS_USER");
+  });
+
   it.each([false, true])("preserves the quote-identifiers preference (%s) for mixed-case table insertion", async (quoteIdentifiers) => {
     const { catalogs, provide, currentView, settings } = snowflakeHarness("SELECT * FROM ");
     catalogs.DEFAULT_DB!.PUBLIC = ["DimCustomer"];
@@ -524,8 +536,8 @@ describe("QueryEditor completion provider ownership", () => {
     runtime.imeCompositionActive = true;
     expect(await provide()).toBeNull();
     expect(completion.triggerSqlCompletion(currentView)).toBe(false);
-    completion.scheduleSqlCompletionStart(currentView);
-    await vi.advanceTimersByTimeAsync(1);
+    completion.scheduleDeferredCompletionTrigger(currentView, "GET", "");
+    await vi.advanceTimersByTimeAsync(25);
     expect(startCompletion).not.toHaveBeenCalled();
     expect(store.listRedisCompletionCommandDocs).not.toHaveBeenCalled();
   });
@@ -540,6 +552,25 @@ describe("QueryEditor completion provider ownership", () => {
     if (change === "cancel") completion.clearDeferredCompletionTrigger();
     await vi.advanceTimersByTimeAsync(50);
     expect(startCompletion).not.toHaveBeenCalled();
+  });
+
+  it("defers completion after IME input and leaves the shortcut immediately available", async () => {
+    const { currentView, settings, completion, provide, startCompletion } = createHarness();
+    settings.editorSettings.completionAutoActivationDelayMs = 2000;
+    completion.scheduleDeferredCompletionTrigger(currentView);
+    expect(await provide(false)).toBeNull();
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(startCompletion).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(startCompletion).toHaveBeenCalledOnce();
+
+    startCompletion.mockClear();
+    completion.scheduleDeferredCompletionTrigger(currentView);
+    expect(completion.triggerSqlCompletion(currentView)).toBe(true);
+    expect(completion.activeOrigin).toBe("explicit");
+    expect(startCompletion).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(startCompletion).toHaveBeenCalledOnce();
   });
 
   it("coalesces valid deferred input and reads late runtime initialization", async () => {
@@ -581,6 +612,17 @@ describe("QueryEditor completion provider ownership", () => {
     const result = await provide();
     expect(store.listRedisCompletionKeys).toHaveBeenCalledWith("connection", "3");
     expect(result?.options.map((option) => option.label)).toContain("user:1");
+  });
+
+  it("inserts the selected collection after typing db in a script-selected database", async () => {
+    const doc = "use analytics\ndb";
+    const { store, provide, currentView } = createHarness({ databaseType: "mongodb", database: "", modelValue: doc });
+    const result = await provide();
+    expect(store.listMongoCompletionCollections).toHaveBeenCalledWith("connection", "analytics");
+    const option = result?.options.find((candidate) => candidate.displayLabel === "users");
+    expect(option?.apply).toBeTypeOf("function");
+    (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, doc.length);
+    expect(currentView.state.doc.toString()).toBe("use analytics\ndb.users");
   });
 
   it("rejects stale Mongo collection loads after request invalidation", async () => {
@@ -895,5 +937,154 @@ describe("Oracle SQL column completion case-insensitivity and live refresh (#152
     expect(startCompletion).toHaveBeenCalledWith(currentView);
     const refreshed = await provide(false);
     expect(refreshed?.options.map((option) => option.label)).toContain("CREATED_BY");
+  });
+
+  it("completes Dameng schema-qualified tables without loading routines and refreshes active popup (#15630)", async () => {
+    vi.useRealTimers();
+    const sql = "select * from YJ1235.sys_";
+    const { provide, store, runtime, startCompletion, currentView } = createHarness(
+      {
+        databaseType: "dameng",
+        dialect: "oracle",
+        database: "",
+        schema: "YJ1235",
+        modelValue: sql,
+      },
+      undefined,
+      true,
+    );
+    runtime.codeMirrorCompletionStatus = () => "active";
+    store.listCompletionTables.mockResolvedValue([{ name: "SYS_USER", schema: "YJ1235", type: "table" }]);
+    let resolveRefresh!: (tables: SqlCompletionTable[]) => void;
+    store.refreshCompletionTables.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolveRefresh = done;
+        }),
+    );
+
+    const asyncResult = await provide(true);
+    expect(asyncResult?.options.map((option) => option.label)).toContain("SYS_USER");
+    expect(store.listCompletionObjects).not.toHaveBeenCalled();
+
+    // Also verify background refresh re-triggers active completion on Dameng qualified schema searches.
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "SYS_ROLE", schema: "YJ1235", type: "table" }]);
+    const localResult = await provide(false);
+    expect(localResult?.options.map((option) => option.label)).toContain("SYS_ROLE");
+    await vi.waitFor(() => expect(resolveRefresh).toBeDefined());
+    resolveRefresh([
+      { name: "SYS_ROLE", schema: "YJ1235", type: "table" },
+      { name: "SYS_USER", schema: "YJ1235", type: "table" },
+    ]);
+    await vi.waitFor(() => expect(startCompletion).toHaveBeenCalledWith(currentView));
+  });
+
+  it("prefers the active Dameng schema over another cached schema for unqualified table columns (#15630)", async () => {
+    vi.useRealTimers();
+    const sql = "select * from sys_user where i";
+    const { provide, store, metadata } = createHarness(
+      {
+        databaseType: "dameng",
+        dialect: "oracle",
+        database: "",
+        schema: "YJ1235",
+        modelValue: sql,
+      },
+      undefined,
+      true,
+    );
+    metadata.cachedTables = [{ name: "SYS_USER", schema: "SYSDBA", type: "table" }];
+    store.listCompletionTables.mockResolvedValue([{ name: "SYS_USER", schema: "YJ1235", type: "table" }]);
+    store.listCompletionColumns.mockImplementation(async (_conn, _db, _table, schema) => (schema === "YJ1235" ? [{ name: "id", table: "SYS_USER", schema: "YJ1235", dataType: "VARCHAR(36 CHAR)" }] : []));
+
+    const result = await provide(true);
+    expect(result?.options.map((option) => option.label)).toContain("id");
+    expect(store.listCompletionColumns).toHaveBeenCalledWith("connection", "", "sys_user", "YJ1235", expect.objectContaining({ tableQuoted: false }), undefined);
+  });
+
+  it("does not query routine objects for Dameng table alias qualifiers when completing columns (#15630)", async () => {
+    vi.useRealTimers();
+    const sql = "select * from YJ1235.SYS_USER u where u.i";
+    const { provide, store } = createHarness(
+      {
+        databaseType: "dameng",
+        dialect: "oracle",
+        database: "",
+        schema: "YJ1235",
+        modelValue: sql,
+      },
+      undefined,
+      true,
+    );
+    store.listCompletionColumns.mockResolvedValue([
+      { name: "id", table: "SYS_USER", schema: "YJ1235", dataType: "VARCHAR(36 CHAR)" },
+      { name: "account", table: "SYS_USER", schema: "YJ1235", dataType: "VARCHAR(64 CHAR)" },
+    ]);
+
+    const result = await provide(true);
+    expect(result?.options.map((option) => option.label)).toContain("id");
+    expect(store.listCompletionObjects).not.toHaveBeenCalled();
+    expect(store.listCompletionColumns).toHaveBeenCalledWith("connection", "", "SYS_USER", "YJ1235", expect.objectContaining({ tableQuoted: false, schemaQuoted: false }), undefined);
+  });
+});
+
+describe("unexecuted local DDL completion", () => {
+  beforeEach(() => vi.useRealTimers());
+
+  function harnessAtMarker(markedSql: string, databaseType: "postgres" | "mysql" | "sqlite" = "postgres") {
+    const cursor = markedSql.indexOf("|");
+    const modelValue = markedSql.replace("|", "");
+    const harness = createHarness({ databaseType, dialect: databaseType, modelValue }, undefined, true);
+    harness.currentView.dispatch({ selection: { anchor: cursor } });
+    return harness;
+  }
+
+  it.each(["postgres", "mysql", "sqlite"] as const)("serves CREATE TABLE columns on local and async %s paths without remote metadata", async (dialect) => {
+    const { provide, store } = harnessAtMarker("CREATE TABLE users (id BIGINT, display_name TEXT);\nSELECT | FROM users", dialect);
+    const local = await provide(false);
+    expect(local?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["id", "display_name"]));
+    const asyncResult = await provide();
+    expect(asyncResult?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["id", "display_name"]));
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+  });
+
+  it("keeps alias and JOIN completion available when remote metadata fails", async () => {
+    const { provide, store } = harnessAtMarker("CREATE TABLE users (id BIGINT, display_name TEXT);\nCREATE TABLE orders (id BIGINT, user_id BIGINT);\nSELECT u.| FROM users u JOIN orders o ON o.user_id = u.id");
+    store.listCompletionColumns.mockRejectedValue(new Error("offline"));
+    store.refreshCompletionColumns.mockRejectedValue(new Error("offline"));
+    const result = await provide();
+    expect(result?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["id", "display_name"]));
+    expect(result?.options.map((option) => option.label)).not.toContain("user_id");
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+  });
+
+  it("includes ALTER and CTAS columns from the whole document", async () => {
+    const { provide } = harnessAtMarker("CREATE TABLE source (id BIGINT, payload TEXT);\nCREATE TABLE report AS SELECT id AS source_id, payload FROM source;\nALTER TABLE report ADD COLUMN created_at TEXT;\nSELECT | FROM report");
+    const result = await provide(false);
+    expect(result?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["source_id", "payload", "created_at"]));
+  });
+
+  it("isolates overlays between editor documents", async () => {
+    const first = harnessAtMarker("CREATE TABLE first_table (first_column INT);\nSELECT | FROM first_table");
+    const second = harnessAtMarker("CREATE TABLE second_table (second_column INT);\nSELECT | FROM second_table");
+    const firstResult = await first.provide(false);
+    const secondResult = await second.provide(false);
+    expect(firstResult?.options.map((option) => option.label)).toContain("first_column");
+    expect(firstResult?.options.map((option) => option.label)).not.toContain("second_column");
+    expect(secondResult?.options.map((option) => option.label)).toContain("second_column");
+    expect(secondResult?.options.map((option) => option.label)).not.toContain("first_column");
+  });
+
+  it("preserves quoted PostgreSQL identifier case", async () => {
+    const { provide } = harnessAtMarker('CREATE TABLE "Mixed" ("Id" BIGINT, "Display Name" TEXT);\nSELECT | FROM "Mixed"');
+    const result = await provide(false);
+    const labels = result?.options.map((option) => option.label) ?? [];
+    expect(labels.some((label) => label === "Id" || label.startsWith("Id "))).toBe(true);
+    expect(labels.some((label) => label === "Display Name" || label.startsWith("Display Name "))).toBe(true);
+  });
+  it("keeps case-distinct quoted PostgreSQL tables separate", async () => {
+    const { provide } = harnessAtMarker('CREATE TABLE "Mixed" ("Id" BIGINT);\nCREATE TABLE "mixed" ("other" TEXT);\nSELECT * FROM |');
+    const result = await provide(false);
+    expect(result?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["Mixed", "mixed"]));
   });
 });

@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useToast } from "@/composables/useToast";
@@ -20,7 +21,9 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly, ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
-import { isSchemaAware, supportsSqlFileExecution, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, supportsDatabaseCreation, supportsSqlFileExecution, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { buildCreateDatabaseSql } from "@/lib/database/createDatabaseSql";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { formatError, isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
 import { fetchSqlFileTargetOptions, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection, supportsConnectionLevelDatabaseBootstrap } from "@/lib/connection/connectionLevelDatabaseBootstrap";
@@ -29,6 +32,7 @@ import {
   commitManualTransaction,
   rollbackManualTransaction,
   cancelSqlFileExecution,
+  executeQuery,
   executeSqlFiles,
   refreshSqlFilePreview,
   inspectSqlFileTables,
@@ -148,6 +152,9 @@ const loadingPreview = ref(false);
 const connectionId = ref("");
 const targetNamespace = ref("");
 const databaseOptions = ref<string[]>([]);
+const newDatabaseOpen = ref(false);
+const newDatabaseName = ref("");
+const creatingDatabase = ref(false);
 const loadingDatabases = ref(false);
 // Second-level namespace for engines that layer schemas under a database (PostgreSQL,
 // SQL Server, ...). Empty means "whatever the connection's search_path/default is", so
@@ -661,6 +668,57 @@ function resetState() {
 }
 
 let databaseLoadToken = 0;
+
+// Offered where the picker lists databases (not schemas) and the engine can create one with plain SQL.
+const canCreateTargetDatabase = computed(() => {
+  const connection = selectedConnection.value;
+  return !!connection && !namespacePickerListsSchemas.value && connection.db_type !== "mongodb" && supportsDatabaseCreation(connection.db_type);
+});
+
+function openNewDatabase() {
+  newDatabaseName.value = "";
+  newDatabaseOpen.value = true;
+}
+
+/** Create the database on the target connection, then select it so the file restores into it. */
+async function createTargetDatabase() {
+  const id = connectionId.value;
+  const connection = selectedConnection.value;
+  const name = newDatabaseName.value.trim();
+  if (!id || !connection || !name || creatingDatabase.value) return;
+  creatingDatabase.value = true;
+  try {
+    await store.ensureConnected(id);
+    const sql = await buildCreateDatabaseSql({
+      databaseType: connection.db_type,
+      driverProfile: connection.driver_profile,
+      target: "database",
+      name,
+      identifierQuote: store.connectionIdentifierQuote?.(id),
+    });
+    const result = await executeWithProductionSqlGuard({
+      connection,
+      database: "",
+      sql,
+      source: t("sqlFile.title"),
+      execute: () => executeQuery(id, "", sql),
+    });
+    if (result === undefined) return;
+    await store.ensureVisibleDatabase(id, name);
+    await store.loadDatabases(id, { force: true });
+    if (!open.value || connectionId.value !== id) return;
+    newDatabaseOpen.value = false;
+    newDatabaseName.value = "";
+    // The reload keeps the current namespace when the list contains it, so select the new database first.
+    targetNamespace.value = name;
+    await loadDatabasesForConnection(id);
+    toast(t("sqlFile.newDatabaseCreated", { name }), 3000);
+  } catch (error) {
+    toast(t("sqlFile.newDatabaseFailed", { message: formatError(error) }), { persistent: true });
+  } finally {
+    creatingDatabase.value = false;
+  }
+}
 
 async function loadDatabasesForConnection(id: string) {
   const token = databaseLoadToken + 1;
@@ -1245,19 +1303,36 @@ watch(
             </div>
 
             <div class="space-y-1.5">
-              <Label class="text-xs">{{ t(namespacePickerListsSchemas ? "sqlFile.schema" : "sqlFile.database") }}</Label>
-              <Select v-if="databaseOptions.length" v-model="targetNamespace" :disabled="executionLocked || loadingDatabases">
-                <SelectTrigger class="h-8 text-xs">
-                  <SelectValue :placeholder="t(namespacePickerListsSchemas ? 'sqlFile.schemaPlaceholder' : 'sqlFile.selectDatabase')" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="db in databaseOptions" :key="db" :value="db">{{ db }}</SelectItem>
-                </SelectContent>
-              </Select>
+              <div class="flex items-center justify-between gap-2">
+                <Label class="text-xs">{{ t(namespacePickerListsSchemas ? "sqlFile.schema" : "sqlFile.database") }}</Label>
+                <Button v-if="canCreateTargetDatabase && !newDatabaseOpen" variant="ghost" size="sm" class="h-5 px-1.5 text-[11px]" data-sql-file-new-database :disabled="executionLocked || loadingDatabases" @click="openNewDatabase">
+                  {{ t("sqlFile.newDatabase") }}
+                </Button>
+              </div>
+              <SearchableSelect
+                v-if="databaseOptions.length"
+                v-model="targetNamespace"
+                :options="databaseOptions"
+                :placeholder="t(namespacePickerListsSchemas ? 'sqlFile.schemaPlaceholder' : 'sqlFile.selectDatabase')"
+                :search-placeholder="t(namespacePickerListsSchemas ? 'transfer.searchSchema' : 'transfer.searchDatabase')"
+                :empty-text="t('common.noResults')"
+                :disabled="executionLocked || loadingDatabases"
+                trigger-class="h-8 w-full justify-between text-xs"
+                content-class="w-[var(--reka-popover-trigger-width)]"
+              />
               <div v-else class="relative">
                 <Input v-model="targetNamespace" class="h-8 text-xs" :disabled="executionLocked || loadingDatabases" :placeholder="t(namespacePickerListsSchemas ? 'sqlFile.schemaPlaceholder' : 'sqlFile.databasePlaceholder')" />
                 <Loader2 v-if="loadingDatabases" class="absolute right-2 top-2 w-3.5 h-3.5 animate-spin text-muted-foreground" />
               </div>
+            </div>
+
+            <div v-if="canCreateTargetDatabase && newDatabaseOpen" class="flex items-center gap-1.5" data-sql-file-new-database-form>
+              <Input v-model="newDatabaseName" class="h-8 min-w-0 flex-1 text-xs" :disabled="creatingDatabase" :placeholder="t('sqlFile.newDatabasePlaceholder')" @keydown.enter.prevent="createTargetDatabase" />
+              <Button size="sm" class="h-8 shrink-0 text-xs" :disabled="creatingDatabase || !newDatabaseName.trim()" @click="createTargetDatabase">
+                <Loader2 v-if="creatingDatabase" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                {{ t("sqlFile.newDatabaseCreate") }}
+              </Button>
+              <Button variant="outline" size="sm" class="h-8 shrink-0 text-xs" :disabled="creatingDatabase" @click="newDatabaseOpen = false">{{ t("common.cancel") }}</Button>
             </div>
 
             <div v-if="schemaPickerApplies" class="space-y-1.5" data-sql-file-schema>

@@ -2,7 +2,7 @@ import type { EditorState, Text } from "@codemirror/state";
 import type { CompletionMetadataScope } from "./queryEditorTypes";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { COMPLETION_METADATA_CONCURRENCY } from "@/stores/connectionStore";
-import { getSqlCompletionContext, oceanBaseCompletionCacheKey } from "@/lib/sql/sqlCompletion";
+import { getSqlCompletionContext, oceanBaseCompletionCacheKey, oracleCompletionCacheKey } from "@/lib/sql/sqlCompletion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import type { SqlSemanticModel } from "@/lib/sql/semantic/types";
 import { analyzeSqlCompletion, type SqlCompletionAnalysisResult } from "@/lib/sql/sqlCompletionAnalysis";
@@ -249,6 +249,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   }
 
   function completionCacheKey(table: { name: string; catalog?: string | null; database?: string | null; schema?: string | null; nameQuoted?: boolean; schemaQuoted?: boolean }, scope?: CompletionMetadataScope) {
+    if (props.databaseType === "oracle") return oracleCompletionCacheKey(table, scope?.schema ?? props.schema);
     if (props.databaseType === "oceanbase-oracle") return oceanBaseCompletionCacheKey(table, scope?.schema ?? props.schema);
     const schema = table.schema ?? scope?.schema ?? props.schema;
     const scopedDatabase = scope && scope.database !== props.database ? scope.database : undefined;
@@ -259,14 +260,14 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   }
 
   /**
-   * Look up cached columns for a referenced table, matching unquoted Oracle-family
+   * Look up cached columns for a referenced table, matching unquoted Dameng
    * identifiers across casing variations while preserving exact matching for quoted names.
    */
   function getCachedColumnsForTable(table: { name: string; catalog?: string | null; database?: string | null; schema?: string | null; nameQuoted?: boolean; schemaQuoted?: boolean }, scope?: CompletionMetadataScope): SqlCompletionColumn[] | undefined {
     const exactKey = completionCacheKey(table, scope);
     const exact = cachedColumnsByTable.get(exactKey);
     if (exact) return exact;
-    if ((props.databaseType !== "oracle" && props.databaseType !== "dameng") || table.nameQuoted || table.schemaQuoted) return undefined;
+    if (props.databaseType !== "dameng" || table.nameQuoted || table.schemaQuoted) return undefined;
     const normalizedExactKey = exactKey.toLowerCase();
     for (const [key, columns] of cachedColumnsByTable.entries()) {
       if (key.includes(":quoted:")) continue;
@@ -434,7 +435,9 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     const target = completionMetadataTarget(table, scope);
     if (!target) return null;
     const localMatches = connectionStore.lookupLocalCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, target.schema, target.catalog);
-    const localExact = localMatches.find((item) => completionTablesMatch(item, table));
+    // Native Oracle diagnostic references have already been folded using their SQL quote flags.
+    const matchesReference = (item: SqlCompletionTable) => (props.databaseType === "oracle" ? item.name === table.name && (!target.schema || item.schema === target.schema) : completionTablesMatch(item, table));
+    const localExact = localMatches.find(matchesReference);
     if (localExact) {
       cachedTables = mergeCompletionTables(cachedTables, [localExact]);
       return localExact;
@@ -444,14 +447,23 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
       verifySchemaMetadata: !!target.schema,
     });
     cachedTables = mergeCompletionTables(cachedTables, remoteMatches);
-    return remoteMatches.find((item) => completionTablesMatch(item, table)) ?? null;
+    return remoteMatches.find(matchesReference) ?? null;
   }
 
   async function ensureColumnsForTable(table: { name: string; database?: string | null; schema?: string | null; nameQuoted?: boolean; schemaQuoted?: boolean }, reference: Pick<SqlCompletionReferencedTable, "nameQuoted" | "schemaQuoted"> = table, scope?: CompletionMetadataScope): Promise<boolean> {
     if (isVirtualCompletionTableReference(table)) return false;
     const cacheTable = { ...table, ...reference };
     const cacheKey = completionCacheKey(cacheTable, scope);
-    if (getCachedColumnsForTable(cacheTable, scope)) return true;
+    const cachedColumns = getCachedColumnsForTable(cacheTable, scope);
+    if (cachedColumns && cachedColumns.length > 0) {
+      // Diagnostics and hover read the exact cache key, so share columns found
+      // through a case-insensitive hit under that key instead of only reporting a hit.
+      if (!cachedColumnsByTable.has(cacheKey)) {
+        cachedColumnsByTable.set(cacheKey, cachedColumns);
+        loadedColumnsByTable.add(cacheKey.toLowerCase());
+      }
+      return true;
+    }
     if (!props.connectionId || props.database == null) return false;
     const target = completionMetadataTarget(table, scope);
     if (!target) return false;

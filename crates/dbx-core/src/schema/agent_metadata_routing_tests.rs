@@ -1,7 +1,7 @@
 use super::{
     get_table_comment_core, get_table_ddl_core, list_databases_core, list_object_statistics_core, list_objects_core,
-    list_objects_core_with_options, AppState, ConnectionConfig, DatabaseType, MetadataIdentityMode,
-    MetadataReadOptions, PoolKind,
+    list_objects_core_with_options, list_table_children_core, list_table_roots_page_core, AppState, ConnectionConfig,
+    DatabaseType, MetadataIdentityMode, MetadataReadOptions, PoolKind,
 };
 use crate::db::agent_driver::{AgentDriverClient, PooledAgentClient};
 use crate::db::ObjectSourceKind;
@@ -805,4 +805,40 @@ fn kingbase_view_comments_follow_the_reported_identifier_quote() {
         &[column],
     );
     assert!(ddl.ends_with("\nCOMMENT ON VIEW `app`.`v` IS 'v';\nCOMMENT ON COLUMN `app`.`v`.`id` IS 'c';"), "{ddl}");
+}
+
+#[tokio::test]
+async fn tdengine_forwards_root_and_child_scopes_to_the_agent() {
+    let fixture = AgentFixture::new(DatabaseType::Tdengine).await;
+
+    let roots =
+        list_table_roots_page_core(&fixture.state, "conn", "configured", "", None, Some(10), Some(0), None, None)
+            .await
+            .unwrap();
+    assert_eq!(roots.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), ["root_table"]);
+    let children =
+        list_table_children_core(&fixture.state, "conn", "configured", "", "meters", Some(3), Some(0)).await.unwrap();
+    assert_eq!(children.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), ["child_0", "child_1", "child_2"]);
+
+    let requests = fixture.requests("list_tables");
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(requests[0]["params"]["page_table_roots"], true);
+    assert!(requests[0]["params"].get("parent_name").is_none());
+    assert_eq!(requests[1]["params"]["parent_name"], "meters");
+    assert!(requests[1]["params"].get("page_table_roots").is_none());
+    assert_eq!(requests[1]["params"]["limit"], 3);
+    assert_eq!(requests[1]["params"]["offset"], 0);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn tdengine_child_listing_drops_rows_from_an_agent_that_ignores_the_scope() {
+    let fixture = AgentFixture::new(DatabaseType::Tdengine).await;
+    std::fs::write(fixture.control_path("ignores-scope"), "").unwrap();
+
+    let children =
+        list_table_children_core(&fixture.state, "conn", "configured", "", "meters", None, None).await.unwrap();
+
+    assert_eq!(children.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), ["child_0"]);
+    fixture.shutdown().await;
 }

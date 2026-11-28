@@ -45,12 +45,14 @@ const under = (namespace: string, keys: string[]) => keys.map((key) => `${namesp
 // leaks the raw key path, and a key missing from a locale silently shows
 // English.
 const FEATURE_MESSAGES: FeatureMessages[] = [
+  { feature: "PolarDB edition guidance (#15659)", keys: ["connection.polarDbPostgresPickerHint"], locales: ["en", "zh-CN", "zh-TW"], translated: true },
   { feature: "query connection group path preview", keys: ["connection.groupPath"], translated: true },
   { feature: "SQL file includes", keys: under("sqlFile", ["resolveIncludes", "resolveIncludesHint"]), translated: true },
   { feature: "AstraFlow provider", keys: ["ai.astraflowDescription"], translated: true },
   { feature: "AI HTML preview (#6467)", keys: under("ai", ["htmlPreviewLabel", "htmlExpandPreview", "htmlExpandPreviewHint", "htmlSaveSafe", "htmlSaveFailed", "htmlCopySource", "htmlCopyRiskBody", "htmlCopyRiskAccept", "htmlCopyRiskRemember", "htmlCopyRiskToast"]) },
   { feature: "AI conversation export (#6467)", keys: under("ai", ["exportConversation", "conversationExportMarkdown", "conversationExportHtml", "conversationRoleUser", "conversationRoleAssistant", "conversationFailedMarker", "conversationExportEmpty"]) },
   { feature: "AI conversation management", keys: under("ai", ["renameConversation", "conversationRenameFailed", "clearDatabaseSelection", "searchDatabases", "noDatabasesFound"]) },
+  { feature: "AI conversation pinning (#14226)", keys: [...under("ai", ["pinConversation", "unpinConversation", "conversationPinFailed"]), "history.pinnedGroup", "history.recentGroup"], translated: true },
   { feature: "AI auto routing (#9118)", keys: ["ai.actions.auto", "ai.routing.recognizing", "ai.routing.chip", "ai.routing.switchTo", "ai.defaultAutoRouting", "ai.defaultAutoRoutingDescription"] },
   {
     feature: "AI SQL action feedback (#11962)",
@@ -58,6 +60,10 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     translated: true,
   },
   { feature: "plugin AI conversation", keys: ["ai.pluginHttpModelOnly", "ai.pluginWelcome", "ai.pluginFollowUp"] },
+  {
+    feature: "plugin update blocked by the host engine requirement",
+    keys: under("pluginPlatform", ["marketplaceStatus.requires-newer-dbx", "marketplaceStatus.incompatible", "requiresNewerDbx", "requiresNewerDbxWithRequirement", "pluginVersionIncompatible", "updateBlockedByNewerDbx", "upgradeDbx"]),
+  },
   { feature: "editor find whole word (#13287)", keys: ["editor.search.wholeWord"], translated: true },
   { feature: "quick open", keys: ["quickOpen.*", "settings.shortcutGlobalSearch"] },
   {
@@ -156,6 +162,11 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     keys: ["pluginPlatform.dataAccessConsent", "pluginPlatform.dataAccessConsentTitle", "pluginPlatform.aiTools.*", "pluginPlatform.dataAccess.*", "ai.toolApproval.*"],
     translated: true,
   },
+  {
+    feature: "plugin tool attachments (#13978)",
+    keys: under("ai", ["pluginToolsEntry", "pluginToolsTitle", "pluginToolsDescription", "pluginToolsEmpty", "pluginToolsHowTo", "pluginToolsClosedHint", "pluginToolsFollowsTarget", "pluginToolsNoneTitle", "pluginToolsSelectedTitle", "pluginToolsSaveFailed", "pluginToolsOverflowHint"]),
+    translated: true,
+  },
   { feature: "schema diff deploy ignores foreign key checks", keys: under("diff", ["ignoreForeignKeyChecks", "ignoreForeignKeyChecksHint"]), translated: true },
   { feature: "shortcut recorder", keys: under("settings", ["shortcutRecordKeys", "shortcutRecordKeysRecordingHint", "shortcutRecordKeysWindowInactive"]), locales: ALL_LOCALES.filter((locale) => locale !== "th") },
   { feature: "select current statement", keys: ["settings.shortcutSelectCurrentStatement", "editor.contextMenu.selectCurrentStatement"] },
@@ -175,6 +186,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "SQL formatter layout style", keys: under("settings", ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic"]) },
   { feature: "sidebar table structure shortcut", keys: ["settings.shortcutEditSidebarTableStructure"], locales: ALL_LOCALES.filter((locale) => locale !== "th") },
   { feature: "MySQL AUTO_INCREMENT warnings", keys: under("structureEditor", ["mysqlAutoIncrementSingleColumn", "mysqlAutoIncrementRequiresIndex", "mysqlAutoIncrementRequiresNativeColumn"]) },
+  { feature: "MySQL system database visibility", keys: under("connection", ["showSystemDatabases", "showSystemDatabasesHint"]), translated: true },
 ];
 
 function lookup(messages: unknown, path: string): unknown {

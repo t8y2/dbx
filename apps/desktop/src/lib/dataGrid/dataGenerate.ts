@@ -1307,6 +1307,7 @@ export function findGeneratorKey(columnName: string, dataType: string, isAutoInc
 
 export interface ColumnAttrs {
   dataType: string;
+  isPrimaryKey?: boolean;
   isAutoIncrement?: boolean;
   columnDefault?: string | null;
   numericPrecision?: number | null;
@@ -1475,6 +1476,16 @@ function buildDefaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, ge
       params.textFormat = "channel";
       params.minLength = 3;
       params.maxLength = 20;
+      return params;
+    }
+    const baseType = normalizeColumnDataType(type);
+    if (attrs.isPrimaryKey && (baseType.includes("char") || baseType.includes("text") || baseType === "clob")) {
+      const typeLength = Number(/\(\s*(\d+)(?:\s+(?:char|byte))?\s*\)/.exec(type)?.[1]);
+      const declaredLength = charLen && charLen > 0 ? charLen : typeLength;
+      const length = declaredLength > 0 ? Math.min(declaredLength, 32) : 32;
+      params.textFormat = "hex";
+      params.minLength = length;
+      params.maxLength = length;
       return params;
     }
     if (charLen !== null && charLen > 0) {

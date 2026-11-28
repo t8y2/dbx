@@ -40,6 +40,8 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         transport_layers: Vec::new(),
         connect_timeout_secs: 5,
         query_timeout_secs: 30,
+
+        write_timeout_secs: 0,
         idle_timeout_secs: 60,
         manual_transaction_timeout_secs: 300,
         idle_disconnect_secs: 0,
@@ -80,6 +82,7 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         is_production: false,
         production_databases: vec![],
         production_badge_scope: None,
+        watermark: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,
@@ -266,6 +269,7 @@ async fn live_postgres_transfer_upserts_generated_always_identity_values() {
         create_table: false,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: dbx_core::transfer::TransferContent::default(),
         objects: Some(Vec::new()),
@@ -446,6 +450,7 @@ async fn live_postgres_structure_only_preserves_table_indexes() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: dbx_core::transfer::TransferContent::default(),
         objects: Some(Vec::new()),
@@ -733,6 +738,7 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: dbx_core::transfer::TransferContent::default(),
         objects: None,
@@ -1038,6 +1044,7 @@ async fn live_postgres_transfer_skips_create_ddl_for_existing_target_table() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: dbx_core::transfer::TransferContent::default(),
         objects: Some(Vec::new()),
@@ -1165,6 +1172,7 @@ async fn live_postgres_transfer_creates_selected_sequence_before_referencing_tab
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: dbx_core::transfer::TransferContent::default(),
         objects: Some(vec![
@@ -1359,6 +1367,7 @@ async fn live_postgres_transfer_drop_target_rebuilds_structure_and_indexes() {
         create_table: true,
         drop_target_before_create: true,
         drop_target_confirmed: true,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -1563,6 +1572,7 @@ impl PostgresRebuildFixture {
                 create_table: true,
                 drop_target_before_create: true,
                 drop_target_confirmed: true,
+                target_table_names: Default::default(),
                 oracle_packages: None,
                 content: TransferContent::default(),
                 objects: Some(Vec::new()),
@@ -1575,6 +1585,23 @@ impl PostgresRebuildFixture {
             },
             _storage_dir: storage_dir,
         }
+    }
+
+    async fn run(&self) -> (dbx_core::transfer::TransferProgress, Vec<String>) {
+        let mut errors = Vec::new();
+        let terminal = dbx_core::transfer_runner::run_transfer(
+            self.state.clone(),
+            self.request.clone(),
+            DatabaseType::Postgres,
+            DatabaseType::Postgres,
+            self.source_pool_key.clone(),
+            self.target_pool_key.clone(),
+            None,
+            Some(5),
+            |progress| errors.extend(progress.error),
+        )
+        .await;
+        (terminal, errors)
     }
 
     async fn rename(&self) -> Result<std::collections::HashMap<String, String>, String> {
@@ -1627,6 +1654,241 @@ impl PostgresRebuildFixture {
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_rebuild_preserves_unselected_constraint_on_conflict() {
+    assert_postgres_rebuild_conflict_and_retry(true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_rebuild_preserves_unselected_index_on_conflict() {
+    assert_postgres_rebuild_conflict_and_retry(false).await;
+}
+
+async fn assert_postgres_rebuild_conflict_and_retry(constraint: bool) {
+    use dbx_core::transfer::TransferStatus;
+
+    let mut fixture = PostgresRebuildFixture::new("object_conflict", &["orders"]).await;
+    let source = &fixture.request.source_schema;
+    let target = &fixture.request.target_schema;
+    let name = "unique_email";
+    let source_object = if constraint {
+        format!("ALTER TABLE {source}.orders ADD CONSTRAINT {name} UNIQUE (email)")
+    } else {
+        format!("CREATE INDEX {name} ON {source}.orders (email)")
+    };
+    postgres::execute_batch(
+        &fixture.source_pool,
+        &[
+            format!("CREATE TABLE {source}.orders (id INT PRIMARY KEY, email TEXT)"),
+            source_object,
+            format!("INSERT INTO {source}.orders VALUES (1, 'source')"),
+        ],
+    )
+    .await
+    .unwrap();
+    postgres::execute_batch(
+        &fixture.target_pool,
+        &[
+            format!("CREATE TABLE {target}.orders (id INT PRIMARY KEY, email TEXT)"),
+            format!("INSERT INTO {target}.orders VALUES (99, 'original')"),
+            format!("CREATE TABLE {target}.customers (email TEXT CONSTRAINT {name} UNIQUE)"),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let original_oid_sql = format!("SELECT '{target}.orders'::regclass::oid::text");
+    let original_oid = query_text(&fixture.target_pool, &original_oid_sql).await;
+    let unrelated_oid_sql = format!("SELECT '{target}.{name}'::regclass::oid::text");
+    let unrelated_oid = query_text(&fixture.target_pool, &unrelated_oid_sql).await;
+    let backup = dbx_core::transfer_rebuild::backup_table_name(
+        DatabaseType::Postgres,
+        &fixture.request.transfer_id,
+        &format!("{source}.orders"),
+        "orders",
+    )
+    .unwrap();
+    let (terminal, errors) = fixture.run().await;
+    assert!(matches!(terminal.status, TransferStatus::Error), "{terminal:?} {errors:?}");
+    assert!(errors.iter().any(|error| error.contains(&format!("relation \"{name}\" already exists"))), "{errors:?}");
+    assert_eq!(query_text(&fixture.target_pool, &unrelated_oid_sql).await, unrelated_oid);
+    assert_eq!(
+        query_text(
+            &fixture.target_pool,
+            &format!("SELECT conname FROM pg_constraint WHERE conindid = '{target}.{name}'::regclass")
+        )
+        .await,
+        name
+    );
+    assert_eq!(
+        query_text(&fixture.target_pool, &format!("SELECT '{target}.{backup}'::regclass::oid::text")).await,
+        original_oid
+    );
+    assert_eq!(query_text(&fixture.target_pool, &format!("SELECT email FROM {target}.{backup}")).await, "original");
+
+    let backup_pkey = query_text(
+        &fixture.target_pool,
+        &format!("SELECT conname FROM pg_constraint WHERE conrelid = '{target}.{backup}'::regclass AND contype = 'p'"),
+    )
+    .await;
+    // Restore the preserved original, then remove the real collision and retry.
+    postgres::execute_batch(
+        &fixture.target_pool,
+        &[
+            format!("DROP TABLE IF EXISTS {target}.orders"),
+            format!("ALTER TABLE {target}.{backup} RENAME TO orders"),
+            format!("ALTER TABLE {target}.orders RENAME CONSTRAINT {backup_pkey} TO orders_pkey"),
+            format!("ALTER TABLE {target}.customers RENAME CONSTRAINT {name} TO customers_email_key"),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(query_text(&fixture.target_pool, &original_oid_sql).await, original_oid);
+    fixture.request.transfer_id = uuid::Uuid::new_v4().to_string();
+    let (terminal, errors) = fixture.run().await;
+    assert!(matches!(terminal.status, TransferStatus::Done), "{terminal:?} {errors:?}");
+    assert_eq!(query_text(&fixture.target_pool, &format!("SELECT email FROM {target}.orders")).await, "source");
+    assert_eq!(
+        query_text(
+            &fixture.target_pool,
+            &format!("SELECT indrelid::regclass::text FROM pg_index WHERE indexrelid = '{target}.{name}'::regclass")
+        )
+        .await,
+        format!("{target}.orders")
+    );
+    assert_eq!(
+        query_text(&fixture.target_pool, &format!("SELECT '{target}.customers_email_key'::regclass::oid::text")).await,
+        unrelated_oid
+    );
+    assert_eq!(
+        schema_count(
+            &fixture.target_pool,
+            &format!("tables WHERE table_schema = '{target}' AND table_name LIKE '%__dbx_bak_%'")
+        )
+        .await,
+        "0"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_rebuild_preserves_unselected_owned_sequence_on_conflict() {
+    let fixture = PostgresRebuildFixture::new("sequence_conflict", &["orders"]).await;
+    let source = &fixture.request.source_schema;
+    let target = &fixture.request.target_schema;
+    postgres::execute_query(&fixture.source_pool, &format!("CREATE TABLE {source}.orders (id SERIAL PRIMARY KEY)"))
+        .await
+        .unwrap();
+    postgres::execute_batch(
+        &fixture.target_pool,
+        &[
+            format!("CREATE TABLE {target}.orders (id INT PRIMARY KEY)"),
+            format!("CREATE TABLE {target}.customers (id SERIAL PRIMARY KEY)"),
+            format!("ALTER SEQUENCE {target}.customers_id_seq RENAME TO orders_id_seq"),
+        ],
+    )
+    .await
+    .unwrap();
+    let oid_sql = format!("SELECT pg_get_serial_sequence('{target}.customers', 'id')::regclass::oid::text");
+    let oid = query_text(&fixture.target_pool, &oid_sql).await;
+    let (terminal, errors) = fixture.run().await;
+    assert!(matches!(terminal.status, dbx_core::transfer::TransferStatus::Error), "{terminal:?} {errors:?}");
+    assert!(
+        errors.iter().any(|error| error.contains("orders_id_seq") && error.contains("incompatible ownership")),
+        "{errors:?}"
+    );
+    assert_eq!(query_text(&fixture.target_pool, &oid_sql).await, oid);
+    assert_eq!(
+        query_text(&fixture.target_pool, &format!("SELECT '{target}.orders_id_seq'::regclass::oid::text")).await,
+        oid
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_rebuild_waiter_abort_stops_further_batches_and_preserves_backup() {
+    let mut fixture = PostgresRebuildFixture::new("abort_write", &["orders"]).await;
+    fixture.request.mode = TransferMode::Upsert;
+    fixture.request.batch_size = 1;
+    let source = &fixture.request.source_schema;
+    let target = &fixture.request.target_schema;
+    let lock_key = i64::from_be_bytes(uuid::Uuid::new_v4().as_bytes()[..8].try_into().unwrap());
+    postgres::execute_batch(
+        &fixture.source_pool,
+        &[
+            format!("CREATE FUNCTION {source}.allow_insert(v int) RETURNS boolean LANGUAGE sql AS 'SELECT true'"),
+            format!("CREATE TABLE {source}.orders (id int PRIMARY KEY CHECK ({source}.allow_insert(id)))"),
+            format!("INSERT INTO {source}.orders VALUES (1), (2), (3)"),
+        ],
+    )
+    .await
+    .unwrap();
+    postgres::execute_batch(&fixture.target_pool, &[
+        format!("CREATE FUNCTION {target}.allow_insert(v int) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock({lock_key}); RETURN true; END; $$"),
+        format!("CREATE TABLE {target}.orders (id int PRIMARY KEY)"),
+        format!("INSERT INTO {target}.orders VALUES (99)"),
+    ]).await.unwrap();
+    let mut observer = fixture.target_pool.get().await.unwrap();
+    let gate = observer.transaction().await.unwrap();
+    gate.query_one("SELECT pg_advisory_xact_lock($1)", &[&lock_key]).await.unwrap();
+    let backup = dbx_core::transfer_rebuild::backup_table_name(
+        DatabaseType::Postgres,
+        &fixture.request.transfer_id,
+        &format!("{source}.orders"),
+        "orders",
+    )
+    .unwrap();
+    let runner = tokio::spawn(dbx_core::transfer_runner::run_transfer(
+        fixture.state.clone(),
+        fixture.request.clone(),
+        DatabaseType::Postgres,
+        DatabaseType::Postgres,
+        fixture.source_pool_key.clone(),
+        fixture.target_pool_key.clone(),
+        None,
+        Some(10),
+        |_| {},
+    ));
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let insert_pattern = format!("INSERT INTO %\"{target}\".\"orders\"%");
+        loop {
+            if gate
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event = 'advisory' AND query LIKE $1)",
+                    &[&insert_pattern],
+                )
+                .await
+                .unwrap()
+                .get::<_, bool>(0)
+            {
+                break;
+            }
+            // pg_stat_activity must be refreshed within the transaction holding the lock.
+            gate.query_one("SELECT pg_stat_clear_snapshot()", &[]).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    runner.abort();
+    assert!(runner.await.unwrap_err().is_cancelled());
+    gate.rollback().await.unwrap();
+    blocked.expect("transfer must reach a blocked target INSERT before cancellation");
+
+    // Synchronize with any statement already submitted to PostgreSQL. The
+    // cancelled transfer must never submit the remaining batches or drop the backup.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert_eq!(
+        query_text(&fixture.target_pool, &format!("SELECT count(*)::text FROM {target}.orders WHERE id > 1")).await,
+        "0"
+    );
+    assert_eq!(query_text(&fixture.target_pool, &format!("SELECT id::text FROM {target}.{backup}")).await, "99");
+    fixture.cleanup().await;
 }
 
 #[tokio::test]
@@ -1889,6 +2151,7 @@ async fn live_postgres_keyset_pagination_copies_every_row() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -2004,6 +2267,7 @@ async fn live_postgres_progress_read_survives_total_duration_beyond_timeout() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -2113,6 +2377,7 @@ async fn live_postgres_keyset_large_batch_copies_every_row() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
@@ -2228,6 +2493,7 @@ async fn live_postgres_structure_only_preview_renders_ddl_without_touching_the_t
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        target_table_names: Default::default(),
         oracle_packages: None,
         content: TransferContent::StructureOnly,
         // A selected non-table object must be disclosed as not expanded, never silently dropped.

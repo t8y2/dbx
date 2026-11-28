@@ -178,6 +178,8 @@ export interface ConnectionConfig {
   connect_timeout_secs?: number;
   connect_timeout_inherit?: boolean;
   query_timeout_secs?: number;
+  /** Timeout for data writes. 0 (default) means unlimited; schema changes ignore it. */
+  write_timeout_secs?: number;
   query_timeout_inherit?: boolean;
   idle_timeout_secs?: number;
   /** Seconds a manual transaction may sit idle before DBX rolls it back. */
@@ -244,8 +246,18 @@ export interface ConnectionConfig {
   production_databases?: string[];
   /** Sidebar presentation only; absent means database/schema rows plus sticky context. */
   production_badge_scope?: ProductionBadgeScope;
+  watermark?: ConnectionWatermarkConfig;
   /** Metadata captured from the latest successful connection test for the saved config. */
   database_info?: DatabaseConnectionInfo;
+}
+
+export type ConnectionWatermarkMode = "auto" | "custom" | "off";
+
+export interface ConnectionWatermarkConfig {
+  mode: ConnectionWatermarkMode;
+  text?: string;
+  font_size?: number;
+  color?: string;
 }
 
 export type ProductionBadgeScope = "connection" | "database" | "table";
@@ -880,11 +892,30 @@ export interface PluginMarketplaceArtifact {
   size?: number;
 }
 
+/** Host verdict for one catalog version, computed by the backend from the catalog's compatibility table. */
+export interface PluginVersionCompatibility {
+  compatible: boolean;
+  /** Declared `engines.dbx` requirement, echoed for display. */
+  dbx?: string;
+  /** Declared `engines.host_api` requirement, echoed for display. */
+  hostApi?: string;
+  /** Which requirement failed; absent when the version is compatible. */
+  blockedBy?: "dbx" | "hostApi";
+  /**
+   * `true` when a newer DBX could satisfy the failing requirement, `false` when it could not
+   * (upper bound such as `<0.7.0`, exact older version, or an unsatisfied host API range);
+   * absent when the version is compatible.
+   */
+  upgradeRequired?: boolean;
+}
+
 export interface PluginMarketplaceVersion {
   version: string;
   releasedAt?: string;
   releaseNotes?: string;
   artifacts: PluginMarketplaceArtifact[];
+  /** Absent when the catalog declares no engine requirement for this version (treated as compatible). */
+  compatibility?: PluginVersionCompatibility;
 }
 
 export interface PluginMarketplacePlugin {
@@ -1145,6 +1176,16 @@ export interface ObjectStatistics {
 }
 
 export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+
+/**
+ * 包内某个子程序的身份：打开包源码后用它把光标定位到该子程序上。
+ * `signature` 是数据字典给出的形参文本，仅用于重载消歧。
+ */
+export interface PackageMemberFocus {
+  name: string;
+  kind: "procedure" | "function";
+  signature?: string;
+}
 
 export type RoutineParameterMetadataMode = "IN" | "OUT" | "INOUT" | "RETURN" | "UNKNOWN";
 
@@ -2237,6 +2278,7 @@ export interface ConnectionGroup {
   id: string;
   name: string;
   collapsed: boolean;
+  color?: string;
 }
 
 export type SidebarOrderEntry = { type: "group"; id: string; children?: SidebarOrderEntry[]; connectionIds?: string[] } | { type: "connection"; id: string };
@@ -2260,6 +2302,8 @@ export interface TreeNode {
   id: string;
   label: string;
   type: TreeNodeType;
+  /** Color of a sidebar connection group or the color inherited by a connection row. */
+  sidebarColor?: string;
   /** Additional values matched by sidebar search without rendering them. */
   searchAliases?: string[];
   children?: TreeNode[];
@@ -2283,6 +2327,8 @@ export interface TreeNode {
   tableName?: string;
   columnIndexKind?: "primary" | "unique" | "index";
   objectName?: string;
+  /** Native PostgreSQL sequence identifiers were read without display normalization. Absent on legacy cached nodes. */
+  postgresSequenceExactIdentity?: true;
   /** Distinguishes schema indexes from the existing table-child index actions. */
   objectScope?: "schema";
   signature?: string;
@@ -2838,7 +2884,7 @@ export interface QueryTab {
     eventOpenRequestId?: number;
     /** 显式的"新建事件"请求：单调递增，用于让已复用 tab 也能重复进入 CREATE 编辑器 */
     eventCreateRequestId?: number;
-    initialObjectFilter?: "tables" | "events" | "indexes";
+    initialObjectFilter?: ObjectBrowserFilter;
     indexRequestSequence?: number;
     indexCreateRequestId?: number;
     initialViewTarget?: SchemaIndexIdentity;
@@ -2887,6 +2933,14 @@ export interface QueryTab {
     objectType: ObjectSourceKind;
     signature?: string;
   };
+  /**
+   * 源码落地后要把光标定位到的包成员（树上点中某个子程序时写入）。编辑区解析出
+   * 它在源码里的偏移、移动光标后立刻清空：这是一次导航意图，不是 tab 的状态，
+   * 留着会让后续的刷新/切回重新跳一次，把用户自己挪过的光标又拽走。
+   *
+   * 纯运行期字段，刻意不进 openTabsPersistence 的落盘白名单。
+   */
+  objectSourceFocusMember?: PackageMemberFocus;
   /** Durable TYPE definitions and step records; restored plans require fresh verification. */
   typeManagementDraft?: import("@/lib/table/oracleTypeManagement").OracleTypeManagementDraft;
   /** Explicit edit mode; TYPE source opens read-only and restores read-only. */
@@ -3138,6 +3192,8 @@ export interface TransferTaskConfig {
   operationTimeoutSecs?: number;
   /** Optional per-source-table transfer filter (bare WHERE or a full SELECT). */
   tableFilters?: Record<string, string>;
+  /** Optional explicit target table name per source table. */
+  targetTableNames?: Record<string, string>;
   /** Legacy-compatible rebuild flag; true takes precedence over the saved DML mode. */
   dropTargetBeforeCreate?: boolean;
   /** Legacy field only. Saved confirmation is always ignored and reset to false. */

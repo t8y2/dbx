@@ -1,45 +1,37 @@
 <script setup lang="ts">
 import { computed, ref, useId } from "vue";
 import { refDebounced } from "@vueuse/core";
-import { PanelLeftClose, PanelLeftOpen } from "@lucide/vue";
+import { PanelLeftClose, PanelLeftOpen, Play } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
-import { tokenizeSqlSemantic, tokenIsIdentifier, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
+import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import { oraclePackageMemberEntries, type OraclePackageMemberEntry } from "@/lib/sql/oraclePackageMembers";
 
-const props = defineProps<{ source: string }>();
-const emit = defineEmits<{ navigate: [offset: number] }>();
+const props = defineProps<{ source: string; canExecuteProcedure?: boolean }>();
+const emit = defineEmits<{ navigate: [offset: number]; executeProcedure: [member: OraclePackageMemberEntry] }>();
 const { t } = useI18n();
 const listId = useId();
 const expanded = ref(true);
 // CodeMirror stores line breaks as single characters.
 const editorSource = computed(() => (props.source.includes("\r") ? props.source.replace(/\r\n?/g, "\n") : props.source));
 const settledSource = refDebounced(editorSource, 150, { maxWait: 500 });
-const members = computed(() => {
-  const source = settledSource.value;
-  const tokens = tokenizeSqlSemantic(source, "oracle").filter((token) => token.kind !== "comment");
-  const entries = [];
-  let line = 1;
-  let lineEnd = source.indexOf("\n");
-  for (let index = 0; index < tokens.length - 2; index++) {
-    const token = tokens[index]!;
-    const name = tokens[index + 1];
-    const next = tokens[index + 2]!;
-    if (token.kind !== "word" || token.depth !== 0 || (token.normalized !== "procedure" && token.normalized !== "function")) continue;
-    if (!tokenIsIdentifier(name) || name.closed === false || tokens[index - 1]?.text === ".") continue;
-    const isFunction = token.normalized === "function";
-    if (next.text !== "(" && (isFunction ? next.normalized !== "return" : ![";", "is", "as"].includes(next.normalized))) continue;
-    const offset = token.span.start;
-    while (lineEnd !== -1 && lineEnd < offset) {
-      line++;
-      lineEnd = source.indexOf("\n", lineEnd + 1);
-    }
-    entries.push({ name: unquoteSqlSemanticIdentifier(name), isFunction, offset, line });
-  }
-  return entries;
-});
+const members = computed(() => oraclePackageMemberEntries(settledSource.value));
 
 function navigate(offset: number) {
   if (editorSource.value === settledSource.value) emit("navigate", offset);
+}
+
+function procedureItems(member: OraclePackageMemberEntry): ContextMenuItem[] {
+  if (!props.canExecuteProcedure || member.isFunction || editorSource.value !== settledSource.value) return [];
+  return [
+    {
+      label: t("contextMenu.executeProcedure"),
+      icon: Play,
+      action: () => {
+        if (editorSource.value === settledSource.value && members.value.includes(member)) emit("executeProcedure", member);
+      },
+    },
+  ];
 }
 </script>
 
@@ -61,19 +53,22 @@ function navigate(offset: number) {
         <PanelLeftOpen v-else class="size-3.5" />
       </Button>
     </div>
-    <ul v-show="expanded" :id="listId" class="min-h-0 overflow-auto p-1">
-      <li v-for="member in members" :key="member.offset">
-        <button
-          type="button"
-          class="flex w-full min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-accent focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
-          :title="t(member.isFunction ? 'objects.packageFunctionAtLine' : 'objects.packageProcedureAtLine', member)"
-          @click="navigate(member.offset)"
-        >
-          <span aria-hidden="true" class="w-3 shrink-0 text-center text-muted-foreground">{{ member.isFunction ? "ƒ" : "P" }}</span>
-          <span class="min-w-0 flex-1 truncate font-mono">{{ member.name }}</span>
-          <span class="shrink-0 text-muted-foreground tabular-nums">{{ member.line }}</span>
-        </button>
-      </li>
-    </ul>
+    <CustomContextMenu :items="[]" v-slot="{ onContextMenu }">
+      <ul v-show="expanded" :id="listId" class="min-h-0 overflow-auto p-1">
+        <li v-for="member in members" :key="member.offset">
+          <button
+            type="button"
+            class="flex w-full min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-accent focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+            :title="t(member.isFunction ? 'objects.packageFunctionAtLine' : 'objects.packageProcedureAtLine', { name: member.name, line: member.line })"
+            @click="navigate(member.offset)"
+            @contextmenu="onContextMenu($event, procedureItems(member))"
+          >
+            <span aria-hidden="true" class="w-3 shrink-0 text-center text-muted-foreground">{{ member.isFunction ? "ƒ" : "P" }}</span>
+            <span class="min-w-0 flex-1 truncate font-mono">{{ member.name }}</span>
+            <span class="shrink-0 text-muted-foreground tabular-nums">{{ member.line }}</span>
+          </button>
+        </li>
+      </ul>
+    </CustomContextMenu>
   </aside>
 </template>

@@ -13,6 +13,7 @@ import { useSidebarDatabaseSpecificMutationRuntime } from "@/composables/useSide
 import { useSidebarTableMutationRuntime } from "@/composables/useSidebarTableMutationRuntime";
 import { useSidebarTreeExportRuntime } from "@/composables/useSidebarTreeExportRuntime";
 import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
+import { connectionColorOptions } from "@/lib/connection/connectionColors";
 import { useSidebarTreeToolRuntime } from "@/composables/useSidebarTreeToolRuntime";
 import { canDropDatabaseNode, notifyDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import { dropDatabaseOtherSessionCount } from "@/lib/database/dropDatabaseError";
@@ -84,6 +85,8 @@ import {
   GitBranch,
   Sparkles,
   Link2,
+  Palette,
+  Circle,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
@@ -104,7 +107,7 @@ import * as api from "@/lib/backend/api";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { canClearDefaultDatabase, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
-import { connectionUsesVisibleSchemaFilter } from "@/lib/database/visibleDatabases";
+import { connectionUsesVisibleSchemaFilter, isSystemSchemaName } from "@/lib/database/visibleDatabases";
 import { canTreeNodeExpand, canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { sidebarConnectionVisibleFilterMenu } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectNameFilter";
@@ -187,7 +190,9 @@ import {
   isDirectNavigationTreeNode,
   isDocumentBrowserTreeNode,
   isRepeatableNavigationTreeNode,
+  objectBrowserFilterForGroupNode,
   objectSourceTargetForTreeNode,
+  packageMemberFocusForTreeNode,
   shouldOpenQueryOnTreeNodeActivation,
   shouldRunTreeNodeRowAction,
   treeNodeRowAction,
@@ -212,6 +217,7 @@ import {
   buildDropDatabaseSql,
   buildDropObjectSql,
   buildDropSchemaSql,
+  buildRenamePostgresSchemaSql,
   damengDropSchemaExecutionSchema,
   buildGetDatabaseCommentSql,
   buildGetSchemaCommentSql,
@@ -224,6 +230,7 @@ import {
   buildTruncateTableSql,
   buildMysqlAutoIncrementSql,
   kingbaseDuplicateStructureTransaction,
+  MYSQL_TABLE_MAINTENANCE_OPERATIONS,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
   supportsMysqlAutoIncrement as connectionSupportsMysqlAutoIncrement,
@@ -238,17 +245,19 @@ import type { DuplicateTableStructurePlan } from "@/lib/database/dbAdminSql";
 import { useOceanbaseCloneDialog } from "@/composables/useOceanbaseCloneDialog";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { redisFlushDbPreview } from "@/lib/redis/redisCommandPreview";
-import { buildRenameObjectSql, buildRenameDatabaseSql, buildRenameDatabasePreflightSql, databaseRenameMaintenanceDatabase, supportsDatabaseRename, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
+import { buildRenameObjectSql, buildRenameDatabaseSql, buildRenameDatabasePreflightSql, databaseRenameMaintenanceDatabase, isMysqlDatabaseRename, supportsDatabaseRename, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
 import { prepareOracleViewRename, executeOracleViewRename, OracleViewRenameFailure, type OracleViewRenamePlan } from "@/lib/table/oracleViewRename";
 import { prepareOracleRoutineRename, executeOracleRoutineRename, OracleRoutineRenameFailure, type OracleRoutineRenamePlan } from "@/lib/table/oracleRoutineRename";
 import { prepareOracleTableRename, executeOracleTableRename, OracleTableRenameFailure, type OracleTableRenamePlan } from "@/lib/table/oracleTableRename";
+import { executeMysqlDatabaseRename, formatMysqlDatabaseRenameBlockers, loadMysqlDatabaseInventory, MysqlDatabaseRenameBlockedError, MysqlDatabaseRenameIncompleteError, prepareMysqlDatabaseRename, type MysqlDatabaseInventory } from "@/lib/table/mysqlDatabaseRename";
 import { prepareOraclePackageSaveAsExecution, OraclePackageSaveAsFailure, prepareOraclePackageSaveAs, type OraclePackageSaveAsPlan } from "@/lib/table/oraclePackageSaveAs";
 import { buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
 import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
-import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection, transferDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
 import { isObjectCacheInvalidationError } from "@/lib/metadata/objectCacheInvalidationError";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import {
@@ -264,7 +273,7 @@ import {
   type TableClipboardTableContext,
 } from "@/lib/table/tableClipboard";
 import { selectedSidebarBatchTargets, selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes } from "@/lib/sidebar/sidebarTreeSelection";
-import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionEditTarget, selectedConnectionMoveTargets } from "@/lib/sidebar/sidebarConnectionSelection";
+import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionEditTarget, selectedConnectionMoveTargets, selectedConnectionTestTargets } from "@/lib/sidebar/sidebarConnectionSelection";
 import { connectionSupportsDatabaseUserAdmin, resolveDatabaseUserAdminProviderForConnection, type DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
 import { authorizationPlanSql, authorizationPlanStatus, buildCreateDatabaseAuthorizationPlan, executeAuthorizationPlan, type AuthorizationPlan, type AuthorizationStepResult } from "@/lib/database/databaseAuthorizationPlan";
 import { connectionSupportsProcessList } from "@/lib/database/processListDrivers";
@@ -345,6 +354,7 @@ import {
   showRenameObjectDialog,
   renameObjectName,
   renameObjectError,
+  renameObjectWarning,
   renameObjectPreviewSql,
   dropTablePreviewSql,
   dropTableCascade,
@@ -505,6 +515,7 @@ const props = defineProps<{
   highlighted?: boolean;
 }>();
 
+const SidebarBatchConnectionTestDialog = defineAsyncComponent(() => import("./SidebarBatchConnectionTestDialog.vue"));
 const ModelGenerateDialog = defineAsyncComponent(() => import("@/components/generate/ModelGenerateDialog.vue"));
 const OracleTableGrantsDialog = defineAsyncComponent(() => import("@/components/objects/OracleTableGrantsDialog.vue"));
 const modelGenerationTarget = shallowRef<TreeNode | null>(null);
@@ -585,6 +596,7 @@ const emit = defineEmits<{
   "peek-structure": [node: TreeNode];
   "open-elasticsearch-index-metadata": [node: TreeNode, kind: ElasticsearchIndexMetadataKind];
   "open-object-source": [node: TreeNode, initialEditing: boolean, initialSection?: ObjectDetailsSection, createTrigger?: SidebarActionRequest<OracleTriggerSqlBinding>];
+  "open-postgres-sequence": [node: TreeNode];
   "open-procedure": [node: TreeNode];
   "open-settings": [initialTab: string];
   "open-connection-settings": [connectionId: string];
@@ -759,6 +771,7 @@ const {
   supportsTruncate,
   supportsVacuum,
   supportsMysqlAutoIncrement,
+  supportsMysqlTableMaintenance,
   canDropTableCascade,
   canTruncateTableCascade,
   refreshDropTablePreviewSql,
@@ -776,6 +789,7 @@ const {
   mysqlAutoIncrement,
   refreshMysqlAutoIncrementPreviewSql,
   confirmMysqlAutoIncrement,
+  mysqlTableMaintenance,
 } = useSidebarTableMutationRuntime({
   activeNode,
   releaseActiveNodeReference,
@@ -1395,11 +1409,6 @@ function runRowClickAction(clickDetail: number) {
     void openObjectBrowser(false, true);
     return;
   }
-  if (node.type === "group-events") {
-    beginNavigationRequest();
-    void openObjectBrowser();
-    return;
-  }
   const action = treeNodeRowAction(
     node.type,
     canExpand.value,
@@ -1629,6 +1638,54 @@ function normalizedTreeClipboardTableEntries(): TableClipboardTableContext[] {
   }));
 }
 
+function viewTransferPrefill() {
+  const clipboard = connectionStore.treeClipboard;
+  const node = activeNode.value;
+  if (clipboard?.kind !== "view-copy" || node.catalog || (node.type !== "database" && node.type !== "schema" && node.type !== "group-views")) return null;
+  const target = pasteTableTargetContext();
+  if (!target) return null;
+
+  const sourceConfig = connectionStore.getConfig(clipboard.connectionId);
+  const targetConfig = connectionStore.getConfig(target.connectionId);
+  if (!sourceConfig || !targetConfig || connectionIsEffectivelyReadOnly(targetConfig)) return null;
+  const sourceType = transferDatabaseTypeForConnection(sourceConfig);
+  if (!supportsTransfer(sourceType) || !transferObjectKindsForDatabase(sourceType).includes("VIEW") || sourceType !== transferDatabaseTypeForConnection(targetConfig) || effectiveDatabaseTypeForConnection(sourceConfig) !== effectiveDatabaseTypeForConnection(targetConfig)) return null;
+
+  const sourceSchema = normalizeTreeClipboardSchema(clipboard.connectionId, clipboard.database, clipboard.schema);
+  const targetSchema = target.schema ?? undefined;
+  if (clipboard.connectionId === target.connectionId && clipboard.database === target.database && sourceSchema === targetSchema) return null;
+
+  return {
+    connectionId: clipboard.connectionId,
+    database: clipboard.database,
+    schema: sourceSchema,
+    views: [clipboard.viewName],
+    targetConnectionId: target.connectionId,
+    targetDatabase: target.database,
+    targetSchema,
+  };
+}
+
+function viewClipboardMenuItem(node: TreeNode): ContextMenuItem | null {
+  if (node.type === "view" && node.connectionId && node.database && !node.catalog) {
+    const config = connectionStore.getConfig(node.connectionId);
+    const type = transferDatabaseTypeForConnection(config);
+    if (!supportsTransfer(type) || !transferObjectKindsForDatabase(type).includes("VIEW")) return null;
+    const source = { kind: "view-copy" as const, connectionId: node.connectionId, database: node.database, schema: node.schema, viewName: node.objectName || node.label };
+    return {
+      sidebarActionId: "contextMenu.copyView",
+      label: t("contextMenu.copyView"),
+      icon: Copy,
+      action: () => {
+        connectionStore.treeClipboard = source;
+        toast(t("connection.copied"), 2000);
+      },
+    };
+  }
+
+  return viewTransferPrefill() ? { sidebarActionId: "contextMenu.pasteView", label: t("contextMenu.pasteView"), icon: Clipboard, action: requestPasteTreeClipboard } : null;
+}
+
 function canPasteTreeClipboardToCurrentNode(): boolean {
   return currentDatabaseType() !== "victoriametrics" && tableClipboardMatchesTarget(normalizedTreeClipboardTableEntries(), pasteTableTargetContext());
 }
@@ -1690,6 +1747,12 @@ function requestPasteTreeClipboard(): boolean {
       .catch((e: any) => toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000));
     return true;
   }
+  if (clipboard?.kind === "view-copy") {
+    const prefill = viewTransferPrefill();
+    if (!prefill) return false;
+    connectionStore.transferSource = prefill;
+    return true;
+  }
   if (clipboard?.kind !== "table-copy") return false;
   if (canTransferTreeClipboardToCurrentNode()) return openTransferFromTreeClipboard();
   if (!canPasteTreeClipboardToCurrentNode()) return false;
@@ -1744,7 +1807,7 @@ function requestRenameSelectedNode(): boolean {
     openRenameDatabaseDialog();
     return true;
   }
-  if (canRenameObject.value) {
+  if (canRenameObject.value || canRenamePostgresSchema(activeNode.value)) {
     openRenameObjectDialog();
     return true;
   }
@@ -1890,9 +1953,17 @@ function onDoubleClick(event: MouseEvent) {
     void openObjectBrowser(false, true);
     return;
   }
-  if (activeNode.value.type === "group-events") {
+  // 双击对象分组行：打开对象浏览器并直接选中该分组的分类。
+  // 表级触发器分组带 tableName，属于表节点自身，继续走后面的展开逻辑。
+  const groupObjectFilter = objectBrowserFilterForGroupNode(activeNode.value.type, activeNode.value.tableName);
+  if (groupObjectFilter) {
     beginNavigationRequest();
-    void openObjectBrowser();
+    void openObjectBrowser(false, false, false, groupObjectFilter);
+    return;
+  }
+  // “查询”分组不是数据库对象，没有对应分类；双击只保证列表处于展开状态。
+  if (activeNode.value.type === "saved-sql-root") {
+    if (!activeNode.value.isExpanded) void toggle(beginNavigationRequest());
     return;
   }
   const action = treeNodeRowDoubleClickAction(
@@ -2118,7 +2189,7 @@ async function confirmDeleteSavedSqlFile() {
   releaseActiveNodeReference([node.id]);
 }
 
-async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean | "create" = false, focusSearch = false) {
+async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean | "create" = false, focusSearch = false, filterOverride?: import("@/types/database").ObjectBrowserFilter) {
   const node = activeNode.value;
   if (!node.connectionId) return;
   try {
@@ -2127,7 +2198,7 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean
 
     const eventName = openEventEditor === true && node.type === "event" ? node.objectName || node.label : undefined;
     const eventCreateRequestId = openEventEditor === "create" && node.type === "group-events" ? ++mysqlEventCreateRequestSeq : undefined;
-    const objectFilter = node.type === "event" || node.type === "group-events" ? "events" : undefined;
+    const objectFilter = filterOverride ?? (node.type === "event" || node.type === "group-events" ? "events" : undefined);
 
     const connection = connectionStore.getConfig(node.connectionId);
     if (!connection) return;
@@ -3320,6 +3391,10 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
   const sourceTarget = objectSourceTargetForTreeNode(sourceNode);
   if (!sourceTarget) return;
   const schema = sourceTarget.schema || database;
+  // 包成员打开的是整个包体，标题就该是那个包：成员名放进标题的话，复用同一个
+  // tab 打开第二个成员时标题还停在第一个成员上，反而指错了内容。
+  const focusMember = packageMemberFocusForTreeNode(sourceNode);
+  const title = `Source - ${focusMember ? sourceTarget.name : node.label}`;
   // issue #9035：两个分支都不再 await 连接与取源。先把容器挂出来（源码 tab /
   // 源码弹窗），ensureConnected 与 getObjectSource 都发生在已挂载的 UI 之内，
   // 加载中有状态、失败就地重试，而不是点击后一段时间毫无反应。
@@ -3327,12 +3402,13 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
     queryStore.openObjectSourceTabPending({
       connectionId,
       database,
-      title: `Source - ${node.label}`,
+      title,
       schema,
       catalog: node.catalog,
       initialEditing,
       initialSection,
-      request: { name: sourceTarget.name, objectType: sourceTarget.objectType, signature: sourceNode.signature },
+      request: { name: sourceTarget.name, objectType: sourceTarget.objectType, signature: sourceTarget.signature },
+      ...(focusMember ? { focusMember } : {}),
     });
     return;
   }
@@ -4225,6 +4301,16 @@ const canRenameObject = computed(() => {
   return !!objectType && (supportsObjectRename(currentDatabaseType(), objectType) || (databaseTypeForNode(node) === "oceanbase-oracle" && (objectType === "PROCEDURE" || objectType === "FUNCTION")) || supportsSourceBackedRoutineRename(currentDatabaseType(), objectType as any));
 });
 
+function canRenamePostgresSchema(node: TreeNode): boolean {
+  if (node.type !== "schema" || !node.connectionId || !node.database || !node.schema) return false;
+  const config = connectionStore.getConfig(node.connectionId);
+  return config?.db_type === "postgres" && (!config.driver_profile || config.driver_profile === "postgres") && !connectionIsEffectivelyReadOnly(config) && !isSystemSchemaName("postgres", node.schema);
+}
+
+function isValidPostgresSchemaRenameName(name: string): boolean {
+  return !name.startsWith("pg_") && !name.includes("\0") && new TextEncoder().encode(name).length <= 63;
+}
+
 // Target whose name the rename dialog last showed. Kept apart from currentSidebarViewRenameTargetKey,
 // which follows the selected node even while the dialog is closed.
 let renameObjectDialogTargetKey = "";
@@ -4236,6 +4322,7 @@ function openRenameObjectDialog() {
   if (targetKey !== renameObjectDialogTargetKey) renameObjectName.value = node.objectName || node.label;
   renameObjectDialogTargetKey = targetKey;
   renameObjectError.value = "";
+  renameObjectWarning.value = "";
   renameObjectPreviewSql.value = "";
   viewRenamePlan.value = undefined;
   routineRenamePlan.value = undefined;
@@ -4269,11 +4356,45 @@ function openRenameDatabaseDialog() {
   renameObjectName.value = activeNode.value.label;
   renameObjectDialogTargetKey = "";
   renameObjectError.value = "";
+  renameObjectWarning.value = "";
   renameObjectPreviewSql.value = "";
   viewRenamePlan.value = undefined;
   viewRenameDrafts.value = {};
   routineRenamePlan.value = undefined;
+  mysqlDatabaseRenameInventory = undefined;
   showRenameObjectDialog.value = true;
+}
+
+function isMysqlDatabaseRenameNode(node: TreeNode): boolean {
+  const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
+  return node.type === "database" && !!config && isMysqlDatabaseRename(config.db_type, config.driver_profile);
+}
+
+function cachedMysqlDatabaseRenameInventory(connectionId: string, database: string): Promise<MysqlDatabaseInventory> {
+  const key = JSON.stringify([connectionId, database]);
+  if (mysqlDatabaseRenameInventory?.key !== key) {
+    const inventory = loadMysqlDatabaseInventory(connectionId, database);
+    mysqlDatabaseRenameInventory = { key, inventory };
+    inventory.catch(() => {
+      if (mysqlDatabaseRenameInventory?.inventory === inventory) mysqlDatabaseRenameInventory = undefined;
+    });
+  }
+  return mysqlDatabaseRenameInventory.inventory;
+}
+
+const MYSQL_RENAME_GRANTEE_PREVIEW_LIMIT = 5;
+
+function mysqlDatabaseRenameGrantWarning(database: string, grantees: readonly string[]): string {
+  if (grantees.length === 0) return "";
+  const shown = grantees.slice(0, MYSQL_RENAME_GRANTEE_PREVIEW_LIMIT).join(", ");
+  const hidden = grantees.length - MYSQL_RENAME_GRANTEE_PREVIEW_LIMIT;
+  return t("contextMenu.renameDatabaseMysqlGrantsNotMigrated", { name: database, grantees: hidden > 0 ? `${shown} (+${hidden})` : shown });
+}
+
+function mysqlDatabaseRenameErrorMessage(error: unknown): string {
+  if (error instanceof MysqlDatabaseRenameBlockedError) return t("contextMenu.renameDatabaseMysqlUnsupportedObjects", { name: error.database, objects: formatMysqlDatabaseRenameBlockers(error.blockers) });
+  if (error instanceof MysqlDatabaseRenameIncompleteError) return t("contextMenu.renameDatabaseMysqlIncomplete", { oldName: error.oldName, newName: error.newName, objects: formatMysqlDatabaseRenameBlockers(error.remaining) });
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function executeTreeNodeSqlWithProductionGuard(
@@ -4327,6 +4448,8 @@ const viewRenameDrafts = ref<Record<string, string>>({});
 const routineRenamePlan = ref<OracleRoutineRenamePlan>();
 const routineRenameDrafts = ref<Record<string, string>>({});
 const tableRenamePlan = ref<OracleTableRenamePlan>();
+// MySQL database rename: the source inventory does not depend on the new name, so it is loaded once per dialog.
+let mysqlDatabaseRenameInventory: { key: string; inventory: Promise<MysqlDatabaseInventory> } | undefined;
 const tableRenameDrafts = ref<Record<string, string>>({});
 const packageSaveAsOpen = ref(false);
 const packageSaveAsTarget = ref<TreeNode | null>(null);
@@ -4353,7 +4476,31 @@ async function refreshRenameObjectPreviewSql() {
     tableRenamePlan.value = undefined;
     return;
   }
+  if (node.type === "schema") {
+    const valid = isValidPostgresSchemaRenameName(newName);
+    renameObjectPreviewSql.value = valid && node.schema ? buildRenamePostgresSchemaSql(node.schema, newName) : "";
+    renameObjectError.value = valid ? "" : t("contextMenu.renameSchemaInvalidName");
+    return;
+  }
   // Database rename path
+  if (node.type === "database" && isMysqlDatabaseRenameNode(node) && node.connectionId) {
+    try {
+      const inventory = await cachedMysqlDatabaseRenameInventory(node.connectionId, node.label);
+      const plan = await prepareMysqlDatabaseRename({ connectionId: node.connectionId, oldName: node.label, newName }, inventory);
+      if (requestId === renameObjectPreviewRequestId) {
+        renameObjectError.value = "";
+        renameObjectWarning.value = mysqlDatabaseRenameGrantWarning(node.label, inventory.grantees);
+        renameObjectPreviewSql.value = plan.previewSql;
+      }
+    } catch (error) {
+      if (requestId === renameObjectPreviewRequestId) {
+        renameObjectPreviewSql.value = "";
+        renameObjectWarning.value = "";
+        renameObjectError.value = mysqlDatabaseRenameErrorMessage(error);
+      }
+    }
+    return;
+  }
   if (node.type === "database") {
     try {
       const sql = await buildRenameDatabaseSql({
@@ -4654,11 +4801,77 @@ async function confirmPackageSaveAs() {
   }
 }
 
+async function renamePostgresSchema(node: TreeNode, newName: string) {
+  if (!canRenamePostgresSchema(node) || !node.connectionId || !node.database || !node.schema || viewRenameExecuting.value) return;
+  if (!isValidPostgresSchemaRenameName(newName)) {
+    renameObjectError.value = t("contextMenu.renameSchemaInvalidName");
+    return;
+  }
+
+  const { connectionId, database, schema } = node;
+  function ensureSchemaTabsAreClosed() {
+    if (queryStore.tabs.some((tab) => tab.connectionId === connectionId && tab.database === database && tab.schema === schema)) {
+      throw new Error(t("contextMenu.renameSchemaCloseTabs"));
+    }
+  }
+
+  viewRenameExecuting.value = true;
+  try {
+    ensureSchemaTabsAreClosed();
+    await connectionStore.ensureConnected(connectionId);
+    const sql = buildRenamePostgresSchemaSql(schema, newName);
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, {
+      database,
+      schema: "",
+      beforeExecute: async () => ensureSchemaTabsAreClosed(),
+    });
+    if (executed === undefined) return;
+  } catch (error) {
+    renameObjectError.value = translateBackendError(t, error);
+    return;
+  } finally {
+    viewRenameExecuting.value = false;
+  }
+
+  showRenameObjectDialog.value = false;
+  toast(t("contextMenu.renameObjectSuccess", { oldName: schema, newName }), 3000);
+  connectionStore.invalidateMetadataCache(connectionId, database, schema);
+  try {
+    await connectionStore.updateSidebarPreferencesAfterSchemaRename(connectionId, database, schema, newName);
+  } catch (error) {
+    toast(t("connection.saveFailed", { message: translateBackendError(t, error) }), { persistent: true });
+  }
+  try {
+    await connectionStore.loadSchemas(connectionId, database, { force: true });
+    connectionStore.replacePinnedTreeNode(node, { ...node, label: newName, schema: newName });
+  } catch (error) {
+    connectionStore.removeTreeNode(node.id);
+    toast(t("contextMenu.renameSchemaRefreshFailed", { message: translateBackendError(t, error) }), { persistent: true });
+  }
+}
+
+function applyDatabaseRenameToTree(node: TreeNode, newName: string) {
+  toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
+  showRenameObjectDialog.value = false;
+  const previousDatabaseNode = { ...node };
+  const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
+  liveNode.label = newName;
+  liveNode.database = newName;
+  connectionStore.updateDatabaseVGroupMember(previousDatabaseNode, newName);
+  const renamedNode: TreeNode = { ...liveNode, label: newName, database: newName };
+  connectionStore.replacePinnedTreeNode(liveNode, renamedNode);
+  void connectionStore.refreshTreeNode(liveNode);
+}
+
 async function confirmRenameObject() {
   const node = sidebarFormTarget.value ?? activeNode.value;
   let newName = renameObjectName.value.trim();
   if (!newName || newName === (node.objectName || node.label) || !node.connectionId || !node.database) return;
   renameObjectError.value = "";
+  if (node.type === "schema") {
+    await renamePostgresSchema(node, newName);
+    return;
+  }
   let renameApplied = false;
   let updatedViewDependencies: number | undefined;
   let updatedTableDependencies: number | undefined;
@@ -4671,6 +4884,32 @@ async function confirmRenameObject() {
     await connectionStore.ensureConnected(node.connectionId);
 
     // Database rename path
+    if (node.type === "database" && isMysqlDatabaseRenameNode(node)) {
+      const connectionId = node.connectionId;
+      let moveStarted = false;
+      try {
+        // Re-inventory at execution time: the dialog preview may be stale.
+        const plan = await prepareMysqlDatabaseRename({ connectionId, oldName: node.label, newName });
+        renameObjectPreviewSql.value = plan.previewSql;
+        const executed = await executeTreeNodeSqlWithProductionGuard(node, plan.previewSql, {
+          database: "",
+          beforeExecute: () => connectionStore.closeDatabaseConnection(connectionId, node.label),
+          execute: async () => {
+            moveStarted = true;
+            await executeMysqlDatabaseRename(plan);
+            return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+          },
+        });
+        if (executed === undefined) return;
+      } catch (error) {
+        // The server state may have changed (e.g. tables moved but the source kept); resync the database list.
+        if (moveStarted) void connectionStore.loadDatabases(connectionId, { force: true }).catch(() => undefined);
+        throw new Error(mysqlDatabaseRenameErrorMessage(error));
+      }
+      renameApplied = true;
+      applyDatabaseRenameToTree(node, newName);
+      return;
+    }
     if (node.type === "database") {
       const maintenanceDatabase = databaseRenameMaintenanceDatabase(connectionStore.getConfig(node.connectionId)?.database, node.label);
       // Preflight: check permissions, prepared transactions, and active connections
@@ -4712,16 +4951,7 @@ async function confirmRenameObject() {
       });
       if (executed === undefined) return;
       renameApplied = true;
-      toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
-      showRenameObjectDialog.value = false;
-      const previousDatabaseNode = { ...node };
-      const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
-      liveNode.label = newName;
-      liveNode.database = newName;
-      connectionStore.updateDatabaseVGroupMember(previousDatabaseNode, newName);
-      const renamedNode: TreeNode = { ...liveNode, label: newName, database: newName };
-      connectionStore.replacePinnedTreeNode(liveNode, renamedNode);
-      void connectionStore.refreshTreeNode(liveNode);
+      applyDatabaseRenameToTree(node, newName);
       return;
     }
 
@@ -5412,11 +5642,13 @@ const canRenameDatabase = computed(() => {
   const node = activeNode.value;
   if (node.type !== "database" || !node.database) return false;
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
-  return !!config && !connectionIsEffectivelyReadOnly(config) && supportsDatabaseRename(config.db_type);
+  return !!config && !connectionIsEffectivelyReadOnly(config) && supportsDatabaseRename(config.db_type, config.driver_profile);
 });
 
 const renameObjectDialogTitle = computed(() => {
-  if (activeNode.value.type === "database") return t("contextMenu.renameDatabaseTitle");
+  const node = sidebarFormTarget.value ?? activeNode.value;
+  if (node.type === "schema") return t("contextMenu.renameSchema");
+  if (node.type === "database") return t("contextMenu.renameDatabaseTitle");
   return t("contextMenu.renameObjectTitle");
 });
 
@@ -5591,7 +5823,10 @@ async function confirmEditDatabaseProperties() {
     const options = propertyGroups.includes("charsetCollation") ? { ...base, charset: editDatabaseCharset.value, collation: editDatabaseCollation.value } : propertyGroups.includes("databaseComment") ? { ...base, comment: editDatabaseCommentText.value } : null;
     if (!options) return;
     const sql = await buildUpdateDatabasePropertiesSql(options);
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database || node.label });
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database || node.label });
+    // The shared production gate declined the DDL (confirmation cancelled or a
+    // read-only connection), so nothing was sent and nothing succeeded.
+    if (!executed) return;
     toast(t("contextMenu.editDatabasePropertiesSuccess", { name: node.label }), 3000);
     showEditDatabasePropertiesDialog.value = false;
     await connectionStore.loadDatabases(node.connectionId, { force: true });
@@ -5665,7 +5900,8 @@ async function confirmEditSchemaComment() {
       comment: schemaCommentText.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    if (!executed) return;
     toast(t("contextMenu.editSchemaCommentSuccess", { name: node.label }), 3000);
     showEditSchemaCommentDialog.value = false;
     await connectionStore.loadSchemas(node.connectionId, node.database, { force: true });
@@ -7299,6 +7535,7 @@ function objectDialogCapabilities() {
     renameObjectDialogTitle,
     renameObjectPreviewSql,
     renameObjectError,
+    renameObjectWarning,
     viewRenamePlan,
     viewRenameDrafts,
     routineRenamePlan,
@@ -7662,6 +7899,21 @@ interface SidebarMenuFactoryContext {
 
 type SidebarMenuFactory = (context: SidebarMenuFactoryContext) => boolean;
 
+const batchTestConnectionIds = ref<string[]>([]);
+
+function addBatchConnectionTestItem(items: ContextMenuItem[], ids: readonly string[]) {
+  const targets = [...new Set(ids)].filter((id) => connectionStore.getConfig(id));
+  if (targets.length < 2) return;
+  items.push({
+    sidebarActionId: "connection.batchTestConnections",
+    label: t("connection.batchTestConnections", { count: targets.length }),
+    action: () => {
+      if (!batchTestConnectionIds.value.length) batchTestConnectionIds.value = targets;
+    },
+    icon: Activity,
+  });
+}
+
 function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
   // 2. Connection
@@ -7683,6 +7935,10 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     } else if (!isConnected.value) {
       items.push({ sidebarActionId: "contextMenu.openConnection", label: t("contextMenu.openConnection"), action: toggle, icon: Plug });
     }
+    addBatchConnectionTestItem(
+      items,
+      selectedConnectionTestTargets(node, selectedTreeNodesInVisibleOrder()).map((target) => target.connectionId),
+    );
     if (node.connectionId && supportsPlDebugRoutine(currentDatabaseType())) {
       items.push({ sidebarActionId: "plDebug.recovery", label: t("plDebug.recovery.title"), action: () => openPlDebugRecovery(node.connectionId!), icon: RefreshCw });
     }
@@ -7884,12 +8140,24 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       disabled: !canDisconnectConnectionGroup(),
       shortcut: shortcutDisconnectConnection.value,
     });
+    addBatchConnectionTestItem(items, connectionStore.connectionIdsInGroups([node.id]));
     items.push({ label: "", separator: true });
     items.push({
       label: t("connectionGroup.renameGroup"),
       action: startRenameGroup,
       icon: Pencil,
       shortcut: shortcutRename,
+    });
+    items.push({
+      label: t("connection.color"),
+      icon: Palette,
+      children: connectionColorOptions.map((color) => ({
+        label: t(color.labelKey),
+        checked: color.value === (node.sidebarColor || ""),
+        icon: Circle,
+        iconClass: `rounded-full ${color.class}`,
+        action: () => connectionStore.setConnectionGroupColor(node.id, color.value),
+      })),
     });
     items.push({ label: "", separator: true });
     items.push({
@@ -8053,6 +8321,9 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (canCreateSchema.value) {
       items.push({ sidebarActionId: "contextMenu.createSchema", label: t("contextMenu.createSchema"), action: openCreateSchemaDialog, icon: Plus });
+    }
+    if (canRenamePostgresSchema(node)) {
+      items.push({ sidebarActionId: "contextMenu.renameSchema", label: t("contextMenu.renameSchema"), action: openRenameObjectDialog, icon: Pencil, shortcut: shortcutRename });
     }
     if (canEditSchemaComment.value) {
       items.push({ sidebarActionId: "contextMenu.editSchemaComment", label: t("contextMenu.editSchemaComment"), action: openEditSchemaCommentDialog, icon: SquarePen });
@@ -8603,6 +8874,14 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       if (supportsMysqlAutoIncrement.value || batchAutoIncrementCount > 1) {
         items.push({ sidebarActionId: "contextMenu.mysqlAutoIncrement", label: autoIncrementMenuLabel(t("contextMenu.mysqlAutoIncrement")), action: autoIncrementMenuAction(mysqlAutoIncrement), icon: Gauge });
       }
+      if (supportsMysqlTableMaintenance.value) {
+        items.push({
+          sidebarActionId: "contextMenu.mysqlTableMaintenance",
+          label: t("contextMenu.mysqlTableMaintenance.title"),
+          icon: Wrench,
+          children: MYSQL_TABLE_MAINTENANCE_OPERATIONS.map((operation) => ({ label: t(`contextMenu.mysqlTableMaintenance.${operation}`), action: () => mysqlTableMaintenance(operation) })),
+        });
+      }
       if (supportsTruncate.value) {
         destructiveActions.push({
           sidebarActionId: "contextMenu.truncateTable",
@@ -8847,6 +9126,18 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "sequence" || (node.type === "synonym" && supportsOracleObjectExport(databaseTypeForNode(node), "SYNONYM"))) {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    if (node.type === "sequence" && connectionStore.getConfig(node.connectionId || "")?.db_type === "postgres") {
+      const sequenceTarget = createSidebarActionTarget(node);
+      const exactIdentity = sequenceTarget.postgresSequenceExactIdentity === true && !!sequenceTarget.objectName && !!sequenceTarget.schema;
+      items.push({
+        label: t("postgresSequence.title"),
+        action: () => {
+          if (exactIdentity) emit("open-postgres-sequence", sequenceTarget);
+        },
+        icon: Pencil,
+        disabled: !exactIdentity,
+      });
+    }
     if (currentDatabaseType() === "oceanbase-oracle") {
       items.push({ label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });
     }
@@ -9131,7 +9422,8 @@ const sidebarMenuFactories: readonly SidebarMenuFactory[] = [buildConnectionSide
 
 function treeItemMenuItems(): ContextMenuItem[] {
   const node = activeNode.value;
-  const items: ContextMenuItem[] = [];
+  const viewClipboardItem = viewClipboardMenuItem(node);
+  const items: ContextMenuItem[] = viewClipboardItem ? [viewClipboardItem] : [];
   const batchDropCount = selectedBatchDropTargets().length;
   const batchEmptyCount = selectedBatchEmptyTargets().length;
   const batchTruncateCount = selectedBatchTruncateTargets().length;
@@ -9540,6 +9832,7 @@ defineExpose({
     :close-on-confirm="false"
     @confirm="cloneDialog.confirm"
   />
+  <SidebarBatchConnectionTestDialog v-if="batchTestConnectionIds.length" :connection-ids="batchTestConnectionIds" @close="batchTestConnectionIds = []" />
   <ModelGenerateDialog v-if="modelGenerationTarget" :key="modelGenerationTarget.id" :target="modelGenerationTarget" @close="modelGenerationTarget = null" />
   <SqlTemplateInsertRowsDialog v-model:open="insertTemplateRowsOpen" @confirm="confirmInsertTemplateRows" />
   <OracleTableGrantsDialog v-if="oracleTableGrantsTarget" :target="oracleTableGrantsTarget" @close="oracleTableGrantsTarget = null" />

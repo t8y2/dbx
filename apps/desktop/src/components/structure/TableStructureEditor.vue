@@ -95,6 +95,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
+import { handleTextInputCaseShortcut } from "@/lib/editor/textInputCaseShortcut";
 import { selectLineEndsDefaultShortcut, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { useSettingsStore, type StructureEditorDensity } from "@/stores/settingsStore";
@@ -112,6 +113,7 @@ import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { applyDdlDatabaseQualifier, formatDdlForDisplay, formatGeneratedDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard, eventTargetUsesNativeClipboard, isPlainClipboardShortcut } from "@/lib/common/clipboard";
+import { structureRowClickTargetOwnsFocus, structureRowClosestControl } from "@/lib/table/structureRowClickFocus";
 import { formatTsv } from "@/lib/export/exportFormats";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
@@ -395,7 +397,12 @@ function formatStructureDdl(ddl: string): Promise<string> {
       databaseType: databaseType.value,
       database: props.database,
       catalog: props.catalog,
-      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      // Kingbase can resolve an unqualified DDL target to a system table with
+      // the same name (#15579), so the editable DDL tab must keep the backend's
+      // schema qualifier. `ddlQualifiedPartCount` has no kingbase entry, so
+      // forcing the flag on only skips the stripping pass — no database segment
+      // is ever inserted.
+      includeDatabaseName: databaseType.value === "kingbase" ? true : settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
     },
     settingsStore.editorSettings.sqlFormatter,
@@ -553,9 +560,10 @@ function scheduleDdlEditorInit() {
  * quoted names are uppercased before their quotes are removed.
  */
 function applyDdlGenerationPreferences(sql: string, dialect: SqlFormatDialect): string {
-  const unqualified = applyDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
-  if (settingsStore.editorSettings.generateSqlQuoteIdentifiers) return unqualified;
-  return formatGeneratedDdlIdentifierQuotes(unqualified, dialect, false, { preserveCaseSensitiveIdentifiers: tableStoresCaseSensitiveIdentifiers.value });
+  // Kingbase can resolve an unqualified DDL target to a system table with the same name.
+  const targetSql = databaseType.value === "kingbase" ? sql : applyDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
+  if (settingsStore.editorSettings.generateSqlQuoteIdentifiers) return targetSql;
+  return formatGeneratedDdlIdentifierQuotes(targetSql, dialect, false, { preserveCaseSensitiveIdentifiers: tableStoresCaseSensitiveIdentifiers.value });
 }
 
 type StructureDdlRequest = {
@@ -1489,9 +1497,9 @@ const structureToolbarButtonClass = "h-[var(--structure-control-height)] gap-1 p
 const structureIconButtonClass = "h-[var(--structure-control-height)] w-[var(--structure-control-height)]";
 const structureIconClass = "h-[var(--structure-icon-size)] w-[var(--structure-icon-size)]";
 const structureCheckboxClass = "h-[var(--structure-checkbox-size)] w-[var(--structure-checkbox-size)]";
-const structureHeaderCellClass = "relative min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-left last:border-r-0";
-const structureCellClass = "min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] last:border-r-0";
-const structureLastCellClass = "min-w-0 overflow-hidden border-b px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
+const structureHeaderCellClass = "relative min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-left";
+const structureCellClass = "min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
+const structureLastCellClass = "min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
 const structurePropertyListClass = "flex w-max min-w-0 items-center gap-0 overflow-hidden";
 const structurePropertyLabelClass = "flex min-w-0 items-center gap-1 whitespace-nowrap";
 const structureActionButtonClass = `${structureIconButtonClass} shrink-0`;
@@ -2598,6 +2606,7 @@ function addExistingPrimaryKeyColumn() {
 // Mirrors Rust `supports_named_primary_key`: engines that persist a user-supplied
 // PK constraint name. Other dialects ignore the symbol, so the field is hidden.
 const canNamePrimaryKey = computed(() => {
+  if (databaseType.value === "saphana") return false;
   if (connection.value?.driver_profile?.toLowerCase() === "gaussdb-m") return true;
   const dialect = structureCapabilities.value.dialect;
   return dialect === "mysql" || dialect === "postgres" || dialect === "sqlserver" || dialect === "oracle";
@@ -4731,6 +4740,12 @@ function onColumnRowMouseDown(event: MouseEvent) {
   if (event.button === 0) {
     columnContextMenuButton = null;
     columnContextMenuCtrlKey = false;
+    // On macOS WebKit, <button> is not mouse-focusable, so mousedown on a popup
+    // trigger inside a focusable scroller moves focus to the scroller instead
+    // and triggers Reka DismissableLayer focusOutside on popovers/menus (#15596).
+    if (!event.ctrlKey && structureRowClosestControl(event.target, "[aria-haspopup]")) {
+      event.preventDefault();
+    }
   } else {
     columnContextMenuButton = event.button;
     columnContextMenuCtrlKey = event.ctrlKey;
@@ -4752,6 +4767,11 @@ function onColumnRowClick(column: EditableStructureColumn, event: MouseEvent) {
   columnContextMenuCtrlKey = false;
   columnPointerSelectionActive = false;
   if (!columnIsSelectable(column)) return;
+  // Focus the scroller only for inert cell content, so the row clipboard shortcuts keep
+  // acting on the table. A control under the pointer must keep focus: moving it to the
+  // scroller dismissed the dropdown/popover that the same click had just opened, because
+  // reka's popover and dropdown layers close on focus-outside (#15585, #15596).
+  if (!eventTargetUsesNativeClipboard(event) && !structureRowClickTargetOwnsFocus(event.target)) structureScrollerElement(columnsScrollerRef.value)?.focus({ preventScroll: true });
   if (event.shiftKey) {
     selectColumnRangeFromAnchor(column);
     return;
@@ -4997,20 +5017,36 @@ function toggleCopySourceColumns() {
   selectedCopySourceColumnNames.value = allCopyableSourceColumnsSelected.value ? [] : [...copyableSourceColumnNames.value];
 }
 
-function applyPastedColumns(text: string) {
-  if (!pasteColumnsDialogOpen.value || !canPasteColumns.value || activeTab.value !== "columns") return;
+function applyColumnDefinitions(text: string, reportDiagnostics = false): boolean {
+  if (!canPasteColumns.value || activeTab.value !== "columns") return false;
   // Revalidate at commit time, including names of drop-marked columns. Import
   // must never implicitly replace a field or use a stale dialog preview.
   const result = parseTableColumnDefinitions(
     text,
     columns.value.map((column) => column.name),
   );
-  if (result.diagnostics.length || !result.columns.length) return;
+  const diagnostic = result.diagnostics[0];
+  if (diagnostic || !result.columns.length) {
+    if (diagnostic && reportDiagnostics) toast(t(`tableColumnPaste.${diagnostic.code}`), 5000);
+    return false;
+  }
   const drafts = createPastedColumnDrafts(result.columns, uuid);
   columns.value.splice(resolveInsertColumnIndex(columns.value, selectedColumnId.value), 0, ...drafts);
   selectSingleColumn(drafts[drafts.length - 1]);
   if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
-  pasteColumnsDialogOpen.value = false;
+  return true;
+}
+
+function applyPastedColumns(text: string) {
+  if (pasteColumnsDialogOpen.value && applyColumnDefinitions(text)) pasteColumnsDialogOpen.value = false;
+}
+
+function onColumnGridPaste(event: ClipboardEvent) {
+  if (event.defaultPrevented || !canPasteColumns.value || eventTargetUsesNativeClipboard(event)) return;
+  const text = event.clipboardData?.getData("text/plain");
+  if (!text?.trim()) return;
+  event.preventDefault();
+  applyColumnDefinitions(text, true);
 }
 
 function applyCopiedColumns() {
@@ -5738,6 +5774,55 @@ function dropOrRemoveColumns(targets: EditableStructureColumn[]) {
   }
 }
 
+function canCopyColumnDdl(targets: EditableStructureColumn[]): boolean {
+  const tableName = isCreateMode.value ? newTableName.value : props.tableName;
+  return canAddColumn.value && !!tableName.trim() && targets.length > 0 && targets.every((column) => !column.markedForDrop && !!column.name.trim() && !!column.dataType.trim());
+}
+
+async function copyColumnDdl(targets: EditableStructureColumn[]) {
+  if (!canCopyColumnDdl(targets)) return;
+  const options = structureChangeOptions();
+  const selectedIds = new Set(targets.map((column) => column.id));
+  const drafts = options.columns.filter((column) => selectedIds.has(column.id));
+  try {
+    const results = await Promise.all(
+      drafts.map((column) =>
+        api.buildSingleColumnAlterSql({
+          databaseType: options.databaseType,
+          driverProfile: options.driverProfile,
+          schema: options.schema,
+          tableName: options.tableName,
+          // Retain original metadata for generated column definitions.
+          column: { ...column, id: `ddl-preview:${column.id}` },
+        }),
+      ),
+    );
+    const warnings = results.flatMap((result) => result.warnings);
+    if (results.some((result) => result.statements.length === 0)) {
+      toast(warnings.join("\n") || t("customType.ddl.empty"), 5000);
+      return;
+    }
+    await copyToClipboard(
+      joinSqlStatementsForScript(
+        results.flatMap((result) => result.statements),
+        options.databaseType,
+      ),
+    );
+    toast(warnings.join("\n") || t("contextMenu.ddlCopied"), warnings.length ? 5000 : 2000);
+  } catch (error) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
+function onColumnGridKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented || !isPlainClipboardShortcut(event, "c") || eventTargetUsesNativeClipboard(event)) return;
+  const targets = selectedColumnsInOrder();
+  if (!canCopyColumnDdl(targets)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!event.repeat) void copyColumnDdl(targets);
+}
+
 /**
  * Context menu for a column row. When the right-clicked row is part of the
  * multi-selection the actions apply to the whole selection; otherwise they
@@ -5759,6 +5844,7 @@ function columnContextMenuItems(column: EditableStructureColumn): ContextMenuIte
       disabled: !canAddColumn.value,
       action: () => void copyColumnRows(targets),
     },
+    { label: t("grid.copyDdl"), icon: ClipboardList, disabled: !canCopyColumnDdl(targets), action: () => void copyColumnDdl(targets) },
     {
       label: isBatchContext ? t("structureEditor.dropSelectedColumns", { count }) : column.original ? t("structureEditor.drop") : t("structureEditor.remove"),
       icon: Trash2,
@@ -8309,7 +8395,13 @@ watch(
 </script>
 
 <template>
-  <div ref="rootRef" class="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-[var(--structure-shell-padding)] text-[length:var(--structure-font-size)]" :data-structure-density="localStructureDensity" :style="structureDensityStyle">
+  <div
+    ref="rootRef"
+    class="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-[var(--structure-shell-padding)] text-[length:var(--structure-font-size)]"
+    :data-structure-density="localStructureDensity"
+    :style="structureDensityStyle"
+    @keydown="handleTextInputCaseShortcut($event, settingsStore.editorSettings.shortcuts)"
+  >
     <ObjectSourceDialog
       v-if="triggerSourceTarget"
       :key="JSON.stringify(triggerSourceTarget.target)"
@@ -8735,7 +8827,7 @@ watch(
             <CustomContextMenu :items="activeColumnContextMenuItems" @close="clearColumnContextMenuTarget" v-slot="columnContextMenuSlot">
               <RecycleScroller
                 ref="columnsScrollerRef"
-                class="structure-column-virtual-scroller structure-table-scroller h-full overflow-auto"
+                class="structure-column-virtual-scroller structure-table-scroller h-full overflow-auto outline-none"
                 :style="{
                   '--structure-column-table-width': columnTableWidth + 'px',
                   '--structure-column-row-height': structureColumnRowHeight + 'px',
@@ -8752,6 +8844,9 @@ watch(
                 key-field="id"
                 item-class="structure-column-virtual-row"
                 list-class="structure-column-virtual-list"
+                tabindex="-1"
+                @keydown="onColumnGridKeydown"
+                @paste="onColumnGridPaste"
                 @scroll.passive="onStructureContentScroll('columns', $event)"
                 @update="onColumnVirtualRowsUpdated"
               >
@@ -10492,15 +10587,16 @@ watch(
 .structure-card-scroller::-webkit-scrollbar-thumb {
   background: rgba(82, 82, 82, 0.3);
   background: color-mix(in oklab, var(--foreground) 30%, transparent);
-  border: 3px solid transparent;
+  border: var(--dbx-workspace-scrollbar-inset) solid transparent;
   background-clip: padding-box;
   border-radius: 999px;
 }
 
+/* Full-track thickness on hover, like the workspace and data grid scrollbars (#15585). */
 .structure-card-scroller::-webkit-scrollbar-thumb:hover {
   background: rgba(82, 82, 82, 0.48);
   background: color-mix(in oklab, var(--foreground) 48%, transparent);
-  border-width: 2px;
+  border-width: 0;
   background-clip: padding-box;
 }
 
@@ -10588,38 +10684,41 @@ watch(
   vertical-align: middle;
 }
 
+/* Mirrors `.data-grid-vertical-scrollbar` so both axes thicken the same way (#15585). */
 .structure-vertical-scrollbar {
   position: relative;
-  width: 10px;
+  width: var(--dbx-workspace-scrollbar-size);
   cursor: default;
   touch-action: none;
 }
 
 .structure-vertical-scrollbar__thumb {
   position: absolute;
-  left: 3px;
-  width: 4px;
+  inset-inline: 0;
   min-height: 24px;
+  border-inline: var(--dbx-workspace-scrollbar-inset) solid transparent;
   border-radius: 999px;
   background: rgba(82, 82, 82, 0.3);
   background: color-mix(in oklab, var(--foreground) 30%, transparent);
+  background-clip: padding-box;
   transition:
-    left 120ms ease,
-    width 120ms ease,
+    border-width 120ms ease,
     background-color 120ms ease;
 }
 
 .structure-vertical-scrollbar:hover .structure-vertical-scrollbar__thumb,
 .structure-vertical-scrollbar--dragging .structure-vertical-scrollbar__thumb {
-  left: 2px;
-  width: 6px;
+  border-width: 0;
   background: rgba(82, 82, 82, 0.48);
   background: color-mix(in oklab, var(--foreground) 48%, transparent);
 }
 
+/* Same thumb model as the data grid (`.data-grid-horizontal-scrollbar`): a 10px
+   track whose thumb grows from the inset look to the full track on hover/drag, so
+   the hover feedback in the structure editor matches 表右键 → 查看数据 (#15585). */
 .structure-horizontal-scrollbar {
   position: relative;
-  height: 10px;
+  height: var(--dbx-workspace-scrollbar-size);
   flex-shrink: 0;
   cursor: pointer;
   touch-action: none;
@@ -10628,22 +10727,21 @@ watch(
 
 .structure-horizontal-scrollbar__thumb {
   position: absolute;
-  top: 3px;
-  height: 4px;
+  inset-block: 0;
   min-width: 24px;
+  border-block: var(--dbx-workspace-scrollbar-inset) solid transparent;
   border-radius: 999px;
   background: rgba(82, 82, 82, 0.3);
   background: color-mix(in oklab, var(--foreground) 30%, transparent);
+  background-clip: padding-box;
   transition:
-    top 120ms ease,
-    height 120ms ease,
+    border-width 120ms ease,
     background-color 120ms ease;
 }
 
 .structure-horizontal-scrollbar:hover .structure-horizontal-scrollbar__thumb,
 .structure-horizontal-scrollbar--dragging .structure-horizontal-scrollbar__thumb {
-  top: 2px;
-  height: 6px;
+  border-width: 0;
   background: rgba(82, 82, 82, 0.48);
   background: color-mix(in oklab, var(--foreground) 48%, transparent);
 }

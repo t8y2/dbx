@@ -238,7 +238,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install nextest
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-nextest@0.9.137
 
@@ -1110,7 +1110,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-nextest@0.9.137
 
@@ -1580,7 +1580,7 @@ jobs:
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install nextest
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-nextest@0.9.137
       # mold -run wraps the whole process tree (see the packages job note);
@@ -1640,6 +1640,22 @@ jobs:
       - name: Test Neo4j Windows-compatible build
         if: matrix.driver == 'neo4j-go'
         run: bash drivers/neo4j-go/build-windows-legacy.sh "$RUNNER_TEMP/dbx-agent-neo4j-windows-x64.exe"
+      - name: Setup Oracle Windows-compatible Go
+        if: matrix.driver == 'oracle-go'
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.20.14"
+          cache-dependency-path: agents/drivers/oracle-go/go.sum
+      - name: Test Oracle Windows-compatible thin build
+        if: matrix.driver == 'oracle-go'
+        run: |
+          cd drivers/oracle-go
+          export GOTOOLCHAIN=local
+          go test -mod=readonly ./...
+          output="$RUNNER_TEMP/dbx-agent-oracle-windows-x64.exe"
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -mod=readonly -trimpath -ldflags="-s -w" -o "$output" .
+          go version -m "$output" | tee "$RUNNER_TEMP/oracle-windows-x64-build-info.txt"
+          grep -q ': go1\.20\.14$' "$RUNNER_TEMP/oracle-windows-x64-build-info.txt"
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -1689,7 +1705,7 @@ jobs:
         if: matrix.driver == 'tdengine'
       - name: Install nextest
         if: matrix.driver == 'tdengine'
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-nextest@0.9.137
       - name: TDengine Rust cache

@@ -14,7 +14,7 @@ use std::future::Future;
 use std::ops::ControlFlow;
 use std::ops::Deref;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -23,7 +23,10 @@ use crate::models::connection::{
     is_mysql_jdbc_tls_param, mysql_jdbc_tls_mode, ConnectionConfig, DatabaseConnectionInfo, DatabaseType,
     MysqlJdbcTlsMode,
 };
-use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database};
+use crate::sql::{
+    contains_ascii_case_insensitive, starts_with_executable_sql_keyword,
+    starts_with_executable_sql_keyword_for_database,
+};
 use crate::types::{
     is_opaque_aggregate_state_type, ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate,
     CompletionAssistantCandidateKind, CompletionAssistantMatchMode, CompletionAssistantObjectKind,
@@ -39,6 +42,92 @@ pub use crate::mysql_data_charset::{
 };
 use crate::mysql_event_sql::MysqlEventInfo;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+enum MySqlStatisticsColumns {
+    /// MySQL 8+: EXPRESSION + INDEX_COMMENT.
+    Full = 0,
+    /// MySQL 5.5–5.7, Doris, StarRocks v5: INDEX_COMMENT without EXPRESSION.
+    WithoutExpression = 1,
+    /// MySQL 5.0/5.1: neither EXPRESSION nor INDEX_COMMENT.
+    Minimal = 2,
+}
+
+impl MySqlStatisticsColumns {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Full,
+            1 => Self::WithoutExpression,
+            _ => Self::Minimal,
+        }
+    }
+
+    fn flags(self) -> (bool, bool) {
+        match self {
+            Self::Full => (true, true),
+            Self::WithoutExpression => (false, true),
+            Self::Minimal => (false, false),
+        }
+    }
+
+    fn downgrade(self) -> Option<Self> {
+        match self {
+            Self::Full => Some(Self::WithoutExpression),
+            Self::WithoutExpression => Some(Self::Minimal),
+            Self::Minimal => None,
+        }
+    }
+}
+
+/// Discovered or engine-known metadata query compatibility flags for a pool.
+///
+/// Storing these beside the pool avoids repeating doomed `Unknown column` or
+/// `ESCAPE` probes on every completion keystroke or index lookup, keeping
+/// Doris/MySQL audit logs clean after discovery (or from the very first call
+/// when pre-seeded for Doris).
+#[derive(Debug, Default)]
+struct MySqlMetadataCapabilities {
+    omit_completion_escape: AtomicBool,
+    routine_use_dtd_identifier: AtomicBool,
+    statistics_columns: AtomicU8,
+}
+
+impl MySqlMetadataCapabilities {
+    fn completion_compatibility(&self) -> MysqlCompletionCompatibility {
+        MysqlCompletionCompatibility {
+            omit_escape: self.omit_completion_escape.load(Ordering::Relaxed),
+            use_dtd_identifier: self.routine_use_dtd_identifier.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record_completion_compatibility(&self, compatibility: MysqlCompletionCompatibility) {
+        if compatibility.omit_escape {
+            self.omit_completion_escape.store(true, Ordering::Relaxed);
+        }
+        if compatibility.use_dtd_identifier {
+            self.routine_use_dtd_identifier.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn statistics_columns(&self) -> MySqlStatisticsColumns {
+        MySqlStatisticsColumns::from_u8(self.statistics_columns.load(Ordering::Relaxed))
+    }
+
+    fn record_statistics_columns(&self, columns: MySqlStatisticsColumns) {
+        self.statistics_columns.fetch_max(columns as u8, Ordering::Relaxed);
+    }
+
+    fn set_doris_defaults(&self) {
+        // Apache Doris 2.x/3.x exposes DTD_IDENTIFIER (not DATA_TYPE) on
+        // information_schema.ROUTINES and omits EXPRESSION on
+        // information_schema.STATISTICS. Keep explicit LIKE ESCAPE enabled
+        // initially because Doris 3.x supports it and older engines that reject
+        // it still discover and cache omit_completion_escape on first use.
+        self.routine_use_dtd_identifier.store(true, Ordering::Relaxed);
+        self.statistics_columns.fetch_max(MySqlStatisticsColumns::WithoutExpression as u8, Ordering::Relaxed);
+    }
+}
+
 /// DBX-owned MySQL pool handle. The driver does not expose its configured
 /// maximum, so retain that value beside the driver pool for checkout phase
 /// classification instead of guessing it from aggregate metrics.
@@ -48,6 +137,7 @@ pub struct MySqlPool {
     max_connections: usize,
     data_charset: Option<MySqlDataCharset>,
     checkout_verifications: std::sync::Arc<MySqlCheckoutVerifications>,
+    metadata_capabilities: std::sync::Arc<MySqlMetadataCapabilities>,
     /// Budget for checking a connection out of this pool.
     ///
     /// The connection-level "connect timeout" setting is threaded down to the
@@ -78,9 +168,17 @@ impl MySqlPool {
             max_connections: max_connections.max(1),
             data_charset: None,
             checkout_verifications: Default::default(),
+            metadata_capabilities: Default::default(),
             checkout_timeout: checkout_timeout.max(Duration::from_secs(1)),
             stateless_http_tunnel: false,
         }
+    }
+
+    /// Pre-seed metadata query compatibility for Doris/SelectDB connections so
+    /// the pool avoids doomed `DATA_TYPE` / `EXPRESSION` column probes from the
+    /// very first metadata query.
+    pub fn set_doris_metadata_defaults(&self) {
+        self.metadata_capabilities.set_doris_defaults();
     }
 
     /// How long a checkout may wait for a pooled (or newly created) connection.
@@ -1908,6 +2006,53 @@ enum MySqlTcpKeepaliveMode {
     Disabled,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MySqlResetMode {
+    /// Shared pools (`max_connections > 1`) reset pooled connections via
+    /// `COM_RESET_CONNECTION` (or `COM_CHANGE_USER` on MySQL <= 5.7.2) on
+    /// return; single-connection client-session pools keep reset disabled to
+    /// preserve temporary tables and session variables.
+    Auto,
+    /// Disable `COM_RESET_CONNECTION` / `COM_CHANGE_USER` on pool return for
+    /// MySQL proxies/gateways (such as JumpServer Magnus) that reject reset
+    /// commands. Without this fallback, `mysql_async`'s recycler silently
+    /// drops every returned connection without sending `COM_QUIT` and opens a
+    /// fresh backend connection on the next query (#15612).
+    Disabled,
+}
+
+impl MySqlResetMode {
+    fn reset_connection(self, max_connections: usize) -> bool {
+        match self {
+            Self::Auto => max_connections > 1,
+            Self::Disabled => false,
+        }
+    }
+}
+
+const MYSQL_DISCARD_POOL_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+async fn disconnect_pool_best_effort(pool: MySqlPool) {
+    let _ = tokio::time::timeout(MYSQL_DISCARD_POOL_DISCONNECT_TIMEOUT, pool.disconnect()).await;
+}
+
+async fn disconnect_conn_best_effort(conn: mysql_async::Conn) {
+    let _ = tokio::time::timeout(MYSQL_DISCARD_POOL_DISCONNECT_TIMEOUT, conn.disconnect()).await;
+}
+
+enum MySqlVerifyError {
+    Connect(String),
+    ResetUnsupported(String),
+}
+
+impl MySqlVerifyError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Connect(error) | Self::ResetUnsupported(error) => error,
+        }
+    }
+}
+
 impl MySqlEofMode {
     fn deprecate_eof(self) -> bool {
         self == Self::Deprecate
@@ -1975,7 +2120,7 @@ impl MySqlSetupMode {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn verify_pool_connection_with_setup_fallback(
+async fn verify_or_retry_without_reset(
     pool: MySqlPool,
     timeout: Duration,
     url: &str,
@@ -1988,121 +2133,264 @@ async fn verify_pool_connection_with_setup_fallback(
     eof_mode: MySqlEofMode,
     tcp_keepalive_mode: MySqlTcpKeepaliveMode,
 ) -> Result<MySqlPool, String> {
-    // The retry URL only changes when a fallback was actually applied, so a
-    // connection that works on the first attempt never pays for the extra pool.
-    let mut retry_url = url.to_string();
-    let mut error = match verify_pool_connection(&pool, timeout).await {
-        Ok(()) => return Ok(pool),
-        Err(err) => err,
-    };
+    let probe_reset = MySqlResetMode::Auto.reset_connection(max_connections);
+    match verify_pool_connection_for_mode(&pool, timeout, probe_reset).await {
+        Ok(()) => Ok(pool),
+        Err(MySqlVerifyError::ResetUnsupported(reason)) => {
+            disconnect_pool_best_effort(pool).await;
+            log::info!(
+                "MySQL server/proxy rejected pooled connection reset ({reason}); retrying with COM_RESET_CONNECTION disabled"
+            );
+            let replacement = create_pool_with_reset_mode(
+                url,
+                ca_cert_path,
+                max_connections,
+                idle_timeout_secs,
+                timeout,
+                setup_database,
+                extra_setup_queries,
+                setup_mode,
+                eof_mode,
+                tcp_keepalive_mode,
+                MySqlResetMode::Disabled,
+            )?;
+            match verify_pool_connection_for_mode(&replacement, timeout, false).await {
+                Ok(()) => Ok(replacement),
+                Err(error) => {
+                    disconnect_pool_best_effort(replacement).await;
+                    Err(error.into_message())
+                }
+            }
+        }
+        Err(MySqlVerifyError::Connect(error)) => {
+            disconnect_pool_best_effort(pool).await;
+            Err(error)
+        }
+    }
+}
 
-    if let Some(charset_url) = mysql_legacy_charset_fallback_url(&retry_url, &error) {
-        log::info!("MySQL server does not support the built-in utf8mb4 charset; retrying with charset=utf8");
-        let charset_pool = create_pool(
-            &charset_url,
+#[allow(clippy::too_many_arguments)]
+fn verify_pool_connection_with_setup_fallback<'a>(
+    pool: MySqlPool,
+    timeout: Duration,
+    url: &'a str,
+    ca_cert_path: Option<&'a str>,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    setup_database: Option<&'a str>,
+    extra_setup_queries: &'a [String],
+    setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
+    tcp_keepalive_mode: MySqlTcpKeepaliveMode,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<MySqlPool, String>> + Send + 'a>> {
+    Box::pin(async move {
+        // The retry URL only changes when a fallback was actually applied, so a
+        // connection that works on the first attempt never pays for the extra pool.
+        let mut retry_url = url.to_string();
+        let mut error = match verify_or_retry_without_reset(
+            pool,
+            timeout,
+            &retry_url,
             ca_cert_path,
             max_connections,
             idle_timeout_secs,
-            timeout,
             setup_database,
             extra_setup_queries,
             setup_mode,
             eof_mode,
             tcp_keepalive_mode,
-        )?;
-        match verify_pool_connection(&charset_pool, timeout).await {
-            Ok(()) => return Ok(charset_pool),
-            Err(charset_error) => {
-                retry_url = charset_url;
-                error = charset_error;
-            }
-        }
-    }
-
-    let recognized_mode = mysql_group_concat_setup_fallback_mode(setup_mode, &error);
-    // An unrecognized wording (a server whose rejection text dbx does not know yet) is
-    // retried on the strength of the retry actually connecting. See
-    // [`mysql_setup_probe_fallback_mode`].
-    let probed = recognized_mode.is_none();
-    let fallback = recognized_mode.or_else(|| mysql_setup_probe_fallback_mode(setup_mode, &retry_url, &error));
-    let Some(fallback_mode) = fallback else {
-        return Err(error);
-    };
-    let ladder = mysql_setup_fallback_ladder(fallback_mode, &error);
-    if probed {
-        log::info!(
-            "MySQL connection failed with a server error while the optional group_concat_max_len setup was in place; \
-             retrying with {ladder:?} to check whether that setup caused it"
-        );
-    } else {
-        log::info!("MySQL server rejected optional group_concat_max_len setup; retrying with {ladder:?}");
-    }
-    let mut last_error = None;
-    let mut verified_without_floor = None;
-    let retries_literal_floor = ladder.contains(&MySqlSetupMode::LiteralFloor);
-    for mode in ladder {
-        let ladder_pool = create_pool(
-            &retry_url,
-            ca_cert_path,
-            max_connections,
-            idle_timeout_secs,
-            timeout,
-            setup_database,
-            extra_setup_queries,
-            mode,
-            eof_mode,
-            tcp_keepalive_mode,
-        )?;
-        // The rung without dbx's built-in statement is the reliable one, and it reports the
-        // value the server uses. The literal rung that follows cannot express the standard
-        // `greatest(...)` guard, so it may only be applied when the server *reports* a value
-        // below dbx's floor; a server configured higher keeps its own value (issue #9412),
-        // and a value the server did not report is kept as it is instead of guessed at.
-        let reports_server_value = mode == MySqlSetupMode::Compatible && retries_literal_floor;
-        let verified = if reports_server_value {
-            verify_pool_connection_reporting_group_concat_max_len(&ladder_pool, timeout).await
-        } else {
-            verify_pool_connection(&ladder_pool, timeout).await.map(|()| None)
+        )
+        .await
+        {
+            Ok(verified) => return Ok(verified),
+            Err(err) => err,
         };
-        match verified {
-            // Every rung but the value-reporting one only has to connect.
-            Ok(None) if !reports_server_value => return Ok(ladder_pool),
-            Ok(None) => {
-                log::info!(
-                    "MySQL server did not report group_concat_max_len; keeping the server value rather than \
-                     applying dbx's {} floor",
-                    MYSQL_GROUP_CONCAT_MAX_LEN
-                );
-                return Ok(ladder_pool);
-            }
-            Ok(Some(current)) if !mysql_literal_floor_is_needed(Some(current)) => {
-                log::info!(
-                    "MySQL server reports group_concat_max_len = {current}, which is not below dbx's {} floor; \
-                     keeping the server value",
-                    MYSQL_GROUP_CONCAT_MAX_LEN
-                );
-                return Ok(ladder_pool);
-            }
-            Ok(Some(_)) => verified_without_floor = Some(ladder_pool),
-            Err(ladder_error) => {
-                log::info!("MySQL retry with {mode:?} mode did not connect: {ladder_error}");
-                last_error = Some(ladder_error);
+
+        if let Some(charset_url) = mysql_legacy_charset_fallback_url(&retry_url, &error) {
+            log::info!("MySQL server does not support the built-in utf8mb4 charset; retrying with charset=utf8");
+            let charset_pool = create_pool(
+                &charset_url,
+                ca_cert_path,
+                max_connections,
+                idle_timeout_secs,
+                timeout,
+                setup_database,
+                extra_setup_queries,
+                setup_mode,
+                eof_mode,
+                tcp_keepalive_mode,
+            )?;
+            match verify_or_retry_without_reset(
+                charset_pool,
+                timeout,
+                &charset_url,
+                ca_cert_path,
+                max_connections,
+                idle_timeout_secs,
+                setup_database,
+                extra_setup_queries,
+                setup_mode,
+                eof_mode,
+                tcp_keepalive_mode,
+            )
+            .await
+            {
+                Ok(verified) => return Ok(verified),
+                Err(charset_error) => {
+                    retry_url = charset_url;
+                    error = charset_error;
+                }
             }
         }
-    }
-    // The literal rung did not connect, but the rung that drops the built-in statement was
-    // already verified, so that connection is still the one to keep.
-    if let Some(pool) = verified_without_floor {
-        return Ok(pool);
-    }
-    // The probe only explains the failure when it connects; keep the server's
-    // first answer otherwise so an unrelated failure is not reported as a setup
-    // rejection.
-    match (probed, last_error) {
-        (true, _) => Err(error),
-        (false, Some(ladder_error)) => Err(ladder_error),
-        (false, None) => Err(error),
-    }
+
+        let recognized_mode = mysql_group_concat_setup_fallback_mode(setup_mode, &error);
+        // An unrecognized wording (a server whose rejection text dbx does not know yet) is
+        // retried on the strength of the retry actually connecting. See
+        // [`mysql_setup_probe_fallback_mode`].
+        let probed = recognized_mode.is_none();
+        let fallback = recognized_mode.or_else(|| mysql_setup_probe_fallback_mode(setup_mode, &retry_url, &error));
+        let Some(fallback_mode) = fallback else {
+            return Err(error);
+        };
+        let ladder = mysql_setup_fallback_ladder(fallback_mode, &error);
+        if probed {
+            log::info!(
+                "MySQL connection failed with a server error while the optional group_concat_max_len setup was in place; \
+                 retrying with {ladder:?} to check whether that setup caused it"
+            );
+        } else {
+            log::info!("MySQL server rejected optional group_concat_max_len setup; retrying with {ladder:?}");
+        }
+        let mut last_error = None;
+        let mut verified_without_floor: Option<MySqlPool> = None;
+        let retries_literal_floor = ladder.contains(&MySqlSetupMode::LiteralFloor);
+        let probe_reset = MySqlResetMode::Auto.reset_connection(max_connections);
+        for mode in ladder {
+            let ladder_pool = create_pool(
+                &retry_url,
+                ca_cert_path,
+                max_connections,
+                idle_timeout_secs,
+                timeout,
+                setup_database,
+                extra_setup_queries,
+                mode,
+                eof_mode,
+                tcp_keepalive_mode,
+            )?;
+            // The rung without dbx's built-in statement is the reliable one, and it reports the
+            // value the server uses. The literal rung that follows cannot express the standard
+            // `greatest(...)` guard, so it may only be applied when the server *reports* a value
+            // below dbx's floor; a server configured higher keeps its own value (issue #9412),
+            // and a value the server did not report is kept as it is instead of guessed at.
+            let reports_server_value = mode == MySqlSetupMode::Compatible && retries_literal_floor;
+            let verified = if reports_server_value {
+                match verify_pool_connection_reporting_group_concat_max_len(&ladder_pool, timeout, probe_reset).await {
+                    Ok(value) => Ok((ladder_pool, value)),
+                    Err(MySqlVerifyError::ResetUnsupported(reason)) => {
+                        disconnect_pool_best_effort(ladder_pool).await;
+                        log::info!(
+                            "MySQL server/proxy rejected pooled connection reset ({reason}); retrying with COM_RESET_CONNECTION disabled"
+                        );
+                        let replacement = create_pool_with_reset_mode(
+                            &retry_url,
+                            ca_cert_path,
+                            max_connections,
+                            idle_timeout_secs,
+                            timeout,
+                            setup_database,
+                            extra_setup_queries,
+                            mode,
+                            eof_mode,
+                            tcp_keepalive_mode,
+                            MySqlResetMode::Disabled,
+                        )?;
+                        match verify_pool_connection_reporting_group_concat_max_len(&replacement, timeout, false).await
+                        {
+                            Ok(value) => Ok((replacement, value)),
+                            Err(err) => {
+                                disconnect_pool_best_effort(replacement).await;
+                                Err(err.into_message())
+                            }
+                        }
+                    }
+                    Err(MySqlVerifyError::Connect(err)) => {
+                        disconnect_pool_best_effort(ladder_pool).await;
+                        Err(err)
+                    }
+                }
+            } else {
+                verify_or_retry_without_reset(
+                    ladder_pool,
+                    timeout,
+                    &retry_url,
+                    ca_cert_path,
+                    max_connections,
+                    idle_timeout_secs,
+                    setup_database,
+                    extra_setup_queries,
+                    mode,
+                    eof_mode,
+                    tcp_keepalive_mode,
+                )
+                .await
+                .map(|pool| (pool, None))
+            };
+            match verified {
+                // Every rung but the value-reporting one only has to connect.
+                Ok((verified_pool, None)) if !reports_server_value => {
+                    if let Some(previous) = verified_without_floor.take() {
+                        disconnect_pool_best_effort(previous).await;
+                    }
+                    return Ok(verified_pool);
+                }
+                Ok((verified_pool, None)) => {
+                    log::info!(
+                        "MySQL server did not report group_concat_max_len; keeping the server value rather than \
+                         applying dbx's {} floor",
+                        MYSQL_GROUP_CONCAT_MAX_LEN
+                    );
+                    if let Some(previous) = verified_without_floor.take() {
+                        disconnect_pool_best_effort(previous).await;
+                    }
+                    return Ok(verified_pool);
+                }
+                Ok((verified_pool, Some(current))) if !mysql_literal_floor_is_needed(Some(current)) => {
+                    log::info!(
+                        "MySQL server reports group_concat_max_len = {current}, which is not below dbx's {} floor; \
+                         keeping the server value",
+                        MYSQL_GROUP_CONCAT_MAX_LEN
+                    );
+                    if let Some(previous) = verified_without_floor.take() {
+                        disconnect_pool_best_effort(previous).await;
+                    }
+                    return Ok(verified_pool);
+                }
+                Ok((verified_pool, Some(_))) => {
+                    if let Some(previous) = verified_without_floor.replace(verified_pool) {
+                        disconnect_pool_best_effort(previous).await;
+                    }
+                }
+                Err(ladder_error) => {
+                    log::info!("MySQL retry with {mode:?} mode did not connect: {ladder_error}");
+                    last_error = Some(ladder_error);
+                }
+            }
+        }
+        // The literal rung did not connect, but the rung that drops the built-in statement was
+        // already verified, so that connection is still the one to keep.
+        if let Some(pool) = verified_without_floor {
+            return Ok(pool);
+        }
+        // The probe only explains the failure when it connects; keep the server's
+        // first answer otherwise so an unrelated failure is not reported as a setup
+        // rejection.
+        match (probed, last_error) {
+            (true, _) => Err(error),
+            (false, Some(ladder_error)) => Err(ladder_error),
+            (false, None) => Err(error),
+        }
+    })
 }
 
 /// Whether dbx's literal floor still raises the value the server reports.
@@ -2124,13 +2412,33 @@ fn mysql_literal_floor_is_needed(current: Option<u64>) -> bool {
 async fn verify_pool_connection_reporting_group_concat_max_len(
     pool: &MySqlPool,
     timeout: Duration,
-) -> Result<Option<u64>, String> {
-    super::with_connection_timeout("MySQL", timeout, async {
-        let mut conn = pool.get_conn().await.map_err(|error| format!("MySQL connection failed: {error}"))?;
-        conn.ping().await.map_err(|error| format!("MySQL ping failed: {error}"))?;
-        Ok(query_first_column::<u64>(&mut conn, "SELECT @@session.group_concat_max_len").await.ok().flatten())
+    probe_reset: bool,
+) -> Result<Option<u64>, MySqlVerifyError> {
+    match tokio::time::timeout(timeout, async {
+        let mut conn = pool
+            .get_conn()
+            .await
+            .map_err(|error| MySqlVerifyError::Connect(format!("MySQL connection failed: {error}")))?;
+        if let Err(error) = conn.ping().await {
+            disconnect_conn_best_effort(conn).await;
+            return Err(MySqlVerifyError::Connect(format!("MySQL ping failed: {error}")));
+        }
+        let value = query_first_column::<u64>(&mut conn, "SELECT @@session.group_concat_max_len").await.ok().flatten();
+        if probe_reset {
+            if let Err(error) = probe_pool_connection_reset(&mut conn).await {
+                disconnect_conn_best_effort(conn).await;
+                return Err(MySqlVerifyError::ResetUnsupported(error.to_string()));
+            }
+        }
+        Ok(value)
     })
     .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            Err(MySqlVerifyError::Connect(format!("MySQL connection timed out after {} seconds", timeout.as_secs())))
+        }
+    }
 }
 
 /// Modes to retry with, in order, after the built-in `group_concat_max_len` setup was
@@ -2331,6 +2639,7 @@ fn mysql_setup_probe_fallback_mode(setup_mode: MySqlSetupMode, url: &str, error:
     error.to_ascii_lowercase().contains("server error").then_some(MySqlSetupMode::Compatible)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_pool(
     url: &str,
     ca_cert_path: Option<&str>,
@@ -2343,6 +2652,35 @@ fn create_pool(
     eof_mode: MySqlEofMode,
     tcp_keepalive_mode: MySqlTcpKeepaliveMode,
 ) -> Result<MySqlPool, String> {
+    create_pool_with_reset_mode(
+        url,
+        ca_cert_path,
+        max_connections,
+        idle_timeout_secs,
+        checkout_timeout,
+        setup_database,
+        extra_setup_queries,
+        setup_mode,
+        eof_mode,
+        tcp_keepalive_mode,
+        MySqlResetMode::Auto,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_pool_with_reset_mode(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    checkout_timeout: Duration,
+    setup_database: Option<&str>,
+    extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
+    tcp_keepalive_mode: MySqlTcpKeepaliveMode,
+    reset_mode: MySqlResetMode,
+) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
     let data_charset = data_charset_from_url(url)?;
     let local_infile_paths = mysql_local_infile_paths(&tls_url.url);
@@ -2353,13 +2691,13 @@ fn create_pool(
     let max_connections = max_connections.max(1);
     // Single-connection pools (max_connections == 1) are client session pools that
     // must preserve session state (e.g. TEMPORARY TABLEs) across queries.
-    // Disable COM_RESET_CONNECTION for these pools to avoid clearing that state.
+    // Disable COM_RESET_CONNECTION for these pools (and for proxies that reject it).
     let inactive_ttl =
         idle_timeout_secs.filter(|&s| s >= 30).map(Duration::from_secs).unwrap_or(Duration::from_secs(300));
     let pool_opts = mysql_async::PoolOpts::new()
         .with_constraints(mysql_async::PoolConstraints::new(1, max_connections).unwrap())
         .with_inactive_connection_ttl(inactive_ttl)
-        .with_reset_connection(max_connections > 1);
+        .with_reset_connection(reset_mode.reset_connection(max_connections));
     let setup_queries = match (setup_database, setup_mode) {
         (Some(database), MySqlSetupMode::Standard) => {
             mysql_setup_queries_for_database(url, Some(database), extra_setup_queries)
@@ -2884,8 +3222,9 @@ fn is_safe_mysql_charset_name(value: &str) -> bool {
 
 fn mysql_connection_time_zone(url: &str) -> Option<String> {
     let (_, query) = url.split_once('?')?;
+    let query = query.split('#').next().unwrap_or(query);
     let mut jdbc_time_zone: Option<String> = None;
-    let mut go_location: Option<String> = None;
+    let mut force_jdbc_time_zone_to_session = false;
 
     for segment in query.split('&') {
         let Some((raw_key, raw_value)) = segment.split_once('=') else {
@@ -2905,15 +3244,22 @@ fn mysql_connection_time_zone(url: &str) -> Option<String> {
                 return Some(value);
             }
         } else if key.eq_ignore_ascii_case("connectionTimeZone") || key.eq_ignore_ascii_case("serverTimezone") {
-            if jdbc_time_zone.is_none() {
+            // Connector/J treats `connectionTimeZone` / `serverTimezone` as
+            // client-side mapping unless `forceConnectionTimeZoneToSession=true`,
+            // and `SERVER` means keep the MySQL server's own session time zone.
+            if jdbc_time_zone.is_none() && !value.eq_ignore_ascii_case("server") {
                 jdbc_time_zone = normalize_mysql_time_zone_value(&value);
             }
-        } else if key.eq_ignore_ascii_case("loc") && go_location.is_none() {
-            go_location = normalize_mysql_time_zone_value(&value);
+        } else if key.eq_ignore_ascii_case("forceConnectionTimeZoneToSession") {
+            force_jdbc_time_zone_to_session = mysql_url_param_value_is_true(&value);
         }
+        // Go's `loc` parameter (e.g. `loc=Local`) only sets client-side
+        // `time.Time` parsing in go-sql-driver/mysql and must not emit
+        // `SET time_zone`, which would shift `SELECT NOW()` to local OS time
+        // instead of the database's time zone (#15827).
     }
 
-    jdbc_time_zone.or(go_location)
+    force_jdbc_time_zone_to_session.then_some(jdbc_time_zone).flatten()
 }
 
 fn normalize_mysql_time_zone_value(value: &str) -> Option<String> {
@@ -2980,14 +3326,52 @@ fn is_safe_mysql_time_zone_name(value: &str) -> bool {
         && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'+' | b':'))
 }
 
-async fn verify_pool_connection(pool: &MySqlPool, timeout: Duration) -> Result<(), String> {
-    super::with_connection_timeout("MySQL", timeout, async {
-        let mut conn = pool.get_conn().await.map_err(|e| format!("MySQL connection failed: {e}"))?;
-        conn.ping().await.map_err(|e| format!("MySQL ping failed: {e}"))?;
-        conn.query_drop("SELECT 1").await.map_err(|e| format!("MySQL connection verification query failed: {e}"))?;
+async fn probe_pool_connection_reset(conn: &mut mysql_async::Conn) -> Result<(), mysql_async::Error> {
+    if !conn.reset().await? {
+        conn.change_user(Default::default()).await?;
+    }
+    // The connection was just reset above, so skip a redundant reset when this
+    // verification checkout returns to the pool.
+    conn.reset_connection(false);
+    Ok(())
+}
+
+async fn verify_pool_connection_for_mode(
+    pool: &MySqlPool,
+    timeout: Duration,
+    probe_reset: bool,
+) -> Result<(), MySqlVerifyError> {
+    match tokio::time::timeout(timeout, async {
+        let mut conn =
+            pool.get_conn().await.map_err(|e| MySqlVerifyError::Connect(format!("MySQL connection failed: {e}")))?;
+        if let Err(e) = conn.ping().await {
+            disconnect_conn_best_effort(conn).await;
+            return Err(MySqlVerifyError::Connect(format!("MySQL ping failed: {e}")));
+        }
+        if let Err(e) = conn.query_drop("SELECT 1").await {
+            disconnect_conn_best_effort(conn).await;
+            return Err(MySqlVerifyError::Connect(format!("MySQL connection verification query failed: {e}")));
+        }
+        if probe_reset {
+            if let Err(e) = probe_pool_connection_reset(&mut conn).await {
+                disconnect_conn_best_effort(conn).await;
+                return Err(MySqlVerifyError::ResetUnsupported(e.to_string()));
+            }
+        }
         Ok(())
     })
     .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            Err(MySqlVerifyError::Connect(format!("MySQL connection timed out after {} seconds", timeout.as_secs())))
+        }
+    }
+}
+
+#[cfg(test)]
+async fn verify_pool_connection(pool: &MySqlPool, timeout: Duration) -> Result<(), String> {
+    verify_pool_connection_for_mode(pool, timeout, false).await.map_err(MySqlVerifyError::into_message)
 }
 
 fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
@@ -3730,8 +4114,10 @@ pub async fn list_tables_filtered(
     let tables: Vec<TableInfo> = rows
         .iter()
         .filter_map(|row| {
-            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
-            (!name.is_empty()).then_some(TableInfo {
+            // MySQL identifiers may contain leading/trailing spaces inside
+            // backticks; only use trim() to reject blank rows.
+            let name = get_str_by_name(row, "TABLE_NAME");
+            (!name.trim().is_empty()).then_some(TableInfo {
                 name,
                 table_type: normalize_mysql_table_type(&get_str_by_name(row, "TABLE_TYPE")),
                 valid: None,
@@ -3891,16 +4277,19 @@ pub async fn completion_assistant_search(
     let pattern = mysql_completion_like_pattern(&request.mask, request.match_mode.as_ref());
     let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let mut candidates = Vec::new();
-    let mut compatibility = MysqlCompletionCompatibility::default();
+    let mut compatibility = pool.metadata_capabilities.completion_compatibility();
+    let mut used_escape_fallback = false;
+    let mut used_routine_fallback = false;
 
     if kinds
         .iter()
         .any(|kind| matches!(kind, CompletionAssistantObjectKind::Database | CompletionAssistantObjectKind::Schema))
     {
-        let rows = mysql_completion_rows(&mut conn, &mut compatibility, false, |policy| {
+        let rows = mysql_completion_rows(&mut conn, &pool.metadata_capabilities, &mut compatibility, false, |policy| {
             mysql_completion_schemas_sql(&pattern, limit.saturating_sub(candidates.len()), policy)
         })
         .await?;
+        used_escape_fallback |= compatibility.omit_escape;
         for row in rows {
             let schema_name = get_str_by_name(&row, "schema_name");
             candidates.push(CompletionAssistantCandidate {
@@ -3919,10 +4308,11 @@ pub async fn completion_assistant_search(
     }
 
     if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_table_like) {
-        let rows = mysql_completion_rows(&mut conn, &mut compatibility, false, |policy| {
+        let rows = mysql_completion_rows(&mut conn, &pool.metadata_capabilities, &mut compatibility, false, |policy| {
             mysql_completion_tables_sql(database, &pattern, &kinds, limit.saturating_sub(candidates.len()), policy)
         })
         .await?;
+        used_escape_fallback |= compatibility.omit_escape;
         for row in rows {
             let table_type = get_str_by_name(&row, "table_type");
             candidates.push(CompletionAssistantCandidate {
@@ -3948,10 +4338,12 @@ pub async fn completion_assistant_search(
 
     if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_routine_like) {
         let remaining = limit.saturating_sub(candidates.len());
-        let rows = mysql_completion_rows(&mut conn, &mut compatibility, true, |policy| {
+        let rows = mysql_completion_rows(&mut conn, &pool.metadata_capabilities, &mut compatibility, true, |policy| {
             mysql_completion_routines_sql(database, &pattern, &kinds, remaining, policy)
         })
         .await?;
+        used_escape_fallback |= compatibility.omit_escape;
+        used_routine_fallback |= compatibility.use_dtd_identifier;
         for row in rows {
             let routine_type = get_str_by_name(&row, "routine_type");
             candidates.push(CompletionAssistantCandidate {
@@ -3977,10 +4369,18 @@ pub async fn completion_assistant_search(
 
     if candidates.len() < limit && kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Column)) {
         if let Some(table) = request.parent_name.as_deref().filter(|table| !table.trim().is_empty()) {
-            let rows = mysql_completion_rows(&mut conn, &mut compatibility, false, |policy| {
-                mysql_completion_columns_sql(database, table, &pattern, limit.saturating_sub(candidates.len()), policy)
-            })
-            .await?;
+            let rows =
+                mysql_completion_rows(&mut conn, &pool.metadata_capabilities, &mut compatibility, false, |policy| {
+                    mysql_completion_columns_sql(
+                        database,
+                        table,
+                        &pattern,
+                        limit.saturating_sub(candidates.len()),
+                        policy,
+                    )
+                })
+                .await?;
+            used_escape_fallback |= compatibility.omit_escape;
             for row in rows {
                 candidates.push(CompletionAssistantCandidate {
                     name: get_str_by_name(&row, "object_name"),
@@ -4003,7 +4403,7 @@ pub async fn completion_assistant_search(
     Ok(CompletionAssistantResponse {
         incomplete: candidates.len() >= limit,
         candidates,
-        fallback_used: compatibility.omit_escape || compatibility.use_dtd_identifier,
+        fallback_used: used_escape_fallback || used_routine_fallback,
     })
 }
 
@@ -4048,17 +4448,20 @@ fn mysql_completion_escape_is_unsupported(error: &mysql_async::Error) -> bool {
 
 async fn mysql_completion_rows(
     conn: &mut mysql_async::Conn,
+    capabilities: &MySqlMetadataCapabilities,
     compatibility: &mut MysqlCompletionCompatibility,
     routine: bool,
     build_sql: impl Fn(MysqlCompletionCompatibility) -> String,
 ) -> Result<Vec<mysql_async::Row>, String> {
     // Each flag can change only once: at most three attempts for routines,
-    // two for other kinds. Share the discovered ESCAPE policy in this request.
+    // two for other kinds. Persist discovered flags on the pool so later
+    // completion keystrokes do not repeat doomed queries.
     loop {
         let sql = build_sql(*compatibility);
         match conn.query_iter(&sql).await {
             Ok(result) => return result.collect_and_drop().await.map_err(|error| error.to_string()),
             Err(error) if compatibility.retry_after(&error, routine) => {
+                capabilities.record_completion_compatibility(*compatibility);
                 log::debug!("Retrying MySQL completion with compatible catalog syntax: {error}");
             }
             Err(error) => return Err(error.to_string()),
@@ -4345,8 +4748,9 @@ fn table_infos_from_show_rows(rows: &[mysql_async::Row]) -> Vec<TableInfo> {
     let mut tables = rows
         .iter()
         .filter_map(|row| {
-            let name = get_str(row, 0).trim().to_string();
-            if name.is_empty() {
+            // SHOW TABLES returns the exact identifier; keep surrounding spaces.
+            let name = get_str(row, 0);
+            if name.trim().is_empty() {
                 return None;
             }
             let table_type = normalize_mysql_table_type(&get_str(row, 1));
@@ -5156,37 +5560,43 @@ pub async fn list_object_statistics_with_budget(
         let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
         result.collect_and_drop::<mysql_async::Row>().await.map_err(|e| e.to_string())?
     };
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            let mut statistics = ObjectStatistics {
-                name,
-                schema: Some(database.to_string()),
-                estimated_rows: get_opt_i64(row, "TABLE_ROWS"),
-                total_bytes: get_opt_i64(row, "TOTAL_BYTES"),
-                ..Default::default()
-            };
-            if include_mysql_details {
-                statistics.data_length = get_opt_i64(row, "DATA_LENGTH");
-                statistics.engine = get_opt_str(row, "ENGINE");
-                statistics.created_at = get_opt_metadata_string(row, "CREATE_TIME");
-                statistics.updated_at = get_opt_metadata_string(row, "UPDATE_TIME");
-                statistics.collation = get_opt_str(row, "TABLE_COLLATION");
-                statistics.row_format = get_opt_str(row, "ROW_FORMAT");
-                statistics.avg_row_length = get_opt_i64(row, "AVG_ROW_LENGTH");
-                statistics.max_data_length = get_opt_i64(row, "MAX_DATA_LENGTH");
-                statistics.check_time = get_opt_metadata_string(row, "CHECK_TIME");
-                statistics.index_length = get_opt_i64(row, "INDEX_LENGTH");
-                statistics.auto_increment = get_opt_unsigned_metadata_string(row, "AUTO_INCREMENT");
-                statistics.data_free = get_opt_i64(row, "DATA_FREE");
-            }
-            Some(statistics)
-        })
-        .collect())
+    Ok(rows.iter().filter_map(|row| object_statistics_from_row(row, database, include_mysql_details)).collect())
+}
+
+fn object_statistics_from_row(
+    row: &mysql_async::Row,
+    database: &str,
+    include_mysql_details: bool,
+) -> Option<ObjectStatistics> {
+    // MySQL identifiers may contain leading/trailing spaces inside backticks.
+    // Keep TABLE_NAME byte-exact so the statistics can be matched to the object
+    // list; trim() is only an emptiness check.
+    let name = get_str_by_name(row, "TABLE_NAME");
+    if name.trim().is_empty() {
+        return None;
+    }
+    let mut statistics = ObjectStatistics {
+        name,
+        schema: Some(database.to_string()),
+        estimated_rows: get_opt_i64(row, "TABLE_ROWS"),
+        total_bytes: get_opt_i64(row, "TOTAL_BYTES"),
+        ..Default::default()
+    };
+    if include_mysql_details {
+        statistics.data_length = get_opt_i64(row, "DATA_LENGTH");
+        statistics.engine = get_opt_str(row, "ENGINE");
+        statistics.created_at = get_opt_metadata_string(row, "CREATE_TIME");
+        statistics.updated_at = get_opt_metadata_string(row, "UPDATE_TIME");
+        statistics.collation = get_opt_str(row, "TABLE_COLLATION");
+        statistics.row_format = get_opt_str(row, "ROW_FORMAT");
+        statistics.avg_row_length = get_opt_i64(row, "AVG_ROW_LENGTH");
+        statistics.max_data_length = get_opt_i64(row, "MAX_DATA_LENGTH");
+        statistics.check_time = get_opt_metadata_string(row, "CHECK_TIME");
+        statistics.index_length = get_opt_i64(row, "INDEX_LENGTH");
+        statistics.auto_increment = get_opt_unsigned_metadata_string(row, "AUTO_INCREMENT");
+        statistics.data_free = get_opt_i64(row, "DATA_FREE");
+    }
+    Some(statistics)
 }
 
 pub async fn list_table_objects_show(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
@@ -7096,8 +7506,9 @@ pub async fn kill_query_with_opts(
             "MySQL kill connection timed out".to_string()
         })?
         .map_err(|e| e.to_string())?;
-    tokio::time::timeout(timeout, conn.query_drop(format!("KILL QUERY {connection_id}")))
-        .await
+    let kill_result = tokio::time::timeout(timeout, conn.query_drop(format!("KILL QUERY {connection_id}"))).await;
+    disconnect_conn_best_effort(conn).await;
+    kill_result
         .map_err(|_| {
             log::warn!(
                 "[db:cancel:error] elapsed_ms={} timeout_ms={} error=MySQL KILL QUERY execution timed out",
@@ -7841,6 +8252,12 @@ async fn mysql_add_column_if_not_exists_fallback(
 /// Route it through the existing query path; MySQL servers that do not support
 /// the syntax still return their normal SQL syntax error.
 fn mysql_statement_returns_rows(sql: &str) -> bool {
+    // Every non-SELECT statement reaches this check, including multi-megabyte
+    // INSERTs from SQL dumps. Only parse the statements that can contain a
+    // RETURNING clause at all.
+    if !contains_ascii_case_insensitive(sql, "returning") {
+        return false;
+    }
     let Ok(statements) = Parser::parse_sql(&MySqlDialect {}, sql) else {
         return false;
     };
@@ -7974,7 +8391,30 @@ fn mysql_statistics_expression_is_unsupported(error: &mysql_async::Error) -> boo
             let message = server_error.message.to_ascii_lowercase();
             message.contains("column") && message.contains("expression") && message.contains("not found")
         }
+        mysql_async::Error::Server(server_error)
+            if server_error.code == 1105 && server_error.state.eq_ignore_ascii_case("HY000") =>
+        {
+            // Apache Doris / StarRocks report missing information_schema.STATISTICS
+            // columns through generic errCode=2 / MySQL error 1105 (HY000).
+            server_error.message.to_ascii_lowercase().contains("unknown column 'expression' in ")
+        }
         _ => false,
+    }
+}
+
+fn mysql_statistics_column_is_unsupported(error: &mysql_async::Error, columns: MySqlStatisticsColumns) -> bool {
+    match columns {
+        MySqlStatisticsColumns::Full => mysql_statistics_expression_is_unsupported(error),
+        MySqlStatisticsColumns::WithoutExpression => match error {
+            mysql_async::Error::Server(server_error) if server_error.code == 1054 => true,
+            mysql_async::Error::Server(server_error)
+                if server_error.code == 1105 && server_error.state.eq_ignore_ascii_case("HY000") =>
+            {
+                server_error.message.to_ascii_lowercase().contains("unknown column 'index_comment' in ")
+            }
+            _ => false,
+        },
+        MySqlStatisticsColumns::Minimal => false,
     }
 }
 
@@ -8035,23 +8475,27 @@ fn append_mysql_index_row(
 }
 
 pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
+    let mut current = pool.metadata_capabilities.statistics_columns();
     let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     // Column sets shrink in steps: MySQL 8+ carries both EXPRESSION and
-    // INDEX_COMMENT, 5.5–5.7 lost EXPRESSION, and 5.0/5.1 also lack
-    // INDEX_COMMENT — each gap reports ER_BAD_FIELD_ERROR (1054), so the
-    // query walks down the ladder until the server accepts it (#14021).
-    let column_sets = [(true, true), (false, true), (false, false)];
-    let mut last_unsupported_error: Option<mysql_async::Error> = None;
-    for (with_expression, with_comment) in column_sets {
+    // INDEX_COMMENT, 5.5–5.7 / Doris / StarRocks v5 omit EXPRESSION, and
+    // 5.0/5.1 also lack INDEX_COMMENT. Persist downgrades on the pool so later
+    // tables do not repeat doomed probes (#14021, #15528).
+    loop {
+        let (with_expression, with_comment) = current.flags();
         let sql = mysql_list_indexes_sql(database, table, with_expression, with_comment);
         let result = match conn.query_iter(&sql).await {
             Ok(result) => result,
-            Err(error) if mysql_statistics_expression_is_unsupported(&error) => {
-                log::debug!(
-                    "MySQL STATISTICS columns are unavailable (expression={with_expression}, comment={with_comment}), retrying with a smaller column set: {error}"
-                );
-                last_unsupported_error = Some(error);
-                continue;
+            Err(error) if mysql_statistics_column_is_unsupported(&error, current) => {
+                if let Some(next) = current.downgrade() {
+                    pool.metadata_capabilities.record_statistics_columns(next);
+                    log::debug!(
+                        "MySQL STATISTICS columns are unavailable (expression={with_expression}, comment={with_comment}), retrying with a smaller column set: {error}"
+                    );
+                    current = next;
+                    continue;
+                }
+                return Err(error.to_string());
             }
             Err(error) => return Err(error.to_string()),
         };
@@ -8084,10 +8528,6 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
         }
         return Ok(indexes);
     }
-    Err(match last_unsupported_error {
-        Some(error) => error.to_string(),
-        None => "MySQL STATISTICS metadata query failed on every known column set".to_string(),
-    })
 }
 
 pub async fn show_create_table_ddl(pool: &MySqlPool, database: &str, table: &str) -> Result<String, String> {
@@ -9091,7 +9531,11 @@ mod tests {
 
         assert!(is_result_set_query("INSERT INTO users (id) VALUES (1) RETURNING id", dialect));
         assert!(is_result_set_query("DELETE FROM users WHERE id = 1 RETURNING id", dialect));
+        assert!(is_result_set_query("insert into users (id) values (1) returning id", dialect));
+        assert!(is_result_set_query("REPLACE INTO users (id) VALUES (1) Returning id", dialect));
         assert!(!is_result_set_query("UPDATE users SET name = 'Ada'", dialect));
+        assert!(!is_result_set_query("INSERT INTO users (id) VALUES (1)", dialect));
+        assert!(!is_result_set_query("INSERT INTO notes (body) VALUES ('returning soon')", dialect));
     }
 
     #[test]
@@ -9596,6 +10040,54 @@ mod tests {
             vec![("active_users", "VIEW"), ("normal_table", "BASE TABLE"), ("t_order", "BASE TABLE")]
         );
         assert!(tables.iter().all(|table| table.comment.is_none()));
+    }
+
+    #[test]
+    fn show_rows_preserve_space_padded_table_identifiers() {
+        let rows = vec![
+            mysql_test_row(vec![Value::Bytes(b" orders ".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
+            mysql_test_row(vec![Value::Bytes(b"orders".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
+            mysql_test_row(vec![Value::Bytes(b"   ".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
+        ];
+
+        let tables = table_infos_from_show_rows(&rows);
+
+        assert_eq!(tables.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec![" orders ", "orders"]);
+    }
+
+    #[test]
+    fn object_statistics_rows_keep_space_padded_table_identifiers() {
+        let statistics_row = |name: &str, engine: &str, collation: &str| {
+            mysql_test_row_with_columns(
+                vec![
+                    Value::Bytes(name.as_bytes().to_vec()),
+                    Value::Int(7),
+                    Value::Int(4096),
+                    Value::Bytes(engine.as_bytes().to_vec()),
+                    Value::Bytes(collation.as_bytes().to_vec()),
+                ],
+                vec![
+                    Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(b"TABLE_NAME"),
+                    Column::new(ColumnType::MYSQL_TYPE_LONGLONG).with_name(b"TABLE_ROWS"),
+                    Column::new(ColumnType::MYSQL_TYPE_LONGLONG).with_name(b"TOTAL_BYTES"),
+                    Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(b"ENGINE"),
+                    Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(b"TABLE_COLLATION"),
+                ],
+            )
+        };
+        let rows = [
+            statistics_row(" orders ", "InnoDB", "utf8mb4_bin"),
+            statistics_row("orders", "MyISAM", "latin1_swedish_ci"),
+            statistics_row("   ", "InnoDB", "utf8mb4_bin"),
+        ];
+
+        let statistics = rows.iter().filter_map(|row| object_statistics_from_row(row, "app", true)).collect::<Vec<_>>();
+
+        assert_eq!(statistics.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(), vec![" orders ", "orders"]);
+        assert_eq!(statistics[0].estimated_rows, Some(7));
+        assert_eq!(statistics[0].total_bytes, Some(4096));
+        assert_eq!(statistics[0].engine.as_deref(), Some("InnoDB"));
+        assert_eq!(statistics[0].collation.as_deref(), Some("utf8mb4_bin"));
     }
 
     #[test]
@@ -11006,6 +11498,227 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mysql_proxy_rejecting_com_reset_connection_reuses_connections_and_sends_com_quit() {
+        use mysql_async::consts::CapabilityFlags as Caps;
+        use mysql_common::proto::MySerialize;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let com_quit = Arc::new(AtomicUsize::new(0));
+        let abrupt_eof = Arc::new(AtomicUsize::new(0));
+        let reset_cmds = Arc::new(AtomicUsize::new(0));
+
+        let accepted_c = Arc::clone(&accepted);
+        let com_quit_c = Arc::clone(&com_quit);
+        let abrupt_eof_c = Arc::clone(&abrupt_eof);
+        let reset_cmds_c = Arc::clone(&reset_cmds);
+        let server = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                accepted_c.fetch_add(1, AtomicOrdering::SeqCst);
+                let com_quit_h = Arc::clone(&com_quit_c);
+                let abrupt_eof_h = Arc::clone(&abrupt_eof_c);
+                let reset_cmds_h = Arc::clone(&reset_cmds_c);
+                handlers.spawn(async move {
+                    let greeting = mysql_common::packets::HandshakePacket::new(
+                        10,
+                        &b"8.0.19-magnus-proxy"[..],
+                        1,
+                        *b"12345678",
+                        Some(&b"abcdefghijkl\0"[..]),
+                        Caps::CLIENT_PROTOCOL_41
+                            | Caps::CLIENT_SECURE_CONNECTION
+                            | Caps::CLIENT_PLUGIN_AUTH
+                            | Caps::CLIENT_DEPRECATE_EOF,
+                        45,
+                        StatusFlags::SERVER_STATUS_AUTOCOMMIT,
+                        Some(&b"mysql_native_password"[..]),
+                    );
+                    let mut payload = Vec::new();
+                    greeting.serialize(&mut payload);
+                    mysql_tls_test_write(&mut socket, 0, &payload).await;
+                    let _handshake = mysql_tls_test_packet(&mut socket).await;
+                    mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+
+                    loop {
+                        let mut header = [0u8; 4];
+                        if socket.read_exact(&mut header).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        let len = u32::from_le_bytes([header[0], header[1], header[2], 0]) as usize;
+                        let mut body = vec![0u8; len];
+                        if socket.read_exact(&mut body).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        match body[0] {
+                            // COM_QUIT
+                            0x01 => {
+                                com_quit_h.fetch_add(1, AtomicOrdering::SeqCst);
+                                break;
+                            }
+                            // COM_RESET_CONNECTION: simulate JumpServer Magnus / go-mysql rejection.
+                            0x1f => {
+                                reset_cmds_h.fetch_add(1, AtomicOrdering::SeqCst);
+                                let mut err = vec![0xff, 0x51, 0x04]; // 1105 (0x0451)
+                                err.extend_from_slice(b"#HY000command 31 is not supported now");
+                                mysql_tls_test_write(&mut socket, 1, &err).await;
+                            }
+                            _ => {
+                                mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                            }
+                        }
+                    }
+                });
+            }
+            while handlers.join_next().await.is_some() {}
+        });
+
+        let url = format!(
+            "mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled&max_allowed_packet=65536&wait_timeout=60&sessionVariables=group_concat_max_len%3D1024"
+        );
+        let pool = connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(3), 3)
+            .await
+            .expect("shared pool should fall back when COM_RESET_CONNECTION is rejected");
+
+        for _ in 0..5 {
+            // Wait for the background Recycler to place the returned connection back
+            // into `available` so sequential queries deterministically reuse it.
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while pool.metrics().connections_in_pool.load(AtomicOrdering::Relaxed) == 0 && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let mut conn = pool.get_conn().await.expect("checkout pooled connection");
+            conn.query_drop("DO 1").await.expect("query succeeds on reused connection");
+            drop(conn);
+        }
+        pool.disconnect().await.expect("pool disconnect succeeds");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        server.abort();
+
+        // 1 probe connection (rejected COM_RESET_CONNECTION and closed with COM_QUIT)
+        // + 1 reused pool connection (no COM_RESET_CONNECTION, closed with COM_QUIT).
+        assert_eq!(reset_cmds.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(accepted.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(com_quit.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(abrupt_eof.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn mysql_server_supporting_com_reset_connection_keeps_reset_enabled() {
+        use mysql_async::consts::CapabilityFlags as Caps;
+        use mysql_common::proto::MySerialize;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let com_quit = Arc::new(AtomicUsize::new(0));
+        let abrupt_eof = Arc::new(AtomicUsize::new(0));
+        let reset_cmds = Arc::new(AtomicUsize::new(0));
+
+        let accepted_c = Arc::clone(&accepted);
+        let com_quit_c = Arc::clone(&com_quit);
+        let abrupt_eof_c = Arc::clone(&abrupt_eof);
+        let reset_cmds_c = Arc::clone(&reset_cmds);
+        let server = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                accepted_c.fetch_add(1, AtomicOrdering::SeqCst);
+                let com_quit_h = Arc::clone(&com_quit_c);
+                let abrupt_eof_h = Arc::clone(&abrupt_eof_c);
+                let reset_cmds_h = Arc::clone(&reset_cmds_c);
+                handlers.spawn(async move {
+                    let greeting = mysql_common::packets::HandshakePacket::new(
+                        10,
+                        &b"8.0.19"[..],
+                        1,
+                        *b"12345678",
+                        Some(&b"abcdefghijkl\0"[..]),
+                        Caps::CLIENT_PROTOCOL_41
+                            | Caps::CLIENT_SECURE_CONNECTION
+                            | Caps::CLIENT_PLUGIN_AUTH
+                            | Caps::CLIENT_DEPRECATE_EOF,
+                        45,
+                        StatusFlags::SERVER_STATUS_AUTOCOMMIT,
+                        Some(&b"mysql_native_password"[..]),
+                    );
+                    let mut payload = Vec::new();
+                    greeting.serialize(&mut payload);
+                    mysql_tls_test_write(&mut socket, 0, &payload).await;
+                    let _handshake = mysql_tls_test_packet(&mut socket).await;
+                    mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+
+                    loop {
+                        let mut header = [0u8; 4];
+                        if socket.read_exact(&mut header).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        let len = u32::from_le_bytes([header[0], header[1], header[2], 0]) as usize;
+                        let mut body = vec![0u8; len];
+                        if socket.read_exact(&mut body).await.is_err() {
+                            abrupt_eof_h.fetch_add(1, AtomicOrdering::SeqCst);
+                            break;
+                        }
+                        match body[0] {
+                            0x01 => {
+                                com_quit_h.fetch_add(1, AtomicOrdering::SeqCst);
+                                break;
+                            }
+                            0x1f => {
+                                reset_cmds_h.fetch_add(1, AtomicOrdering::SeqCst);
+                                mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                            }
+                            _ => {
+                                mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                            }
+                        }
+                    }
+                });
+            }
+            while handlers.join_next().await.is_some() {}
+        });
+
+        let url = format!(
+            "mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled&max_allowed_packet=65536&wait_timeout=60&sessionVariables=group_concat_max_len%3D1024"
+        );
+        let pool = connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(3), 3)
+            .await
+            .expect("shared pool connects");
+
+        for _ in 0..2 {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while pool.metrics().connections_in_pool.load(AtomicOrdering::Relaxed) == 0 && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let mut conn = pool.get_conn().await.expect("checkout pooled connection");
+            conn.query_drop("DO 1").await.expect("query succeeds");
+            drop(conn);
+        }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while pool.metrics().connections_in_pool.load(AtomicOrdering::Relaxed) == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        pool.disconnect().await.expect("pool disconnect succeeds");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        server.abort();
+
+        assert_eq!(accepted.load(AtomicOrdering::SeqCst), 1);
+        // 1 probe reset during connect + 1 reset per query return (2 queries).
+        assert_eq!(reset_cmds.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(com_quit.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(abrupt_eof.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn mysql_tls_strict_modes_never_retry_in_plaintext() {
         for mode in ["required", "verify_ca", "verify_identity"] {
             let (result, mut servers) = mysql_tls_test_connect(vec![MysqlTlsTestReply::LegacyTls], mode).await;
@@ -11487,6 +12200,398 @@ mod tests {
         assert!(mysql_statistics_expression_is_unsupported(&unsupported));
         assert!(!mysql_statistics_expression_is_unsupported(&unrelated));
         assert!(!mysql_statistics_expression_is_unsupported(&wrong_state));
+    }
+
+    #[test]
+    fn mysql_index_metadata_accepts_doris_unknown_expression_and_comment_errors() {
+        let doris_expression = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1105,
+            message: "errCode = 2, detailMessage = Unknown column 'EXPRESSION' in 'table list' in PROJECT clause"
+                .to_string(),
+            state: "HY000".to_string(),
+        });
+        let doris_index_comment = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1105,
+            message: "errCode = 2, detailMessage = Unknown column 'INDEX_COMMENT' in 'table list' in PROJECT clause"
+                .to_string(),
+            state: "HY000".to_string(),
+        });
+        let doris_unrelated = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1105,
+            message: "errCode = 2, detailMessage = Unknown column 'INDEX_NAME' in 'table list' in PROJECT clause"
+                .to_string(),
+            state: "HY000".to_string(),
+        });
+
+        assert!(mysql_statistics_expression_is_unsupported(&doris_expression));
+        assert!(mysql_statistics_column_is_unsupported(&doris_expression, MySqlStatisticsColumns::Full));
+        assert!(!mysql_statistics_column_is_unsupported(&doris_expression, MySqlStatisticsColumns::WithoutExpression));
+        assert!(mysql_statistics_column_is_unsupported(
+            &doris_index_comment,
+            MySqlStatisticsColumns::WithoutExpression
+        ));
+        assert!(!mysql_statistics_column_is_unsupported(&doris_index_comment, MySqlStatisticsColumns::Full));
+        assert!(!mysql_statistics_column_is_unsupported(&doris_index_comment, MySqlStatisticsColumns::Minimal));
+        assert!(!mysql_statistics_expression_is_unsupported(&doris_unrelated));
+        assert!(!mysql_statistics_column_is_unsupported(&doris_unrelated, MySqlStatisticsColumns::Full));
+        assert!(!mysql_statistics_column_is_unsupported(&doris_unrelated, MySqlStatisticsColumns::WithoutExpression));
+    }
+
+    #[test]
+    fn mysql_pool_doris_metadata_defaults_configure_routines_and_statistics() {
+        let pool = MySqlPool::new("mysql://root@127.0.0.1:9030/app", 1);
+        assert!(!pool.metadata_capabilities.completion_compatibility().omit_escape);
+        assert!(!pool.metadata_capabilities.completion_compatibility().use_dtd_identifier);
+        assert_eq!(pool.metadata_capabilities.statistics_columns(), MySqlStatisticsColumns::Full);
+
+        pool.set_doris_metadata_defaults();
+        let cloned = pool.clone();
+        assert!(!cloned.metadata_capabilities.completion_compatibility().omit_escape);
+        assert!(cloned.metadata_capabilities.completion_compatibility().use_dtd_identifier);
+        assert_eq!(cloned.metadata_capabilities.statistics_columns(), MySqlStatisticsColumns::WithoutExpression);
+    }
+
+    fn mysql_test_lenenc_str(buf: &mut Vec<u8>, s: &[u8]) {
+        buf.push(s.len() as u8);
+        buf.extend_from_slice(s);
+    }
+
+    fn mysql_test_column_def(name: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        mysql_test_lenenc_str(&mut buf, b"def");
+        mysql_test_lenenc_str(&mut buf, b"information_schema");
+        mysql_test_lenenc_str(&mut buf, b"t");
+        mysql_test_lenenc_str(&mut buf, b"t");
+        mysql_test_lenenc_str(&mut buf, name.as_bytes());
+        mysql_test_lenenc_str(&mut buf, name.as_bytes());
+        buf.push(0x0c); // length of fixed-length fields
+        buf.extend_from_slice(&33u16.to_le_bytes()); // utf8_general_ci
+        buf.extend_from_slice(&255u32.to_le_bytes()); // column length
+        buf.push(ColumnType::MYSQL_TYPE_VAR_STRING as u8);
+        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+        buf.push(0); // decimals
+        buf.extend_from_slice(&0u16.to_le_bytes()); // filler
+        buf
+    }
+
+    fn mysql_test_err_packet(code: u16, state: &str, message: &str) -> Vec<u8> {
+        let mut err = vec![0xff];
+        err.extend_from_slice(&code.to_le_bytes());
+        err.push(b'#');
+        err.extend_from_slice(state.as_bytes());
+        err.extend_from_slice(message.as_bytes());
+        err
+    }
+
+    async fn mysql_doris_metadata_test_server(listener: tokio::net::TcpListener) -> Vec<String> {
+        use mysql_async::consts::CapabilityFlags as Caps;
+        use mysql_common::proto::MySerialize;
+
+        let mut recorded_queries = Vec::new();
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let greeting = mysql_common::packets::HandshakePacket::new(
+            10,
+            &b"5.7.99-Doris-3.1.1"[..],
+            1,
+            *b"12345678",
+            Some(&b"abcdefghijkl\0"[..]),
+            Caps::CLIENT_PROTOCOL_41
+                | Caps::CLIENT_SECURE_CONNECTION
+                | Caps::CLIENT_PLUGIN_AUTH
+                | Caps::CLIENT_DEPRECATE_EOF,
+            33,
+            StatusFlags::SERVER_STATUS_AUTOCOMMIT,
+            Some(&b"mysql_native_password"[..]),
+        );
+        let mut payload = Vec::new();
+        greeting.serialize(&mut payload);
+        mysql_tls_test_write(&mut socket, 0, &payload).await;
+        let auth = mysql_tls_test_packet(&mut socket).await;
+        let caps = Caps::from_bits_truncate(u32::from_le_bytes(auth[..4].try_into().unwrap()));
+        let deprecate_eof = caps.contains(Caps::CLIENT_DEPRECATE_EOF);
+        mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+
+        loop {
+            let command = mysql_tls_test_packet(&mut socket).await;
+            match command.as_slice().first().copied() {
+                None | Some(0x01) => break, // COM_QUIT
+                Some(0x03) => {
+                    // COM_QUERY
+                    let sql = String::from_utf8_lossy(&command[1..]).to_string();
+                    recorded_queries.push(sql.clone());
+                    let upper = sql.to_ascii_uppercase();
+                    if upper.contains("INFORMATION_SCHEMA.STATISTICS") && upper.contains("EXPRESSION") {
+                        let err = mysql_test_err_packet(
+                            1105,
+                            "HY000",
+                            "errCode = 2, detailMessage = Unknown column 'EXPRESSION' in 'table list' in PROJECT clause",
+                        );
+                        mysql_tls_test_write(&mut socket, 1, &err).await;
+                    } else if upper.contains("INFORMATION_SCHEMA.ROUTINES") && upper.contains("DATA_TYPE AS DATA_TYPE")
+                    {
+                        let err = mysql_test_err_packet(
+                            1105,
+                            "HY000",
+                            "errCode = 2, detailMessage = Unknown column 'DATA_TYPE' in 'table list' in PROJECT clause",
+                        );
+                        mysql_tls_test_write(&mut socket, 1, &err).await;
+                    } else {
+                        // Return a valid empty 1-column result set.
+                        mysql_tls_test_write(&mut socket, 1, &[1]).await;
+                        mysql_tls_test_write(&mut socket, 2, &mysql_test_column_def("dummy")).await;
+                        if deprecate_eof {
+                            mysql_tls_test_write(&mut socket, 3, &[0xfe, 0, 0, 2, 0, 0, 0]).await;
+                        } else {
+                            mysql_tls_test_write(&mut socket, 3, &[0xfe, 0, 0, 2, 0]).await;
+                            mysql_tls_test_write(&mut socket, 4, &[0xfe, 0, 0, 2, 0]).await;
+                        }
+                    }
+                }
+                _ => {
+                    mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                }
+            }
+        }
+        recorded_queries
+    }
+
+    #[tokio::test]
+    async fn doris_seeded_pool_never_sends_expression_or_routine_data_type_columns() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(mysql_doris_metadata_test_server(listener));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+        pool.set_doris_metadata_defaults();
+
+        let indexes = list_indexes(&pool, "boyaa_eagle_10036", "events").await.unwrap();
+        assert!(indexes.is_empty());
+
+        let routine_req: CompletionAssistantRequest = serde_json::from_value(serde_json::json!({
+            "connection_id": "doris-1",
+            "database": "boyaa_eagle_10036",
+            "schema": "boyaa_eagle_10036",
+            "object_kinds": ["function"],
+            "mask": "ev",
+            "max_results": 50,
+            "match_mode": "prefix"
+        }))
+        .unwrap();
+        let routine_res = completion_assistant_search(&pool, &routine_req).await.unwrap();
+        assert!(routine_res.fallback_used);
+
+        let table_req: CompletionAssistantRequest = serde_json::from_value(serde_json::json!({
+            "connection_id": "doris-1",
+            "database": "boyaa_eagle_10036",
+            "schema": "boyaa_eagle_10036",
+            "object_kinds": ["table"],
+            "mask": "ev",
+            "max_results": 50,
+            "match_mode": "prefix"
+        }))
+        .unwrap();
+        let table_res = completion_assistant_search(&pool, &table_req).await.unwrap();
+        assert!(!table_res.fallback_used);
+
+        pool.disconnect().await.unwrap();
+        let queries = server.await.unwrap();
+        assert!(
+            queries.iter().all(|sql| !sql.contains("EXPRESSION")),
+            "Doris-seeded pool must never query STATISTICS.EXPRESSION: {queries:?}"
+        );
+        assert!(
+            queries.iter().all(|sql| !sql.contains("DATA_TYPE AS data_type")),
+            "Doris-seeded pool must never query ROUTINES.DATA_TYPE: {queries:?}"
+        );
+        assert!(
+            queries.iter().any(|sql| sql.contains("DTD_IDENTIFIER AS data_type")),
+            "Doris-seeded pool must query ROUTINES.DTD_IDENTIFIER directly: {queries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_mysql_pool_caches_doris_statistics_and_routine_fallbacks_across_calls() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(mysql_doris_metadata_test_server(listener));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+
+        // First call discovers missing EXPRESSION; second call reuses cached capability.
+        list_indexes(&pool, "boyaa_eagle_10036", "events").await.unwrap();
+        list_indexes(&pool, "boyaa_eagle_10036", "orders").await.unwrap();
+
+        let routine_req: CompletionAssistantRequest = serde_json::from_value(serde_json::json!({
+            "connection_id": "plain-mysql-doris",
+            "database": "boyaa_eagle_10036",
+            "schema": "boyaa_eagle_10036",
+            "object_kinds": ["function"],
+            "mask": "ev",
+            "max_results": 50,
+            "match_mode": "prefix"
+        }))
+        .unwrap();
+        let first_routines = completion_assistant_search(&pool, &routine_req).await.unwrap();
+        assert!(first_routines.fallback_used);
+        let second_routines = completion_assistant_search(&pool, &routine_req).await.unwrap();
+        assert!(second_routines.fallback_used);
+
+        // Table-only lookup after routine fallback must still report fallback_used = false.
+        let table_req: CompletionAssistantRequest = serde_json::from_value(serde_json::json!({
+            "connection_id": "plain-mysql-doris",
+            "database": "boyaa_eagle_10036",
+            "schema": "boyaa_eagle_10036",
+            "object_kinds": ["table"],
+            "mask": "ev",
+            "max_results": 50,
+            "match_mode": "prefix"
+        }))
+        .unwrap();
+        let table_res = completion_assistant_search(&pool, &table_req).await.unwrap();
+        assert!(!table_res.fallback_used);
+
+        pool.disconnect().await.unwrap();
+        let queries = server.await.unwrap();
+        let expression_probes = queries.iter().filter(|sql| sql.contains("EXPRESSION")).count();
+        let routine_data_type_probes = queries.iter().filter(|sql| sql.contains("DATA_TYPE AS data_type")).count();
+        assert_eq!(expression_probes, 1, "STATISTICS.EXPRESSION must be probed at most once per pool: {queries:?}");
+        assert_eq!(routine_data_type_probes, 1, "ROUTINES.DATA_TYPE must be probed at most once per pool: {queries:?}");
+    }
+
+    #[tokio::test]
+    async fn doris_list_indexes_never_queries_statistics_expression_even_without_preseed() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(mysql_doris_metadata_test_server(listener));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+
+        // Call doris::list_indexes directly on an unseeded pool; SHOW CREATE TABLE returns
+        // empty rows in this mock so the call returns a DDL error, while STATISTICS must
+        // still never request EXPRESSION.
+        let _ = crate::doris::list_indexes(&pool, "boyaa_eagle_10036", "events").await;
+
+        pool.disconnect().await.unwrap();
+        let queries = server.await.unwrap();
+        assert!(
+            queries.iter().any(|sql| sql.contains("information_schema.STATISTICS")),
+            "expected STATISTICS query: {queries:?}"
+        );
+        assert!(
+            queries.iter().all(|sql| !sql.contains("EXPRESSION")),
+            "doris::list_indexes must never query STATISTICS.EXPRESSION: {queries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn starrocks_list_indexes_preserves_the_initial_statistics_expression_probe() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(mysql_doris_metadata_test_server(listener));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+
+        // The shared fallback requests expression metadata when the engine is
+        // unseeded, then remembers the missing-column result for later calls.
+        for _ in 0..2 {
+            let _ = crate::starrocks::list_indexes(&pool, "app", "events").await;
+        }
+        pool.disconnect().await.unwrap();
+
+        let queries = server.await.unwrap();
+        let probes: Vec<_> = queries.iter().filter(|sql| sql.contains("information_schema.STATISTICS")).collect();
+        assert_eq!(probes.len(), 3, "expected initial probe and two fallback reads: {queries:?}");
+        assert!(probes[0].contains("EXPRESSION"));
+        assert!(probes[1..].iter().all(|sql| !sql.contains("EXPRESSION")));
+    }
+
+    #[tokio::test]
+    async fn mysql_pool_caches_completion_escape_fallback_across_requests() {
+        use mysql_async::consts::CapabilityFlags as Caps;
+        use mysql_common::proto::MySerialize;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut recorded_queries = Vec::new();
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let greeting = mysql_common::packets::HandshakePacket::new(
+                10,
+                &b"5.7.99-Doris-legacy"[..],
+                1,
+                *b"12345678",
+                Some(&b"abcdefghijkl\0"[..]),
+                Caps::CLIENT_PROTOCOL_41
+                    | Caps::CLIENT_SECURE_CONNECTION
+                    | Caps::CLIENT_PLUGIN_AUTH
+                    | Caps::CLIENT_DEPRECATE_EOF,
+                33,
+                StatusFlags::SERVER_STATUS_AUTOCOMMIT,
+                Some(&b"mysql_native_password"[..]),
+            );
+            let mut payload = Vec::new();
+            greeting.serialize(&mut payload);
+            mysql_tls_test_write(&mut socket, 0, &payload).await;
+            let auth = mysql_tls_test_packet(&mut socket).await;
+            let caps = Caps::from_bits_truncate(u32::from_le_bytes(auth[..4].try_into().unwrap()));
+            let deprecate_eof = caps.contains(Caps::CLIENT_DEPRECATE_EOF);
+            mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+
+            loop {
+                let command = mysql_tls_test_packet(&mut socket).await;
+                match command.as_slice().first().copied() {
+                    None | Some(0x01) => break,
+                    Some(0x03) => {
+                        let sql = String::from_utf8_lossy(&command[1..]).to_string();
+                        recorded_queries.push(sql.clone());
+                        if sql.contains("ESCAPE") {
+                            let err = mysql_test_err_packet(
+                                1105,
+                                "HY000",
+                                "errCode = 2, detailMessage = mismatched input 'ESCAPE' expecting {<EOF>, ';'}",
+                            );
+                            mysql_tls_test_write(&mut socket, 1, &err).await;
+                        } else {
+                            mysql_tls_test_write(&mut socket, 1, &[1]).await;
+                            mysql_tls_test_write(&mut socket, 2, &mysql_test_column_def("dummy")).await;
+                            if deprecate_eof {
+                                mysql_tls_test_write(&mut socket, 3, &[0xfe, 0, 0, 2, 0, 0, 0]).await;
+                            } else {
+                                mysql_tls_test_write(&mut socket, 3, &[0xfe, 0, 0, 2, 0]).await;
+                                mysql_tls_test_write(&mut socket, 4, &[0xfe, 0, 0, 2, 0]).await;
+                            }
+                        }
+                    }
+                    _ => {
+                        mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    }
+                }
+            }
+            recorded_queries
+        });
+
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled");
+        let pool = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await.unwrap();
+        let req: CompletionAssistantRequest = serde_json::from_value(serde_json::json!({
+            "connection_id": "doris-legacy-escape",
+            "database": "app",
+            "schema": "app",
+            "object_kinds": ["table"],
+            "mask": "ev",
+            "max_results": 50,
+            "match_mode": "prefix"
+        }))
+        .unwrap();
+
+        let first = completion_assistant_search(&pool, &req).await.unwrap();
+        assert!(first.fallback_used);
+        let second = completion_assistant_search(&pool, &req).await.unwrap();
+        assert!(second.fallback_used);
+
+        pool.disconnect().await.unwrap();
+        let queries = server.await.unwrap();
+        let escape_probes = queries.iter().filter(|sql| sql.contains("ESCAPE")).count();
+        assert_eq!(escape_probes, 1, "LIKE ESCAPE must be probed at most once per pool: {queries:?}");
     }
 
     #[test]
@@ -12590,9 +13695,43 @@ mod tests {
     }
 
     #[test]
-    fn mysql_setup_queries_apply_jdbc_time_zone_aliases() {
+    fn mysql_setup_queries_do_not_force_jdbc_time_zone_without_session_flag() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?serverTimezone=GMT%2B8", &[]),
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?connectionTimeZone=LOCAL", &[]),
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
+        assert_eq!(
+            mysql_setup_queries(
+                "mysql://host:3306/db?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=false",
+                &[]
+            ),
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_apply_jdbc_time_zone_when_forced_to_session() {
+        assert_eq!(
+            mysql_setup_queries(
+                "mysql://host:3306/db?serverTimezone=GMT%2B8&forceConnectionTimeZoneToSession=true",
+                &[]
+            ),
             vec![
                 "USE `db`",
                 "SET time_zone = '+08:00'",
@@ -12601,7 +13740,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?connectionTimeZone=UTC", &[]),
+            mysql_setup_queries(
+                "mysql://host:3306/db?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true",
+                &[]
+            ),
             vec![
                 "USE `db`",
                 "SET time_zone = '+00:00'",
@@ -12609,15 +13751,33 @@ mod tests {
                 "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
+        assert_eq!(
+            mysql_setup_queries(
+                "mysql://host:3306/db?connectionTimeZone=SERVER&forceConnectionTimeZoneToSession=true",
+                &[]
+            ),
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
     }
 
     #[test]
-    fn mysql_setup_queries_apply_go_loc_when_no_explicit_time_zone_exists() {
+    fn mysql_setup_queries_do_not_apply_go_loc_to_session_time_zone() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?parseTime=True&loc=Local", &[]),
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?loc=Asia%2FShanghai", &[]),
             vec![
                 "USE `db`",
-                "SET time_zone = 'Asia/Shanghai'",
                 "SET NAMES utf8mb4",
                 "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]

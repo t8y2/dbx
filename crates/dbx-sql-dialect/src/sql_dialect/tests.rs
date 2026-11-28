@@ -285,6 +285,17 @@ fn maps_table_pagination_strategy_by_database_type() {
         TablePaginationStrategy::Rownum
     );
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Jdbc)), TablePaginationStrategy::AgentMaxRows);
+    for trino_family in [DatabaseType::Trino, DatabaseType::PrestoSql] {
+        assert_eq!(table_pagination_strategy(Some(trino_family)), TablePaginationStrategy::FetchFirst);
+        assert_eq!(
+            pagination_strategy(Some(trino_family), PaginationContext::BoundedRead),
+            TablePaginationStrategy::FetchFirst
+        );
+        assert_eq!(
+            pagination_strategy(Some(trino_family), PaginationContext::UserQuery),
+            TablePaginationStrategy::LimitOffset
+        );
+    }
     // Both Spanner dialects support `LIMIT n OFFSET m`; pin the fallback.
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Spanner)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(None), TablePaginationStrategy::LimitOffset);
@@ -341,6 +352,28 @@ fn oscar_table_data_pages_use_one_limit_pagination_form_without_rownum() {
         "SELECT \"ID\", \"NAME\" FROM \"SYSDBA\".\"USERS\" ORDER BY \"ID\" ASC LIMIT 100 OFFSET 100;"
     );
     assert!(!second_page.to_ascii_uppercase().contains("ROWNUM"), "{second_page}");
+}
+
+#[test]
+fn trino_table_data_pages_put_offset_before_the_row_limit() {
+    // Trino and PrestoSQL reject `LIMIT n OFFSET m` ("mismatched input
+    // 'OFFSET'"), so page 2 of the table data grid failed (#15231).
+    for database_type in [DatabaseType::Trino, DatabaseType::PrestoSql] {
+        let options = TableDataSelectSqlOptions {
+            database_type: Some(database_type),
+            schema: Some("demo".to_string()),
+            table_name: "orders".to_string(),
+            limit: Some(100),
+            offset: Some(0),
+            ..Default::default()
+        };
+
+        let first_page = build_table_data_select_sql(options.clone());
+        assert_eq!(first_page, "SELECT * FROM \"demo\".\"orders\" FETCH FIRST 100 ROWS ONLY");
+
+        let second_page = build_table_data_select_sql(TableDataSelectSqlOptions { offset: Some(100), ..options });
+        assert_eq!(second_page, "SELECT * FROM \"demo\".\"orders\" OFFSET 100 ROWS FETCH FIRST 100 ROWS ONLY");
+    }
 }
 
 #[test]
@@ -1728,6 +1761,34 @@ fn iris_table_data_sql_quotes_only_delimited_object_names() {
     });
 
     assert_eq!(sql, "SELECT TOP 25 * FROM \"App Schema\".\"Patient Record\"");
+}
+
+#[test]
+fn tdengine_stable_data_tab_read_without_condition_returns_structure_only() {
+    let stable = |inject: bool, where_input: Option<&str>, table_type: &str| {
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            schema: Some("test_db".to_string()),
+            table_name: "meters".to_string(),
+            table_type: Some(table_type.to_string()),
+            limit: Some(100),
+            where_input: where_input.map(str::to_string),
+            inject_default_time_series_where: inject,
+            ..Default::default()
+        })
+    };
+    // Data-tab read of a super table with no condition: no rows, so no full scan.
+    assert_eq!(stable(true, None, "STABLE"), "SELECT tbname, * FROM `test_db`.`meters` LIMIT 0;");
+    assert_eq!(stable(true, Some("  "), "SUPER TABLE"), "SELECT tbname, * FROM `test_db`.`meters` LIMIT 0;");
+    // A user-supplied condition restores the normal page.
+    assert_eq!(
+        stable(true, Some("location = 'beijing'"), "STABLE"),
+        "SELECT tbname, * FROM `test_db`.`meters` WHERE (location = 'beijing') LIMIT 100;"
+    );
+    // Sampling/export callers do not opt in and keep reading the table.
+    assert_eq!(stable(false, None, "STABLE"), "SELECT tbname, * FROM `test_db`.`meters` LIMIT 100;");
+    // Child and ordinary tables are bounded by their own data and stay unaffected.
+    assert_eq!(stable(true, None, "TABLE"), "SELECT * FROM `test_db`.`meters` LIMIT 100;");
 }
 
 #[test]

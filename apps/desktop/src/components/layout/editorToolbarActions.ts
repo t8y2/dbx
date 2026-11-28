@@ -43,6 +43,7 @@ export interface EditorToolbarActions {
   saveSql(tabId: string): void;
   saveRoutineToDatabase(tabId: string): void;
   saveAllTabs(tabIds?: string[]): void;
+  openRecentTables?(): void;
   openSqlFile(): void;
   importResultArchive(): void;
   pasteSqlInCondition(): void;

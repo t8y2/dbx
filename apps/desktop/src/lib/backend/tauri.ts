@@ -1,9 +1,12 @@
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
+import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
+import type { MongoDeleteId } from "@/lib/mongo/mongoDocumentValues";
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
 import type { AppThemeMode } from "@/lib/app/appTheme";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { notifySavedSqlLibraryChanged } from "@/lib/savedSql/savedSqlLibraryEvents";
-import { Channel } from "@tauri-apps/api/core";
+import { Channel, Resource } from "@tauri-apps/api/core";
 import { SnapshotCompletionError, unwrapSnapshotCompletion } from "@/lib/export/snapshotCompletion";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
@@ -16,6 +19,7 @@ import { functionDiffsToWire, functionInfoFromWire, schemaDiffPreparationFromWir
 import type { OracleRoutineSnapshot, OracleRoutineOperation, OracleRoutineOperationObservation, OracleRoutineSaveInput, OracleRoutinePlanInput, OracleRoutinePlan, OracleRoutineReadOptions, OracleRoutineIdentity } from "@/types/schemaDiff";
 import type { PlDebugBootstrap, PlDebugSessionRef, PlDebugStartIntent, PlDebugOperationRequest, PlDebugReadRequest, PlDebugReceipt, PlDebugSnapshot } from "@/lib/debug/plDebugProtocol";
 import type { PlDebugInspectRequest, PlDebugInspectResult, PlDebugCompileIntent, PlDebugCompileRef, PlDebugCompileReceipt } from "@/lib/debug/plDebugProtocol";
+import { HOST_OBSERVATION_EVENT, HOST_OBSERVATION_GAP_EVENT, type PluginHostObservationEvent, type PluginHostObservationGap } from "@/types/pluginObservation";
 
 export function plDebugBootstrap(): Promise<PlDebugBootstrap> {
   return invoke("pl_debug_bootstrap");
@@ -237,7 +241,7 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { OracleTriggerSqlInput, PreparedOracleTriggerSql } from "@/lib/database/oracleTriggerSql";
 import type { OracleTableReferenceRewriteInput, OracleViewRenameSource, OracleViewRenameSourceInput, OracleViewRenameSourceReview } from "@/types/database";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
-import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
+import type { BuildRenameObjectSqlOptions, MysqlRenameDatabaseSqlOptions, MysqlRenameDatabaseStatements } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
 import type {
   DatabaseNameSqlOptions,
@@ -622,6 +626,10 @@ export interface QueryPaginationExecutionPlanOptions {
   /** Optimizer hint injected into the generated count (dbx_count) and page (dbx_page) SQL.
    *  Example: GaussDB parallel execution hint: + set(query_dop 8). */
   executionHint?: string;
+  /** Connected server version (e.g. ShardingSphere-Proxy) used to avoid proxy-unsafe SQL rewrites. */
+  serverVersion?: string;
+  /** Connected server comment (`@@version_comment`), used alongside `serverVersion` for proxy detection. */
+  serverComment?: string;
 }
 
 export interface QueryPaginationExecutionPlan {
@@ -848,6 +856,7 @@ export async function aiAgentStream(
   _signal?: AbortSignal,
   selectedDatabases?: string[],
   allowSkills = false,
+  pluginConnectionIds: string[] = [],
 ): Promise<string> {
   const unlisten: UnlistenFn = await listen<TauriAgentEvent>("ai-agent-event", (event) => {
     const payload = event.payload;
@@ -873,6 +882,7 @@ export async function aiAgentStream(
       confirmedSchema,
       selectedDatabases,
       allowSkills,
+      pluginConnectionIds,
     });
   } catch (e) {
     unlisten();
@@ -1381,7 +1391,7 @@ export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassp
   return invoke("snippet_sync_inspect", { config, snippetPassphrase, secretsPassphrase });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string, automatic = false): Promise<SnippetSyncSummary> {
   return invoke("snippet_sync_upload", {
     config,
     editorSettings,
@@ -1389,7 +1399,8 @@ export async function snippetSyncUpload(config: SnippetSyncConfig, editorSetting
     includeSecrets,
     secretsPassphrase,
     selection,
-    expectedRemoteContentHash,
+    expectedRemoteContentHash: expectedRemoteContentHash ?? (config.snippetId?.trim() ? readSnippetRemoteContentHash(config.provider, config.instanceUrl, config.snippetId) : undefined),
+    automatic,
   });
 }
 
@@ -1514,6 +1525,18 @@ export async function renameSqlFileInFolder(rootPath: string, filePath: string, 
 
 export async function deleteSqlFileInFolder(rootPath: string, filePath: string): Promise<void> {
   return invoke("delete_sql_file_in_folder", { rootPath, filePath });
+}
+
+export async function moveSqlFileInFolder(rootPath: string, filePath: string, targetRootPath: string, directoryPath: string): Promise<string> {
+  return invoke("move_sql_file_in_folder", { rootPath, filePath, targetRootPath, directoryPath });
+}
+
+export async function watchSqlFileFolder(folderPath: string, recursive: boolean, onChange: () => void): Promise<() => Promise<void>> {
+  const channel = new Channel<null>();
+  channel.onmessage = onChange;
+  const rid = await invoke<number>("watch_sql_file_folder", { folderPath, recursive, onChange: channel });
+  const resource = new Resource(rid);
+  return () => resource.close();
 }
 
 export async function createSqlFolderInFolder(rootPath: string, directoryPath: string, folderName: string): Promise<string> {
@@ -1643,6 +1666,17 @@ export interface AiConversation {
    *  the record keeps the ENTRY the user chose, not the action a send routed
    *  to. Same semantics as `assistantMode`. */
   assistantAction?: string;
+  /** Plugin connections the user attached to this conversation's agent runs.
+   *  Plugin tools are scoped to these open connections (plus the target when it
+   *  is itself a plugin connection); absent/empty means nothing is attached,
+   *  which is the safe default for records written before this field existed. */
+  pluginConnectionIds?: string[];
+  /** Pinned to the top of the history list (#14226). Absent means unpinned, so
+   *  legacy records and records written before the field existed load fine. */
+  pinned?: boolean;
+  /** When the user pinned it. Deliberately separate from `updatedAt` so pinning
+   *  an old conversation does not make it the restore-last target. */
+  pinnedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -1672,6 +1706,21 @@ export interface AiRun {
 
 export async function saveAiConversation(conversation: AiConversation): Promise<void> {
   return invoke("save_ai_conversation", { conversation });
+}
+
+/** Patches only the plugin attachment list, so an old transcript snapshot is
+ *  never re-written over newer messages (attachment toggles + repair path). */
+export async function updateAiConversationPluginConnections(conversationId: string, pluginConnectionIds: string[]): Promise<void> {
+  return invoke("update_ai_conversation_plugin_connections", { conversationId, pluginConnectionIds });
+}
+
+/** Writes only the pin columns (#14226). Pinning is a property toggle, so it must
+ *  not rewrite the transcript: a whole-record write races every streaming
+ *  snapshot and would make a failed pin stick on disk via the snapshot path.
+ *  Resolves `false` when the conversation no longer exists, so the caller drops
+ *  its stale row instead of confirming a pin nothing on disk carries. */
+export async function saveAiConversationPin(id: string, pinned: boolean, pinnedAt?: string): Promise<boolean> {
+  return invoke<boolean>("save_ai_conversation_pin", { id, pinned, pinnedAt: pinnedAt ?? null });
 }
 
 export async function loadAiConversations(): Promise<AiConversation[]> {
@@ -1967,6 +2016,11 @@ export async function listTables(
     ...(exactIdentity ? { exactIdentity: true } : {}),
     ...(pageTableRoots ? { pageTableRoots: true } : {}),
   });
+}
+
+/** Child tables of one parent table (TDengine super table), paged on demand. */
+export async function listTableChildren(connectionId: string, database: string, schema: string, parentName: string, limit?: number, offset?: number): Promise<TableInfo[]> {
+  return invoke("list_table_children", { connectionId, database, schema, parentName, limit, offset });
 }
 
 export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<string | null> {
@@ -2589,6 +2643,10 @@ export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseT
     terminateConnections: options.terminateConnections,
     identifierQuote: options.identifierQuote,
   });
+}
+
+export async function buildMysqlRenameDatabaseSql(options: MysqlRenameDatabaseSqlOptions): Promise<MysqlRenameDatabaseStatements> {
+  return invoke("build_mysql_rename_database_sql", { options });
 }
 
 export async function buildRenameDatabasePreflightSql(options: { databaseType?: DatabaseType; databaseName: string }): Promise<string> {
@@ -3406,6 +3464,42 @@ export async function subscribePluginEvents(onEvent: (event: PluginEvent) => voi
 }
 
 /**
+ * Subscribe to host observation events (`host.observe:*`). The plugin bridge
+ * filters each event by the workbench plugin's declared permissions; the
+ * sidecar fan-out lives in the Rust shell.
+ *
+ * `onGap` receives the host's explicit drop notices when the bus could not
+ * keep up. Event `id` gaps are not drop signals: ids are host-global while
+ * delivery is permission-filtered.
+ */
+export async function subscribeHostObservations(onEvent: (event: PluginHostObservationEvent) => void, onGap?: (gap: PluginHostObservationGap) => void): Promise<UnlistenFn> {
+  const unlistenEvent = await listen<PluginHostObservationEvent>(HOST_OBSERVATION_EVENT, (event) => onEvent(event.payload));
+  const unlistenGap = onGap ? await listen<PluginHostObservationGap>(HOST_OBSERVATION_GAP_EVENT, (event) => onGap(event.payload)) : undefined;
+  return () => {
+    unlistenEvent();
+    unlistenGap?.();
+  };
+}
+
+/**
+ * Register a plugin workbench as an observer of the host observation bus.
+ *
+ * The shell's bridges stay subscribed for the whole process, so the Rust bus
+ * cannot infer observers from its receivers; it only builds payloads for
+ * categories with registered interest. `ownerId` is per workbench mount (two
+ * tabs of one plugin are refcounted separately); the permissions are read from
+ * the installed manifest on the Rust side.
+ */
+export async function setPluginObservationInterest(ownerId: string, pluginId: string): Promise<void> {
+  await invoke("set_plugin_observation_interest", { ownerId, pluginId });
+}
+
+/** Drop the interest registered by `setPluginObservationInterest`. */
+export async function clearPluginObservationInterest(ownerId: string): Promise<void> {
+  await invoke("clear_plugin_observation_interest", { ownerId });
+}
+
+/**
  * Subscribe to backend connection-liveness messages (#4339).
  *
  * The listener receives the message unwrapped; the web transport's SSE handler parses the same
@@ -4053,8 +4147,8 @@ export async function redisGetTtl(connectionId: string, db: number, keyRaw: stri
   return invoke("redis_get_ttl", { connectionId, db, keyRaw });
 }
 
-export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string): Promise<RedisStreamPage> {
-  return invoke("redis_get_stream_entries", { connectionId, db, keyRaw, cursor });
+export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string, newestFirst?: boolean): Promise<RedisStreamPage> {
+  return invoke("redis_get_stream_entries", { connectionId, db, keyRaw, cursor, ...(newestFirst ? { newestFirst } : {}) });
 }
 
 export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {
@@ -5626,11 +5720,11 @@ export async function mongoUpdateDocuments(connectionId: string, database: strin
   return { affected_rows: affectedRows };
 }
 
-export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string): Promise<number> {
+export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: MongoDeleteId, routing?: string): Promise<number> {
   return documentDeleteDocument(connectionId, database, collection, id, routing);
 }
 
-export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string, documentType?: string): Promise<number> {
+export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: MongoDeleteId, routing?: string, documentType?: string): Promise<number> {
   return invoke("document_delete_document", {
     connectionId,
     database,
@@ -6228,6 +6322,11 @@ export interface TransferRequest {
    * (`select * from t_order where id <= 90000`). Missing/empty = full table.
    */
   tableFilters?: Record<string, string>;
+  /**
+   * Optional explicit target table name per source table (key = source table name).
+   * Wins over `targetTableNameCase`; tables without an entry keep the case option's name.
+   */
+  targetTableNames?: Record<string, string>;
   dropTargetBeforeCreate: boolean;
   dropTargetConfirmed: boolean;
   oraclePackages?: OraclePackageTransferRequest;
@@ -6915,6 +7014,8 @@ export interface QueryResultExportRequest {
   timeoutSecs?: number;
   keysetOptimizationEnabled: boolean;
   clientSessionId?: string;
+  /** MySQL source session, borrowed while streaming without transferring ownership. */
+  sourceClientSessionId?: string;
   /** Open manual transaction to read through, so the export sees its uncommitted changes. */
   txnSessionId?: string;
   executionId?: string;
@@ -7220,12 +7321,13 @@ export async function exportQueryResultJson(filePath: string, columns: string[],
   });
 }
 
-export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
+export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], transposedMarkdown?: TransposedMarkdownLabels): Promise<void> {
   return invoke("export_query_result_markdown", {
     request: {
       filePath,
       columns,
       rows,
+      transposedMarkdown,
     },
   });
 }

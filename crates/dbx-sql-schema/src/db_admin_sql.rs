@@ -16,6 +16,9 @@ pub enum DatabaseObjectType {
     Function,
     Event,
     Trigger,
+    Sequence,
+    Package,
+    PackageBody,
     Type,
     TypeBody,
 }
@@ -597,7 +600,16 @@ pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions
             if matches!(database_type, Some(DatabaseType::ClickHouse | DatabaseType::Redshift)) {
                 return Err(format!("Dropping indexes is not supported for {}.", database_label(database_type)));
             }
-            if matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::SqlServer)) {
+            if database_type == Some(DatabaseType::Doris) && options.name.trim().eq_ignore_ascii_case("unique key") {
+                return Err(
+                    "The Doris key index is part of the table's UNIQUE KEY and cannot be dropped from this editor."
+                        .to_string(),
+                );
+            }
+            if matches!(
+                database_type,
+                Some(DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::Goldendb | DatabaseType::SqlServer)
+            ) {
                 return Ok(format!("DROP INDEX {name} ON {table};"));
             }
             if matches!(
@@ -1122,7 +1134,13 @@ pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
 }
 
 pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: DatabaseObjectType) -> bool {
-    if object_type == DatabaseObjectType::Trigger {
+    if matches!(
+        object_type,
+        DatabaseObjectType::Trigger
+            | DatabaseObjectType::Sequence
+            | DatabaseObjectType::Package
+            | DatabaseObjectType::PackageBody
+    ) {
         return false;
     }
     let Some(database_type) = database_type else {
@@ -1303,6 +1321,9 @@ pub fn build_rename_database_preflight_sql(
     database_type: Option<DatabaseType>,
     database_name: &str,
 ) -> Result<String, String> {
+    if database_type == Some(DatabaseType::Mysql) {
+        return Ok(build_mysql_rename_database_preflight_sql(database_name));
+    }
     if !supports_database_rename(database_type) {
         return Err(format!("Renaming databases is not supported for {}.", database_label(database_type)));
     }
@@ -1310,6 +1331,124 @@ pub fn build_rename_database_preflight_sql(
     Ok(format!(
         "SELECT (SELECT count(*) FROM pg_stat_activity WHERE datname = '{escaped}' AND pid <> pg_backend_pid()) AS active_connections, (SELECT count(*) FROM pg_prepared_xacts WHERE database = '{escaped}') AS prepared_transactions, (SELECT pg_catalog.pg_get_userbyid(datdba) = current_user AS is_owner FROM pg_database WHERE datname = '{escaped}') AS is_owner;"
     ))
+}
+
+/// MySQL/MariaDB have no `RENAME DATABASE` (removed in 5.1.23). A database is renamed by creating
+/// the target database and moving every base table with one `RENAME TABLE` statement, which keeps
+/// data in place and rewrites foreign keys (including ones from other databases) to the new name.
+/// `RENAME TABLE` cannot move views (ER 1450) or tables with triggers (ER 1435), and routines and
+/// events are not tables at all, so the preflight lists every schema object and the caller only
+/// proceeds when the database holds nothing but tables.
+///
+/// Privileges granted on the database, its tables or columns stay bound to the old names (the
+/// server never migrates them), so they are listed as `GRANT` rows for the caller to warn about.
+/// Only grants visible to the current account are reported.
+///
+/// Columns: `object_kind` (`SCHEMA` | `TABLE` | `TRIGGER` | `ROUTINE` | `EVENT` | `GRANT`),
+/// `object_name`, `object_detail`. The `SCHEMA` row carries the default charset in `object_name`
+/// and the default collation in `object_detail`; `TABLE` rows carry `TABLE_TYPE`, `ROUTINE` rows
+/// `ROUTINE_TYPE`, and `GRANT` rows the grantee and grant level (`DATABASE` | `TABLE` | `COLUMN`).
+fn build_mysql_rename_database_preflight_sql(database_name: &str) -> String {
+    let name = mysql_metadata_string_literal(database_name);
+    format!(
+        "SELECT 'SCHEMA' AS object_kind, DEFAULT_CHARACTER_SET_NAME AS object_name, DEFAULT_COLLATION_NAME AS object_detail FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = {name} \
+         UNION ALL SELECT 'TABLE', TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = {name} \
+         UNION ALL SELECT 'TRIGGER', TRIGGER_NAME, NULL FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = {name} \
+         UNION ALL SELECT 'ROUTINE', ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = {name} \
+         UNION ALL SELECT 'EVENT', EVENT_NAME, NULL FROM information_schema.EVENTS WHERE EVENT_SCHEMA = {name} \
+         UNION ALL SELECT DISTINCT 'GRANT', GRANTEE, 'DATABASE' FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA = {name} \
+         UNION ALL SELECT DISTINCT 'GRANT', GRANTEE, 'TABLE' FROM information_schema.TABLE_PRIVILEGES WHERE TABLE_SCHEMA = {name} \
+         UNION ALL SELECT DISTINCT 'GRANT', GRANTEE, 'COLUMN' FROM information_schema.COLUMN_PRIVILEGES WHERE TABLE_SCHEMA = {name}"
+    )
+}
+
+/// Hex literal so the value is identical with and without `NO_BACKSLASH_ESCAPES`.
+fn mysql_metadata_string_literal(value: &str) -> String {
+    let hex: String = value.bytes().map(|byte| format!("{byte:02x}")).collect();
+    format!("CONVERT(X'{hex}' USING utf8mb4)")
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MysqlRenameDatabaseSqlOptions {
+    pub old_name: String,
+    pub new_name: String,
+    /// Base tables to move, as reported by the preflight.
+    #[serde(default)]
+    pub table_names: Vec<String>,
+    /// Default charset/collation of the source database, carried over to the target.
+    #[serde(default)]
+    pub charset: Option<String>,
+    #[serde(default)]
+    pub collation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MysqlRenameDatabaseStatements {
+    pub create_database: String,
+    /// `None` when the source database has no tables.
+    pub move_tables: Option<String>,
+    pub drop_old_database: String,
+    /// Rollback for a failed move: the target was just created and `RENAME TABLE` is atomic.
+    pub drop_new_database: String,
+}
+
+/// Statements for the MySQL/MariaDB database rename described on
+/// [`build_mysql_rename_database_preflight_sql`]. The caller runs them one by one and must confirm
+/// the source database is empty again before running `drop_old_database`.
+pub fn build_mysql_rename_database_sql(
+    options: MysqlRenameDatabaseSqlOptions,
+) -> Result<MysqlRenameDatabaseStatements, String> {
+    let old_name = options.old_name.as_str();
+    let new_name = options.new_name.as_str();
+    if old_name.is_empty() || new_name.is_empty() {
+        return Err("Database name cannot be empty.".to_string());
+    }
+    if old_name == new_name {
+        return Err("The new database name must differ from the current name.".to_string());
+    }
+    let mysql = Some(DatabaseType::Mysql);
+    let old_db = quote_rename_identifier(mysql, old_name);
+    let new_db = quote_rename_identifier(mysql, new_name);
+    let charset = mysql_charset_option("charset", options.charset.as_deref())?;
+    let collation = mysql_charset_option("collation", options.collation.as_deref())?;
+    let mut create_database = format!("CREATE DATABASE {new_db}");
+    if let Some(charset) = charset {
+        create_database.push_str(&format!(" CHARACTER SET {charset}"));
+    }
+    if let Some(collation) = collation {
+        create_database.push_str(&format!(" COLLATE {collation}"));
+    }
+    create_database.push(';');
+    let mut moves = Vec::with_capacity(options.table_names.len());
+    for table in &options.table_names {
+        if table.is_empty() {
+            return Err("Table name cannot be empty.".to_string());
+        }
+        let table = quote_rename_identifier(mysql, table);
+        moves.push(format!("{old_db}.{table} TO {new_db}.{table}"));
+    }
+    let move_tables = (!moves.is_empty()).then(|| format!("RENAME TABLE {};", moves.join(", ")));
+    Ok(MysqlRenameDatabaseStatements {
+        create_database,
+        move_tables,
+        drop_old_database: format!("DROP DATABASE {old_db};"),
+        drop_new_database: format!("DROP DATABASE {new_db};"),
+    })
+}
+
+/// Charset and collation names are bare identifiers (`utf8mb4`, `utf8mb4_0900_ai_ci`); reject
+/// anything else instead of interpolating it into DDL.
+fn mysql_charset_option<'a>(label: &str, value: Option<&'a str>) -> Result<Option<&'a str>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.chars().all(|character| character.is_ascii_alphanumeric() || character == '_') {
+        Ok(Some(value))
+    } else {
+        Err(format!("Invalid MySQL {label}: {value}"))
+    }
 }
 
 fn is_postgres_like_rename(database_type: DatabaseType) -> bool {
@@ -1479,6 +1618,9 @@ fn object_type_keyword(object_type: DatabaseObjectType) -> &'static str {
         DatabaseObjectType::Function => "FUNCTION",
         DatabaseObjectType::Event => "EVENT",
         DatabaseObjectType::Trigger => "TRIGGER",
+        DatabaseObjectType::Sequence => "SEQUENCE",
+        DatabaseObjectType::Package => "PACKAGE",
+        DatabaseObjectType::PackageBody => "PACKAGE BODY",
         DatabaseObjectType::Type => "TYPE",
         DatabaseObjectType::TypeBody => "TYPE BODY",
     }
@@ -2492,6 +2634,32 @@ mod tests {
     }
 
     #[test]
+    fn drop_transport_supports_sequences_packages_and_package_bodies() {
+        for (database, object_type, expected) in [
+            ("oracle", "SEQUENCE", r#"DROP SEQUENCE "Mixed Owner"."My""Object";"#),
+            ("postgres", "SEQUENCE", r#"DROP SEQUENCE "Mixed Owner"."My""Object";"#),
+            ("kingbase", "SEQUENCE", r#"DROP SEQUENCE "Mixed Owner"."My""Object";"#),
+            ("oracle", "PACKAGE", r#"DROP PACKAGE "Mixed Owner"."My""Object";"#),
+            ("oracle", "PACKAGE_BODY", r#"DROP PACKAGE BODY "Mixed Owner"."My""Object";"#),
+            ("oceanbase-oracle", "PACKAGE_BODY", r#"DROP PACKAGE BODY "Mixed Owner"."My""Object";"#),
+            ("dameng", "PACKAGE", r#"DROP PACKAGE "Mixed Owner"."My""Object";"#),
+            ("opengauss", "PACKAGE_BODY", r#"DROP PACKAGE BODY "Mixed Owner"."My""Object";"#),
+            ("firebird", "PACKAGE_BODY", r#"DROP PACKAGE BODY "My""Object";"#),
+        ] {
+            let options: DropObjectSqlOptions = serde_json::from_value(serde_json::json!({
+                "databaseType": database,
+                "objectType": object_type,
+                "schema": "Mixed Owner",
+                "name": "My\"Object",
+                "signature": "integer"
+            }))
+            .unwrap();
+            assert!(!supports_object_rename(Some(DatabaseType::SqlServer), options.object_type));
+            assert_eq!(build_drop_object_sql(options), expected, "{database} {object_type}");
+        }
+    }
+
+    #[test]
     fn trigger_drop_transport_preserves_exact_identity_without_enabling_rename() {
         for database_type in ["oracle", "oceanbase-oracle", "dameng"] {
             let options: DropObjectSqlOptions = serde_json::from_value(serde_json::json!({
@@ -2768,6 +2936,20 @@ mod tests {
             })
             .unwrap(),
             "DROP INDEX \"public\".\"idx_orders_status\";"
+        );
+        // Doris follows MySQL for index DDL: the index name must be paired with
+        // its table, a bare `DROP INDEX <name>;` is rejected by the server.
+        assert_eq!(
+            build_drop_table_child_object_sql(DropTableChildObjectSqlOptions {
+                database_type: Some(DatabaseType::Doris),
+                object_type: TableChildObjectType::Index,
+                schema: None,
+                table_name: "orders".to_string(),
+                name: "idx_orders_status".to_string(),
+                identifier_quote: None,
+            })
+            .unwrap(),
+            "DROP INDEX `idx_orders_status` ON `orders`;"
         );
         assert_eq!(
             build_drop_table_child_object_sql(DropTableChildObjectSqlOptions {
@@ -4009,7 +4191,80 @@ mod tests {
         assert!(!supports_database_rename(Some(DatabaseType::Mysql)));
         assert!(!supports_database_rename(Some(DatabaseType::Sqlite)));
         assert!(build_rename_database_sql(Some(DatabaseType::Mysql), "old_db", "new_db", false, None).is_err());
-        assert!(build_rename_database_preflight_sql(Some(DatabaseType::Mysql), "old_db").is_err());
+        assert!(build_rename_database_preflight_sql(Some(DatabaseType::Sqlite), "old_db").is_err());
+    }
+
+    #[test]
+    fn builds_mysql_rename_database_preflight_sql() {
+        let sql = build_rename_database_preflight_sql(Some(DatabaseType::Mysql), "a\\'b").unwrap();
+        // "a\'b" as hex, independent of NO_BACKSLASH_ESCAPES.
+        let literal = "CONVERT(X'615c2762' USING utf8mb4)";
+        for source in [
+            "information_schema.SCHEMATA WHERE SCHEMA_NAME",
+            "information_schema.TABLES WHERE TABLE_SCHEMA",
+            "information_schema.TRIGGERS WHERE TRIGGER_SCHEMA",
+            "information_schema.ROUTINES WHERE ROUTINE_SCHEMA",
+            "information_schema.EVENTS WHERE EVENT_SCHEMA",
+            "information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA",
+            "information_schema.TABLE_PRIVILEGES WHERE TABLE_SCHEMA",
+            "information_schema.COLUMN_PRIVILEGES WHERE TABLE_SCHEMA",
+        ] {
+            assert!(sql.contains(&format!("{source} = {literal}")), "missing {source}: {sql}");
+        }
+        assert!(!sql.contains("a\\'b"));
+    }
+
+    #[test]
+    fn builds_mysql_rename_database_statements() {
+        let statements = build_mysql_rename_database_sql(MysqlRenameDatabaseSqlOptions {
+            old_name: "old`db".to_string(),
+            new_name: "new db".to_string(),
+            table_names: vec!["orders".to_string(), "line`items".to_string()],
+            charset: Some("utf8mb4".to_string()),
+            collation: Some("utf8mb4_0900_ai_ci".to_string()),
+        })
+        .unwrap();
+        assert_eq!(
+            statements,
+            MysqlRenameDatabaseStatements {
+                create_database: "CREATE DATABASE `new db` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;".to_string(),
+                move_tables: Some(
+                    "RENAME TABLE `old``db`.`orders` TO `new db`.`orders`, `old``db`.`line``items` TO `new db`.`line``items`;"
+                        .to_string()
+                ),
+                drop_old_database: "DROP DATABASE `old``db`;".to_string(),
+                drop_new_database: "DROP DATABASE `new db`;".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn builds_mysql_rename_database_statements_without_tables_or_charset() {
+        let statements = build_mysql_rename_database_sql(MysqlRenameDatabaseSqlOptions {
+            old_name: "a".to_string(),
+            new_name: "b".to_string(),
+            table_names: Vec::new(),
+            charset: None,
+            collation: Some("  ".to_string()),
+        })
+        .unwrap();
+        assert_eq!(statements.create_database, "CREATE DATABASE `b`;");
+        assert_eq!(statements.move_tables, None);
+    }
+
+    #[test]
+    fn rejects_invalid_mysql_rename_database_options() {
+        let options = |old: &str, new: &str, table: &str, charset: &str| MysqlRenameDatabaseSqlOptions {
+            old_name: old.to_string(),
+            new_name: new.to_string(),
+            table_names: vec![table.to_string()],
+            charset: Some(charset.to_string()),
+            collation: None,
+        };
+        assert!(build_mysql_rename_database_sql(options("a", "a", "t", "utf8mb4")).is_err());
+        assert!(build_mysql_rename_database_sql(options("a", "", "t", "utf8mb4")).is_err());
+        assert!(build_mysql_rename_database_sql(options("a", "b", "", "utf8mb4")).is_err());
+        assert!(build_mysql_rename_database_sql(options("a", "b", "t", "utf8mb4; DROP")).is_err());
     }
 
     #[test]

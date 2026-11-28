@@ -46,7 +46,9 @@ use dbx_core::{
         is_production_database, mongo_pipeline_targets_production_database,
         sql_references_disallowed_database_for_connection, targets_production_database,
     },
-    query_execution_sql::{classify_salesforce_statement_risk, is_write_sql_for_database, SalesforceStatementRisk},
+    query_execution_sql::{
+        classify_salesforce_statement_risk, is_write_sql_for_database, supports_sql_query, SalesforceStatementRisk,
+    },
     sql_risk::{
         classify_sql_risk_for_database, is_dangerous_sql_for_database, mcp_sql_has_forbidden_database_switch, SqlRisk,
     },
@@ -149,6 +151,16 @@ pub struct NacosConfigKeyRequest {
     pub data_id: String,
     #[schemars(description = "Configuration group, e.g. DEFAULT_GROUP")]
     pub group: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosConfigHistoryRequest {
+    #[serde(flatten)]
+    pub key: NacosConfigKeyRequest,
+    #[schemars(
+        description = "History ID from a list item. Omit to list revisions, or pass it to read one revision's content."
+    )]
+    pub history_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -620,6 +632,30 @@ impl CellWindowArgs {
     fn to_query_window(&self) -> QueryCellWindow {
         QueryCellWindow::from_options(self.cell_char_offset, self.cell_char_limit)
     }
+}
+
+/// `dbx_query` request: the same shape as [`ExecuteQueryRequest`] without
+/// `session_id`. The read-only tool deliberately cannot join an existing
+/// session or transaction; stateful and write work stays on
+/// `dbx_execute_query`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadOnlyQueryRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Database name")]
+    #[schemars(extend("type" = "string"))]
+    pub database: Option<String>,
+    #[schemars(
+        description = "Single read-only SQL statement. Only SELECT, SHOW, DESC/DESCRIBE, EXPLAIN and WITH ... SELECT are accepted; writes, DDL, multi-statement scripts, EXPLAIN ANALYZE, locking reads and SELECT ... INTO OUTFILE are rejected."
+    )]
+    pub sql: String,
+    #[serde(flatten)]
+    pub cell_window: CellWindowArgs,
+    #[schemars(
+        description = "Maximum rows returned for this call (default 100, max 1000; larger values are clamped)."
+    )]
+    #[schemars(extend("type" = "integer"))]
+    pub max_rows: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1277,9 +1313,9 @@ impl DbxMcpServer {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                text(serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| "[]".to_string()))
+                product_tool_result(serde_json::Value::Array(filtered))
             }
-            Ok(value) => text(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())),
+            Ok(value) => product_tool_result(value),
             Err(error) => backend_tool_error("DBX_TOOL_ERROR", error),
         }
     }
@@ -1737,20 +1773,31 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_nacos_config_history",
-        description = "List the publish history of one Nacos configuration.",
+        description = "List the publish history of a Nacos configuration, or read one historical version by history_id.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
-    async fn nacos_config_history(&self, Parameters(request): Parameters<NacosConfigKeyRequest>) -> CallToolResult {
+    async fn nacos_config_history(&self, Parameters(request): Parameters<NacosConfigHistoryRequest>) -> CallToolResult {
         use crate::products::Product::Nacos;
         use dbx_core::mcp_access::McpAccessLevel::Read;
-        let args = json!({ "namespace": request.namespace, "dataId": request.data_id, "group": request.group });
+        let key = request.key;
+        let mut args = json!({ "namespace": key.namespace, "dataId": key.data_id, "group": key.group });
+        let operation = if let Some(history_id) = request.history_id {
+            let history_id = history_id.trim();
+            if history_id.is_empty() {
+                return tool_error("INVALID_ARGUMENTS", "history_id cannot be empty.");
+            }
+            args["historyId"] = json!(history_id);
+            "get_config_history"
+        } else {
+            "config_history"
+        };
         self.run_product_tool(
             "dbx_nacos_config_history",
-            &request.selector,
+            &key.selector,
             Nacos,
-            "config_history",
+            operation,
             Read,
-            request.namespace.as_deref(),
+            key.namespace.as_deref(),
             args,
         )
         .await
@@ -2169,6 +2216,7 @@ impl DbxMcpServer {
         };
         let filter = request.filter.as_deref().map(str::trim).filter(|value| !value.is_empty());
         let mut lines = Vec::new();
+        let mut entries = Vec::new();
         for (plugin_id, plugin_name, tool_count, connection_count) in &rows {
             let matches = |haystack: &str| -> bool {
                 filter.is_none_or(|needle| haystack.to_ascii_lowercase().contains(&needle.to_ascii_lowercase()))
@@ -2179,20 +2227,30 @@ impl DbxMcpServer {
             lines.push(format!(
                 "- {plugin_id} · {plugin_name} · {tool_count} tool(s) · {connection_count} allowed connection(s)"
             ));
+            entries.push(json!({
+                "id": plugin_id,
+                "name": plugin_name,
+                "tool_count": tool_count,
+                "connection_count": connection_count,
+            }));
         }
         if lines.is_empty() {
-            return text(match (filter, &note) {
+            let message = match (filter, &note) {
                 (Some(_), _) => "No DBX plugin matches the filter.".to_string(),
                 (None, Some(note)) => note.clone(),
                 (None, None) => "No DBX plugin contributes MCP tools.".to_string(),
-            });
+            };
+            return structured_text(json!({ "plugins": [] }), message);
         }
-        text(format!(
-            "{} plugin(s) contribute MCP tools:\n{}\n\nInspect tools with dbx_plugin_tools (plugin_id), call them with dbx_plugin_call.{}",
-            lines.len(),
-            lines.join("\n"),
-            note.as_ref().map(|note| format!("\n{note}")).unwrap_or_default()
-        ))
+        structured_text(
+            json!({ "plugins": entries }),
+            format!(
+                "{} plugin(s) contribute MCP tools:\n{}\n\nInspect tools with dbx_plugin_tools (plugin_id), call them with dbx_plugin_call.{}",
+                lines.len(),
+                lines.join("\n"),
+                note.as_ref().map(|note| format!("\n{note}")).unwrap_or_default()
+            ),
+        )
     }
 
     #[tool(
@@ -2285,6 +2343,7 @@ impl DbxMcpServer {
             );
         }
         let mut lines = Vec::new();
+        let mut entries = Vec::new();
         for entry in &owned {
             let entry_connections = match (&access, &group_paths) {
                 (Some(access), Some(group_paths)) => allowed_connections
@@ -2315,6 +2374,13 @@ impl DbxMcpServer {
             if entry.injects_connection_id {
                 line.push_str("\nThe host injects the bound connection's id automatically.");
             }
+            entries.push(json!({
+                "name": entry.tool.name.clone(),
+                "description": crate::plugin_tools::external_tool_description(&entry.plugin_name, &entry.tool),
+                "input_schema": schema,
+                "read_only": entry.tool.read_only,
+                "requires_connection": entry.requires_connection(),
+            }));
             lines.push(line);
         }
         let connection_note = match allowed_connections.len() {
@@ -2330,12 +2396,15 @@ impl DbxMcpServer {
         };
         let hidden_note = (hidden > 0)
             .then(|| format!("\n{} further tool(s) of this plugin are hidden by the DBX MCP settings.", hidden));
-        text(format!(
-            "{} tool(s) of plugin {plugin_id}:\n\n{}\n\n{connection_note}\nCall through dbx_plugin_call (plugin_id + tool + arguments).{}",
-            owned.len(),
-            lines.join("\n\n"),
-            hidden_note.unwrap_or_default()
-        ))
+        structured_text(
+            json!({ "plugin_id": plugin_id, "tools": entries }),
+            format!(
+                "{} tool(s) of plugin {plugin_id}:\n\n{}\n\n{connection_note}\nCall through dbx_plugin_call (plugin_id + tool + arguments).{}",
+                owned.len(),
+                lines.join("\n\n"),
+                hidden_note.unwrap_or_default()
+            ),
+        )
     }
 
     #[tool(
@@ -2392,7 +2461,9 @@ impl DbxMcpServer {
             return error;
         }
         match self.load_scoped_connections().await {
-            Ok(connections) if connections.is_empty() => text("No connections configured in DBX."),
+            Ok(connections) if connections.is_empty() => {
+                structured_text(json!({ "connections": [] }), "No connections configured in DBX.")
+            }
             Ok(connections) => {
                 let group_paths = self.backend.load_connection_group_details().await.unwrap_or_default();
                 let rows = connections
@@ -2404,7 +2475,7 @@ impl DbxMcpServer {
                         summary
                     })
                     .collect::<Vec<_>>();
-                text(format_connections(&rows))
+                structured_text(json!({ "connections": rows }), format_connections(&rows))
             }
             Err(error) => backend_tool_error("CONNECTION_LOAD_ERROR", error),
         }
@@ -2462,9 +2533,10 @@ impl DbxMcpServer {
                     message.push('\n');
                     message.push_str(warning);
                 }
-                text(message)
+                structured_text(json!({ "tables": [] }), message)
             }
             Ok(tables) => {
+                let mut entries = Vec::with_capacity(tables.len());
                 let mut lines = tables
                     .into_iter()
                     .map(|table| {
@@ -2486,6 +2558,11 @@ impl DbxMcpServer {
                                 .map(|comment| comment.trim().to_string())
                                 .filter(|comment| !comment.is_empty())
                         });
+                        entries.push(json!({
+                            "name": table.name.clone(),
+                            "type": table.table_type.clone(),
+                            "comment": comment,
+                        }));
                         let comment = comment.map(|comment| format!(" -- {comment}")).unwrap_or_default();
                         format!("- {} ({}){}", table.name, table.table_type, comment)
                     })
@@ -2493,7 +2570,10 @@ impl DbxMcpServer {
                 if let Some(warning) = notes_warning {
                     lines.push(warning.to_string());
                 }
-                text(docs_notes::guard_untrusted_note_output(lines.join("\n"), notes_applied))
+                structured_text(
+                    json!({ "tables": entries }),
+                    docs_notes::guard_untrusted_note_output(lines.join("\n"), notes_applied),
+                )
             }
             Err(error) => tool_error("TABLE_LIST_ERROR", error),
         }
@@ -2531,7 +2611,7 @@ impl DbxMcpServer {
                     message.push('\n');
                     message.push_str(warning);
                 }
-                text(message)
+                structured_text(json!({ "columns": [] }), message)
             }
             Ok(columns) => {
                 let mut note_budget = SchemaNoteBudget::new();
@@ -2560,7 +2640,26 @@ impl DbxMcpServer {
                     output.push_str("\n\n");
                     output.push_str(warning);
                 }
-                text(output)
+                let entries = columns
+                    .iter()
+                    .map(|column| {
+                        json!({
+                            "name": column.name,
+                            "type": column.data_type,
+                            "nullable": column.is_nullable,
+                            "key": if column.is_primary_key {
+                                "PRI"
+                            } else if column.is_unique {
+                                "UNI"
+                            } else {
+                                ""
+                            },
+                            "default": column.column_default,
+                            "comment": column.comment,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                structured_text(json!({ "columns": entries }), output)
             }
             Err(error) => tool_error("TABLE_DESCRIPTION_ERROR", error),
         }
@@ -2595,8 +2694,21 @@ impl DbxMcpServer {
             },
         };
         match self.backend.list_routines(&resolved.connection, &database, &schema, routine_types.as_deref()).await {
-            Ok(routines) if routines.is_empty() => text("No routines found."),
-            Ok(routines) => text(format_routines(&routines)),
+            Ok(routines) if routines.is_empty() => structured_text(json!({ "routines": [] }), "No routines found."),
+            Ok(routines) => {
+                let entries = routines
+                    .iter()
+                    .map(|routine| {
+                        json!({
+                            "name": routine.name,
+                            "type": routine.object_type,
+                            "schema": routine.schema,
+                            "comment": routine.comment,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                structured_text(json!({ "routines": entries }), format_routines(&routines))
+            }
             Err(error) => tool_error("ROUTINE_LIST_ERROR", error),
         }
     }
@@ -2638,8 +2750,25 @@ impl DbxMcpServer {
             )
             .await
         {
-            Ok(source) if source.source.trim().is_empty() => text("Routine source is empty."),
-            Ok(source) => text(source.source),
+            Ok(source) if source.source.trim().is_empty() => structured_text(
+                json!({
+                    "name": request.name,
+                    "type": object_type,
+                    "source": "",
+                }),
+                "Routine source is empty.",
+            ),
+            Ok(source) => {
+                let source_text = source.source;
+                structured_text(
+                    json!({
+                        "name": request.name,
+                        "type": object_type,
+                        "source": source_text.clone(),
+                    }),
+                    source_text,
+                )
+            }
             Err(error) => tool_error("ROUTINE_SOURCE_ERROR", error),
         }
     }
@@ -2657,8 +2786,45 @@ impl DbxMcpServer {
         cancellable_tool_call(cancellation, self.execute_query(parameters)).await
     }
 
+    #[tool(
+        name = "dbx_query",
+        description = "Run a single read-only SQL statement and return its result. Only SELECT, SHOW, DESC/DESCRIBE, EXPLAIN and WITH ... SELECT are accepted; INSERT/UPDATE/DELETE/DDL, multi-statement scripts, EXPLAIN ANALYZE, locking reads (FOR UPDATE/SHARE, LOCK IN SHARE MODE), SELECT ... INTO OUTFILE and USE/database switching are rejected. This tool has no session_id: use dbx_execute_query for stateful sessions, transactions or writes.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn query_tool(
+        &self,
+        cancellation: tokio_util::sync::CancellationToken,
+        parameters: Parameters<ReadOnlyQueryRequest>,
+    ) -> CallToolResult {
+        cancellable_tool_call(cancellation, self.execute_read_only_query(parameters)).await
+    }
+
+    /// Run the shared execute path with the read-only gate enabled.
+    /// `session_id` is intentionally dropped: a read-only query must not enter
+    /// an open transaction or inherit session database state.
+    async fn execute_read_only_query(&self, Parameters(request): Parameters<ReadOnlyQueryRequest>) -> CallToolResult {
+        let request = ExecuteQueryRequest {
+            selector: request.selector,
+            database: request.database,
+            sql: request.sql,
+            session_id: None,
+            cell_char_offset: request.cell_window.cell_char_offset,
+            cell_char_limit: request.cell_window.cell_char_limit,
+            max_rows: request.max_rows,
+        };
+        self.execute_query_impl(request, true).await
+    }
+
     async fn execute_query(&self, Parameters(request): Parameters<ExecuteQueryRequest>) -> CallToolResult {
-        if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
+        self.execute_query_impl(request, false).await
+    }
+
+    async fn execute_query_impl(&self, request: ExecuteQueryRequest, read_only: bool) -> CallToolResult {
+        // The allowlist and history are keyed by tool name, so a read-only call
+        // must be authorized as `dbx_query` and cannot inherit a grant that
+        // only covers the write-capable tool.
+        let tool_name = if read_only { "dbx_query" } else { "dbx_execute_query" };
+        if let Err(error) = self.ensure_tool_allowed(tool_name).await {
             return error;
         }
         let explicit_cell_window = (request.cell_char_offset.is_some() || request.cell_char_limit.is_some())
@@ -2668,6 +2834,37 @@ impl DbxMcpServer {
             Err(error) => return error,
         };
         let connection = &resolved.connection;
+        if read_only {
+            // The catalog advertises dbx_query only for SQL-capable
+            // connections. Reject the remaining non-SQL types explicitly so a
+            // client that already knows the tool name cannot send MongoDB
+            // shell commands, Redis commands or Salesforce DML through the
+            // read-only path.
+            if !supports_read_only_sql_query(connection.db_type) {
+                return tool_error(
+                    "READ_ONLY_QUERY_UNSUPPORTED",
+                    format!(
+                        "dbx_query supports SQL connections only; {} connections use their dedicated tools.",
+                        connection.db_type.as_str()
+                    ),
+                );
+            }
+            if let Err(error) =
+                dbx_core::query::read_only_gate::require_single_read_only_statement(&request.sql, connection.db_type)
+            {
+                return tool_error("READ_ONLY_QUERY_REJECTED", error.to_string());
+            }
+            // The classifier catches locking reads and writable CTEs; the
+            // keyword scan catches dialect-specific writes such as MySQL
+            // executable comments and SELECT ... INTO OUTFILE. Fail closed on
+            // either signal, matching validate_sql_policy.
+            if is_write_sql_for_database(&request.sql, connection.db_type) {
+                return tool_error(
+                    "READ_ONLY_QUERY_REJECTED",
+                    "The statement is not read-only; the request was rejected",
+                );
+            }
+        }
         if connection.db_type == dbx_core::models::connection::DatabaseType::Redis {
             return tool_error(
                 "REDIS_COMMAND_REQUIRED",
@@ -2782,7 +2979,7 @@ impl DbxMcpServer {
                 };
                 let approval = crate::approval::ToolApprovalRequest::new(
                     crate::approval::ToolApprovalKind::MongoCommand,
-                    "dbx_execute_query",
+                    tool_name,
                     &request.sql,
                 )
                 .with_target(Some(&connection.id), Some(target_database));
@@ -2792,7 +2989,7 @@ impl DbxMcpServer {
                     return tool_error("TOOL_BLOCKED", error);
                 }
                 mark_call_confirmation("confirmed");
-                if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
+                if let Err(error) = self.ensure_tool_allowed(tool_name).await {
                     return error;
                 }
                 let refreshed = match self
@@ -2862,7 +3059,7 @@ impl DbxMcpServer {
             Err(error) => return error,
         };
         if approval_token.is_some() {
-            if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
+            if let Err(error) = self.ensure_tool_allowed(tool_name).await {
                 return error;
             }
         }
@@ -2892,7 +3089,7 @@ impl DbxMcpServer {
             // The lease is the queue boundary. Re-read every mutable policy and
             // connection binding after waiting so queued work cannot outrun a
             // revocation or configuration refresh.
-            if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
+            if let Err(error) = self.ensure_tool_allowed(tool_name).await {
                 return error;
             }
             let refreshed = match self
@@ -2967,7 +3164,7 @@ impl DbxMcpServer {
                         })
                         .unwrap_or_else(|| format_query_result(&execution.result, max_rows as usize));
                     self.save_mcp_sql_history(
-                        "dbx_execute_query",
+                        tool_name,
                         &refreshed.connection,
                         &session.database,
                         &history_sql,
@@ -2981,7 +3178,7 @@ impl DbxMcpServer {
                 }
                 Err(error) => {
                     self.save_mcp_sql_history(
-                        "dbx_execute_query",
+                        tool_name,
                         &refreshed.connection,
                         &session.database,
                         &history_sql,
@@ -3018,22 +3215,13 @@ impl DbxMcpServer {
             arguments["timeout_secs"] = json!(secs);
         }
         let started_at = Instant::now();
-        let result =
-            self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
+        let (result, query_result) =
+            self.backend.execute_query_agent_tool(connection, &database, arguments, permissions).await;
         let success = !result.is_error;
         let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
-        self.save_mcp_sql_history(
-            "dbx_execute_query",
-            connection,
-            &database,
-            &history_sql,
-            started_at,
-            success,
-            error,
-            None,
-        )
-        .await;
-        agent_result(result)
+        self.save_mcp_sql_history(tool_name, connection, &database, &history_sql, started_at, success, error, None)
+            .await;
+        query_tool_result(result, query_result)
     }
 
     #[tool(
@@ -4069,7 +4257,15 @@ impl DbxMcpServer {
         let truncated = selected.len() > max_tables || (requested.is_empty() && available.len() > max_tables);
         selected.truncate(max_tables);
         if selected.is_empty() {
-            return text("No matching tables found.");
+            return structured_text(
+                json!({
+                    "connection": connection.name,
+                    "database": database,
+                    "schema": schema,
+                    "tables": [],
+                }),
+                "No matching tables found.",
+            );
         }
         let (annotations, notes_warning) = match self.backend.load_docs_annotations(connection).await {
             Ok(annotations) => (annotations, None),
@@ -4128,7 +4324,43 @@ impl DbxMcpServer {
             output.push_str("\n\n");
             output.push_str(warning);
         }
-        text(output)
+        let entries = tables
+            .iter()
+            .map(|(table, columns, _)| {
+                json!({
+                    "name": table.name,
+                    "type": table.table_type,
+                    "columns": columns
+                        .iter()
+                        .map(|column| {
+                            json!({
+                                "name": column.name,
+                                "type": column.data_type,
+                                "nullable": column.is_nullable,
+                                "key": if column.is_primary_key {
+                                    "PRI"
+                                } else if column.is_unique {
+                                    "UNI"
+                                } else {
+                                    ""
+                                },
+                                "default": column.column_default,
+                                "comment": column.comment,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        structured_text(
+            json!({
+                "connection": connection.name,
+                "database": database,
+                "schema": schema,
+                "tables": entries,
+            }),
+            output,
+        )
     }
 
     #[tool(
@@ -4771,9 +5003,11 @@ impl DbxMcpServer {
                 "DATABASE_OUT_OF_SCOPE",
                 "This connection is configured with no database access in DBX MCP settings.",
             ),
-            DatabaseScope::Selected(databases) => text(format_database_names(databases)),
+            DatabaseScope::Selected(databases) => {
+                structured_text(json!({ "databases": databases }), format_database_names(databases))
+            }
             DatabaseScope::All => match self.backend.list_databases(&resolved.connection).await {
-                Ok(databases) => text(format_database_names(&databases)),
+                Ok(databases) => structured_text(json!({ "databases": databases }), format_database_names(&databases)),
                 Err(error) => tool_error("DATABASE_LIST_ERROR", error),
             },
         }
@@ -6147,6 +6381,33 @@ fn text(value: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(value)])
 }
 
+/// Text for humans, plus the same data as `structuredContent` for agents.
+///
+/// Metadata tools render user-controlled comments and identifiers into their
+/// text output, where a `|` or a newline shifts every following column. The
+/// structured copy is the stable contract; the text stays for clients that do
+/// not read `structuredContent` yet.
+fn structured_text(value: serde_json::Value, body: impl Into<String>) -> CallToolResult {
+    let mut result = text(body);
+    result.structured_content = Some(value);
+    result
+}
+
+/// Product-provider (Nacos/Consul) tools already hold the complete JSON payload.
+/// Return it in `structuredContent` as well as the pretty-printed text block so
+/// MCP clients can consume the data without re-parsing text. Older MCP protocol
+/// revisions require `structuredContent` to be an object (newer ones accept any
+/// JSON), so arrays and scalars are wrapped as `{"result": ...}` - the same shape
+/// `dbx_execute_batch` uses for its per-statement results (see #9069, #15189).
+fn product_tool_result(value: serde_json::Value) -> CallToolResult {
+    let mut result = text(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()));
+    result.structured_content = Some(match value {
+        serde_json::Value::Object(_) => value,
+        other => json!({ "result": other }),
+    });
+    result
+}
+
 async fn cancellable_tool_call(
     cancellation: tokio_util::sync::CancellationToken,
     operation: impl std::future::Future<Output = CallToolResult>,
@@ -6185,7 +6446,14 @@ fn transaction_failure_result(session_id: &str, failure: TransactionFailure) -> 
 }
 
 fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {}", message.into()))])
+    let launch_restriction = if code == "MCP_READ_ONLY" && crate::backend::legacy_mcp_allow_writes() == Some(false) {
+        "This MCP process is forced read-only by the DBX_MCP_ALLOW_WRITES launch setting. \
+         It takes precedence over permissions saved in DBX Settings → MCP. \
+         Check the MCP client's launch configuration.\n"
+    } else {
+        ""
+    };
+    CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {launch_restriction}{}", message.into()))])
 }
 
 fn backend_tool_error(default_code: &str, error: impl Into<String>) -> CallToolResult {
@@ -6220,6 +6488,17 @@ fn sql_requires_batch_execution(sql: &str, database_type: DatabaseType) -> bool 
         return true;
     }
     dbx_core::sql::sql_execution_plan_for_database(sql, database_type).statements.len() > 1
+}
+
+/// Connection types `dbx_query` accepts. The catalog advertises `SQL_QUERY`
+/// (QueryExecution minus Redis/MongoDB/Salesforce); Plugin/MessageQueue/Mqtt
+/// are excluded for the same reason the plugin data gate excludes them.
+fn supports_read_only_sql_query(database_type: DatabaseType) -> bool {
+    supports_sql_query(database_type)
+        && !matches!(
+            database_type,
+            DatabaseType::Salesforce | DatabaseType::Plugin | DatabaseType::MessageQueue | DatabaseType::Mqtt
+        )
 }
 
 /// Maximum rows returned per statement in a `dbx_execute_batch` call. The batch
@@ -6347,6 +6626,23 @@ fn agent_result(result: dbx_core::agent_events::ToolResult) -> CallToolResult {
     } else {
         text(result.content)
     }
+}
+
+/// Stateless `dbx_execute_query` result: the markdown text stays model-facing
+/// while `structuredContent.result` carries the raw QueryResult, matching the
+/// transaction-session shape so clients can tell NULL from "NULL" and keep
+/// column types (#15149). Errors keep the text-only contract.
+fn query_tool_result(
+    result: dbx_core::agent_events::ToolResult,
+    query_result: Option<dbx_core::db::QueryResult>,
+) -> CallToolResult {
+    let mut call = agent_result(result);
+    if call.is_error != Some(true) {
+        if let Some(query_result) = query_result {
+            call.structured_content = Some(json!({ "result": query_result }));
+        }
+    }
+    call
 }
 
 fn policy_allows_connection(
@@ -7660,6 +7956,84 @@ mod tests {
         assert_eq!(output.matches(docs_notes::LOCAL_NOTE_CLOSE).count(), 1, "{output}");
     }
 
+    // #15188: metadata tools must carry the same data in structuredContent, so
+    // agents never have to parse comments that contain a `|` or a newline.
+    #[tokio::test]
+    async fn metadata_tools_expose_structured_content() {
+        let table = dbx_core::db::TableInfo {
+            name: "orders".to_string(),
+            table_type: "TABLE".to_string(),
+            valid: None,
+            comment: Some("a | b\nc".to_string()),
+            parent_schema: None,
+            parent_name: None,
+        };
+        let column = dbx_core::db::ColumnInfo {
+            name: "id".to_string(),
+            data_type: "bigint".to_string(),
+            is_nullable: false,
+            column_default: Some("''".to_string()),
+            is_primary_key: true,
+            comment: Some("x|y".to_string()),
+            ..Default::default()
+        };
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("pg", "PG", "postgres", "app")],
+            databases: vec!["app".to_string()],
+            tables: vec![table],
+            columns: vec![column],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let connections = server.list_connections(Parameters(ListConnectionsRequest {})).await;
+        let structured = connections.structured_content.expect("connections structuredContent");
+        assert_eq!(structured["connections"][0]["id"], "pg");
+        assert_eq!(structured["connections"][0]["database"], "app");
+
+        let databases = server.list_databases(Parameters(ListDatabasesRequest { selector: selector("pg") })).await;
+        assert_eq!(databases.structured_content.expect("databases structuredContent")["databases"][0], "app");
+
+        let tables = server
+            .list_tables(Parameters(ListTablesRequest { selector: selector("pg"), database: None, schema: None }))
+            .await;
+        let structured = tables.structured_content.expect("tables structuredContent");
+        assert_eq!(structured["tables"][0]["name"], "orders");
+        assert_eq!(structured["tables"][0]["type"], "TABLE");
+        assert_eq!(structured["tables"][0]["comment"], "a | b\nc");
+
+        let described = server
+            .describe_table(Parameters(DescribeTableRequest {
+                selector: selector("pg"),
+                table: "orders".to_string(),
+                database: None,
+                schema: None,
+            }))
+            .await;
+        let structured = described.structured_content.expect("columns structuredContent");
+        assert_eq!(structured["columns"][0]["name"], "id");
+        assert_eq!(structured["columns"][0]["nullable"], false);
+        assert_eq!(structured["columns"][0]["key"], "PRI");
+        // `Some("")` (empty-string default) must stay distinguishable from NULL.
+        assert_eq!(structured["columns"][0]["default"], "''");
+        assert_eq!(structured["columns"][0]["comment"], "x|y");
+
+        let context = server
+            .get_schema_context(Parameters(SchemaContextRequest {
+                selector: selector("pg"),
+                database: None,
+                schema: None,
+                tables: None,
+                max_tables: None,
+            }))
+            .await;
+        let structured = context.structured_content.expect("schema context structuredContent");
+        assert_eq!(structured["connection"], "PG");
+        assert_eq!(structured["database"], "app");
+        assert_eq!(structured["tables"][0]["name"], "orders");
+        assert_eq!(structured["tables"][0]["columns"][0]["name"], "id");
+    }
+
     #[test]
     fn parses_dbx_resource_uris_and_decodes_query_values() {
         assert_eq!(parse_dbx_resource_uri(CONNECTIONS_RESOURCE_URI).unwrap(), DbxResourceRequest::Connections);
@@ -7827,6 +8201,12 @@ mod tests {
         product_calls: std::sync::Mutex<Vec<crate::products::ProductCall>>,
         tool_approvals: std::sync::Mutex<Vec<crate::approval::ToolApprovalRequest>>,
         nacos_namespaces: Option<Vec<String>>,
+        databases: Vec<String>,
+        tables: Vec<dbx_core::db::TableInfo>,
+        columns: Vec<dbx_core::db::ColumnInfo>,
+        /// Returned by `execute_query_agent_tool` so tests can exercise the
+        /// structured `dbx_execute_query` path (#15149).
+        query_result: Option<dbx_core::db::QueryResult>,
     }
 
     impl Default for FakeBackend {
@@ -7864,6 +8244,10 @@ mod tests {
                 product_calls: std::sync::Mutex::new(Vec::new()),
                 tool_approvals: std::sync::Mutex::new(Vec::new()),
                 nacos_namespaces: None,
+                databases: Vec::new(),
+                tables: Vec::new(),
+                columns: Vec::new(),
+                query_result: None,
             }
         }
     }
@@ -8234,6 +8618,29 @@ mod tests {
             Ok(self.connections.clone())
         }
 
+        async fn list_databases(&self, _connection: &ConnectionConfig) -> Result<Vec<String>, String> {
+            Ok(self.databases.clone())
+        }
+
+        async fn list_tables(
+            &self,
+            _connection: &ConnectionConfig,
+            _database: &str,
+            _schema: &str,
+        ) -> Result<Vec<dbx_core::db::TableInfo>, String> {
+            Ok(self.tables.clone())
+        }
+
+        async fn get_columns(
+            &self,
+            _connection: &ConnectionConfig,
+            _database: &str,
+            _schema: &str,
+            _table: &str,
+        ) -> Result<Vec<dbx_core::db::ColumnInfo>, String> {
+            Ok(self.columns.clone())
+        }
+
         async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
             Ok(self.plugin_providers.clone())
         }
@@ -8351,6 +8758,17 @@ mod tests {
                 is_error,
                 explain_data: None,
             }
+        }
+
+        async fn execute_query_agent_tool(
+            &self,
+            connection: &ConnectionConfig,
+            database: &str,
+            arguments: serde_json::Value,
+            permissions: dbx_core::agent_tools::AgentSqlPermissions,
+        ) -> (dbx_core::agent_events::ToolResult, Option<dbx_core::db::QueryResult>) {
+            let result = self.execute_agent_tool(connection, database, "execute_query", arguments, permissions).await;
+            (result, self.query_result.clone())
         }
 
         async fn salesforce_current_user(
@@ -9364,6 +9782,28 @@ mod tests {
             .await;
         let values: serde_json::Value = serde_json::from_str(result_text(&result)).unwrap();
         assert_eq!(values, json!([{ "namespace": "dev" }]));
+        assert_eq!(
+            result.structured_content.as_ref().expect("structured content must be populated"),
+            &json!({ "result": [{ "namespace": "dev" }] }),
+        );
+    }
+
+    #[test]
+    fn product_tool_result_wraps_arrays_and_passes_objects_through() {
+        let array = product_tool_result(json!([{ "namespace": "" }]));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(result_text(&array)).unwrap(),
+            json!([{ "namespace": "" }]),
+        );
+        assert_eq!(array.structured_content.as_ref().unwrap(), &json!({ "result": [{ "namespace": "" }] }));
+
+        let object = product_tool_result(json!({ "pageNo": 1, "namespaces": [] }));
+        assert!(result_text(&object).contains("\"pageNo\": 1"));
+        assert_eq!(object.structured_content.as_ref().unwrap(), &json!({ "pageNo": 1, "namespaces": [] }));
+
+        let null = product_tool_result(serde_json::Value::Null);
+        assert_eq!(result_text(&null), "null");
+        assert_eq!(null.structured_content.as_ref().unwrap(), &json!({ "result": null }));
     }
 
     #[test]
@@ -10037,6 +10477,10 @@ mod tests {
             }))
             .await;
         assert_eq!(result.is_error, Some(false), "{}", result_text(&result));
+        assert_eq!(
+            result.structured_content.as_ref().expect("structured content must be populated"),
+            &json!({ "ok": true, "operation": "kv_delete" }),
+        );
         {
             let approvals = backend.tool_approvals.lock().unwrap();
             assert_eq!(approvals.len(), 1);
@@ -10313,9 +10757,9 @@ mod tests {
         // 22 product-provider tools (14 Nacos + 8 Consul), plus the three
         // runtime-selectable plugin meta tools retained by auto mode.
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 50);
+        assert_eq!(tools.len(), 51);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(tools.len(), 48);
+        assert_eq!(tools.len(), 49);
         assert!(names.contains(&"dbx_nacos_get_config") && names.contains(&"dbx_consul_kv_get"));
         #[cfg(feature = "mq-admin")]
         assert!(names.contains(&"dbx_peek_messages"));
@@ -10691,6 +11135,7 @@ mod tests {
             ("dbx_list_routines", &["database", "schema", "routine_type"]),
             ("dbx_get_routine_source", &["database", "schema", "signature"]),
             ("dbx_execute_query", &["database", "session_id", "cell_char_offset", "cell_char_limit", "max_rows"]),
+            ("dbx_query", &["database", "cell_char_offset", "cell_char_limit", "max_rows"]),
             (
                 "dbx_execute_batch",
                 &[
@@ -10866,9 +11311,9 @@ mod tests {
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         // Product tools stay available: they are bound to in-scope connections.
         #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 42);
+        assert_eq!(names.len(), 43);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(names.len(), 40);
+        assert_eq!(names.len(), 41);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
@@ -13337,6 +13782,102 @@ mod tests {
         let results = structured["results"].as_array().expect("results must be an array");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["statement_index"], 0);
+    }
+
+    #[tokio::test]
+    async fn execute_query_returns_structured_content() {
+        let postgres = connection("pg", "pg", "postgres", "app");
+        let mut query_result = empty_query_result();
+        query_result.columns = vec!["i".to_string(), "n".to_string(), "s".to_string()];
+        query_result.column_types = vec!["bigint".to_string(), "null".to_string(), "varchar".to_string()];
+        query_result.rows = vec![vec![serde_json::json!("1"), serde_json::Value::Null, serde_json::json!("NULL")]];
+        let backend = Arc::new(FakeBackend {
+            connections: vec![postgres],
+            query_result: Some(query_result),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let result = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT 1 AS i, NULL AS n, 'NULL' AS s".to_string(),
+                session_id: None,
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        // The markdown text stays in content…
+        assert!(result_text(&result).contains("ok"));
+        // …and structuredContent.result keeps column types plus the NULL / "NULL"
+        // distinction that markdown rendering loses (#15149).
+        let structured = result.structured_content.as_ref().expect("structured content must be populated");
+        assert!(structured.is_object(), "MCP structuredContent must be a JSON object");
+        assert_eq!(structured["result"]["columns"], serde_json::json!(["i", "n", "s"]));
+        assert_eq!(structured["result"]["column_types"], serde_json::json!(["bigint", "null", "varchar"]));
+        assert_eq!(structured["result"]["rows"], serde_json::json!([["1", null, "NULL"]]));
+        assert!(structured["result"]["rows"][0][1].is_null(), "SQL NULL must stay JSON null");
+        assert_eq!(structured["result"]["rows"][0][2], serde_json::json!("NULL"), "a string 'NULL' must stay a string");
+    }
+
+    /// The read-only sibling returns the same structured result shape as
+    /// `dbx_execute_query`, so agent clients keep column types and NULLs.
+    #[tokio::test]
+    async fn dbx_query_returns_structured_content() {
+        let postgres = connection("pg", "pg", "postgres", "app");
+        let mut query_result = empty_query_result();
+        query_result.columns = vec!["i".to_string()];
+        query_result.column_types = vec!["bigint".to_string()];
+        query_result.rows = vec![vec![serde_json::json!("1")]];
+        let backend = Arc::new(FakeBackend {
+            connections: vec![postgres],
+            query_result: Some(query_result),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let result = server
+            .execute_read_only_query(Parameters(ReadOnlyQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT 1 AS i".to_string(),
+                cell_window: CellWindowArgs::default(),
+                max_rows: None,
+            }))
+            .await;
+        assert_ne!(result.is_error, Some(true), "read-only SELECT should succeed");
+        let structured = result.structured_content.as_ref().expect("structured content must be populated");
+        assert_eq!(structured["result"]["columns"], serde_json::json!(["i"]));
+        assert_eq!(structured["result"]["rows"], serde_json::json!([["1"]]));
+    }
+
+    #[tokio::test]
+    async fn execute_query_error_keeps_text_only_contract() {
+        let postgres = connection("pg", "pg", "postgres", "app");
+        let mut query_result = empty_query_result();
+        query_result.columns = vec!["i".to_string()];
+        let backend = Arc::new(FakeBackend {
+            connections: vec![postgres],
+            query_result: Some(query_result),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let result = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT FAIL_MCP_TEST".to_string(),
+                session_id: None,
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.structured_content.is_none(), "errors must not carry structuredContent");
     }
 
     #[tokio::test]

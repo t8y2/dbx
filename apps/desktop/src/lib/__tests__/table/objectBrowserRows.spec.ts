@@ -43,6 +43,69 @@ describe("buildObjectBrowserRows", () => {
     }
   });
 
+  it("keeps space-padded MySQL-family table identifiers distinct while trimming only the display name", () => {
+    for (const databaseType of ["mysql", "doris", "starrocks", "goldendb"] as const) {
+      const rows = buildObjectBrowserRows({
+        objects: [
+          { name: " orders", object_type: "TABLE", schema: " app " },
+          { name: "orders", object_type: "TABLE", schema: " app " },
+        ],
+        database: "app",
+        fallbackSchema: "app",
+        databaseType,
+      });
+
+      expect(
+        rows.map((row) => row.name),
+        databaseType,
+      ).toEqual([" orders", "orders"]);
+      expect(
+        rows.map((row) => row.displayName),
+        databaseType,
+      ).toEqual(["orders", "orders"]);
+      expect(
+        rows.map((row) => row.schema),
+        databaseType,
+      ).toEqual([" app ", " app "]);
+      expect(new Set(rows.map((row) => row.id)).size, databaseType).toBe(2);
+    }
+  });
+
+  it("normalizes non-MySQL table names and schemas, leaving only exact INDEX identities untouched", () => {
+    const rows = buildObjectBrowserRows({
+      objects: [
+        { name: " orders ", object_type: "TABLE", schema: " Mixed " },
+        { name: " Ix (a) ", object_type: "INDEX", schema: " Mixed ", parent_name: " T(a) " },
+      ],
+      database: "app",
+      fallbackSchema: "app",
+      databaseType: "oceanbase-oracle",
+    });
+
+    expect(rows.map((row) => [row.type, row.name, row.displayName, row.schema])).toEqual([
+      ["TABLE", "orders", "orders", "Mixed"],
+      ["INDEX", " Ix (a) ", " Ix (a) ", " Mixed "],
+    ]);
+  });
+
+  it("does not turn synonyms and jobs into table rows", () => {
+    const rows = buildObjectBrowserRows({
+      objects: [
+        { name: "actual_table", object_type: "TABLE" },
+        { name: "actual_sequence", object_type: "SEQUENCE" },
+        { name: "alias", object_type: "SYNONYM" },
+        { name: "job", object_type: "JOB" },
+      ],
+      database: "app",
+      fallbackSchema: "app",
+    });
+
+    expect(rows.map(({ type, name }) => [type, name])).toEqual([
+      ["TABLE", "actual_table"],
+      ["SEQUENCE", "actual_sequence"],
+    ]);
+  });
+
   it("keeps a schema index distinct from a table and preserves its exact parent identity", () => {
     const rows = buildObjectBrowserRows({
       objects: [{ name: " Ix (a) ", object_type: "INDEX", schema: "Index Owner", parent_schema: "Table Owner", parent_name: " T(a) " }],

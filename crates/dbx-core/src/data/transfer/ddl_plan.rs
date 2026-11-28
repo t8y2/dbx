@@ -47,6 +47,18 @@ pub(super) async fn prepare_table_ddl(
         .map_err(|error| format!("Cannot read complete MySQL DDL for '{table}': {error}"))?;
         return mysql_xugu::prepare(&ddl, columns, &request.target_schema, target_table);
     }
+    if oracle_xugu::is_pair(source_db_type, target_db_type) {
+        let ddl = oracle_xugu::source_ddl(state, request, source_pool_key, table).await?;
+        return oracle_xugu::prepare(
+            &ddl,
+            columns,
+            &request.source_schema,
+            table,
+            &request.target_schema,
+            target_table,
+            table_comment,
+        );
+    }
     let source_columns = if request.has_package_selection() {
         Some(serde_json::to_value(columns).map_err(|error| error.to_string())?)
     } else {
@@ -279,11 +291,21 @@ pub(super) async fn prepare_table_ddl(
         )
     };
 
+    // PostgreSQL's IF NOT EXISTS also suppresses a conflict with an index or
+    // sequence. Let the executor see the failure and verify the target kind.
+    let mut ddl = if *target_db_type == DatabaseType::Postgres {
+        match ddl.strip_prefix("CREATE TABLE IF NOT EXISTS ") {
+            Some(tail) => format!("CREATE TABLE {tail}"),
+            None => ddl,
+        }
+    } else {
+        ddl
+    };
+
     // MySQL-family targets: defer the foreign keys to ALTER statements so the table
     // creation order never has to satisfy foreign key dependencies (a foreign key cycle
     // has no valid CREATE TABLE order at all). The rebuild path above guarantees the
     // metadata behind `foreign_keys` is trustworthy before anything is stripped.
-    let mut ddl = ddl;
     let mut deferred_fk_alters = Vec::new();
     let mut deferred_fk_names = Vec::new();
     if supports_deferred_mysql_foreign_keys(target_db_type) && !foreign_keys.is_empty() {

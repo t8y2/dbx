@@ -45,7 +45,9 @@ watch(
       const response = await mqGetBrokerConfig(connectionId, brokerId);
       if (active) result.value = response;
     } catch (cause) {
-      if (active) error.value = formatError(cause);
+      if (!active) return;
+      const message = formatError(cause);
+      error.value = message === "Agent RPC error (-1): Unknown method: mq_get_broker_config" ? t("mqBroker.configurationDriverUnsupported") : message;
     }
   },
   { immediate: true, flush: "sync" },

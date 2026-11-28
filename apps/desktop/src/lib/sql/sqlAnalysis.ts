@@ -643,6 +643,81 @@ function isSelectStar(body: string, alias: string | undefined): boolean {
   return new RegExp(`^${escapeRegExp(alias)}\\s*\\.\\s*\\*$`, "i").test(trimmed);
 }
 
+/**
+ * Rewrite simple derived tables — `(SELECT * FROM t ...) alias` — into their
+ * base table (`t alias`) so display-only source resolution (result-column
+ * comments, type labels) can trace columns through derived tables. Only an
+ * identity `SELECT *` projection over a single plain table source is rewritten;
+ * anything else stays untouched. The result must never feed editability or
+ * write paths. Returns the original string when nothing was rewritten.
+ */
+export function flattenSimpleDerivedTablesForDisplay(sql: string): string {
+  const normalized = stripSqlComments(sql)
+    .replace(/;+\s*$/, "")
+    .trim();
+  if (!normalized || /^\s*WITH\b/i.test(normalized) || !/^SELECT\b/i.test(normalized)) return sql;
+  if (hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"])) return sql;
+  const fromIndex = findTopLevelKeyword(normalized, "FROM", 0);
+  if (fromIndex < 0) return sql;
+  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR"], fromIndex + 4);
+  const fromBody = normalized.slice(fromIndex + 4, fromEnd < 0 ? normalized.length : fromEnd);
+  const flattened = flattenDerivedGroupsInFromBody(fromBody);
+  if (flattened === fromBody) return sql;
+  return normalized.slice(0, fromIndex + 4) + flattened + (fromEnd < 0 ? "" : normalized.slice(fromEnd));
+}
+
+function flattenDerivedGroupsInFromBody(fromBody: string): string {
+  const tokens = tokenizeSqlSemantic(fromBody);
+  const closeOf = new Map<number, number>();
+  const openStack: number[] = [];
+  tokens.forEach((token, index) => {
+    if (token.kind !== "punctuation") return;
+    if (token.text === "(") openStack.push(index);
+    else if (token.text === ")" && openStack.length > 0) closeOf.set(openStack.pop()!, index);
+  });
+  let out = "";
+  let copiedTo = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const closeIndex = closeOf.get(i);
+    if (closeIndex === undefined) continue;
+    const openToken = tokens[i]!;
+    const closeToken = tokens[closeIndex]!;
+    // A derived table only sits at a source position: start of the FROM body,
+    // after a comma-join, or right after a JOIN keyword.
+    let prev = i - 1;
+    while (prev >= 0 && tokens[prev]!.kind === "comment") prev--;
+    const prevToken = prev >= 0 ? tokens[prev]! : undefined;
+    const atSourcePosition = !prevToken || (prevToken.kind === "punctuation" && prevToken.text === ",") || (prevToken.kind === "word" && prevToken.normalized === "join");
+    i = closeIndex;
+    if (!atSourcePosition) continue;
+    const aliasPos = skipWhitespace(fromBody, closeToken.span.end);
+    const aliasIdent = startsWithKeyword(fromBody, aliasPos, "AS") ? readIdentifier(fromBody, aliasPos + 2) : tableSourceTerminatorAt(fromBody, aliasPos) ? undefined : readIdentifier(fromBody, aliasPos);
+    const replacement = flattenDerivedTableSource(fromBody.slice(openToken.span.end, closeToken.span.start), aliasIdent ? fromBody.slice(aliasPos, aliasIdent.end) : undefined);
+    if (!replacement) continue;
+    out += fromBody.slice(copiedTo, openToken.span.start) + replacement;
+    copiedTo = aliasIdent ? aliasIdent.end : closeToken.span.end;
+  }
+  return copiedTo === 0 ? fromBody : out + fromBody.slice(copiedTo);
+}
+
+function flattenDerivedTableSource(inner: string, outerAlias: string | undefined): string | undefined {
+  const normalizedInner = inner.trim();
+  if (!/^SELECT\b/i.test(normalizedInner)) return undefined;
+  const innerFromIndex = findTopLevelKeyword(normalizedInner, "FROM", 0);
+  if (innerFromIndex < 0) return undefined;
+  const projection = stripSqlServerTopClause(normalizedInner.slice("SELECT".length, innerFromIndex).trim());
+  if (projection !== "*") return undefined;
+  const innerBody = normalizedInner.slice(innerFromIndex + "FROM".length);
+  const innerFromEnd = firstTopLevelKeywordIndex(innerBody, ["WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR"], 0);
+  const innerFromBody = innerBody.slice(0, innerFromEnd < 0 ? innerBody.length : innerFromEnd).trim();
+  if (isExternalFromSource(innerFromBody) || parseFromSources(innerFromBody).length !== 1) return undefined;
+  const table = parseQualifiedIdentifier(innerFromBody);
+  if (!table) return undefined;
+  const rawTable = innerFromBody.slice(skipWhitespace(innerFromBody, 0), table.end).trimEnd();
+  if (!rawTable) return undefined;
+  return outerAlias ? `${rawTable} ${outerAlias}` : rawTable;
+}
+
 export function hasUnparsedQuerySource(sql: string): boolean {
   const normalized = stripSqlComments(sql).trim();
   if (/^WITH\b/i.test(normalized) || hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"])) return false;
@@ -751,6 +826,99 @@ function tableSourceTerminatorAt(text: string, pos: number): boolean {
   if (pos >= text.length) return true;
   if (text[pos] === ",") return true;
   return ["ON", "USING", "JOIN", "LEFT", "RIGHT", "INNER", "FULL", "CROSS", "OUTER", "NATURAL", "WITH"].some((keyword) => startsWithKeyword(text, pos, keyword));
+}
+
+/** Placeholder table names standing in for derived sources in the display rewrite. */
+const DISPLAY_DERIVED_TABLE_PREFIX = "__dbx_derived_";
+
+export interface QueryDisplayStructure {
+  analysis: EditableQueryInfo;
+  /** Placeholder table name → the derived source's output column labels, in ordinal order. */
+  derivedOutputColumns: Map<string, string[]>;
+}
+
+/**
+ * Display-only parse that additionally accepts derived tables the plain source
+ * parse rejects — `(SELECT a, b FROM t WHERE ... UNION ALL SELECT ...) D`.
+ * Each such source is rewritten to a placeholder table whose "columns" are the
+ * first SELECT's output labels, so result ordinals stay aligned while the
+ * derived columns resolve to no physical table and therefore show no comment.
+ * Unsupported shapes bail to null and callers keep today's behavior.
+ * Never feeds editability or write paths.
+ */
+export function analyzeQueryDisplayStructure(sql: string): QueryDisplayStructure | null {
+  const normalized = stripSqlComments(sql)
+    .replace(/;+\s*$/, "")
+    .trim();
+  if (!normalized || /^\s*WITH\b/i.test(normalized) || !/^SELECT\b/i.test(normalized)) return null;
+  if (hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"])) return null;
+  if (hasTopLevelSemicolon(normalized)) return null;
+
+  const fromIndex = findTopLevelKeyword(normalized, "FROM", 0);
+  if (fromIndex < 0) return null;
+  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR"], fromIndex + "FROM".length);
+  const fromBody = normalized.slice(fromIndex + "FROM".length, fromEnd < 0 ? normalized.length : fromEnd);
+  const derivedOutputColumns = new Map<string, string[]>();
+  const rewrittenFromBody = rewriteDerivedSourcesForDisplay(fromBody, derivedOutputColumns);
+  if (!rewrittenFromBody) return null;
+  const rewrittenSql = normalized.slice(0, fromIndex + "FROM".length) + rewrittenFromBody + (fromEnd < 0 ? "" : normalized.slice(fromEnd));
+  const analysis = analyzeSelectStructureForDisplay(rewrittenSql);
+  if (!analysis) return null;
+  return { analysis, derivedOutputColumns };
+}
+
+/**
+ * Replace each derived table at a FROM source position with a placeholder
+ * table, recording the output column labels its first SELECT produces.
+ */
+function rewriteDerivedSourcesForDisplay(fromBody: string, derivedOutputColumns: Map<string, string[]>): string | null {
+  const tokens = tokenizeSqlSemantic(fromBody);
+  const closeOf = new Map<number, number>();
+  const openStack: number[] = [];
+  tokens.forEach((token, index) => {
+    if (token.kind !== "punctuation") return;
+    if (token.text === "(") openStack.push(index);
+    else if (token.text === ")" && openStack.length > 0) closeOf.set(openStack.pop()!, index);
+  });
+  let out = "";
+  let copiedTo = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const closeIndex = closeOf.get(i);
+    if (closeIndex === undefined) continue;
+    // A derived table only sits at a source position: start of the FROM body,
+    // after a comma-join, or right after a JOIN keyword.
+    let prev = i - 1;
+    while (prev >= 0 && tokens[prev]!.kind === "comment") prev--;
+    const prevToken = prev >= 0 ? tokens[prev]! : undefined;
+    const atSourcePosition = !prevToken || (prevToken.kind === "punctuation" && prevToken.text === ",") || (prevToken.kind === "word" && prevToken.normalized === "join");
+    if (!atSourcePosition) continue;
+    const openToken = tokens[i]!;
+    const closeToken = tokens[closeIndex]!;
+    i = closeIndex;
+    const outputColumns = parseDerivedOutputColumns(fromBody.slice(openToken.span.end, closeToken.span.start));
+    if (!outputColumns) return null;
+    const placeholder = `${DISPLAY_DERIVED_TABLE_PREFIX}${derivedOutputColumns.size}__`;
+    derivedOutputColumns.set(placeholder, outputColumns);
+    out += fromBody.slice(copiedTo, openToken.span.start) + placeholder;
+    copiedTo = closeToken.span.end;
+  }
+  return copiedTo === 0 ? fromBody : out + fromBody.slice(copiedTo);
+}
+
+/** Output labels of a derived table, taken from its first set-operation branch. */
+function parseDerivedOutputColumns(inner: string): string[] | null {
+  const normalized = inner.trim();
+  if (!/^SELECT\b/i.test(normalized)) return null;
+  const setIndex = firstTopLevelKeywordIndex(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"], 0);
+  const branch = setIndex < 0 ? normalized : normalized.slice(0, setIndex);
+  const fromIndex = findTopLevelKeyword(branch, "FROM", 0);
+  if (fromIndex < 0) return null;
+  const projection = stripSqlServerTopClause(branch.slice("SELECT".length, fromIndex).trim());
+  if (!projection || /^DISTINCT\b/i.test(projection)) return null;
+  const columns = parseSelectColumns(projection);
+  // A star branch has no static column count; bail rather than shift ordinals.
+  if (!columns.length || columns.some((column) => column.star)) return null;
+  return columns.map((column) => column.resultName);
 }
 
 function startsWithKeyword(text: string, pos: number, keyword: string): boolean {

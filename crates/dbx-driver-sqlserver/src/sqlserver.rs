@@ -392,6 +392,12 @@ pub async fn connect_with_port_explicit(
 ) -> Result<SqlServerClient, String> {
     let host = sqlserver_host_with_url_instance(host, port, port_explicit, url_params)?;
     let host = host.as_ref();
+    if let Some(verification) = sqlserver_certificate_verification(url_params)? {
+        // A verified connection must never fall back to an unverified or unencrypted transport.
+        let encryption = tiberius::EncryptionLevel::Required;
+        return try_connect(host, port, port_explicit, user, pass, database, encryption, Some(&verification), timeout)
+            .await;
+    }
     if sqlserver_native_encryption_disabled(url_params) {
         let skipped = "encryption was disabled by encrypt=false / sqlserverEncryption=disabled".to_string();
         return try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
@@ -399,9 +405,8 @@ pub async fn connect_with_port_explicit(
             .map_err(|fallback_errors| sqlserver_connect_failure_message(&skipped, &fallback_errors));
     }
 
-    match try_connect(host, port, port_explicit, user, pass, database, tiberius::EncryptionLevel::Required, timeout)
-        .await
-    {
+    let encryption = tiberius::EncryptionLevel::Required;
+    match try_connect(host, port, port_explicit, user, pass, database, encryption, None, timeout).await {
         Ok(client) => Ok(client),
         Err(encrypted_error) => {
             try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
@@ -505,7 +510,7 @@ async fn try_connect_legacy_sqlserver_encryption(
 ) -> Result<SqlServerClient, Vec<(&'static str, String)>> {
     let mut errors = Vec::new();
     for (label, encryption) in SQLSERVER_LEGACY_ENCRYPTION_FALLBACKS {
-        match try_connect(host, port, port_explicit, user, pass, database, encryption, timeout).await {
+        match try_connect(host, port, port_explicit, user, pass, database, encryption, None, timeout).await {
             Ok(client) => return Ok(client),
             Err(error) => errors.push((label, error)),
         }
@@ -532,6 +537,42 @@ fn is_sqlserver_tls_handshake_error(error: &str) -> bool {
     error.contains("tls") && (error.contains("handshake") || error.contains("eof") || error.contains("performing i/o"))
 }
 
+/// Server certificate verification requested with `trustServerCertificate=false`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqlServerCertificateVerification {
+    /// CA certificate (`.pem`, `.crt` or `.der`) from `sslrootcert`; system roots when absent.
+    ca_file: Option<String>,
+    /// Name from `hostNameInCertificate`, used instead of the connection host for the TLS check.
+    host_name: Option<String>,
+}
+
+fn sqlserver_certificate_verification(
+    url_params: Option<&str>,
+) -> Result<Option<SqlServerCertificateVerification>, String> {
+    use dbx_types::models::connection::sqlserver_url_param;
+
+    let Some(trust) = sqlserver_url_param(url_params, "trustServerCertificate")? else {
+        return Ok(None);
+    };
+    match trust.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "1" => return Ok(None),
+        "false" | "no" | "0" => {}
+        _ => return Err("Invalid SQL Server trustServerCertificate URL parameter: expected true or false".into()),
+    }
+    if sqlserver_native_encryption_disabled(url_params) {
+        return Err("trustServerCertificate=false cannot be combined with encrypt=false".into());
+    }
+    let non_empty = |value: Option<String>| value.map(|value| value.trim().to_owned()).filter(|v| !v.is_empty());
+    let ca_file = non_empty(sqlserver_url_param(url_params, "sslrootcert")?);
+    let host_name = non_empty(sqlserver_url_param(url_params, "hostNameInCertificate")?);
+    if let Some(name) = &host_name {
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+            return Err("Invalid SQL Server hostNameInCertificate URL parameter".into());
+        }
+    }
+    Ok(Some(SqlServerCertificateVerification { ca_file, host_name }))
+}
+
 async fn try_connect(
     host: &str,
     port: u16,
@@ -540,6 +581,7 @@ async fn try_connect(
     pass: &str,
     database: Option<&str>,
     encryption: tiberius::EncryptionLevel,
+    verification: Option<&SqlServerCertificateVerification>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
     let deadline = tokio::time::Instant::now() + timeout;
@@ -563,7 +605,25 @@ async fn try_connect(
         if let Some(db) = database {
             config.database(db);
         }
-        config.trust_cert();
+        // The TCP address is taken before `hostNameInCertificate` replaces the host used for the TLS check.
+        let addr = config.get_addr();
+        match verification {
+            Some(verification) => {
+                if let Some(ca_file) = &verification.ca_file {
+                    config.trust_cert_ca(ca_file);
+                }
+                // Routed connections are checked against the host the server redirected to.
+                if let Some(host_name) = verification.host_name.as_deref().filter(|_| redirects == 0) {
+                    if uses_named_instance_resolution {
+                        return Err("hostNameInCertificate cannot be used with a named instance resolved through \
+                                    SQL Server Browser; set the instance port explicitly"
+                            .into());
+                    }
+                    config.host(host_name);
+                }
+            }
+            None => config.trust_cert(),
+        }
         config.encryption(encryption);
 
         let remaining_connect = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -583,7 +643,7 @@ async fn try_connect(
                     }
                 })?
         } else {
-            tokio::time::timeout(remaining_connect, TcpStream::connect(config.get_addr()))
+            tokio::time::timeout(remaining_connect, TcpStream::connect(addr))
                 .await
                 .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
                 .map_err(|e| {
@@ -3013,12 +3073,34 @@ fn sqlserver_schema_name_predicate(schema: &str, schema_name_expression: &str) -
     format!("{schema_name_expression} = N'{}'", schema.replace('\'', "''"))
 }
 
-pub fn sqlserver_object_id_expression(schema: &str, table: &str) -> String {
+/// Resolves an unqualified object by name through `sys.objects`.
+///
+/// `OBJECT_SCHEMA_NAME` only exists from SQL Server 2008 on, so the blank-schema
+/// metadata used by DBX's SQL Server object tree failed on SQL Server 2005 with
+/// error 195 ("'OBJECT_SCHEMA_NAME' is not a recognized built-in function
+/// name") right after a table was created. The catalog lookup below keeps the
+/// same "find the object the caller means" semantics on every supported
+/// version: prefer the caller's default schema, then `dbo`, then any other
+/// schema.
+fn sqlserver_unqualified_object_lookup(table: &str, projection: &str) -> String {
     let table = table.replace('\'', "''");
+    format!(
+        "(SELECT TOP 1 {projection} FROM sys.objects dbx_object \
+         WHERE dbx_object.name = N'{table}' AND dbx_object.type IN ('U', 'V') \
+         ORDER BY CASE \
+             WHEN dbx_object.schema_id = SCHEMA_ID(SCHEMA_NAME()) THEN 0 \
+             WHEN dbx_object.schema_id = SCHEMA_ID(N'dbo') THEN 1 \
+             ELSE 2 END, \
+             dbx_object.schema_id)"
+    )
+}
+
+pub fn sqlserver_object_id_expression(schema: &str, table: &str) -> String {
     if schema.trim().is_empty() {
-        return format!("OBJECT_ID(QUOTENAME(N'{table}'))");
+        return sqlserver_unqualified_object_lookup(table, "dbx_object.object_id");
     }
 
+    let table = table.replace('\'', "''");
     let schema = schema.replace('\'', "''");
     format!("OBJECT_ID(QUOTENAME(N'{schema}') + N'.' + QUOTENAME(N'{table}'))")
 }
@@ -3026,8 +3108,8 @@ pub fn sqlserver_object_id_expression(schema: &str, table: &str) -> String {
 fn sqlserver_object_schema_name_predicate(schema: &str, table: &str, schema_name_expression: &str) -> String {
     if schema.trim().is_empty() {
         return format!(
-            "{schema_name_expression} = OBJECT_SCHEMA_NAME({})",
-            sqlserver_object_id_expression(schema, table)
+            "{schema_name_expression} = (SELECT dbx_schema.name FROM sys.schemas dbx_schema WHERE dbx_schema.schema_id = {})",
+            sqlserver_unqualified_object_lookup(table, "dbx_object.schema_id")
         );
     }
 
@@ -3181,7 +3263,7 @@ pub struct SqlServerSynonymTarget {
 fn sqlserver_synonym_target_sql() -> &'static str {
     // Only a base object in the current database can be read with the local catalog
     // views, so synonyms that name another database or a linked server resolve to nothing.
-    "SELECT OBJECT_SCHEMA_NAME(o.object_id) AS target_schema, o.name AS target_name, o.type AS target_type \
+    "SELECT SCHEMA_NAME(o.schema_id) AS target_schema, o.name AS target_name, o.type AS target_type \
      FROM sys.synonyms sn \
      JOIN sys.schemas s ON s.schema_id = sn.schema_id \
      JOIN sys.objects o ON o.object_id = OBJECT_ID(sn.base_object_name) \
@@ -5324,6 +5406,62 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_certificate_verification_is_opt_in() {
+        use super::{sqlserver_certificate_verification, SqlServerCertificateVerification};
+
+        assert_eq!(sqlserver_certificate_verification(None), Ok(None));
+        assert_eq!(sqlserver_certificate_verification(Some("encrypt=true")), Ok(None));
+        assert_eq!(sqlserver_certificate_verification(Some("trustServerCertificate=true")), Ok(None));
+        assert_eq!(
+            sqlserver_certificate_verification(Some("encrypt=true;trustServerCertificate=false")),
+            Ok(Some(SqlServerCertificateVerification { ca_file: None, host_name: None }))
+        );
+        // Desktop paths may contain spaces or separators: percent-encoded and brace-quoted values both work.
+        assert_eq!(
+            sqlserver_certificate_verification(Some(
+                "TrustServerCertificate=no&sslrootcert=C%3A%5Ccerts%5Cmy%20ca.pem&hostNameInCertificate=db.example.com"
+            )),
+            Ok(Some(SqlServerCertificateVerification {
+                ca_file: Some(r"C:\certs\my ca.pem".into()),
+                host_name: Some("db.example.com".into()),
+            }))
+        );
+        assert_eq!(
+            sqlserver_certificate_verification(Some("trustServerCertificate=false;sslrootcert={/certs/a;b.crt}")),
+            Ok(Some(SqlServerCertificateVerification { ca_file: Some("/certs/a;b.crt".into()), host_name: None }))
+        );
+    }
+
+    #[test]
+    fn sqlserver_certificate_verification_rejects_contradictions() {
+        use super::sqlserver_certificate_verification;
+
+        assert!(sqlserver_certificate_verification(Some("trustServerCertificate=maybe")).is_err());
+        assert!(sqlserver_certificate_verification(Some("trustServerCertificate=false;encrypt=false")).is_err());
+        assert!(sqlserver_certificate_verification(Some(
+            "trustServerCertificate=false&hostNameInCertificate=db.example.com%2Fx"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn sqlserver_verified_connections_do_not_fall_back() {
+        let source = include_str!("sqlserver.rs");
+        let connect = source.split("pub async fn connect_with_port_explicit(").nth(1).unwrap();
+        let connect = connect.split("const SQLSERVER_LEGACY_TLS_HINT").next().unwrap();
+        let verified = connect.split("sqlserver_certificate_verification(url_params)?").nth(1).unwrap();
+        let verified = verified.split("if sqlserver_native_encryption_disabled").next().unwrap();
+        assert!(verified.contains("Some(&verification)"));
+        assert!(!verified.contains("try_connect_legacy_sqlserver_encryption"));
+
+        let try_connect = source.split("\nasync fn try_connect(").nth(1).unwrap();
+        let try_connect = try_connect.split("fn row_to_json").next().unwrap();
+        let addr = try_connect.find("let addr = config.get_addr();").unwrap();
+        assert!(addr < try_connect.find("config.host(host_name)").unwrap());
+        assert!(try_connect.contains("TcpStream::connect(addr)"));
+    }
+
+    #[test]
     fn sqlserver_legacy_encryption_modes_cover_jdbc_and_no_encryption_fallback() {
         assert_eq!(super::SQLSERVER_LEGACY_ENCRYPTION_LEVEL, tiberius::EncryptionLevel::Off);
         assert_eq!(super::SQLSERVER_UNSUPPORTED_ENCRYPTION_LEVEL, tiberius::EncryptionLevel::NotSupported);
@@ -5610,6 +5748,7 @@ mod tests {
             "password",
             None,
             tiberius::EncryptionLevel::NotSupported,
+            None,
             Duration::from_secs(3),
         )
         .await;
@@ -5671,6 +5810,7 @@ mod tests {
             "password",
             None,
             tiberius::EncryptionLevel::NotSupported,
+            None,
             Duration::from_secs(3),
         )
         .await;
@@ -5713,6 +5853,7 @@ mod tests {
             "password",
             None,
             tiberius::EncryptionLevel::NotSupported,
+            None,
             Duration::from_secs(3),
         )
         .await;
@@ -6300,9 +6441,37 @@ mod tests {
             "s.name = COALESCE((SELECT default_schema.name FROM sys.schemas default_schema WHERE default_schema.name = SCHEMA_NAME()), N'dbo')"
         );
         assert!(sqlserver_list_tables_sql("", None, None, None).contains(&predicate));
-        assert!(sqlserver_columns_sql("\t", "orders")
-            .contains("s.name = OBJECT_SCHEMA_NAME(OBJECT_ID(QUOTENAME(N'orders')))"),);
-        assert!(sqlserver_indexes_sql("", "orders").contains("OBJECT_ID(QUOTENAME(N'orders'))"));
+        let columns_sql = sqlserver_columns_sql("\t", "orders");
+        assert!(columns_sql.contains(
+            "s.name = (SELECT dbx_schema.name FROM sys.schemas dbx_schema WHERE dbx_schema.schema_id = (SELECT TOP 1 dbx_object.schema_id FROM sys.objects dbx_object"
+        ));
+        assert!(sqlserver_indexes_sql("", "orders")
+            .contains("(SELECT TOP 1 dbx_object.object_id FROM sys.objects dbx_object"));
+    }
+
+    #[test]
+    fn sqlserver_blank_schema_metadata_avoids_sql_server_2008_builtins() {
+        // OBJECT_SCHEMA_NAME is 2008+; SQL Server 2005 answers error 195, which broke
+        // column/index loads (including the refresh right after CREATE TABLE) there.
+        for sql in [
+            sqlserver_columns_sql("", "orders"),
+            sqlserver_indexes_sql("", "orders"),
+            sqlserver_indexes_sql("dbo", "orders"),
+            sqlserver_list_tables_sql("", None, None, None),
+            sqlserver_triggers_sql("", "orders"),
+            sqlserver_table_comment_sql("", "orders"),
+            sqlserver_synonym_target_sql().to_string(),
+        ] {
+            assert!(
+                !sql.to_ascii_uppercase().contains("OBJECT_SCHEMA_NAME"),
+                "SQL must stay SQL Server 2005 compatible: {sql}"
+            );
+        }
+
+        let columns_sql = sqlserver_columns_sql("", "orders");
+        assert!(columns_sql.contains("SCHEMA_ID(SCHEMA_NAME())"));
+        assert!(columns_sql.contains("SCHEMA_ID(N'dbo')"));
+        assert!(columns_sql.contains("dbx_object.name = N'orders'"));
     }
 
     #[test]

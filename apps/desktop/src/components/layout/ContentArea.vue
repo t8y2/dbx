@@ -85,9 +85,14 @@ import QueryMessagesView from "@/components/layout/QueryMessagesView.vue";
 import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarActions.vue";
 import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
-import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
+import ConnectionWatermark from "@/components/common/ConnectionWatermark.vue";
+import { resolveConnectionWatermark } from "@/lib/connection/connectionWatermark";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
 import OraclePackageMembers from "@/components/objects/OraclePackageMembers.vue";
+import type { OraclePackageSourceContext } from "@/lib/sql/oraclePackageMemberNavigation";
+import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
+import type { OraclePackageMemberEntry } from "@/lib/sql/oraclePackageMembers";
+import type { OraclePackageProcedureTarget } from "@/lib/table/routineParameters";
 import OracleTriggerStatus from "@/components/objects/OracleTriggerStatus.vue";
 import type { OracleTriggerSnapshot, OracleTriggerTarget, OracleTriggerExecutionResult } from "@/lib/database/oracleTriggerPlan";
 const OracleInvalidObjectsDialog = defineAsyncComponent(() => import("@/components/objects/OracleInvalidObjectsDialog.vue"));
@@ -216,7 +221,7 @@ import type { ExportReadControl } from "@/lib/export/snapshotCompletion";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { promptExportSavePath } from "@/lib/export/exportPath";
 import { queryResultExportBaseName } from "@/lib/export/saveTextFile";
-import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, serializeMongoDeleteId, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { buildMongoQueryResultOperations, formatMongoQueryResultOperationPreview } from "@/lib/mongo/mongoQueryResultEditing";
 import { buildInfluxDbV1DeleteStatements, canDeleteInfluxDbV1Row, resolveInfluxDbV1DeleteTarget } from "@/lib/influxdb/influxDbV1Delete";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
@@ -413,6 +418,10 @@ const { tier: dataToolbarTier } = useToolbarOverflow(dataToolbarRef, [
   // action set grows at that point, so the row must be re-measured.
   () => !!dataGridRef.value?.canOpenTableStructureEditor,
   () => !!dataGridRef.value?.goToColumnToolbarCapability?.visible,
+  // Hidden labels remove text without resizing the row; the breadcrumb shows
+  // the connection name, whose width can change on rename.
+  () => hideToolbarLabels.value,
+  () => props.activeConnection?.name,
 ]);
 const dataToolbarCompact = computed(() => dataToolbarTier.value >= 1);
 const showDataColumnsChip = computed(() => dataToolbarTier.value < 2);
@@ -457,12 +466,57 @@ const activeResultDatabase = computed(() => activeResultExecutionTarget.value?.d
 const activeResultSchema = computed(() => activeResultExecutionTarget.value?.schema ?? props.activeTab.schema);
 const graphViewKey = computed(() => JSON.stringify([props.activeTab.id, props.activeTab.resultViewGeneration, props.activeTab.activeResultRunId, props.activeTab.activeResultIndex, activeResultConnectionId.value, activeResultDatabase.value]));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
+const debugRoutine = computed(() => {
+  const { objectSource, sql, originalSql } = props.activeTab;
+  if (!objectSource || sql !== originalSql) return undefined;
+  const { schema, name, objectType } = objectSource;
+  if (objectType === "PROCEDURE" || objectType === "FUNCTION") return { schema, name, objectType };
+  return undefined;
+});
 const managedTypeSource = computed(() => isOracleFamilyTypeSource(effectiveDatabaseTypeForConnection(props.activeConnection), props.activeTab.objectSource?.objectType));
-const showOraclePackageMembers = computed(() => {
+const showPackageMembers = computed(() => {
   const type = effectiveDatabaseTypeForConnection(props.activeConnection);
   const source = props.activeTab.objectSource?.objectType ?? props.activeTab.objectDetails?.objectType;
-  return (type === "oracle" || type === "oceanbase-oracle") && (source === "PACKAGE" || source === "PACKAGE_BODY");
+  return (type === "oracle" || type === "oceanbase-oracle" || type === "dameng") && (source === "PACKAGE" || source === "PACKAGE_BODY");
 });
+/**
+ * 源码 tab 正在显示的包。编辑器拿它把包内的裸名解析成这个包的成员：包头里点声明跳到包体
+ * 实现，包体里点调用就地跳转，而不是按名字去数据字典找一个并不存在的独立过程。
+ */
+const packageSourceIdentity = computed<OraclePackageSourceContext | undefined>(() => {
+  if (!showPackageMembers.value) return undefined;
+  const tab = props.activeTab;
+  const objectType = tab.objectSource?.objectType ?? tab.objectDetails?.objectType;
+  if (objectType !== "PACKAGE" && objectType !== "PACKAGE_BODY") return undefined;
+  const name = tab.objectSource?.name ?? tab.objectDetails?.name;
+  if (!name) return undefined;
+  return { name, schema: tab.objectSource?.schema ?? tab.objectDetails?.schema ?? tab.schema, objectType };
+});
+const packageProcedureContext = computed(() => {
+  const tab = props.activeTab;
+  const source = tab.objectSource ?? tab.objectDetails;
+  const schema = source?.schema ?? tab.schema;
+  if (effectiveDatabaseTypeForConnection(props.activeConnection) !== "oracle" || !schema || !source || (source.objectType !== "PACKAGE" && source.objectType !== "PACKAGE_BODY")) return undefined;
+  return { connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog, schema, packageName: source.name };
+});
+const packageProcedureTarget = shallowRef<OraclePackageProcedureTarget & { catalog?: string }>();
+const packageProcedureOpen = ref(false);
+
+function openPackageProcedure(member: OraclePackageMemberEntry) {
+  const context = packageProcedureContext.value;
+  if (!context || member.isFunction || queryStore.isTabDirty(props.activeTab)) return;
+  packageProcedureTarget.value = { ...context, member };
+  packageProcedureOpen.value = true;
+}
+
+async function openPackageProcedureSql(sql: string, execute = false) {
+  const target = packageProcedureTarget.value;
+  if (!target) return;
+  const title = `Execute - ${target.packageName}.${target.member.databaseName}`;
+  const tabId = queryStore.createTab(target.connectionId, target.database, title, "query", target.schema, sql, target.catalog, { forceNew: true });
+  if (execute) await queryStore.executeTabSql(tabId, sql);
+}
+
 const unfinishedTypeChange = computed(() => !!props.activeTab.typeManagementDraft && props.activeTab.typeManagementDraft.state !== "complete");
 const verifiedTypeDeletion = computed(() => props.activeTab.typeManagementDraft?.state === "complete" && props.activeTab.typeManagementDraft.operation.startsWith("delete"));
 function resumeTypeManagement() {
@@ -583,6 +637,7 @@ const activeSqlStatementParameterOptions = computed(() =>
   sqlStatementParameterOptionsForCompatibility(activeEffectiveDatabaseType.value, activeEffectiveDatabaseType.value === "opengauss" ? connectionStore.databaseCompatibilityMode(activeResultConnectionId.value, activeResultDatabase.value) : undefined),
 );
 const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
+const activeWatermark = computed(() => resolveConnectionWatermark(props.activeConnection, activeProductionContext.value.active));
 const productionSessionDetail = computed(() => {
   if (!activeProductionContext.value.active) return "";
   if (activeProductionContext.value.reason === "connection") return t("production.connection");
@@ -1116,6 +1171,10 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
   if (!tab.result.columns.includes(target.idColumn)) return undefined;
 
   const editTarget = { idColumn: target.idColumn, documentAt: (rowIdx: number) => tab.result?.mongo_documents?.[rowIdx] };
+  function deleteIdForRow(id: unknown, rowIndex: number) {
+    const canonicalDocument = tab.result?.mongo_copy_documents?.[rowIndex] as Record<string, unknown> | undefined;
+    return serializeMongoDeleteId(id, canonicalDocument?._id);
+  }
 
   const save: CustomSaveHandler["save"] = async (changes: MongoQueryGridChanges) => {
     if (changes.newRows.length > 0) {
@@ -1123,16 +1182,16 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
     }
     if (!changes.columns.includes(target.idColumn)) throw new Error("No _id column");
     for (const operation of buildMongoQueryResultOperations(changes, editTarget)) {
-      const id = serializeMongoDocumentId(operation.id);
       if (operation.kind === "delete") {
-        await api.mongoDeleteDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, id);
+        await api.mongoDeleteDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, deleteIdForRow(operation.id, operation.rowIndex));
       } else {
-        await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, id, JSON.stringify(operation.update));
+        await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, serializeMongoDocumentId(operation.id), JSON.stringify(operation.update));
       }
     }
   };
 
-  const preview: CustomSaveHandler["preview"] = async (changes: MongoQueryGridChanges) => buildMongoQueryResultOperations(changes, editTarget).map((operation) => formatMongoQueryResultOperationPreview(target.collection, operation));
+  const preview: CustomSaveHandler["preview"] = async (changes: MongoQueryGridChanges) =>
+    buildMongoQueryResultOperations(changes, editTarget).map((operation) => formatMongoQueryResultOperationPreview(target.collection, operation, operation.kind === "delete" ? deleteIdForRow(operation.id, operation.rowIndex) : undefined));
 
   const applySavedChanges: NonNullable<CustomSaveHandler["applySavedChanges"]> = ({ dirtyRows, columns }) => {
     const documents = tab.result?.mongo_documents;
@@ -2380,7 +2439,7 @@ defineExpose({
               <Button v-if="!unfinishedTypeChange && !verifiedTypeDeletion" variant="outline" size="sm" @click="refreshTypeSource">{{ t("structureEditor.refresh") }}</Button>
               <span v-if="verifiedTypeDeletion" role="status" class="text-sm text-muted-foreground">{{ t("objects.typeManagementDeleted") }}</span>
             </div>
-            <ProductionWatermark v-if="activeProductionContext.active" />
+            <ConnectionWatermark v-if="activeWatermark" v-bind="activeWatermark" />
             <ObjectDependenciesPanel :target="activeObjectDependencyTarget" :section="activeObjectSection" @update:section="setObjectSection" @view-sql="viewObjectDependencySql" @open-object="(context, target) => emit('openDependencyObject', context, target)">
               <OracleTriggerStatus
                 v-if="queryStore.oracleTriggerSourceState(activeTab.id)"
@@ -2417,12 +2476,24 @@ defineExpose({
                   {{ t("common.retry") }}
                 </Button>
               </div>
-              <div v-else :class="showOraclePackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
-                <OraclePackageMembers v-if="showOraclePackageMembers" :key="activeTab.id" :source="activeTab.sql" @navigate="queryEditorRef?.focusPackageMember($event)" />
+              <div v-else :class="showPackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
+                <OraclePackageMembers v-if="showPackageMembers" :key="activeTab.id" :source="activeTab.sql" :can-execute-procedure="!!packageProcedureContext && !queryStore.isTabDirty(activeTab)" @navigate="queryEditorRef?.focusPackageMember($event)" @execute-procedure="openPackageProcedure" />
+                <ProcedureExecutionDialog
+                  v-if="packageProcedureTarget"
+                  v-model:open="packageProcedureOpen"
+                  :connection-id="packageProcedureTarget.connectionId"
+                  :database="packageProcedureTarget.database"
+                  database-type="oracle"
+                  :schema="packageProcedureTarget.schema"
+                  :routine-name="packageProcedureTarget.member.databaseName"
+                  :package-procedure="packageProcedureTarget"
+                  @open-sql="openPackageProcedureSql($event)"
+                  @execute="openPackageProcedureSql($event, true)"
+                />
                 <QueryEditor
                   ref="queryEditorRef"
                   class="relative z-0 flex-1"
-                  :class="{ 'min-w-0': showOraclePackageMembers }"
+                  :class="{ 'min-w-0': showPackageMembers }"
                   :auto-focus="sourceSectionActive && autoFocus !== false"
                   :model-value="activeTab.sql"
                   :tab-id="activeTab.id"
@@ -2431,6 +2502,8 @@ defineExpose({
                   :catalog="activeTab.catalog"
                   :database="activeTab.database"
                   :schema="activeTab.schema"
+                  :package-source="packageSourceIdentity"
+                  :debug-routine="debugRoutine"
                   :client-session-id="activeTab.id"
                   :completion-context-version="activeTab.completionContextVersion"
                   :database-type="activeEffectiveDatabaseType"
@@ -3395,7 +3468,7 @@ defineExpose({
     <!-- Data mode: full-height grid -->
     <template v-else-if="activeTab.mode === 'data'">
       <div class="flex-1 min-h-0 flex flex-col">
-        <div ref="dataToolbarRef" class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs overflow-hidden">
+        <div ref="dataToolbarRef" data-toolbar-row class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs overflow-hidden">
           <!-- Context breadcrumb. The connection and database segments are
                capped so a long connection name can never eat half the row;
                the table name gets the remaining room and is the only filled

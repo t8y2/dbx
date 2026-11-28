@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { formatError } from "@/lib/backend/errorUtils";
-import { mqGetKafkaConsumerGroupSnapshot } from "@/lib/backend/api";
+import { mqDeleteSubscription, mqGetKafkaConsumerGroupSnapshot } from "@/lib/backend/api";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import type { KafkaConsumerGroupSummary } from "@/types/mq";
 import MqPanelToolbar from "./shared/MqPanelToolbar.vue";
 import MqSearchInput from "./shared/MqSearchInput.vue";
 
 interface Props {
   connectionId: string;
+  readOnly?: boolean;
+  confirmWrite?: (operation: string) => Promise<boolean>;
 }
 
 const props = defineProps<Props>();
@@ -22,6 +25,9 @@ const selectedGroupId = ref<string>();
 const searchKeyword = ref("");
 const loading = ref(false);
 const error = ref<string>();
+const deleteTarget = ref<string>();
+const deleteError = ref<string>();
+const deleting = ref(false);
 let loadSequence = 0;
 
 const sortedGroups = computed(() => {
@@ -74,6 +80,27 @@ async function loadGroups() {
   }
 }
 
+async function deleteGroup() {
+  const groupId = deleteTarget.value;
+  if (!groupId || props.readOnly || deleting.value || !props.confirmWrite) return;
+  const connectionId = props.connectionId;
+  deleting.value = true;
+  deleteError.value = undefined;
+  try {
+    const approved = await props.confirmWrite(t("mqKafkaConsumerGroups.confirmDelete", { name: groupId }));
+    if (!approved || props.readOnly || props.connectionId !== connectionId || deleteTarget.value !== groupId) return;
+    // The Kafka adapter deletes by group ID and ignores the topic reference.
+    await mqDeleteSubscription(connectionId, { tenant: "", namespace: "", topic: "", persistent: true }, groupId, false);
+    if (props.connectionId !== connectionId || deleteTarget.value !== groupId) return;
+    deleteTarget.value = undefined;
+    await loadGroups();
+  } catch (error: unknown) {
+    if (props.connectionId === connectionId && deleteTarget.value === groupId) deleteError.value = formatError(error);
+  } finally {
+    deleting.value = false;
+  }
+}
+
 function formatNumber(value: number | undefined): string {
   return value === undefined ? "-" : value.toLocaleString();
 }
@@ -87,11 +114,17 @@ watch(
   () => {
     groups.value = [];
     selectedGroupId.value = undefined;
+    deleteTarget.value = undefined;
+    deleteError.value = undefined;
     searchKeyword.value = "";
     void loadGroups();
   },
   { immediate: true },
 );
+
+onBeforeUnmount(() => {
+  deleteTarget.value = undefined;
+});
 </script>
 
 <template>
@@ -150,7 +183,21 @@ watch(
             <h4>{{ selectedGroup.groupId }}</h4>
             <p>{{ t("mqKafkaConsumerGroups.partitionDetail") }}</p>
           </div>
-          <span v-if="selectedGroup.error" class="detail-warning" :title="selectedGroup.error">{{ t("mqKafkaConsumerGroups.partialData") }}</span>
+          <div class="flex shrink-0 items-center gap-2">
+            <span v-if="selectedGroup.error" class="detail-warning" :title="selectedGroup.error">{{ t("mqKafkaConsumerGroups.partialData") }}</span>
+            <button
+              v-if="confirmWrite"
+              type="button"
+              class="mq-btn-sm mq-btn-danger"
+              :disabled="readOnly || deleting"
+              @click="
+                deleteError = undefined;
+                deleteTarget = selectedGroup.groupId;
+              "
+            >
+              {{ t("mqKafkaConsumerGroups.deleteGroup") }}
+            </button>
+          </div>
         </div>
 
         <div v-if="!selectedGroup.partitions.length" class="detail-empty">{{ t("mqKafkaConsumerGroups.noCommittedOffsets") }}</div>
@@ -189,6 +236,19 @@ watch(
         </div>
       </section>
     </div>
+    <DangerConfirmDialog
+      v-if="deleteTarget"
+      :open="true"
+      :title="t('mqKafkaConsumerGroups.deleteGroup')"
+      :message="t('mqKafkaConsumerGroups.confirmDelete', { name: deleteTarget ?? '' })"
+      :details-text="deleteError"
+      :confirm-label="t('mqKafkaConsumerGroups.deleteGroup')"
+      :loading="deleting"
+      :close-on-confirm="false"
+      initial-focus="cancel"
+      @update:open="(open) => !open && (deleteTarget = undefined)"
+      @confirm="deleteGroup"
+    />
   </div>
 </template>
 

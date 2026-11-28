@@ -48,6 +48,8 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         transport_layers: Vec::new(),
         connect_timeout_secs: 10,
         query_timeout_secs: 30,
+
+        write_timeout_secs: 0,
         idle_timeout_secs: 60,
         manual_transaction_timeout_secs: 300,
         idle_disconnect_secs: 0,
@@ -88,6 +90,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         is_production: false,
         production_databases: vec![],
         production_badge_scope: None,
+        watermark: None,
         show_system_schemas: false,
         database_info: None,
         sidebar_auto_load_all_tables: false,

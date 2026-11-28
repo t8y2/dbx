@@ -4,8 +4,16 @@ import { createApp, defineComponent, h, markRaw, nextTick, ref, type App, type P
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
 import type { QueryResult } from "@/types/database";
 import { TooltipProvider } from "@/components/ui/tooltip";
+
+const exportMarkdown = vi.hoisted(() => vi.fn(async (_path: string, _columns: string[], _rows: unknown[][], _transposed?: TransposedMarkdownLabels) => undefined));
+vi.mock("@/lib/backend/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/backend/api")>()),
+  exportQueryResultMarkdown: exportMarkdown,
+  saveEditorSettings: vi.fn(async () => undefined),
+}));
 
 vi.mock("vue-virtual-scroller", async () => {
   const { defineComponent, h } = await import("vue");
@@ -77,6 +85,7 @@ function mountGrid(context: "table-data" | "results" = "table-data") {
     }),
   );
   const resultColumnComments = ref<Array<string | undefined>>();
+  const grid = ref<{ toggleColumnVisibility: (columnIndex: number) => void; moveDisplayableColumn: (from: number, to: number) => void }>();
 
   const host = document.createElement("div");
   document.body.append(host);
@@ -89,6 +98,7 @@ function mountGrid(context: "table-data" | "results" = "table-data") {
           {
             default: () =>
               h(DataGrid, {
+                ref: grid,
                 result: result.value,
                 resultColumnComments: resultColumnComments.value,
                 databaseType: "mysql",
@@ -111,16 +121,32 @@ function mountGrid(context: "table-data" | "results" = "table-data") {
   app.use(i18n);
   app.mount(host);
   mountedApps.push({ app, host });
-  return { host, settingsStore, result, resultColumnComments };
+  return { host, settingsStore, result, resultColumnComments, grid };
 }
 
-async function openTranspose(host: HTMLElement) {
+async function openTranspose(host: HTMLElement, selectedRows = 1) {
   const firstRowNumber = host.querySelector<HTMLElement>(".data-grid-row-number");
   if (!firstRowNumber) throw new Error("Row number not found");
   firstRowNumber.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
   window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
+  if (selectedRows > 1) {
+    host.querySelectorAll<HTMLElement>(".data-grid-row-number")[selectedRows - 1]!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, shiftKey: true }));
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
+  }
   firstRowNumber.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, button: 0 }));
   await settle();
+}
+
+async function exportSelectedMarkdown(host: HTMLElement) {
+  const trigger = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.getAttribute("aria-label") === i18n.global.t("grid.export"));
+  if (!trigger) throw new Error("Export menu trigger not found");
+  trigger.click();
+  await settle();
+  const selected = [...document.querySelectorAll<HTMLButtonElement>("[data-export-menu-grid] button")].find((button) => button.getAttribute("aria-label") === i18n.global.t("grid.exportSelectedRowsMarkdown"));
+  expect(selected, "The real export menu must offer selected-row Markdown").toBeDefined();
+  selected!.click();
+  await vi.waitFor(() => expect(exportMarkdown).toHaveBeenCalledOnce());
+  return exportMarkdown.mock.calls[0]!;
 }
 
 afterEach(() => {
@@ -128,9 +154,83 @@ afterEach(() => {
     app.unmount();
     host.remove();
   }
+  exportMarkdown.mockClear();
 });
 
 describe("DataGrid transpose sorting", () => {
+  it("exports a selected transposed record as Markdown field/value rows through the real menu", async () => {
+    const { host, settingsStore } = mountGrid("results");
+    settingsStore.updateEditorSettings({ dataGridMultiRowTranspose: false });
+    await settle();
+    await openTranspose(host);
+    expect(host.querySelector("[data-grid-transpose-header]")).not.toBeNull();
+
+    const [path, headers, rows, transposed] = await exportSelectedMarkdown(host);
+    expect(path).toMatch(/\.md$/);
+    expect(headers).toEqual(["zeta", "alpha"]);
+    expect(rows).toEqual([["b", "10"]]);
+    expect(transposed).toEqual({ field: i18n.global.t("common.column"), data: i18n.global.t("settings.dataTab") });
+  });
+
+  it("exports only selected transpose records into separate Markdown value columns", async () => {
+    const { host } = mountGrid("results");
+    await settle();
+    await openTranspose(host, 2);
+
+    const [, headers, rows, transposed] = await exportSelectedMarkdown(host);
+    expect(headers).toEqual(["zeta", "alpha"]);
+    expect(rows).toEqual([
+      ["b", "10"],
+      ["a", null],
+    ]);
+    expect(transposed).toEqual({ field: i18n.global.t("common.column"), data: i18n.global.t("settings.dataTab") });
+  });
+
+  it("keeps selected-row Markdown in the normal table orientation outside transpose mode", async () => {
+    const { host } = mountGrid("results");
+    await settle();
+    const rowNumber = host.querySelector<HTMLElement>(".data-grid-row-number")!;
+    rowNumber.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
+    await settle();
+
+    const [, headers, rows] = await exportSelectedMarkdown(host);
+    expect(headers).toEqual(["zeta", "alpha"]);
+    expect(rows).toEqual([["b", "10"]]);
+    expect(exportMarkdown.mock.calls[0]).toHaveLength(3);
+  });
+
+  it("follows the displayed field sort when exporting transposed Markdown", async () => {
+    const { host } = mountGrid("results");
+    await settle();
+    await openTranspose(host);
+    host.querySelector<HTMLButtonElement>("[data-grid-transpose-column-sort]")!.click();
+    await settle();
+    expect(transposeFieldNames(host)).toEqual(["alpha", "zeta"]);
+
+    const [, headers, rows] = await exportSelectedMarkdown(host);
+    expect(headers).toEqual(["alpha", "zeta"]);
+    expect(rows).toEqual([["10", "b"]]);
+  });
+
+  it("keeps repeated field names paired with their values after hiding, reordering and sorting", async () => {
+    const { host, result, grid } = mountGrid("results");
+    result.value = { ...result.value, columns: ["zeta", "alpha", "alpha", "hidden"], column_types: ["varchar", "varchar", "varchar", "varchar"], rows: [["b", "first", "second", "not exported"]] };
+    await settle();
+    grid.value!.moveDisplayableColumn(2, 0);
+    grid.value!.toggleColumnVisibility(3);
+    await settle();
+    await openTranspose(host);
+    host.querySelector<HTMLButtonElement>("[data-grid-transpose-column-sort]")!.click();
+    await settle();
+    expect(transposeFieldNames(host)).toEqual(["alpha", "alpha", "zeta"]);
+    expect([...host.querySelectorAll<HTMLElement>("[data-grid-transpose-column-index]")].map((field) => field.dataset.gridTransposeColumnIndex)).toEqual(["2", "1", "0"]);
+
+    const [, headers, rows] = await exportSelectedMarkdown(host);
+    expect(headers).toEqual(["alpha", "alpha", "zeta"]);
+    expect(rows).toEqual([["second", "first", "b"]]);
+  });
+
   it.each(["table-data", "results"] as const)("moves all field metadata into an independent information column for %s", async (context) => {
     const { host, settingsStore } = mountGrid(context);
     settingsStore.updateEditorSettings({ dataGridShowTransposeFieldMetadata: true });

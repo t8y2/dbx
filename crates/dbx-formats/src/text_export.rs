@@ -106,6 +106,44 @@ pub fn format_markdown(data: &QueryResultTextExportData) -> String {
     [header, separator, body].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n") + "\n"
 }
 
+/// Write the selected records as value columns without allocating a transposed
+/// matrix or padding every field to the longest value in a record.
+pub fn format_transposed_markdown(data: &QueryResultTextExportData, field_label: &str, data_label: &str) -> String {
+    use std::fmt::Write;
+    let mut output = format!("| {}", compact_markdown_cell(field_label));
+    let data_label = compact_markdown_cell(data_label);
+    for i in 0..data.rows.len() {
+        output.push_str(" | ");
+        output.push_str(&data_label);
+        if data.rows.len() > 1 {
+            write!(output, " {}", i + 1).expect("writing to a String cannot fail");
+        }
+    }
+    output.push_str(" |\n| ---");
+    for _ in &data.rows {
+        output.push_str(" | ---");
+    }
+    output.push_str(" |\n");
+    for (index, column) in data.columns.iter().enumerate() {
+        output.push_str("| ");
+        output.push_str(&compact_markdown_cell(column));
+        for row in &data.rows {
+            output.push_str(" | ");
+            match row.get(index) {
+                Some(Value::String(text)) => output.push_str(&compact_markdown_cell(text)),
+                Some(value) => output.push_str(&compact_markdown_cell(&display_cell(value))),
+                None => output.push_str("NULL"),
+            }
+        }
+        output.push_str(" |\n");
+    }
+    output
+}
+
+fn compact_markdown_cell(value: &str) -> String {
+    markdown_cell(&value.replace('\\', "\\\\")).replace('\r', "<br>")
+}
+
 fn display_cell(value: &Value) -> String {
     match value {
         Value::Null => "NULL".to_string(),
@@ -459,8 +497,8 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        format_html, format_json, format_markdown, normalize_nebula_export_rows, normalize_neo4j_export_rows,
-        QueryResultTextExportData,
+        format_html, format_json, format_markdown, format_transposed_markdown, normalize_nebula_export_rows,
+        normalize_neo4j_export_rows, QueryResultTextExportData,
     };
 
     #[test]
@@ -607,6 +645,62 @@ mod tests {
                 "",
             ]
             .join("\n")
+        );
+    }
+
+    #[test]
+    fn transposed_markdown_numbers_records_and_keeps_typed_values_in_field_order() {
+        let data = QueryResultTextExportData {
+            title: None,
+            columns: vec!["id|key".into(), "flag".into(), "value".into(), "blank".into()],
+            rows: vec![
+                vec![json!(42), json!(false), json!({"a": 1}), json!("")],
+                vec![json!(7), Value::Null, json!("end")],
+            ],
+        };
+        assert_eq!(
+            format_transposed_markdown(&data, "列|名", "数据"),
+            concat!(
+                "| 列\\|名 | 数据 1 | 数据 2 |\n| --- | --- | --- |\n",
+                "| id\\|key | 42 | 7 |\n| flag | false | NULL |\n",
+                "| value | {\"a\":1} | end |\n| blank |  | NULL |\n",
+            )
+        );
+    }
+
+    #[test]
+    fn transposed_markdown_does_not_pad_other_fields_to_a_large_value() {
+        let long_value = "x".repeat(4096);
+        let data = QueryResultTextExportData {
+            title: None,
+            columns: (0..32).map(|i| format!("f{i:04}")).collect(),
+            rows: vec![(0..32).map(|i| json!(if i == 0 { long_value.as_str() } else { "x" })).collect()],
+        };
+        let content = format_transposed_markdown(&data, "Field", "Data");
+        assert!(content.len() < 5_000);
+        assert_eq!(content.lines().count(), 34);
+        assert!(content.contains(&format!("| f0000 | {long_value} |\n")));
+        assert!(content.ends_with("| f0031 | x |\n"));
+    }
+
+    #[test]
+    fn transposed_markdown_escapes_labels_and_values_without_numbering_a_single_record() {
+        let data = QueryResultTextExportData {
+            title: None,
+            columns: vec!["pipe".into(), "carriage".into(), "newline".into(), "path".into()],
+            rows: vec![vec![json!(r"A\|B"), json!("A\rB"), json!("A\r\nB\nC"), json!(r"C:\tmp\file")]],
+        };
+        assert_eq!(
+            format_transposed_markdown(&data, "Field", "Data|value"),
+            concat!(
+                "| Field | Data\\|value |\n| --- | --- |\n",
+                r"| pipe | A\\\|B |",
+                "\n",
+                "| carriage | A<br>B |\n",
+                "| newline | A<br>B<br>C |\n",
+                r"| path | C:\\tmp\\file |",
+                "\n",
+            )
         );
     }
 

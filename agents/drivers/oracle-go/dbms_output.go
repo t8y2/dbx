@@ -689,10 +689,10 @@ func (s *server) beginStatementTx(ctx context.Context) (*sql.Tx, error) {
 type sqlConnDBMSOutputSession struct {
 	conn *sql.Conn
 	// oci selects the OCI (godror) driver, which binds sql.Out directly and sizes
-	// an OUT string itself (32767 bytes, stmt.go:1422-1426 of godror v0.51.5, so
-	// it already holds every line the server can produce). The built-in go-ora
-	// driver needs its own Out type carrying the client-side buffer size the
-	// payload is read back into.
+	// an OUT string itself (32767 bytes in godror's stmt.go, so it already holds
+	// every line the server can produce). The built-in go-ora driver needs its
+	// own Out type carrying the client-side buffer size the payload is read back
+	// into.
 	oci bool
 	// binding carries the register size shared by every connection of this
 	// server, so a server that rejects the largest one only pays for it once.

@@ -226,7 +226,8 @@ const isVerticalLayout = computed(() => settingsStore.editorSettings.tabPlacemen
 // the strip below rendering only the selected group's tabs (issue #10034).
 // Meaningless without grouping, so it silently falls back to the single row.
 const isTwoRowLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabGroupRows === "two-row" && settingsStore.editorSettings.tabGroupMode !== "none");
-const isWrapLayout = computed(() => !isVerticalLayout.value && !isTwoRowLayout.value && settingsStore.editorSettings.tabLayout === "wrap");
+const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabLayout === "wrap");
+const hasWrapRowLimit = computed(() => isWrapLayout.value && settingsStore.editorSettings.tabWrapMaxRows > 0);
 // The icon-only collapse only exists in the vertical toolbar; horizontal
 // placements must ignore the persisted collapse state entirely.
 const isTabBarCollapsed = computed(() => isVerticalLayout.value && !!props.tabBarCollapsed);
@@ -243,6 +244,7 @@ const tabBarStyle = computed<CSSProperties | undefined>(() => {
   if (!isVerticalLayout.value && settingsStore.editorSettings.tabMaxWidth > 0) {
     styles["--tab-max-width"] = `${settingsStore.editorSettings.tabMaxWidth}px`;
   }
+  if (hasWrapRowLimit.value) styles["--tab-wrap-max-rows"] = settingsStore.editorSettings.tabWrapMaxRows;
   return Object.keys(styles).length > 0 ? styles : undefined;
 });
 const tabBarCollapseIcon = computed(() => {
@@ -404,6 +406,12 @@ const showOverflowControl = computed(() => {
   const hasHiddenTab = hasHorizontalFixedRows.value ? fixedTabsScroll.hasTabOverflow.value || regularTabsScroll.hasTabOverflow.value || hasHorizontalRowOverflow() : hasTabOverflow.value || hasTruncatedTabTitle.value;
   return props.tabs.length > 0 && hasHiddenTab && !isWrapLayout.value && !isVerticalLayout.value;
 });
+// The custom horizontal drag scrollbar only makes sense for a single-row
+// horizontally scrollable strip that actually overflows. Two-row mode keeps
+// showOverflowControl enabled for the tab-list menu even when tabs fit or wrap,
+// so deriving the scrollbar from showOverflowControl would reveal a stale
+// full-width bar on hover (#15619).
+const showTabScrollbar = computed(() => !isVerticalLayout.value && !isWrapLayout.value && !hasHorizontalFixedRows.value && hasTabOverflow.value);
 const tabTailDragRegionClass = computed(() => {
   if (isWrapLayout.value || isVerticalLayout.value) return "w-0 flex-none self-stretch";
   // Keep a constant footprint. Letting this spacer (and the strip's reserved
@@ -1803,6 +1811,15 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.reopenClosedTab ?? "Shift+Mod+T"),
       onReopen: () => queryStore.reopenClosedTab(),
     }),
+    ...(toolbar?.openRecentTables
+      ? [
+          {
+            label: `${t("tabs.recentTablesTitle")}…`,
+            shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.openRecentTables ?? ""),
+            action: toolbar.openRecentTables,
+          },
+        ]
+      : []),
     createCloseTabMenuItem({
       label: t("contextMenu.closeTab"),
       onClose: () => closeTab(tab),
@@ -1877,7 +1894,9 @@ function handleTabDoubleClick(tab: QueryTab, event: MouseEvent) {
   if (event.target instanceof Element && event.target.closest("button, input, [role='button']")) {
     return;
   }
-  if (settingsStore.editorSettings.tabDoubleClickAction === "close") {
+  const action = settingsStore.editorSettings.tabDoubleClickAction;
+  if (action === "none") return;
+  if (action === "close") {
     closeTab(tab);
     return;
   }
@@ -2062,7 +2081,7 @@ watch(
       }
     }
     nextTick(() => {
-      if (!isWrapLayout.value) {
+      if (!isWrapLayout.value || hasWrapRowLimit.value) {
         const container = tabsContainerRef.value;
         if (container) {
           const activeEl = container.querySelector('[data-active-tab="true"]');
@@ -2091,6 +2110,7 @@ watch(isVerticalLayout, (vertical) => {
 watch(twoRowSelectedKey, () => {
   nextTick(() => {
     twoRowRailRef.value?.querySelector(".tab-group-header--active")?.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: "nearest" });
+    updateScrollButtons();
   });
 });
 
@@ -2104,7 +2124,9 @@ watch(
     props.specialPageTabs?.settingsOpen,
     props.specialPageTabs?.driverStoreOpen,
     settingsStore.editorSettings.tabLayout,
+    settingsStore.editorSettings.tabWrapMaxRows,
     settingsStore.editorSettings.tabGroupMode,
+    settingsStore.editorSettings.tabGroupRows,
     settingsStore.editorSettings.tabMaxWidth,
     compactTabTitle.value,
     Array.from(collapsedTabGroups.value).sort().join("|"),
@@ -2312,7 +2334,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
         @update:model-value="selectTabOrganizationItem"
       />
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
-        <div v-if="showOverflowControl && !hasHorizontalFixedRows" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
+        <div v-if="showTabScrollbar" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
           <div class="app-tab-scrollbar__thumb" :style="tabScrollbarThumbStyle" />
         </div>
         <div
@@ -2322,11 +2344,12 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
             isVerticalLayout ? 'flex-col items-stretch overflow-y-auto overflow-x-hidden py-1' : isClassicLayout ? 'h-full items-center overflow-x-auto' : 'h-full items-center gap-0 overflow-x-auto py-1.5',
             isWrapLayout ? 'wrap-mode' : '',
             isWrapLayout && isClassicLayout ? 'classic-wrap' : '',
+            hasWrapRowLimit ? 'wrap-mode--limited' : '',
             hasHorizontalFixedRows ? 'horizontal-fixed-tabs-scroll' : '',
           ]"
-          :style="tabsContainerStyle"
+          :style="hasWrapRowLimit ? undefined : tabsContainerStyle"
           @scroll="!isVerticalLayout && !hasHorizontalFixedRows && updateScrollButtons()"
-          @wheel="!isVerticalLayout && !hasHorizontalFixedRows && onTabsWheel($event)"
+          @wheel="!isVerticalLayout && !hasHorizontalFixedRows && !isWrapLayout && onTabsWheel($event)"
         >
           <template v-for="section in stripSections" :key="section.key">
             <div
@@ -2337,7 +2360,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
               ]"
             >
               <div
-                v-if="hasHorizontalFixedRows && (tabSectionScroll(section.key).hasTabOverflow.value || tabSectionHasOverflow(section.key))"
+                v-if="!isWrapLayout && hasHorizontalFixedRows && (tabSectionScroll(section.key).hasTabOverflow.value || tabSectionHasOverflow(section.key))"
                 class="app-tab-scrollbar"
                 :class="[section.pinned ? 'app-tab-scrollbar--bottom' : '', { 'app-tab-scrollbar--dragging': tabSectionScroll(section.key).isScrollbarDragging.value }]"
                 @pointerdown="tabSectionScroll(section.key).startScrollbarDrag($event)"

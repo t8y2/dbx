@@ -1,3 +1,6 @@
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
+import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
+import type { MongoDeleteId } from "@/lib/mongo/mongoDocumentValues";
 import type { SqlFileEncoding } from "./tauri";
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
@@ -10,6 +13,7 @@ import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/li
 import type { NativeJobContext, NativeJobDetails, NativeJobList, NativeJobListRequest, NativeJobRequest, NativeJobOperationStatus, NativeJobPreparedPlan, NativeJobRef, NativeJobReferenceCatalog, NativeJobReferenceListRequest } from "@/lib/database/nativeJobs";
 import type { PlDebugBootstrap, PlDebugSessionRef, PlDebugStartIntent, PlDebugOperationRequest, PlDebugReadRequest, PlDebugReceipt, PlDebugSnapshot } from "@/lib/debug/plDebugProtocol";
 import type { PlDebugInspectRequest, PlDebugInspectResult, PlDebugCompileIntent, PlDebugCompileRef, PlDebugCompileReceipt } from "@/lib/debug/plDebugProtocol";
+import type { PluginHostObservationEvent, PluginHostObservationGap } from "@/types/pluginObservation";
 
 export function plDebugBootstrap(): Promise<PlDebugBootstrap> {
   return post("/api/pl-debug/bootstrap", {});
@@ -313,7 +317,7 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { OracleTriggerSqlInput, PreparedOracleTriggerSql } from "@/lib/database/oracleTriggerSql";
 import type { OracleTableReferenceRewriteInput, OracleViewRenameSource, OracleViewRenameSourceInput, OracleViewRenameSourceReview } from "@/types/database";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
-import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
+import type { BuildRenameObjectSqlOptions, MysqlRenameDatabaseSqlOptions, MysqlRenameDatabaseStatements } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
 import type {
   DatabaseNameSqlOptions,
@@ -915,6 +919,26 @@ export async function subscribePluginEvents(onEvent: (event: PluginEvent) => voi
 }
 
 /**
+ * Host observation events (`host.observe:*`) are published by the desktop shell
+ * (`install_host_observation_bridge`) only; the web shell has no SSE endpoint
+ * yet. This no-op keeps both transports signature-compatible: the workbench
+ * host passes `subscribeHostObservations` only in the Tauri runtime, so
+ * `capabilities.observations` stays absent on web and plugins gate on it.
+ */
+export async function subscribeHostObservations(_onEvent: (event: PluginHostObservationEvent) => void, _onGap?: (gap: PluginHostObservationGap) => void): Promise<() => void> {
+  return () => {};
+}
+
+/**
+ * Observation interest is registered with the desktop bus only (see
+ * `subscribeHostObservations`); the web shell has no observation delivery, so
+ * both transport calls are no-ops there.
+ */
+export async function setPluginObservationInterest(_ownerId: string, _pluginId: string): Promise<void> {}
+
+export async function clearPluginObservationInterest(_ownerId: string): Promise<void> {}
+
+/**
  * Subscribe to backend connection-liveness messages (#4339).
  *
  * The SSE payload is one `ConnectionLivenessMessage`: the plugin stream's `{ kind }` wrapper
@@ -1336,6 +1360,11 @@ export async function listTables(
   return get(
     `/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset, object_types: objectTypes?.join(","), catalog, table_name_filter: tableNameFilter ? JSON.stringify(tableNameFilter) : undefined, exact_identity: exactIdentity || undefined, page_table_roots: pageTableRoots || undefined })}`,
   );
+}
+
+/** Child tables of one parent table (TDengine super table), paged on demand. */
+export async function listTableChildren(connectionId: string, database: string, schema: string, parentName: string, limit?: number, offset?: number): Promise<TableInfo[]> {
+  return get(`/api/schema/table-children?${qs({ connection_id: connectionId, database, schema, table: parentName, limit, offset })}`);
 }
 
 export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<string | null> {
@@ -2120,6 +2149,10 @@ export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseT
   return post("/api/query/build-rename-database-sql", options);
 }
 
+export async function buildMysqlRenameDatabaseSql(options: MysqlRenameDatabaseSqlOptions): Promise<MysqlRenameDatabaseStatements> {
+  return post("/api/query/build-mysql-rename-database-sql", { options });
+}
+
 export async function buildRenameDatabasePreflightSql(options: { databaseType?: DatabaseType; databaseName: string }): Promise<string> {
   return post("/api/query/build-rename-database-preflight-sql", options);
 }
@@ -2494,6 +2527,7 @@ export async function aiAgentStream(
   signal?: AbortSignal,
   selectedDatabases?: string[],
   allowSkills = false,
+  pluginConnectionIds: string[] = [],
 ): Promise<string> {
   const res = await fetch(apiUrl("/api/ai/agent-stream"), {
     method: "POST",
@@ -2515,6 +2549,7 @@ export async function aiAgentStream(
       // The web server ignores this by design: local skill files are never
       // exposed to it (there is no request field on that route either).
       allowSkills,
+      pluginConnectionIds,
     }),
     signal,
   });
@@ -2827,6 +2862,7 @@ export async function loadOpenTabsState(): Promise<OpenTabsStatePayload | null> 
     ? {
         tabs: payload.tabs,
         activeTabId: typeof payload.activeTabId === "string" ? payload.activeTabId : null,
+        ...(Array.isArray(payload.closedQueryDrafts) ? { closedQueryDrafts: payload.closedQueryDrafts } : {}),
         ...(payload.groups !== undefined ? { groups: payload.groups } : {}),
         ...(typeof payload.focusedGroupId === "string" ? { focusedGroupId: payload.focusedGroupId } : {}),
         ...(payload.orientation === "vertical" || payload.orientation === "horizontal" ? { orientation: payload.orientation } : {}),
@@ -3107,7 +3143,7 @@ export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassp
   return post("/api/cloud-sync/snippet/inspect", { config, snippetPassphrase, secretsPassphrase });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string, automatic = false): Promise<SnippetSyncSummary> {
   return post("/api/cloud-sync/snippet/upload", {
     config,
     editorSettings,
@@ -3115,7 +3151,8 @@ export async function snippetSyncUpload(config: SnippetSyncConfig, editorSetting
     includeSecrets,
     secretsPassphrase,
     selection,
-    expectedRemoteContentHash,
+    expectedRemoteContentHash: expectedRemoteContentHash ?? (config.snippetId?.trim() ? readSnippetRemoteContentHash(config.provider, config.instanceUrl, config.snippetId) : undefined),
+    automatic,
   });
 }
 
@@ -3141,6 +3178,17 @@ export async function savePinnedTreeNodeIds(_ids: string[]): Promise<void> {
 
 export async function saveAiConversation(conversation: AiConversation): Promise<void> {
   return post("/api/ai/conversation", { conversation });
+}
+
+/** Patches only the plugin attachment list; see the Tauri counterpart. */
+export async function updateAiConversationPluginConnections(conversationId: string, pluginConnectionIds: string[]): Promise<void> {
+  return post("/api/ai/conversation/plugin-connections", { conversationId, pluginConnectionIds });
+}
+
+/** Column-only pin write (#14226); see the Tauri counterpart for why, including
+ *  the `false` = conversation-missing result. */
+export async function saveAiConversationPin(id: string, pinned: boolean, pinnedAt?: string): Promise<boolean> {
+  return post<boolean>("/api/ai/conversation/pin", { id, pinned, pinnedAt: pinnedAt ?? null });
 }
 
 export async function loadAiConversations(): Promise<AiConversation[]> {
@@ -3336,6 +3384,14 @@ export async function renameSqlFileInFolder(_rootPath: string, _filePath: string
 
 export async function deleteSqlFileInFolder(_rootPath: string, _filePath: string): Promise<void> {
   throw new Error("Managing SQL files in folders is only available in the desktop app");
+}
+
+export async function moveSqlFileInFolder(_rootPath: string, _filePath: string, _targetRootPath: string, _directoryPath: string): Promise<string> {
+  throw new Error("Managing SQL files in folders is only available in the desktop app");
+}
+
+export async function watchSqlFileFolder(_folderPath: string, _recursive: boolean, _onChange: () => void): Promise<() => Promise<void>> {
+  throw new Error("Watching SQL folders is only available in the desktop app");
 }
 
 export async function createSqlFolderInFolder(_rootPath: string, _directoryPath: string, _folderName: string): Promise<string> {
@@ -4106,8 +4162,10 @@ export async function exportQueryResultJson(filePath: string, columns: string[],
   downloadTextFile(filePath, "export.json", result.content, "application/json;charset=utf-8");
 }
 
-export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
-  const result = await post<{ content: string }>("/api/export/query-result-markdown", { columns, rows });
+export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], transposedMarkdown?: TransposedMarkdownLabels): Promise<void> {
+  // Layout belongs in the URL so the same records fit the same upload limit in either orientation.
+  const query = transposedMarkdown ? "?" + new URLSearchParams({ field: transposedMarkdown.field, data: transposedMarkdown.data }) : "";
+  const result = await post<{ content: string }>(`/api/export/query-result-markdown${query}`, { columns, rows });
   downloadTextFile(filePath, "export.md", result.content, "text/markdown;charset=utf-8");
 }
 
@@ -4178,8 +4236,8 @@ export async function redisGetTtl(connectionId: string, db: number, keyRaw: stri
   return post("/api/redis/get-ttl", { connectionId, db, keyRaw });
 }
 
-export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string): Promise<RedisStreamPage> {
-  return post("/api/redis/get-stream-entries", { connectionId, db, keyRaw, cursor });
+export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string, newestFirst?: boolean): Promise<RedisStreamPage> {
+  return post("/api/redis/get-stream-entries", { connectionId, db, keyRaw, cursor, ...(newestFirst ? { newestFirst } : {}) });
 }
 
 export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {
@@ -5642,11 +5700,11 @@ export async function mongoUpdateDocuments(connectionId: string, database: strin
   });
 }
 
-export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string): Promise<number> {
+export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: MongoDeleteId, routing?: string): Promise<number> {
   return documentDeleteDocument(connectionId, database, collection, id, routing);
 }
 
-export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string, documentType?: string): Promise<number> {
+export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: MongoDeleteId, routing?: string, documentType?: string): Promise<number> {
   return post("/api/document-store/delete-document", {
     connectionId,
     database,

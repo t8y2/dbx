@@ -83,9 +83,9 @@ $env:GOOS="windows"; $env:GOARCH="amd64"
 $env:CC="C:/mingw64/bin/gcc.exe"
 $env:CGO_CFLAGS="-IC:/instantclient/sdk/include"
 $env:CGO_LDFLAGS="-LC:/instantclient/sdk/lib/msvc"
-# go.mod keeps `go 1.20` for the Windows 7-compatible thin build; the OCI
-# variant needs Go >= 1.21 (godror), so -mod=mod updates go.mod in place.
-go build -mod=mod -tags oci -trimpath -ldflags="-s -w" -o oracle-oci.exe .
+# go.mod keeps pure Go 1.20 thin dependencies for Windows 7; the OCI variant
+# uses its own go.oci.mod / go.oci.sum (Go >= 1.25 for godror).
+go build -mod=readonly -modfile=go.oci.mod -tags oci -trimpath -ldflags="-s -w" -o oracle-oci.exe .
 ```
 
 At runtime only `oci.dll` is needed, located through `PATH`.

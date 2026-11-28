@@ -201,6 +201,11 @@ pub struct BuildRenameDatabaseSqlRequest {
 }
 
 #[derive(Deserialize)]
+pub struct BuildMysqlRenameDatabaseSqlRequest {
+    pub options: dbx_core::db_admin_sql::MysqlRenameDatabaseSqlOptions,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildRenameDatabasePreflightSqlRequest {
     pub database_type: Option<dbx_core::models::connection::DatabaseType>,
@@ -516,6 +521,51 @@ pub async fn execute_query(
 
     tracing::debug!(connection_id = %req.connection_id, "execute_query");
 
+    let options = dbx_core::query::QueryExecutionOptions {
+        max_rows: req.max_rows,
+        fetch_size: req.fetch_size,
+        page_size: req.page_size,
+        row_offset: req.row_offset,
+        max_result_bytes: req.max_result_bytes,
+        result_key_columns: req.result_key_columns,
+        table_data_preview: req.table_data_preview,
+        catalog: req.catalog,
+        result_session_id: req.result_session_id,
+        client_session_id: req.client_session_id,
+        timeout_secs: req.timeout_secs,
+        execution_id: Some(execution_id),
+        use_transaction: req.use_transaction,
+        execution_mode: req.execution_mode.unwrap_or_default(),
+        ..Default::default()
+    };
+
+    // A write with an explicit limit stops waiting at the deadline but is never
+    // cancelled: the caller could not tell whether the rows landed.
+    let decision =
+        dbx_core::query::connection_statement_timeout(&state.app, &req.connection_id, &req.sql, req.timeout_secs).await;
+    if let (Some(wait), false) = (decision.client_wait(), decision.cancels_on_timeout()) {
+        let detached = dbx_core::query::spawn_detached_statement(
+            state.app.clone(),
+            req.connection_id,
+            database,
+            req.sql,
+            req.schema,
+            Some(cancel_token),
+            options,
+            registered,
+            None,
+        );
+        return match tokio::time::timeout(wait, detached).await {
+            Ok(Ok(result)) => Ok(Json(result.map_err(|error| AppError::from(error.into_backend_error()))?)),
+            Ok(Err(_)) => Err(AppError::from(dbx_core::backend_error::BackendError::from_sql_detail(
+                "Statement task stopped unexpectedly",
+            ))),
+            Err(_) => Err(AppError::from(dbx_core::backend_error::BackendError::from_timeout_detail(
+                &dbx_core::query::detached_write_timeout_message(wait),
+            ))),
+        };
+    }
+
     let result = dbx_core::query::execute_sql_statement_with_options_typed(
         &state.app,
         &req.connection_id,
@@ -523,23 +573,7 @@ pub async fn execute_query(
         &req.sql,
         req.schema.as_deref(),
         Some(cancel_token),
-        dbx_core::query::QueryExecutionOptions {
-            max_rows: req.max_rows,
-            fetch_size: req.fetch_size,
-            page_size: req.page_size,
-            row_offset: req.row_offset,
-            max_result_bytes: req.max_result_bytes,
-            result_key_columns: req.result_key_columns,
-            table_data_preview: req.table_data_preview,
-            catalog: req.catalog,
-            result_session_id: req.result_session_id,
-            client_session_id: req.client_session_id,
-            timeout_secs: req.timeout_secs,
-            execution_id: Some(execution_id),
-            use_transaction: req.use_transaction,
-            execution_mode: req.execution_mode.unwrap_or_default(),
-            ..Default::default()
-        },
+        options,
     )
     .await;
 
@@ -681,43 +715,61 @@ pub async fn execute_multi(
 
     tracing::debug!(connection_id = %req.connection_id, "execute_multi");
 
-    let core_started_at = std::time::Instant::now();
-    let result = dbx_core::query::execute_multi_core_with_options_for_client_typed(
-        &state.app,
-        &req.connection_id,
-        &database,
-        &req.sql,
-        req.schema.as_deref(),
-        Some(cancel_token),
-        dbx_core::query::QueryExecutionOptions {
-            defer_lobs: req.defer_lobs,
-            max_rows: req.max_rows,
-            fetch_size: req.fetch_size,
-            page_size: req.page_size,
-            row_offset: req.row_offset,
-            max_result_bytes: req.max_result_bytes,
-            result_key_columns: req.result_key_columns,
-            table_data_preview: req.table_data_preview,
-            catalog: req.catalog,
-            result_session_id: req.result_session_id,
-            client_session_id: req.client_session_id,
-            timeout_secs: req.timeout_secs,
-            await_cancel_completion: false,
-            execution_id: Some(execution_id),
-            use_transaction: req.use_transaction,
-            continue_on_error: req.continue_on_error.unwrap_or(false),
-            execution_mode: req.execution_mode.unwrap_or_default(),
-            preserve_explicit_transaction: req.preserve_explicit_transaction,
-            report_compilation_errors: req.report_compilation_errors,
-        },
-    )
-    .await;
-    let core_ms = core_started_at.elapsed().as_millis();
+    let deadline =
+        dbx_core::query::connection_statement_timeout(&state.app, &req.connection_id, &req.sql, req.timeout_secs).await;
+    let run = async move {
+        let core_started_at = std::time::Instant::now();
+        let result = dbx_core::query::execute_multi_core_with_options_for_client_typed(
+            &state.app,
+            &req.connection_id,
+            &database,
+            &req.sql,
+            req.schema.as_deref(),
+            Some(cancel_token),
+            dbx_core::query::QueryExecutionOptions {
+                defer_lobs: req.defer_lobs,
+                max_rows: req.max_rows,
+                fetch_size: req.fetch_size,
+                page_size: req.page_size,
+                row_offset: req.row_offset,
+                max_result_bytes: req.max_result_bytes,
+                result_key_columns: req.result_key_columns,
+                table_data_preview: req.table_data_preview,
+                catalog: req.catalog,
+                result_session_id: req.result_session_id,
+                client_session_id: req.client_session_id,
+                timeout_secs: req.timeout_secs,
+                await_cancel_completion: false,
+                execution_id: Some(execution_id),
+                use_transaction: req.use_transaction,
+                continue_on_error: req.continue_on_error.unwrap_or(false),
+                execution_mode: req.execution_mode.unwrap_or_default(),
+                preserve_explicit_transaction: req.preserve_explicit_transaction,
+                report_compilation_errors: req.report_compilation_errors,
+                // User statements always capture DBMS_OUTPUT and switch schema.
+                skip_server_output: false,
+            },
+        )
+        .await;
+        let core_ms = core_started_at.elapsed().as_millis();
 
-    registered.finish_with_late_cancel(&result, keep_timeout_reachable);
+        registered.finish_with_late_cancel(&result, keep_timeout_reachable);
 
-    let result = result.map_err(|error| AppError::from(error.into_backend_error()))?;
-    execute_multi_response(result, core_ms)
+        let result = result.map_err(|error| AppError::from(error.into_backend_error()))?;
+        execute_multi_response(result, core_ms)
+    };
+    match deadline {
+        dbx_core::query::StatementTimeout::Detach(wait) => {
+            // Dropping the join handle only stops waiting. The task owns the
+            // registration until the query and any transaction finish.
+            match tokio::time::timeout(wait, tokio::spawn(Box::pin(run))).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(AppError::from("Statement task stopped unexpectedly")),
+                Err(_) => Err(AppError::from(dbx_core::query::detached_write_timeout_message(wait))),
+            }
+        }
+        _ => Box::pin(run).await,
+    }
 }
 
 fn execute_multi_response(
@@ -1288,6 +1340,12 @@ pub async fn build_rename_database_preflight_sql(
     dbx_core::db_admin_sql::build_rename_database_preflight_sql(req.database_type, &req.database_name)
         .map(Json)
         .map_err(AppError::from)
+}
+
+pub async fn build_mysql_rename_database_sql(
+    Json(req): Json<BuildMysqlRenameDatabaseSqlRequest>,
+) -> Result<Json<dbx_core::db_admin_sql::MysqlRenameDatabaseStatements>, AppError> {
+    dbx_core::db_admin_sql::build_mysql_rename_database_sql(req.options).map(Json).map_err(AppError::from)
 }
 
 pub async fn build_create_database_sql(

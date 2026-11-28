@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
+import type { TreeNode } from "@/types/database";
 import {
   copyNameForTreeNode,
   isDirectNavigationTreeNode,
   isRepeatableNavigationTreeNode,
+  objectBrowserFilterForGroupNode,
   objectSourceKindForTreeNode,
   objectSourceTargetForTreeNode,
+  packageMemberFocusForTreeNode,
   shouldActivateTreeNodeOnSingleClick,
   shouldBrowseObjectsOnDatabaseActivation,
   shouldOpenQueryOnTreeNodeActivation,
@@ -20,6 +23,16 @@ describe("treeNodeClick", () => {
   it("opens DynamoDB tables in the document browser on single or double activation", () => {
     expect(treeNodeRowAction("dynamodb-table", false, "single", "dynamodb")).toBe("toggle");
     expect(treeNodeRowDoubleClickAction("dynamodb-table", false, "double", false, "dynamodb")).toBe("toggle");
+  });
+
+  it("opens the object browser for a database-level trigger group", () => {
+    expect(objectBrowserFilterForGroupNode("group-triggers")).toBe("triggers");
+  });
+
+  it("keeps a table-scoped trigger group on its table instead of the database object browser", () => {
+    expect(objectBrowserFilterForGroupNode("group-triggers", "orders")).toBeUndefined();
+    // Double-click activation falls through to the table node's expand behavior.
+    expect(treeNodeRowDoubleClickAction("group-triggers", true, "double", true, "mysql", false, false)).toBe("toggle");
   });
 
   it("opens synonym nodes as synonym source", () => {
@@ -208,9 +221,29 @@ describe("treeNodeClick", () => {
     ).toEqual({
       name: "business_api",
       schema: "app_schema",
-      objectType: "PACKAGE",
-      signature: "p_value IN INT",
+      objectType: "PACKAGE_BODY",
     });
+  });
+
+  it("keeps the member signature out of the package body source identity", () => {
+    const member: TreeNode = {
+      id: "pkg:member",
+      label: "calculate(p_value IN INT)",
+      type: "function",
+      objectName: "calculate",
+      parentName: "business_api",
+      parentSchema: "app_schema",
+      parentType: "package",
+      schema: "ignored_schema",
+      signature: "p_value IN INT",
+    };
+    // Same package body for every member: one tab, not one per overload.
+    expect(objectSourceTargetForTreeNode(member)?.signature).toBeUndefined();
+    expect(packageMemberFocusForTreeNode(member)).toEqual({ name: "calculate", kind: "function", signature: "p_value IN INT" });
+  });
+
+  it("reports no package member focus for a standalone routine", () => {
+    expect(packageMemberFocusForTreeNode({ id: "proc", label: "standalone_proc", type: "procedure", schema: "app" })).toBeNull();
   });
 
   it("routes the package body action to the owning package source", () => {

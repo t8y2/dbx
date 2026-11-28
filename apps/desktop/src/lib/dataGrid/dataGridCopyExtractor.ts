@@ -1,5 +1,6 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
 import type { DataGridCopyInsertMode, DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
+import type { TransposedMarkdownLabels } from "@/lib/dataGrid/transposedMarkdown";
 
 export const DATA_GRID_COPY_EXTRACTOR_IDS = [
   "raw",
@@ -29,6 +30,12 @@ export const DATA_GRID_COPY_EXTRACTOR_IDS = [
 
 export type DataGridCopyExtractorId = (typeof DATA_GRID_COPY_EXTRACTOR_IDS)[number];
 export type DataGridCopyPreference = "smart" | DataGridCopyExtractorId;
+export const DATA_GRID_SMART_SINGLE_COLUMN_FORMATS = ["raw", "tsv", "csv", "one-row", "sql-in-list", "json", "json-lines"] as const satisfies readonly DataGridCopyExtractorId[];
+export type DataGridSmartSingleColumnFormat = "default" | (typeof DATA_GRID_SMART_SINGLE_COLUMN_FORMATS)[number];
+
+export function normalizeDataGridSmartSingleColumnFormat(value: unknown): DataGridSmartSingleColumnFormat {
+  return DATA_GRID_SMART_SINGLE_COLUMN_FORMATS.find((format) => format === value) ?? "default";
+}
 export type DataGridExtractorCategory = "raw" | "delimited" | "json" | "sql" | "document";
 
 export const DATA_GRID_DEFAULT_COPY_PREFERENCES: readonly DataGridCopyPreference[] = [
@@ -140,6 +147,7 @@ export interface DataGridExtractorOptions {
     skipComputedColumns: boolean;
     skipGeneratedColumns: boolean;
     insertMode: DataGridCopyInsertMode;
+    replaceInto?: boolean;
     primaryKeyMode: DataGridPrimaryKeyMode;
     includeDatabaseName: boolean;
     quoteIdentifiers: boolean;
@@ -176,6 +184,7 @@ export interface DataGridExtractRequest {
   rows: unknown[][];
   selectionKind: DataGridSelectionKind;
   options: DataGridExtractorOptions;
+  transposedMarkdown?: TransposedMarkdownLabels;
   spatialColumns?: QueryResult["spatial_columns"];
   spatialValues?: QueryResult["spatial_values"];
 }
@@ -268,6 +277,7 @@ export function normalizeDataGridExtractorOptions(value: unknown): DataGridExtra
       skipComputedColumns: sql.skipComputedColumns !== false,
       skipGeneratedColumns: sql.skipGeneratedColumns !== false,
       insertMode: sql.insertMode === "row-by-row" ? "row-by-row" : "merged",
+      ...(sql.replaceInto === true ? { replaceInto: true } : {}),
       primaryKeyMode: sql.primaryKeyMode === "exclude-generated" || sql.primaryKeyMode === "exclude-all" || sql.primaryKeyMode === "include" ? sql.primaryKeyMode : sql.excludePrimaryKeysFromInsert === true ? "exclude-generated" : "include",
       includeDatabaseName: sql.includeDatabaseName !== false,
       quoteIdentifiers: sql.quoteIdentifiers !== false,

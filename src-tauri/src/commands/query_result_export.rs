@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::commands::connection::AppState;
 
 use dbx_core::query_cancel::RunningTaskMetadata;
-pub use dbx_core::query_result_export::QueryResultExportRequest;
+use dbx_core::query_result_export::QueryResultExportInvocation;
 use dbx_core::query_result_export::StagedExportTarget;
 use dbx_core::table_export::ExportStatus;
 pub use dbx_core::table_export::TableExportProgress;
@@ -39,7 +39,13 @@ pub async fn create_query_result_temp_file(extension: String) -> Result<String, 
     Ok(dir.join(format!("dbx-query-result-{}.{}", uuid::Uuid::new_v4(), extension)).to_string_lossy().to_string())
 }
 
-fn emit_progress(app: &AppHandle, progress: TableExportProgress) {
+fn emit_progress(app: &AppHandle, state: &AppState, progress: TableExportProgress) {
+    crate::commands::observability::publish_transfer_progress(
+        state,
+        "query-result-export",
+        &progress.export_id,
+        &progress,
+    );
     let _ = app.emit("query-result-export-progress", progress);
 }
 
@@ -321,8 +327,9 @@ mod tests {
 pub async fn start_query_result_export(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
-    mut request: QueryResultExportRequest,
+    request: QueryResultExportInvocation,
 ) -> Result<(), String> {
+    let QueryResultExportInvocation { mut request, source_client_session_id } = request;
     dbx_core::query::mysql_data_charset_policy::check_export(&state, &request.connection_id, &request.format).await?;
     let state = state.inner().clone();
     let export_id = request.export_id.clone();
@@ -346,15 +353,17 @@ pub async fn start_query_result_export(
         let cancel_token = registered_query.as_ref().map(|query| query.token());
         let routed_progress = Arc::new(RoutedExportProgress::default());
         let routed_progress_handler = routed_progress.clone();
-        let completion = dbx_core::query_result_export::export_query_result_core_with_completion(
+        let completion = dbx_core::query_result_export::export_query_result_with_cleanup(
             &state,
             &request,
             cancel_token.clone(),
             |progress| {
                 route_core_progress(progress, &routed_progress_handler, |progress| {
-                    emit_progress(&app, progress);
+                    emit_progress(&app, &state, progress);
                 });
             },
+            true,
+            source_client_session_id.as_deref(),
         )
         .await;
         drop(registered_query);
@@ -374,18 +383,22 @@ pub async fn start_query_result_export(
                 terminal,
                 cancellation_requested,
                 routed_progress.rows_exported(),
-                |progress| emit_progress(&app, progress),
+                |progress| emit_progress(&app, &state, progress),
             )
         };
         if let Err(error) = result {
-            let _ = app.emit(
-                "query-result-export-progress",
-                serde_json::json!({
-                    "exportId": export_id, "tableName": "Query Result",
-                    "rowsExported": routed_progress.rows_exported(), "totalRows": null,
-                    "status": "Unknown", "errorMessage": error,
-                }),
+            let payload = serde_json::json!({
+                "exportId": export_id, "tableName": "Query Result",
+                "rowsExported": routed_progress.rows_exported(), "totalRows": null,
+                "status": "Unknown", "errorMessage": error,
+            });
+            crate::commands::observability::publish_transfer_progress(
+                &state,
+                "query-result-export",
+                &export_id,
+                &payload,
             );
+            let _ = app.emit("query-result-export-progress", payload);
         }
 
         dbx_core::database_export::clear_export_cancelled(&export_id).await;

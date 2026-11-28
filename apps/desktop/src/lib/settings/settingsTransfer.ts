@@ -1,12 +1,13 @@
 import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX } from "@/lib/sidebar/sidebarHoverSettings";
 import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, type EditorSettingsDraftKey, type EditorSettingsImportPatch } from "./editorSettingsDraft";
-import { DEFAULT_TOOLBAR_ITEM_ORDER, type ToolbarItemKey } from "./toolbarCustomization";
+import { DEFAULT_TOOLBAR_ITEM_ORDER, normalizePinnedToolbarMenuItems, type ToolbarItemKey } from "./toolbarCustomization";
 import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_DESKTOP_SETTINGS, DEFAULT_EDITOR_SETTINGS, DEFAULT_TOOLBAR_ITEMS, normalizeDesktopSettings, normalizeEditorSettings, isSidebarConnectionIconStyle, type DesktopSettings, type EditorSettings } from "@/stores/settingsStore";
 import type { AppThemeMode } from "@/lib/app/appTheme";
 import { EDITOR_MAX_FONT_SIZE, EDITOR_MIN_FONT_SIZE } from "@/lib/editor/editorZoom";
 import { DATA_GRID_TYPE_COLOR_KEYS, DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { SHORTCUT_DEFINITIONS } from "@/lib/editor/shortcutRegistry";
 import { DEFAULT_SQL_FORMATTER_RULE_SETTINGS, DEFAULT_SQL_FORMATTER_SETTINGS, isCompleteSqlFormatterSettings, type SqlFormatterOptionSettings, type SqlFormatterRuleSettings } from "@/lib/sql/sqlFormatterConfig";
+import { normalizePreferredTableAlias } from "@/lib/sql/sqlIdentifier";
 import { SQL_VARIABLE_SYNTAX_KEYS } from "@/lib/sql/sqlVariableSyntax";
 
 /**
@@ -166,6 +167,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "showInsertValueHints",
     "showConnectionGroupPath",
     "autoAliasTables",
+    "preferredTableAlias",
     "qualifyColumnCompletions",
     "batchColumnSelectionIncludeComments",
     "tableCompletionSchemaQualification",
@@ -175,6 +177,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sequenceCompletionEnabled",
     "sortCompletionColumnsAlphabetically",
     "selectFirstCompletionOnOpen",
+    "completionAutoActivationDelayMs",
     "completionTriggerMode",
     "completionMatchMode",
     "excludedCompletionItems",
@@ -207,6 +210,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
   navigation: [
     "appLayout",
     "tabLayout",
+    "tabWrapMaxRows",
     "tabPlacement",
     "crossWindowTabDragPreviewEnabled",
     "tabGroupMode",
@@ -316,6 +320,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "exportRowLimitEnabled",
     "exportRowLimit",
     "queryExportKeysetOptimizationEnabled",
+    "globalNumberGrouping",
     "globalDateTimeDisplayFormat",
     "globalDateTimeExportFormat",
     "globalDateTimeImportFormat",
@@ -569,14 +574,20 @@ function isRawShortcutSettingsShape(value: unknown): boolean {
 }
 
 /**
- * Raw shape: every supplied toolbar key must already be a boolean.
+ * Raw shape: visibility keys are booleans and pinned entries are strings.
  * normalizeToolbarItems coerces `exclusiveRightSidebarPanels` with `!== false`
  * (and fills the rest with nullish defaults), so a non-boolean like "no" would
  * otherwise be silently turned into `true` and pass the normalized round-trip
  * check. Unknown keys are ignored for forward compatibility.
  */
 function isRawToolbarItemsShape(value: unknown): boolean {
-  return isPlainObject(value) && Object.entries(value).every(([key, entry]) => !(key in DEFAULT_TOOLBAR_ITEMS) || typeof entry === "boolean");
+  return (
+    isPlainObject(value) &&
+    Object.entries(value).every(([key, entry]) => {
+      if (key === "pinnedMenuItems") return Array.isArray(entry) && entry.every((item) => typeof item === "string");
+      return !(key in DEFAULT_TOOLBAR_ITEMS) || typeof entry === "boolean";
+    })
+  );
 }
 
 function isRawToolbarItemOrderShape(value: unknown): boolean {
@@ -587,7 +598,8 @@ function normalizeImportedToolbarItems(value: unknown): Partial<EditorSettings["
   const imported: Partial<EditorSettings["toolbarItems"]> = {};
   if (!isPlainObject(value)) return imported;
   for (const [key, entry] of Object.entries(value)) {
-    if (key in DEFAULT_TOOLBAR_ITEMS && typeof entry === "boolean") imported[key as keyof EditorSettings["toolbarItems"]] = entry;
+    if (key === "pinnedMenuItems") imported.pinnedMenuItems = normalizePinnedToolbarMenuItems(entry);
+    else if (key in DEFAULT_TOOLBAR_ITEMS && typeof entry === "boolean") imported[key as Exclude<keyof EditorSettings["toolbarItems"], "pinnedMenuItems">] = entry;
   }
   return imported;
 }
@@ -673,6 +685,7 @@ const NESTED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: un
  * inside `customThemes`).
  */
 const RAW_STRUCTURED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
+  preferredTableAlias: (value) => typeof value === "string" && (!value.trim() || !!normalizePreferredTableAlias(value)),
   customThemes: (value) => isArrayOfShape(value, isCustomThemeItem),
   dataGridTypeColorSchemes: (value) => isArrayOfShape(value, isDataGridTypeColorSchemeItem),
   tableColumnTemplateFields: isStringArray,

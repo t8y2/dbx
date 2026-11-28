@@ -782,7 +782,7 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
 fn uses_shared_database_comments(config: &ConnectionConfig) -> bool {
     match config.db_type {
         DatabaseType::Postgres => {
-            matches!(config.driver_profile.as_deref(), None | Some("postgres" | "opengauss" | "gaussdb"))
+            matches!(config.driver_profile.as_deref(), None | Some("postgres" | "greenplum" | "opengauss" | "gaussdb"))
         }
         DatabaseType::OpenGauss | DatabaseType::Gaussdb => true,
         _ => false,
@@ -1089,6 +1089,7 @@ pub async fn list_tables_core(
         object_types,
         table_name_filter,
         false,
+        None,
     )
     .await
 }
@@ -1119,8 +1120,44 @@ pub async fn list_table_roots_page_core(
         object_types,
         table_name_filter,
         true,
+        None,
     )
     .await
+}
+
+/// Child tables of one parent table (TDengine: the child tables of a super
+/// table), paged by `limit`/`offset`. Lets the sidebar load a super table's
+/// children on demand instead of listing every child table up front.
+///
+/// Agents that predate this scope ignore it and answer with the unscoped list;
+/// the post-filter keeps that answer from leaking unrelated tables.
+pub async fn list_table_children_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    parent_name: &str,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<db::TableInfo>, String> {
+    let tables = list_tables_core_impl(
+        state,
+        connection_id,
+        database,
+        schema,
+        None,
+        limit,
+        offset,
+        None,
+        None,
+        false,
+        Some(parent_name),
+    )
+    .await?;
+    Ok(tables
+        .into_iter()
+        .filter(|table| table.parent_name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case(parent_name)))
+        .collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1135,6 +1172,7 @@ async fn list_tables_core_impl(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
     page_table_roots: bool,
+    parent_table: Option<&str>,
 ) -> Result<Vec<db::TableInfo>, String> {
     let db_config = connection_config(state, connection_id).await;
     if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
@@ -1162,6 +1200,7 @@ async fn list_tables_core_impl(
                 table_name_filter,
                 metadata_session.client_session_id(),
                 page_table_roots,
+                parent_table,
             )
         },
     )
@@ -1926,7 +1965,11 @@ impl OracleMetadataQuery<'_> {
                             sql,
                             if database.is_empty() { None } else { Some(*database) },
                             schema,
-                            QueryExecutionOptions { max_rows: Some(max_rows), ..Default::default() },
+                            QueryExecutionOptions {
+                                skip_server_output: true,
+                                max_rows: Some(max_rows),
+                                ..Default::default()
+                            },
                         ),
                         *timeout_duration,
                     )
@@ -2416,7 +2459,11 @@ async fn oracle_table_comments_for_names(
                     &sql,
                     if database.is_empty() { None } else { Some(database) },
                     if schema.is_empty() { None } else { Some(schema) },
-                    QueryExecutionOptions { max_rows: Some(chunk.len()), ..Default::default() },
+                    QueryExecutionOptions {
+                        skip_server_output: true,
+                        max_rows: Some(chunk.len()),
+                        ..Default::default()
+                    },
                 ),
                 timeout_duration,
             )
@@ -2514,7 +2561,7 @@ async fn load_oracle_exact_table_comments_for_objects(
             &sql,
             (!database.is_empty()).then_some(database),
             None,
-            QueryExecutionOptions { max_rows: Some(chunk.len()), ..Default::default() },
+            QueryExecutionOptions { skip_server_output: true, max_rows: Some(chunk.len()), ..Default::default() },
         );
         match client.execute_query_with_timeout::<db::QueryResult>(params, timeout_duration).await {
             Ok(result) => comments.extend(table_comments_from_query_result(result)),
@@ -2726,7 +2773,7 @@ async fn agent_object_statistics_query(
                 sql,
                 if database.is_empty() { None } else { Some(database) },
                 if schema.is_empty() { None } else { Some(schema) },
-                QueryExecutionOptions { max_rows: Some(10_000), ..Default::default() },
+                QueryExecutionOptions { skip_server_output: true, max_rows: Some(10_000), ..Default::default() },
             ),
             timeout_duration,
         )
@@ -2761,6 +2808,7 @@ async fn list_tables_once(
     table_name_filter: Option<&TableNameFilter>,
     client_session_id: Option<&str>,
     page_table_roots: bool,
+    parent_table: Option<&str>,
 ) -> Result<Vec<db::TableInfo>, String> {
     let pool_key =
         state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
@@ -2954,14 +3002,22 @@ async fn list_tables_once(
             } else {
                 None
             };
+            // Only the TDengine agent understands the hierarchy scope; do not leak
+            // the extra fields to agents that never defined them.
+            let agent_scope = if is_tdengine {
+                db::agent_driver::AgentTableScope { page_table_roots, parent_name: parent_table }
+            } else {
+                db::agent_driver::AgentTableScope::default()
+            };
             match client
-                .list_tables_constrained::<Vec<db::TableInfo>>(
+                .list_tables_scoped::<Vec<db::TableInfo>>(
                     database,
                     schema,
                     agent_filter,
                     agent_limit,
                     agent_offset,
                     object_types,
+                    agent_scope,
                     timeout_duration,
                 )
                 .await
@@ -3156,7 +3212,28 @@ async fn list_tables_once(
             }
         }
         PoolKind::Postgres(p) => {
-            if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty) {
+            if let Some(gp_caps) = state.greenplum_capabilities_for_pool(&pool_key, p, db_config.as_ref()).await {
+                if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty)
+                {
+                    if page_table_roots {
+                        db::greenplum::list_table_roots_page_filtered(p, &gp_caps, schema, filter, limit, offset, true)
+                            .await
+                    } else {
+                        db::greenplum::list_tables_filtered(p, &gp_caps, schema, filter, limit, offset, true).await
+                    }
+                } else if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
+                    db::greenplum::list_tables_filtered(p, &gp_caps, schema, filter, None, None, false).await.map(
+                        |tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter),
+                    )
+                } else if page_table_roots {
+                    db::greenplum::list_table_roots_page_filtered(p, &gp_caps, schema, filter, limit, offset, false)
+                        .await
+                } else {
+                    db::greenplum::list_tables_filtered(p, &gp_caps, schema, filter, limit, offset, false).await
+                }
+            } else if requests_table_objects_only(object_types)
+                && table_name_filter.is_none_or(TableNameFilter::is_empty)
+            {
                 if page_table_roots {
                     db::postgres::list_table_roots_page_filtered(p, schema, filter, limit, offset, true).await
                 } else {
@@ -3907,6 +3984,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
+            write_timeout_secs: 0,
             idle_timeout_secs: 60,
             manual_transaction_timeout_secs: 300,
             idle_disconnect_secs: 0,
@@ -3947,6 +4025,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }
@@ -8491,6 +8570,10 @@ pub async fn completion_assistant_search_core(
                 PoolKind::Mysql(pool, mode) if *mode != MysqlMode::OceanBaseOracle => Some(pool.clone()),
                 _ => None,
             }) {
+                let db_config = connection_config(state, &request.connection_id).await;
+                if db_config.as_ref().is_some_and(db::doris::is_config) {
+                    pool.set_doris_metadata_defaults();
+                }
                 return db::mysql::completion_assistant_search(&pool, &request).await;
             }
         }
@@ -9262,6 +9345,17 @@ async fn list_objects_once(
                     include_custom_types,
                 )
                 .await?
+            } else if let Some(gp_caps) = state.greenplum_capabilities_for_pool(&pool_key, p, db_config.as_ref()).await
+            {
+                db::greenplum::list_objects(
+                    p,
+                    &gp_caps,
+                    schema,
+                    include_relations,
+                    include_routines,
+                    include_custom_types,
+                )
+                .await?
             } else {
                 db::postgres::list_objects(p, schema, include_relations, include_routines, include_custom_types).await?
             };
@@ -9420,7 +9514,11 @@ async fn list_completion_objects_once(
             Ok(filter_completion_objects_with_packages(objects))
         }
         PoolKind::Postgres(p) => {
-            db::postgres::list_objects(p, schema, true, true, false).await.map(filter_completion_objects)
+            if let Some(gp_caps) = state.greenplum_capabilities_for_pool(&pool_key, p, db_config.as_ref()).await {
+                db::greenplum::list_objects(p, &gp_caps, schema, true, true, false).await.map(filter_completion_objects)
+            } else {
+                db::postgres::list_objects(p, schema, true, true, false).await.map(filter_completion_objects)
+            }
         }
         PoolKind::SqlServer(_) => {
             let outcome = list_objects_once(
@@ -10748,6 +10846,16 @@ pub async fn table_partition_status_core(
         let pool_handle = state.pool_handle(&pool_key).await;
         match pool_handle.as_ref() {
             Some(PoolKind::Postgres(pool)) => {
+                let db_config = connection_config(state, connection_id).await;
+                if let Some(gp_caps) = state.greenplum_capabilities_for_pool(&pool_key, pool, db_config.as_ref()).await
+                {
+                    let status = db::greenplum::get_table_partition_status(pool, &gp_caps, schema, table).await?;
+                    return Ok(TablePartitionStatus {
+                        is_partitioned_parent: status.is_partitioned_parent,
+                        is_partition: status.is_partition,
+                        is_foreign: status.is_foreign,
+                    });
+                }
                 let info = db::postgres::get_table_partition_info(pool, schema, table).await?;
                 Ok(TablePartitionStatus {
                     is_partitioned_parent: info.key.is_some(),
@@ -10800,7 +10908,14 @@ pub async fn get_table_partitioning_core(
         let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let pool_handle = state.pool_handle(&pool_key).await;
         match pool_handle.as_ref() {
-            Some(PoolKind::Postgres(pool)) => db::postgres::get_table_partitioning(pool, schema, table).await,
+            Some(PoolKind::Postgres(pool)) => {
+                let db_config = connection_config(state, connection_id).await;
+                if let Some(gp_caps) = state.greenplum_capabilities_for_pool(&pool_key, pool, db_config.as_ref()).await
+                {
+                    return db::greenplum::get_table_partitioning(pool, &gp_caps, schema, table).await;
+                }
+                db::postgres::get_table_partitioning(pool, schema, table).await
+            }
             Some(PoolKind::Agent(client)) => {
                 // Resolve the config once: it gates the arm and feeds the RPC
                 // timeout.
@@ -11909,12 +12024,16 @@ async fn get_table_ddl_once(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(db::opentenbase::is_config) => {
             opentenbase_ddl(p, schema, table, options.include_partitions).await
         }
-        PoolKind::Postgres(p)
-            if options.include_postgres_access && db_config.as_ref().is_some_and(is_native_postgres_config) =>
-        {
-            pg_display_ddl(p, schema, table).await
+        PoolKind::Postgres(p) => {
+            if let Some(gp_caps) = state.greenplum_capabilities_for_pool(&pool_key, p, db_config.as_ref()).await {
+                greenplum_ddl(p, &gp_caps, schema, table, options.include_partitions, options.include_postgres_access)
+                    .await
+            } else if options.include_postgres_access && db_config.as_ref().is_some_and(is_native_postgres_config) {
+                pg_display_ddl(p, schema, table).await
+            } else {
+                pg_ddl_for_options(p, schema, table, options.include_partitions).await
+            }
         }
-        PoolKind::Postgres(p) => pg_ddl_for_options(p, schema, table, options.include_partitions).await,
         PoolKind::Sqlite(p) => sqlite_ddl(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::table_ddl(client, table).await,
         PoolKind::Turso(client) => db::turso_driver::table_ddl(client, table).await,
@@ -12901,7 +13020,12 @@ pub fn oracle_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourc
         db::ObjectSourceKind::Sequence => "SEQUENCE",
         db::ObjectSourceKind::Synonym => "SYNONYM",
         db::ObjectSourceKind::Job => "",
-        db::ObjectSourceKind::Package => "PACKAGE",
+        // `PACKAGE` makes DBMS_METADATA emit the specification *and* the body as two
+        // CREATE statements. The editor would then hold two objects, which every later
+        // step treats as one: saving failed with "must contain exactly one complete
+        // object definition", and the readback comparison could never match.
+        // `PACKAGE_SPEC` is the specification alone, matching `source_integrity_sql`.
+        db::ObjectSourceKind::Package => "PACKAGE_SPEC",
         db::ObjectSourceKind::PackageBody => "PACKAGE_BODY",
         db::ObjectSourceKind::Type => "TYPE",
         db::ObjectSourceKind::TypeBody => "TYPE_BODY",
@@ -14214,7 +14338,7 @@ async fn oracle_agent_list_objects(
             &page_sql,
             (!database.is_empty()).then_some(database),
             None,
-            QueryExecutionOptions { max_rows: Some(page_size), ..Default::default() },
+            QueryExecutionOptions { skip_server_output: true, max_rows: Some(page_size), ..Default::default() },
         );
         let result: db::QueryResult = client.execute_query_with_timeout(params, timeout_duration).await?;
         if (result.truncated || result.has_more) && result.rows.is_empty() {
@@ -14264,7 +14388,7 @@ async fn oracle_agent_object_source(
         &sql,
         if database.is_empty() { None } else { Some(database) },
         if schema.is_empty() { None } else { Some(schema) },
-        QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
+        QueryExecutionOptions { skip_server_output: true, max_rows: Some(1), ..Default::default() },
     );
     let mut client = client.lock().await;
     let result: db::QueryResult = client.execute_query_with_timeout(params, timeout_duration).await?;
@@ -15474,9 +15598,16 @@ mod object_source_tests {
             oracle_object_source_sql("HR", "PAYROLL", &ObjectSourceKind::PackageBody),
             "SELECT DBMS_METADATA.GET_DDL('PACKAGE_BODY', 'PAYROLL', 'HR') FROM DUAL"
         );
+        // A package specification must be fetched as PACKAGE_SPEC: plain `PACKAGE`
+        // returns the specification and the body together, which the editor and the
+        // save path both treat as a single object.
         assert_eq!(
             oracle_object_source_sql("", "PAYROLL", &ObjectSourceKind::Package),
-            "SELECT DBMS_METADATA.GET_DDL('PACKAGE', 'PAYROLL') FROM DUAL"
+            "SELECT DBMS_METADATA.GET_DDL('PACKAGE_SPEC', 'PAYROLL') FROM DUAL"
+        );
+        assert_eq!(
+            oracle_object_source_sql("HR", "PAYROLL", &ObjectSourceKind::Package),
+            "SELECT DBMS_METADATA.GET_DDL('PACKAGE_SPEC', 'PAYROLL', 'HR') FROM DUAL"
         );
         assert_eq!(
             oracle_object_source_sql("HR", "ORDER_SEQ", &ObjectSourceKind::Sequence),
@@ -18663,6 +18794,134 @@ pub async fn opentenbase_ddl(
             Ok(ddl)
         }
     }
+}
+
+/// Greenplum DDL renderer supporting both Greenplum 6 (classic `pg_partition` /
+/// `pg_exttable` / `reloptions` / `pg_attribute_encoding`) and Greenplum 7
+/// (declarative partitions + `USING ao_row|ao_column` + `reloptions` +
+/// `DISTRIBUTED BY`). Any Greenplum-specific catalog lookup error degrades
+/// softly to the already-rendered PostgreSQL base DDL instead of failing the
+/// whole DDL view.
+pub async fn greenplum_ddl(
+    pool: &deadpool_postgres::Pool,
+    caps: &db::greenplum::GreenplumCapabilities,
+    schema: &str,
+    table: &str,
+    include_partitions: bool,
+    include_postgres_access: bool,
+) -> Result<String, String> {
+    let (ddl, is_external) = if caps.is_classic_gp6() {
+        let base_ddl = pg_ddl(pool, schema, table).await?;
+        match db::greenplum::table_modifiers(pool, caps, schema, table, include_partitions).await {
+            Ok(modifiers) => {
+                let is_external = modifiers.is_external();
+                let rendered = match db::greenplum::apply_table_modifiers(&base_ddl, &modifiers) {
+                    Ok(rendered) => rendered,
+                    Err(error) => {
+                        log::warn!(
+                            "[schema][greenplum:gp6-ddl-render-fallback] schema={} table={} error={}",
+                            schema,
+                            table,
+                            error
+                        );
+                        base_ddl
+                    }
+                };
+                (rendered, is_external)
+            }
+            Err(error) => {
+                log::warn!(
+                    "[schema][greenplum:gp6-modifiers-fallback] schema={} table={} error={}",
+                    schema,
+                    table,
+                    error
+                );
+                (base_ddl, false)
+            }
+        }
+    } else {
+        let base_ddl = pg_ddl_for_options(pool, schema, table, include_partitions).await?;
+        if include_partitions {
+            let relations: Vec<(String, String)> = db::ddl_scan::top_level_statement_ranges(&base_ddl)
+                .into_iter()
+                .filter_map(|range| db::ddl_scan::parse_create_table_relation(&base_ddl[range]))
+                .collect();
+            match db::greenplum::table_modifiers_for_relations(pool, caps, &relations).await {
+                Ok(modifiers_by_relation) => {
+                    let root_key = (
+                        if schema.trim().is_empty() { "public".to_string() } else { schema.to_string() },
+                        table.to_string(),
+                    );
+                    let is_external = modifiers_by_relation.get(&root_key).is_some_and(|m| m.is_external());
+                    let rendered = match db::greenplum::apply_tree_table_modifiers(&base_ddl, &modifiers_by_relation) {
+                        Ok(rendered) => rendered,
+                        Err(error) => {
+                            log::warn!(
+                                "[schema][greenplum:gp7-tree-render-fallback] schema={} table={} error={}",
+                                schema,
+                                table,
+                                error
+                            );
+                            base_ddl
+                        }
+                    };
+                    (rendered, is_external)
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[schema][greenplum:gp7-tree-modifiers-fallback] schema={} table={} error={}",
+                        schema,
+                        table,
+                        error
+                    );
+                    (base_ddl, false)
+                }
+            }
+        } else {
+            match db::greenplum::table_modifiers(pool, caps, schema, table, false).await {
+                Ok(modifiers) => {
+                    let is_external = modifiers.is_external();
+                    let rendered = match db::greenplum::apply_table_modifiers(&base_ddl, &modifiers) {
+                        Ok(rendered) => rendered,
+                        Err(error) => {
+                            log::warn!(
+                                "[schema][greenplum:gp7-ddl-render-fallback] schema={} table={} error={}",
+                                schema,
+                                table,
+                                error
+                            );
+                            base_ddl
+                        }
+                    };
+                    (rendered, is_external)
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[schema][greenplum:gp7-modifiers-fallback] schema={} table={} error={}",
+                        schema,
+                        table,
+                        error
+                    );
+                    (base_ddl, false)
+                }
+            }
+        }
+    };
+
+    if include_postgres_access && !is_external {
+        match db::postgres::get_table_access(pool, schema, table).await {
+            Ok(access) => return Ok(append_postgres_access_ddl(ddl, schema, table, &access)),
+            Err(error) => {
+                log::warn!(
+                    "[schema][greenplum:table-access-ddl-fallback] schema={} table={} error={}",
+                    schema,
+                    table,
+                    error
+                );
+            }
+        }
+    }
+    Ok(ddl)
 }
 
 /// Whether a `nextval` sequence is the standard `<table>_<column>_seq` serial

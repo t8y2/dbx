@@ -101,12 +101,14 @@ import {
   isSqlObjectNavigationRoutineType,
   normalizeOracleNavigationTarget,
   sqlObjectNavigationContextTarget,
+  sqlObjectNavigationPackageMember,
   sqlObjectNavigationSourceKind,
   sqlObjectNavigationSourceName,
   sqlObjectNavigationSourceSchema,
   type SqlObjectNavigationContext,
   type SqlObjectNavigationTarget,
 } from "@/lib/sql/sqlNavigation";
+import { resolveTableClickAction } from "@/lib/sql/tableClickNavigation";
 import { isObjectDependencySection, type ObjectDependencyTarget } from "@/lib/database/objectDependencyDetails";
 import { buildEditableObjectSource } from "@/lib/table/objectSourceEditor";
 import { isOracleFamilyTypeSource } from "@/lib/database/databaseObjectCapabilities";
@@ -124,7 +126,7 @@ import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { defaultSavedQueryFileName, externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, isSqlFilePath, isSqlOrScriptFilePath, queryTabExternalFilePath, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 
-import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, QueryTab, TableInfoTab, TabOutputView, TreeNode } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, PackageMemberFocus, QueryTab, TableInfoTab, TabOutputView, TreeNode } from "@/types/database";
 import { OPEN_PLUGIN_SETTINGS, type PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { parsePluginInstallDeepLink } from "@/lib/plugins/pluginInstallDeepLink";
 import { createFrontendPluginRegistry, pluginConnectionProviderDefaultPort } from "@/lib/plugins/frontendPlugin";
@@ -149,7 +151,9 @@ import {
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
   isReopenClosedTabShortcut,
+  isOpenRecentTablesShortcut,
   isCloseWindowShortcut,
+  isCommitTransactionShortcut,
   isDisconnectAllActiveConnectionsShortcut,
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
@@ -184,6 +188,7 @@ import {
   isToggleZenModeShortcut,
   isZoomInShortcut,
   isZoomOutShortcut,
+  copyResultColumnIndexFromShortcut,
   saveShortcutSurface,
   switchToTabIndexFromShortcut,
   tabSwitcherDirectionFromShortcut,
@@ -218,6 +223,7 @@ import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
 import { useUiFontFamilyPreview } from "@/composables/useUiFontFamilyPreview";
 import { createUiScaleApplyQueue } from "@/lib/app/uiScaleApplyQueue";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
+import { savedSqlExportFileName } from "@/lib/savedSql/savedSqlExport";
 import { subscribeSavedSqlLibraryChanges } from "@/lib/savedSql/savedSqlLibraryEvents";
 import { savedSqlDefaultTargetForWrite } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
@@ -260,6 +266,7 @@ import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostB
 const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAssistant.vue"));
 const PluginWorkbenchTab = defineAsyncComponent(() => import("@/components/plugins/PluginWorkbenchTab.vue"));
 const QueryHistory = defineAsyncComponent(() => import("@/components/editor/QueryHistory.vue"));
+const RecentClosedTabsDialog = defineAsyncComponent(() => import("@/components/tabs/RecentClosedTabsDialog.vue"));
 const SqlLibraryPanel = defineAsyncComponent(() => import("@/components/layout/SqlLibraryPanel.vue"));
 const SqlFilesBookmarksDock = defineAsyncComponent(() => import("@/components/layout/SqlFilesBookmarksDock.vue"));
 const DriverStorePage = defineAsyncComponent(() => import("@/components/config/DriverStoreDialog.vue"));
@@ -527,6 +534,7 @@ const isSpecialPageActive = computed(() => !isDetachedWindowContext && (driverSt
 const showQuickOpen = ref(false);
 const quickOpenForceContent = ref(false);
 const showTabSwitcher = ref(false);
+const showRecentTables = ref(false);
 const tabSwitcherIndex = ref(0);
 const agentDriverUpdateCount = ref(0);
 const showHistory = ref(false);
@@ -647,6 +655,7 @@ const queryEditorObjectSourceTarget = ref<{
   initialEditing: boolean;
   signature?: string;
   relationName?: string;
+  focusMember?: PackageMemberFocus;
 } | null>(null);
 const showSaveSqlDialog = ref(false);
 const saveSqlDialogTabId = ref<string | null>(null);
@@ -1158,7 +1167,8 @@ const executableSql = computed(() => {
 
 // Descendants only need to know whether there is anything to run. Handing them the SQL text itself
 // would re-render the whole editor shell on every keystroke.
-const hasExecutableSql = computed(() => executableSql.value.trim().length > 0);
+// `/\S/` stops at the first character that is not whitespace; `trim()` copied the whole script per keystroke.
+const hasExecutableSql = computed(() => /\S/.test(executableSql.value));
 
 async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot, executionTab?: QueryTab) {
   const tab = executionTab ?? activeTab.value;
@@ -1353,6 +1363,9 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   saveSql: (tabId: string) => void openSaveSqlDialog(tabId),
   saveRoutineToDatabase: (tabId: string) => void saveRoutineToDatabase(tabId),
   saveAllTabs: (tabIds?: string[]) => void handleSaveAllTabs(tabIds),
+  openRecentTables: () => {
+    showRecentTables.value = true;
+  },
   openSqlFile,
   importResultArchive,
   pasteSqlInCondition: pasteClipboardAsSqlInCondition,
@@ -2458,12 +2471,19 @@ function defaultSavedSqlName(title: string) {
   return normalized.endsWith(".sql") ? normalized : `${normalized}.sql`;
 }
 
+function suggestedSavedSqlName(tab: QueryTab): string {
+  const name = defaultSavedSqlName(tab.title);
+  if (tab.customTitle || !/^query_\d+\.sql$/i.test(name)) return name;
+  const connectionName = connectionStore.getConfig(tab.connectionId)?.name.trim();
+  return connectionName ? savedSqlExportFileName(defaultSavedSqlName(`${connectionName}_${name}`)) : name;
+}
+
 function selectedSaveSqlFolderId(): string | undefined {
   return saveSqlFolderId.value === ROOT_SAVED_SQL_FOLDER ? undefined : saveSqlFolderId.value;
 }
 
 function setAutoSaveSqlName(tab: QueryTab) {
-  const name = defaultSavedSqlName(tab.title);
+  const name = suggestedSavedSqlName(tab);
   saveSqlName.value = name;
   autoGeneratedSaveSqlName.value = name;
 }
@@ -2646,12 +2666,16 @@ function handleWebBeforeUnload(event: BeforeUnloadEvent) {
   event.returnValue = "";
 }
 
+function requestUnsavedTabsCloseConfirmation(action: AppCloseAction): boolean {
+  return action === "quit" ? queryStore.requestAppCloseConfirmation() : queryStore.requestWindowCloseConfirmation();
+}
+
 function continuePendingAppCloseAfterSave() {
   const action = pendingAppCloseAction.value;
   if (!action) return;
   if (queryStore.hasUnsavedWindowTabs) {
     pendingSaveShouldCloseTab.value = false;
-    if (queryStore.requestWindowCloseConfirmation()) return;
+    if (requestUnsavedTabsCloseConfirmation(action)) return;
   }
   finishPendingAppClose(action);
 }
@@ -2663,10 +2687,10 @@ function requestAppClose(action: AppCloseAction, options: AppCloseRequestOptions
     return;
   }
   pendingCloseActionChoice.value = !!options.requireCloseActionChoice;
-  if (queryStore.hasUnsavedWindowTabs) {
+  if (action !== "hide" && queryStore.hasUnsavedWindowTabs) {
     pendingAppCloseAction.value = action;
     pendingSaveShouldCloseTab.value = false;
-    if (queryStore.requestWindowCloseConfirmation()) return;
+    if (requestUnsavedTabsCloseConfirmation(action)) return;
   }
   finishPendingAppClose(action);
 }
@@ -2814,7 +2838,7 @@ async function saveTabForCloseAll(tabId: string): Promise<boolean> {
 
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
   const target = savedSqlTargetForSave(tab);
-  let saveName = existing?.name || defaultSavedSqlName(tab.title);
+  let saveName = existing?.name || suggestedSavedSqlName(tab);
   for (let attempt = 0; attempt < SAVE_SQL_NAME_ATTEMPTS; attempt++) {
     try {
       const saved = await savedSqlStore.saveFile({
@@ -3719,10 +3743,13 @@ async function onClickTable(table: SqlObjectNavigationTarget, context?: SqlObjec
   }
   const target = tableTargetFromActiveTab(table, context);
   if (!target) return;
-  const objectType = sqlObjectNavigationSourceKind(table);
-  if (objectType) {
-    // Definition navigation for views must not run the view query, which may be expensive or have side effects upstream.
-    queryEditorDdlTarget.value = { ...target, objectType };
+  const action = resolveTableClickAction(sqlObjectNavigationSourceKind(table), settingsStore.editorSettings.clickTableNavigationTarget);
+  if (action.kind === "dialog") {
+    // Definition navigation for routines, sequences and synonyms; views only open their
+    // definition while the navigation setting is "ddl". A view falls back to its data view
+    // when the user explicitly disabled that setting, instead of running the (possibly
+    // expensive) view query behind their back.
+    queryEditorDdlTarget.value = { ...target, objectType: action.objectType };
     showQueryEditorDdlDialog.value = true;
     return;
   }
@@ -3776,6 +3803,10 @@ function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: bo
   if (!target || !objectType) return;
   const sourceName = sqlObjectNavigationSourceName(navigation);
   const sourceSchema = sqlObjectNavigationSourceSchema(navigation, target.schema || target.database);
+  // `PKG.MEMBER` 打开的是整个包体，成员身份只用来定位光标：它不属于包体的取源
+  // 身份，混进去会让后端按重载去匹配一个不存在的独立子程序。
+  const focusMember = sqlObjectNavigationPackageMember(navigation);
+  const sourceSignature = focusMember ? undefined : navigation.signature;
   try {
     // Keep the editor navigation path aligned with the sidebar: create a visible
     // pending tab first, then let the store own connection/source loading.
@@ -3787,7 +3818,8 @@ function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: bo
         schema: sourceSchema || target.database,
         catalog: target.catalog,
         initialEditing,
-        request: { name: sourceName, objectType, signature: navigation.signature },
+        request: { name: sourceName, objectType, signature: sourceSignature },
+        ...(focusMember ? { focusMember } : {}),
       });
       return;
     }
@@ -3802,7 +3834,8 @@ function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: bo
       name: sourceName,
       objectType,
       initialEditing,
-      signature: navigation.signature,
+      signature: sourceSignature,
+      ...(focusMember ? { focusMember } : {}),
     };
     showQueryEditorObjectSourceDialog.value = true;
   } catch (e: any) {
@@ -5057,6 +5090,21 @@ async function handleKeydown(e: KeyboardEvent) {
     contentAreaRef.value?.refreshData();
     return;
   }
+  if (!showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
+    const target = e.target instanceof Element ? e.target : null;
+    const canUseShortcut = !target?.closest('[role="dialog"], [role="alertdialog"], input, textarea, [contenteditable="true"]:not(.cm-content)');
+    if (!e.repeat && canUseShortcut && isCommitTransactionShortcut(e, shortcuts) && contentAreaRef.value?.commitTransaction()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    const copyResultColumn = copyResultColumnIndexFromShortcut(e, shortcuts);
+    if (copyResultColumn !== null && !target?.closest('[role="dialog"], [role="alertdialog"], input, textarea') && contentAreaRef.value?.copyResultColumn(copyResultColumn)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+  }
   if (isToggleResultsPaneShortcut(e, shortcuts) && contentAreaRef.value?.toggleResultsPane()) {
     e.preventDefault();
     e.stopPropagation();
@@ -5159,6 +5207,15 @@ async function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     await closeActiveSurface();
     return;
+  }
+  if (isOpenRecentTablesShortcut(e, shortcuts) && authenticated.value && !e.isComposing && !e.repeat && (workspaceRendered() || isZenMode.value)) {
+    const target = e.target instanceof Element ? e.target : null;
+    if (!target?.closest('[role="dialog"], [role="alertdialog"]')) {
+      e.preventDefault();
+      e.stopPropagation();
+      showRecentTables.value = true;
+      return;
+    }
   }
   if (isReopenClosedTabShortcut(e, shortcuts)) {
     e.preventDefault();
@@ -5686,7 +5743,7 @@ onUnmounted(() => {
 
 <template>
   <LoginPage v-if="setupRequired || (needsAuth && !authenticated)" :setup-mode="setupRequired" @authenticated="onLoginSuccess" />
-  <div v-show="!setupRequired && (!needsAuth || authenticated)" class="dbx-app-root fixed inset-0 h-screen w-screen overflow-hidden">
+  <div v-show="!setupRequired && (!needsAuth || authenticated)" class="dbx-app-root absolute isolate inset-0 h-screen w-screen overflow-hidden">
     <div v-if="appBackgroundActive && appBackgroundObjectUrl" data-app-background class="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
       <div class="h-full w-full" :style="appBackgroundImageStyle"></div>
     </div>
@@ -5837,6 +5894,7 @@ onUnmounted(() => {
                   @opened="activateMainContentSurface('query')"
                   @new-connection="openPluginConnectionDialog"
                   @plugin-runtime-replaced="refreshPluginWorkbenches"
+                  @check-app-update="checkUpdates()"
                 />
                 <EditorSettingsPage
                   v-if="settingsPageTabOpen"
@@ -6296,6 +6354,7 @@ onUnmounted(() => {
         <BackgroundTasksClosePromptDialog v-if="isDesktop && showBackgroundTasksClosePrompt" v-model:open="showBackgroundTasksClosePrompt" :count="activeBackgroundTaskCount" @cancel="cancelPendingAppClose" @quit="confirmQuitWithActiveBackgroundTasks" />
         <QuickOpenDialog :open="showQuickOpen" :initial-content-mode="quickOpenForceContent" @update:open="showQuickOpen = $event" @select="handleQuickOpenSelect" />
         <OracleTypeManagementDialog v-if="oracleTypeManagementRequest" />
+        <RecentClosedTabsDialog v-if="showRecentTables" v-model:open="showRecentTables" tables-only />
         <TabSwitcherDialog :open="showTabSwitcher" :tabs="tabSwitcherTabs" :selected-index="tabSwitcherIndex" :shortcut-hint="tabSwitcherShortcutHint" @update:open="handleTabSwitcherOpenChange" @update:selected-index="tabSwitcherIndex = $event" @select="handleTabSwitcherSelect" />
       </div>
       <Teleport to="body">
@@ -6425,6 +6484,7 @@ onUnmounted(() => {
         :relation-name="queryEditorObjectSourceTarget.relationName"
         :object-type="queryEditorObjectSourceTarget.objectType"
         :initial-editing="queryEditorObjectSourceTarget.initialEditing"
+        :focus-member="queryEditorObjectSourceTarget.focusMember"
         :database-type="queryEditorObjectSourceDatabaseType"
         :dialect="queryEditorObjectSourceDialect"
         :format-dialect="queryEditorObjectSourceFormatDialect"

@@ -29,7 +29,7 @@ import type { DatabaseType } from "@/types/database";
 import type { ComputedRef } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import type { Composer } from "vue-i18n";
-import type { useSettingsStore } from "@/stores/settingsStore";
+import { DEFAULT_EDITOR_SETTINGS, type useSettingsStore } from "@/stores/settingsStore";
 import type { QueryEditorProps } from "./queryEditorTypes";
 import type { QueryEditorCodeMirrorRuntime, QueryEditorCodeMirrorModules } from "./queryEditorCodeMirrorRuntime";
 import type { useQueryEditorDiagnostics } from "./useQueryEditorDiagnostics";
@@ -415,6 +415,10 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
     if (!supportsQueryEditorSqlLanguage(props.databaseType)) return [];
     return autocompletion({
       activateOnTyping: true,
+      // DBeaver-style auto-activation delay: typing bursts do not pop the list
+      // until the pause elapses (#15340). CodeMirror treats this as the gap
+      // between the last keystroke and activation.
+      activateOnTypingDelay: Math.max(0, Number.isFinite(settingsStore.editorSettings.completionAutoActivationDelayMs) ? settingsStore.editorSettings.completionAutoActivationDelayMs : DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs),
       defaultKeymap: false,
       selectOnOpen: settingsStore.editorSettings.selectFirstCompletionOnOpen,
       compareCompletions: (a, b) => compareSqlCompletions(a, b, settingsStore.editorSettings.sortCompletionColumnsAlphabetically),

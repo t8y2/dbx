@@ -3471,6 +3471,16 @@ pub fn starts_with_executable_sql_keyword(sql: &str, keywords: &[&str]) -> bool 
     starts_with_executable_sql_keyword_with_options(sql, keywords, SqlParsingOptions::default())
 }
 
+/// Whether `sql` contains `word` in any ASCII letter case, wherever it occurs.
+///
+/// sqlparser matches keywords by their ASCII spelling, so a statement without
+/// this text cannot contain the keyword. Statement checks use it to skip a
+/// full parse (costly for multi-megabyte INSERTs) when the keyword they look
+/// for is absent.
+pub fn contains_ascii_case_insensitive(sql: &str, word: &str) -> bool {
+    word.is_empty() || sql.as_bytes().windows(word.len()).any(|window| window.eq_ignore_ascii_case(word.as_bytes()))
+}
+
 /// Like [`starts_with_executable_sql_keyword`], but requires the leading
 /// executable words to match a whole sequence. Needed for statements such as
 /// GaussDB's `EXECUTE DIRECT`, where the first word alone does not decide
@@ -4964,6 +4974,76 @@ mod tests {
         starts_with_oracle_style_routine_body, SqlDialectProfile, SqlFileRequest, SqlFileStatementAction,
         SqlParsingOptions, SqlStatementSplitter, SQL_FILE_INSERT_STATEMENT_MAX_BYTES,
     };
+
+    #[test]
+    fn oracle_routine_with_a_loop_stays_one_statement() {
+        // Regression guard: `END LOOP;` leaves the routine's block open, so the
+        // splitter must not cut here and turn the remainder into a second statement
+        // ("Oracle object source must contain exactly one complete object definition").
+        let source = "CREATE OR REPLACE PROCEDURE SCOTT.P(V0 IN NUMBER) IS
+  V_N NUMBER := 0;
+BEGIN
+  FOR i IN 1..10 LOOP
+    V_N := V_N + i;
+  END LOOP;
+  INSERT INTO T(N) VALUES (V_N);
+  COMMIT;
+END P;";
+
+        assert_eq!(split_sql_statements_for_database(source, DatabaseType::Oracle).len(), 1);
+    }
+
+    #[test]
+    fn oracle_package_body_keeps_quoted_name_comments_and_members_together() {
+        // The real shape of a stored package body (SCOTT.PKG1): the stored
+        // ALL_SOURCE text starts at `PACKAGE BODY`, the name is quoted, `as` is
+        // lowercase, block comments hold CJK text, a `/` inside prose, and commented
+        // out code that still contains `end if;`. Each member closes with its own
+        // `END;`, which must not finish the package.
+        let source = r#"CREATE OR REPLACE PACKAGE BODY         "PKG1" as
+  /*标识回写示例（调用方传入的参数说明）
+  1、编号字符串     2 操作类型（1为新增/撤销，2为移动/归档）*/
+  PROCEDURE SET_WRITE_FLAG(V0   ID_LIST_TYPE,
+                           IRET OUT VARCHAR2, --返回错误类型
+                           SRET OUT VARCHAR2 --返回错误输出值
+                           ) IS
+    EX EXCEPTION;
+    VERR   VARCHAR2(200) := '';
+  BEGIN
+    IF (LENGTH(V0(1)) > 0) THEN
+      FOR i IN 1 .. 10 LOOP
+        NULL;
+      END LOOP;
+    END IF;
+    COMMIT;
+  EXCEPTION
+    WHEN EX THEN
+      ROLLBACK;
+      IRET := V_IRET;
+    WHEN OTHERS THEN
+      IRET := -1;
+      SRET := SQLERRM;
+      ROLLBACK;
+  END;
+  /*if (V_STIME IS NOT NULL AND LENGTH(V_STIME) >= 8) then
+     select count(1) into V_NUM from dual;
+  end if;*/
+  ----123
+  PROCEDURE Mark_Job_End(V0   ID_LIST_TYPE,
+                         IRET OUT VARCHAR2, -- 返回错误代码
+                         SRET OUT VARCHAR2 --返回错误内容
+                         ) is
+    V_COUNT NUMBER;
+  BEGIN
+    SELECT COUNT(1) INTO V_COUNT FROM DUAL;
+    if (V_COUNT = 0) then
+      NULL;
+    end if;
+  END;
+END PKG1;"#;
+
+        assert_eq!(split_sql_statements_for_database(source, DatabaseType::Oracle).len(), 1);
+    }
 
     #[test]
     fn file_directive_boundaries_use_the_dialect_line_comment_rule() {

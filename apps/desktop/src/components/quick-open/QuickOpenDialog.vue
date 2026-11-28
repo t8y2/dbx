@@ -19,6 +19,7 @@ import { parseQuickSearchQuery, quickSearchCategory as itemCategory, type QuickS
 import { getGlobalSearchRoots, saveGlobalSearchRoots, getGlobalSearchExtensions, saveGlobalSearchExtensions } from "@/lib/globalSearch/globalSearchSettings";
 
 const QuickOpenFilePreview = defineAsyncComponent(() => import("./QuickOpenFilePreview.vue"));
+const IME_COMPOSITION_END_GRACE_MS = 100;
 
 const props = defineProps<{
   open: boolean;
@@ -228,8 +229,37 @@ const dialogOpen = computed({
   },
 });
 
+let searchCompositionActive = false;
+let searchCompositionEndedAt: number | undefined;
+
+function startSearchComposition(): void {
+  searchCompositionActive = true;
+  searchCompositionEndedAt = undefined;
+}
+
+function endSearchComposition(): void {
+  searchCompositionActive = false;
+  searchCompositionEndedAt = performance.now();
+}
+
+function resetSearchComposition(): void {
+  searchCompositionActive = false;
+  searchCompositionEndedAt = undefined;
+}
+
 function handleKeyDown(e: KeyboardEvent): void {
   if (previewEditing.value) return;
+  if (searchCompositionActive || e.isComposing || e.keyCode === 229 || e.key === "Process") {
+    e.stopPropagation();
+    return;
+  }
+  // WebKit can end composition before dispatching the Enter that committed it.
+  const commitsComposition = e.key === "Enter" && searchCompositionEndedAt !== undefined && performance.now() - searchCompositionEndedAt < IME_COMPOSITION_END_GRACE_MS;
+  searchCompositionEndedAt = undefined;
+  if (commitsComposition) {
+    e.stopPropagation();
+    return;
+  }
   if ((e.metaKey || e.ctrlKey) && /^[1-8]$/.test(e.key)) {
     e.preventDefault();
     selectCategory(categoryDefinitions[Number(e.key) - 1]!.id);
@@ -501,6 +531,7 @@ watch(
   () => props.open,
   (newOpen) => {
     if (!newOpen) {
+      resetSearchComposition();
       cancelSearch();
       return;
     }
@@ -545,7 +576,7 @@ watch(selectedIndex, async () => {
 
 <template>
   <Dialog :open="dialogOpen" @update:open="dialogOpen = $event">
-    <DialogContent class="max-w-6xl p-0 gap-0 rounded-xl overflow-hidden">
+    <DialogContent class="max-w-6xl p-0 gap-0 rounded-xl overflow-hidden" :class="{ 'lg:h-[calc(var(--dbx-viewport-height)-2rem)]': contentMode && contentMatchCount > 0 }">
       <div class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] min-h-0 flex-col bg-background">
         <!-- Search Input -->
         <div class="flex shrink-0 items-center gap-3 px-4 pr-12 py-3 border-b">
@@ -557,7 +588,11 @@ watch(selectedIndex, async () => {
             type="text"
             :placeholder="contentMode ? t('quickOpen.contentPlaceholder') : t('quickOpen.placeholder')"
             class="flex-1 border-0 bg-transparent p-0 placeholder:text-muted-foreground focus-visible:ring-0 focus-visible:outline-none"
+            @compositionstart="startSearchComposition"
+            @compositionend="endSearchComposition"
+            @blur="resetSearchComposition"
             @keydown="handleKeyDown"
+            @keyup="searchCompositionEndedAt = undefined"
           />
           <div class="flex items-center gap-1 shrink-0">
             <!-- Object/file ⇄ file content mode toggle -->

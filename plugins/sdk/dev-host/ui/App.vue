@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Plus, Upload, Plug, Unplug, Pencil, Trash2, X, RefreshCw, Sun, Moon, Terminal, Settings2, Languages } from "lucide-vue-next";
+import { Plus, Upload, Plug, Unplug, Pencil, Trash2, X, RefreshCw, Sun, Moon, Terminal, Settings2, Languages } from "@lucide/vue";
 import { hostMessage, pluginInitMessage } from "./messages.js";
 import DebugPanel from "./DebugPanel.vue";
 import PluginIcon from "./PluginIcon.vue";

@@ -1118,6 +1118,11 @@ func buildDSNWithSSLMode(cp connectParams, sslMode string) string {
 		"dbname=" + quoteDSNValue(cp.Database),
 		"sslmode=" + sslMode,
 		"connect_timeout=15",
+		// openGauss-connector-go-pq omits client_encoding from its defaults and
+		// performs no client-side decoding, so a GB18030/GBK database would
+		// inherit server_encoding and stream non-UTF-8 bytes verbatim unless
+		// UTF8 is requested explicitly in the startup packet.
+		"client_encoding=UTF8",
 	}
 	if cp.CACertPath != "" {
 		parts = append(parts, "sslrootcert="+quoteDSNValue(cp.CACertPath))
@@ -1129,7 +1134,7 @@ func buildDSNWithSSLMode(cp connectParams, sslMode string) string {
 		parts = append(parts, "sslkey="+quoteDSNValue(cp.ClientKeyPath))
 	}
 	for _, parameter := range nativeURLParams(cp.URLParams) {
-		if !strings.EqualFold(parameter.Key, "sslmode") {
+		if !strings.EqualFold(parameter.Key, "sslmode") && !strings.EqualFold(parameter.Key, "client_encoding") {
 			parts = append(parts, parameter.Key+"="+quoteDSNValue(parameter.Value))
 		}
 	}
@@ -1201,6 +1206,15 @@ func nativeConnectionStringSSLMode(value string) (string, bool) {
 	return sslMode, found
 }
 
+func isOverriddenNativeDSNParam(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "sslmode", "client_encoding", "clientencoding", "characterencoding", "useunicode":
+		return true
+	default:
+		return false
+	}
+}
+
 func rewriteNativeConnectionStringSSLMode(value, sslMode string) string {
 	if isAgentNativeURL(value) {
 		baseAndQuery, fragment, hasFragment := strings.Cut(value, "#")
@@ -1210,7 +1224,7 @@ func rewriteNativeConnectionStringSSLMode(value, sslMode string) string {
 			for _, pair := range strings.Split(query, "&") {
 				key, _, _ := strings.Cut(pair, "=")
 				decodedKey, err := url.QueryUnescape(key)
-				if err == nil && strings.EqualFold(decodedKey, "sslmode") {
+				if err == nil && isOverriddenNativeDSNParam(decodedKey) {
 					continue
 				}
 				if pair != "" {
@@ -1218,7 +1232,7 @@ func rewriteNativeConnectionStringSSLMode(value, sslMode string) string {
 				}
 			}
 		}
-		pairs = append(pairs, "sslmode="+url.QueryEscape(sslMode))
+		pairs = append(pairs, "sslmode="+url.QueryEscape(sslMode), "client_encoding=UTF8")
 		result := base + "?" + strings.Join(pairs, "&")
 		if hasFragment {
 			result += "#" + fragment
@@ -1227,15 +1241,15 @@ func rewriteNativeConnectionStringSSLMode(value, sslMode string) string {
 	}
 
 	fields := splitNativeDSNFields(value)
-	result := make([]string, 0, len(fields)+1)
+	result := make([]string, 0, len(fields)+2)
 	for _, field := range fields {
 		key, _, ok := strings.Cut(field, "=")
-		if ok && strings.EqualFold(strings.TrimSpace(key), "sslmode") {
+		if ok && isOverriddenNativeDSNParam(key) {
 			continue
 		}
 		result = append(result, field)
 	}
-	result = append(result, "sslmode="+sslMode)
+	result = append(result, "sslmode="+sslMode, "client_encoding=UTF8")
 	return strings.Join(result, " ")
 }
 

@@ -1,4 +1,4 @@
-import type { ColumnInfo, ConnectionConfig, DatabaseObjectType, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, ForeignKeyInfo, IndexInfo, QueryResult, TriggerInfo } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { createColumnDrafts, createForeignKeyDrafts, createIndexDrafts, createTriggerDrafts } from "@/lib/table/tableStructureEditorState";
@@ -9,7 +9,7 @@ import { buildOceanbaseTableClone, type OceanbaseTableClone } from "./oceanbaseT
 
 export interface DropObjectSqlOptions {
   databaseType?: DatabaseType;
-  objectType: DatabaseObjectType;
+  objectType: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "EVENT" | "TRIGGER" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
   schema?: string | null;
   name: string;
   signature?: string | null;
@@ -474,6 +474,40 @@ export function supportsMysqlAutoIncrement(connection: Pick<ConnectionConfig, "d
   return !profile || MYSQL_AUTO_INCREMENT_PROFILES.has(profile);
 }
 
+export type MysqlTableMaintenanceOperation = "analyze" | "check" | "optimize" | "repair";
+
+export const MYSQL_TABLE_MAINTENANCE_OPERATIONS: readonly MysqlTableMaintenanceOperation[] = ["analyze", "check", "optimize", "repair"];
+
+// ANALYZE/CHECK/OPTIMIZE/REPAIR TABLE are MySQL/MariaDB statements; other MySQL-protocol
+// engines (TiDB, Doris, OceanBase, ...) reject some of them, so only the plain family is listed.
+const MYSQL_TABLE_MAINTENANCE_PROFILES = new Set(["mysql", "mariadb", "greatsql"]);
+
+export function supportsMysqlTableMaintenance(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined): boolean {
+  if (connection?.db_type !== "mysql") return false;
+  const profile = connection.driver_profile?.trim().toLowerCase();
+  return !profile || MYSQL_TABLE_MAINTENANCE_PROFILES.has(profile);
+}
+
+export function buildMysqlTableMaintenanceSql(operation: MysqlTableMaintenanceOperation, tableName: string): string {
+  return `${operation.toUpperCase()} TABLE \`${tableName.replace(/`/g, "``")}\``;
+}
+
+/**
+ * Reduce the result set of a MySQL maintenance statement (columns Table, Op, Msg_type,
+ * Msg_text) to one line: the error text if any row is an error, otherwise the last message
+ * (an InnoDB OPTIMIZE reports a "recreate + analyze" note before its final "OK").
+ */
+export function summarizeMysqlTableMaintenanceResult(result: Pick<QueryResult, "columns" | "rows"> | undefined): { ok: boolean; message: string } {
+  const columns = (result?.columns ?? []).map((column) => column.toLowerCase());
+  const typeIndex = columns.indexOf("msg_type");
+  const textIndex = columns.indexOf("msg_text");
+  const rows = result?.rows ?? [];
+  if (typeIndex < 0 || textIndex < 0 || rows.length === 0) return { ok: true, message: "" };
+  const errors = rows.filter((row) => String(row[typeIndex]).toLowerCase() === "error").map((row) => String(row[textIndex] ?? ""));
+  if (errors.length > 0) return { ok: false, message: errors.join("; ") };
+  return { ok: true, message: String(rows[rows.length - 1][textIndex] ?? "") };
+}
+
 const DROP_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"];
 const TRUNCATE_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"];
 
@@ -495,6 +529,10 @@ export function buildCreateSchemaSql(options: SchemaNameSqlOptions): Promise<str
 
 export function buildDropSchemaSql(options: SchemaNameSqlOptions): Promise<string> {
   return api.buildDropSchemaSql(options);
+}
+
+export function buildRenamePostgresSchemaSql(oldName: string, newName: string): string {
+  return `ALTER SCHEMA ${quotePostgresIdentifier(oldName)} RENAME TO ${quotePostgresIdentifier(newName)};`;
 }
 
 export function damengDropSchemaExecutionSchema(username: string | null | undefined, targetSchema: string): string | null {

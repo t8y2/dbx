@@ -624,7 +624,8 @@ func (scan plDebugNativeRoutineScan) identify(target plDebugNativeCandidate, lin
 		matches := true
 		for i, param := range params {
 			parsed := node.Parameters[i]
-			if param.Name == nil || *param.Name != parsed.Name || param.Mode != parsed.Mode || param.Type != parsed.Type || !param.scalar() {
+			sameType := param.scalar() && param.Type == parsed.Type || param.cursorOutput() && parsed.Type == "SYS_REFCURSOR"
+			if param.Name == nil || *param.Name != parsed.Name || param.Mode != parsed.Mode || !sameType {
 				matches = false
 			}
 		}

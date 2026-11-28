@@ -34,7 +34,9 @@ use tokio_util::sync::CancellationToken;
 use super::file_validator::validate_file_path;
 use crate::execution::{await_stream_with_progress_timeout, DbOperationBudget, StreamProgressClock};
 use crate::models::connection::DatabaseType;
-use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_sequence};
+use crate::sql::{
+    contains_ascii_case_insensitive, starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_sequence,
+};
 use crate::types::{
     ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
     CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
@@ -1235,6 +1237,26 @@ fn pg_text_fallback_value(value: &str, col_type: Option<PgColType>) -> (serde_js
     (value, srid)
 }
 
+/// The binary numeric decoder emits a leading zero for values below one, but
+/// PostgreSQL's text protocol prints them as `.7`. Servers that only answer
+/// with text results (TBase/GaussDB) and queries forced onto the text protocol
+/// by another column would otherwise show a different string for the same
+/// value. Only add the missing zero; never touch signs, exponents or other
+/// numeric spellings.
+fn normalize_pg_numeric_text(value: &str) -> String {
+    let unsigned = value.strip_prefix('-').or_else(|| value.strip_prefix('+')).unwrap_or(value);
+    if unsigned.starts_with('.') && unsigned.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
+        let sign_len = value.len() - unsigned.len();
+        let mut normalized = String::with_capacity(value.len() + 1);
+        normalized.push_str(&value[..sign_len]);
+        normalized.push('0');
+        normalized.push_str(unsigned);
+        normalized
+    } else {
+        value.to_string()
+    }
+}
+
 fn pg_text_fallback_value_with_spatial(
     value: &str,
     col_type: Option<PgColType>,
@@ -1254,6 +1276,7 @@ fn pg_text_fallback_value_with_spatial(
             Some(parsed) => (serde_json::Value::Bool(parsed), None, false),
             None => (serde_json::Value::String(value.to_string()), None, false),
         },
+        Some(PgColType::Numeric) => (serde_json::Value::String(normalize_pg_numeric_text(value)), None, false),
         Some(_) => (serde_json::Value::String(value.to_string()), None, false),
         None => decode_pg_text_wkb(value)
             .map(|geometry| (serde_json::Value::String(geometry.wkt), geometry.srid, true))
@@ -5212,9 +5235,9 @@ pub async fn fetch_postgres_partition_tree(
         .collect())
 }
 
-/// Batched sibling of get_columns, fetching every relation through at most
-/// two OID-scoped catalog queries. The compatibility tier avoids PostgreSQL
-/// 12+ catalog fields so PostgreSQL 10-compatible servers remain bounded.
+/// Batched sibling of get_columns, fetching every relation through a bounded
+/// sequence of OID-scoped catalog queries. The compatibility tier avoids
+/// PostgreSQL 12+ catalog fields so PostgreSQL 10-compatible servers remain supported.
 pub async fn get_columns_for_relations(
     pool: &Pool,
     relations: &[(i64, String, String)],
@@ -5247,10 +5270,11 @@ async fn get_columns_for_relations_with_sql(
     Ok(result)
 }
 
-fn postgres_columns_for_relations_query_tiers() -> [&'static str; 3] {
+fn postgres_columns_for_relations_query_tiers() -> [&'static str; 4] {
     [
         postgres_columns_for_relations_sql(),
         postgres_columns_for_relations_compat_sql(),
+        postgres_columns_for_relations_information_schema_with_comments_sql(),
         postgres_columns_for_relations_information_schema_sql(),
     ]
 }
@@ -5408,8 +5432,10 @@ fn postgres_columns_for_relations_compat_sql() -> &'static str {
 // 42703), and referencing it failed the whole tier (#15130). Enumerated types
 // therefore degrade to the generic `USER-DEFINED` label in this last-resort
 // tier instead of aborting the column listing.
-fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
-    "SELECT c.oid::bigint AS relid, ic.column_name AS column_name, \
+macro_rules! postgres_columns_for_relations_information_schema_sql {
+    ($comment:literal) => {
+        concat!(
+            "SELECT c.oid::bigint AS relid, ic.column_name AS column_name, \
              ic.data_type AS full_type, \
              ic.is_nullable = 'YES' AS is_nullable, \
              ic.column_default AS column_default, \
@@ -5425,8 +5451,9 @@ fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
                  AND tc.table_schema = ic.table_schema \
                  AND tc.table_name = ic.table_name \
                  AND kcu.column_name = ic.column_name \
-             ) AS is_pk, \
-             NULL::text AS column_comment, \
+             ) AS is_pk, ",
+            $comment,
+            " AS column_comment, \
              NULL::text AS column_extra, \
              ic.numeric_precision::int AS numeric_precision, \
              ic.numeric_scale::int AS numeric_scale, \
@@ -5438,6 +5465,20 @@ fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
              WHERE ic.table_catalog = current_database() \
              AND c.oid = ANY($1::bigint[]) \
              ORDER BY c.oid, ic.ordinal_position"
+        )
+    };
+}
+
+fn postgres_columns_for_relations_information_schema_with_comments_sql() -> &'static str {
+    postgres_columns_for_relations_information_schema_sql!(
+        "(SELECT d.description FROM pg_catalog.pg_description d \
+          WHERE d.classoid = c.tableoid AND d.objoid = c.oid \
+            AND d.objsubid = ic.ordinal_position)"
+    )
+}
+
+fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
+    postgres_columns_for_relations_information_schema_sql!("NULL::text")
 }
 
 /// Same field layout as `column_info_from_row`, offset by one leading `relid`
@@ -8529,16 +8570,18 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
-// Last-resort single-relation tier: only `information_schema` columns, for
-// servers where the `pg_attribute` tiers yield nothing. Casts the precision,
-// scale and length with `::int` because GaussDB rejects `CAST(... AS int)`
-// with `syntax error at or near "int"` (#14613).
+// Both information_schema queries must match column_info_from_row_offset.
+// Cast precision, scale and length with `::int` because GaussDB rejects
+// `CAST(... AS int)` with `syntax error at or near "int"` (#14613).
 //
 // `full_type` is a plain `data_type` because GaussDB's `information_schema.columns`
 // has no `udt_name` column (`Column c.udt_name does not exist`, SQLSTATE 42703),
 // which used to fail this tier outright (#15130); user-defined types fall back to
 // the generic `USER-DEFINED` label rather than taking the listing down with them.
-const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
+macro_rules! information_schema_columns_sql {
+    ($comment:literal) => {
+        concat!(
+            "SELECT c.column_name, \
              c.data_type AS full_type, \
              c.is_nullable = 'YES' AS is_nullable, \
              c.column_default, \
@@ -8554,8 +8597,9 @@ const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
                  AND tc.table_schema = c.table_schema \
                  AND tc.table_name = c.table_name \
                  AND kcu.column_name = c.column_name \
-             ) AS is_pk, \
-             NULL::text AS column_comment, \
+             ) AS is_pk, ",
+            $comment,
+            " AS column_comment, \
              NULL::text AS column_extra, \
              c.numeric_precision::int AS numeric_precision, \
              c.numeric_scale::int AS numeric_scale, \
@@ -8564,7 +8608,22 @@ const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
              FROM information_schema.columns c \
              WHERE c.table_schema = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN current_schema() ELSE $1 END) \
              AND c.table_name = $2 \
-             ORDER BY c.ordinal_position";
+             ORDER BY c.ordinal_position"
+        )
+    };
+}
+
+const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = information_schema_columns_sql!("NULL::text");
+
+// openGauss can expose comments even when the compat tier cannot read pg_depend
+// (#15267). Its columns view exposes attnum as ordinal_position, including
+// gaps left by dropped columns.
+const GAUSS_COLUMNS_INFORMATION_SCHEMA_WITH_COMMENTS_SQL: &str = information_schema_columns_sql!(
+    "(SELECT d.description FROM pg_catalog.pg_class r \
+      JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace \
+      JOIN pg_catalog.pg_description d ON d.classoid = r.tableoid AND d.objoid = r.oid \
+      WHERE n.nspname = c.table_schema AND r.relname = c.table_name AND d.objsubid = c.ordinal_position)"
+);
 
 fn parse_enum_values_from_row(row: &impl ValueRow, index: usize) -> Option<Vec<String>> {
     let raw = row.try_get::<_, Option<String>>(index).ok().flatten()?;
@@ -8683,7 +8742,11 @@ fn column_metadata_tiers(modern_tier_supported: bool) -> Vec<(&'static str, &'st
             ("information_schema", POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL),
         ]
     } else {
-        vec![("compat", POSTGRES_COLUMNS_COMPAT_SQL), ("information_schema", POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL)]
+        vec![
+            ("compat", POSTGRES_COLUMNS_COMPAT_SQL),
+            ("information_schema_with_comments", GAUSS_COLUMNS_INFORMATION_SCHEMA_WITH_COMMENTS_SQL),
+            ("information_schema", POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL),
+        ]
     }
 }
 
@@ -8902,6 +8965,12 @@ struct PostgresSearchPathBaseline {
     configured: String,
     first_resolved_schema: Option<String>,
     has_explicit_pg_catalog: bool,
+    /// Schemas the server actually resolved for this session
+    /// (`current_schemas(false)`). A configured element that is absent here does
+    /// not exist, and naming it in `SET search_path` makes strict servers reject
+    /// the whole statement with SQLSTATE 22023. `None` keeps every element, for
+    /// callers that build a baseline by hand.
+    existing_schemas: Option<Vec<String>>,
 }
 
 type PostgresSearchPathBaselineEntry = (Weak<deadpool_postgres::StatementCache>, PostgresSearchPathBaseline);
@@ -8975,6 +9044,16 @@ fn postgres_quoted_search_path_elements(configured: &str) -> Vec<String> {
     elements
 }
 
+/// The schema name behind one already-quoted search-path element, for comparing
+/// it with the names the server reported as existing.
+fn postgres_search_path_element_name(element: &str) -> String {
+    if element.len() >= 2 && element.starts_with('"') && element.ends_with('"') {
+        element[1..element.len() - 1].replace("\"\"", "\"")
+    } else {
+        element.to_ascii_lowercase()
+    }
+}
+
 fn postgres_set_preserved_search_path_sql(
     schema: &str,
     context: PostgresSearchPathContext,
@@ -9000,6 +9079,14 @@ fn postgres_set_preserved_search_path_sql(
     let configured = configured_elements
         .iter()
         .filter(|element| !is_postgres_user_placeholder(element))
+        .filter(|element| match &baseline.existing_schemas {
+            // Dropping a missing schema is what makes `SET search_path` succeed on
+            // servers that validate every element (SQLSTATE 22023); it also keeps
+            // the path equivalent everywhere else, since a missing element is
+            // never searchable anyway.
+            Some(existing) => existing.iter().any(|name| *name == postgres_search_path_element_name(element)),
+            None => true,
+        })
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join(", ");
@@ -9106,7 +9193,7 @@ async fn postgres_search_path_baseline(
         timeout_duration,
         client.query_one(
             "SELECT current_setting('search_path'), (current_schemas(false))[1], \
-                    'pg_catalog' = ANY(current_schemas(false))",
+                    'pg_catalog' = ANY(current_schemas(false)), current_schemas(false)",
             &[],
         ),
     )
@@ -9117,6 +9204,7 @@ async fn postgres_search_path_baseline(
         configured: row.try_get(0).map_err(|error| error.to_string())?,
         first_resolved_schema: row.try_get(1).map_err(|error| error.to_string())?,
         has_explicit_pg_catalog: row.try_get(2).map_err(|error| error.to_string())?,
+        existing_schemas: Some(row.try_get(3).map_err(|error| error.to_string())?),
     };
     cache_postgres_search_path_baseline(client, baseline.clone());
     Ok(baseline)
@@ -9218,6 +9306,14 @@ pub fn postgres_statement_returns_rows(sql: &str) -> bool {
     // rows with `RETURNING`. The prefix alone cannot decide, so parse it and
     // keep the row-returning assumption whenever parsing does not say otherwise.
     let leads_with_cte = starts_with_executable_sql_keyword(sql, &["WITH"]);
+
+    // INSERT/UPDATE/DELETE only return rows through RETURNING. Skip the full
+    // parse of statements without it, such as large multi-row INSERT batches.
+    if starts_with_executable_sql_keyword(sql, &["INSERT", "UPDATE", "DELETE"])
+        && !contains_ascii_case_insensitive(sql, "returning")
+    {
+        return false;
+    }
 
     let Ok(statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
         return leads_with_cte;
@@ -10104,8 +10200,14 @@ async fn execute_query_with_max_rows_inner(
                 .await
         }
     } else {
-        let affected =
-            if force_unnamed { client.execute_typed(sql, &[]).await } else { client.execute(sql, &[]).await };
+        // Grid writes have no bind parameters. Sending Parse and Bind together
+        // keeps the statement on one backend when a transaction pool releases
+        // its server connection between protocol round trips.
+        let affected = if force_unnamed || starts_with_executable_sql_keyword(sql, &["INSERT", "UPDATE", "DELETE"]) {
+            client.execute_typed(sql, &[]).await
+        } else {
+            client.execute(sql, &[]).await
+        };
         affected.map_err(pg_error_to_string).map(|affected| QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -12658,6 +12760,7 @@ mod tests {
             configured: "application, extensions, public".to_string(),
             first_resolved_schema: Some("application".to_string()),
             has_explicit_pg_catalog: false,
+            existing_schemas: None,
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
@@ -12707,6 +12810,7 @@ mod tests {
                 configured: configured.to_string(),
                 first_resolved_schema: Some(first_schema.to_string()),
                 has_explicit_pg_catalog: false,
+                existing_schemas: None,
             };
             for (context, scope) in [
                 (PostgresSearchPathContext::Query, ""),
@@ -12724,11 +12828,67 @@ mod tests {
     }
 
     #[test]
+    fn postgres_search_path_drops_a_configured_schema_the_database_does_not_have() {
+        // A database that dropped its `public` schema still reports it in
+        // current_setting('search_path'), but not in current_schemas(false).
+        let baseline = PostgresSearchPathBaseline {
+            configured: "dbi, public".to_string(),
+            first_resolved_schema: Some("dbi".to_string()),
+            has_explicit_pg_catalog: false,
+            existing_schemas: Some(vec!["dbi".to_string()]),
+        };
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("dbi", PostgresSearchPathContext::Query, &baseline),
+            "SET search_path TO \"dbi\", pg_catalog"
+        );
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("dbi", PostgresSearchPathContext::LocalQueryTransaction, &baseline,),
+            "SET LOCAL search_path TO \"dbi\", pg_catalog"
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_keeps_every_existing_configured_schema() {
+        let baseline = PostgresSearchPathBaseline {
+            configured: "application, extensions, public".to_string(),
+            first_resolved_schema: Some("application".to_string()),
+            has_explicit_pg_catalog: false,
+            existing_schemas: Some(vec!["application".to_string(), "extensions".to_string(), "public".to_string()]),
+        };
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
+            "SET search_path TO \"application\", \"extensions\", \"public\", pg_catalog"
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_compares_quoted_elements_with_existing_names() {
+        let baseline = PostgresSearchPathBaseline {
+            configured: "\"MiXeD Name\", missing, public".to_string(),
+            first_resolved_schema: Some("MiXeD Name".to_string()),
+            has_explicit_pg_catalog: false,
+            existing_schemas: Some(vec!["MiXeD Name".to_string(), "public".to_string()]),
+        };
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("MiXeD Name", PostgresSearchPathContext::Query, &baseline),
+            "SET search_path TO \"MiXeD Name\", \"public\", pg_catalog"
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_element_name_unquotes_identifiers() {
+        assert_eq!(postgres_search_path_element_name(r#""public""#), "public");
+        assert_eq!(postgres_search_path_element_name(r#""a""b""#), "a\"b");
+        assert_eq!(postgres_search_path_element_name("MiXeD"), "mixed");
+    }
+
+    #[test]
     fn postgres_search_path_prepends_selected_schema_without_dropping_configured_items() {
         let baseline = PostgresSearchPathBaseline {
             configured: "extensions, public".to_string(),
             first_resolved_schema: Some("public".to_string()),
             has_explicit_pg_catalog: false,
+            existing_schemas: None,
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
@@ -12750,6 +12910,7 @@ mod tests {
             configured: "\"$user\", public".to_string(),
             first_resolved_schema: Some("public".to_string()),
             has_explicit_pg_catalog: false,
+            existing_schemas: None,
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("dwd_views", PostgresSearchPathContext::Query, &baseline),
@@ -12760,6 +12921,7 @@ mod tests {
             configured: "$user, public".to_string(),
             first_resolved_schema: Some("public".to_string()),
             has_explicit_pg_catalog: false,
+            existing_schemas: None,
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("dwd_views", PostgresSearchPathContext::Query, &bare_baseline),
@@ -12773,6 +12935,7 @@ mod tests {
             configured: "\"$user\", public".to_string(),
             first_resolved_schema: Some("dbx_test".to_string()),
             has_explicit_pg_catalog: false,
+            existing_schemas: None,
         };
 
         assert_eq!(
@@ -12784,6 +12947,7 @@ mod tests {
             configured: "dbx_test, \"$user\", public".to_string(),
             first_resolved_schema: Some("dbx_test".to_string()),
             has_explicit_pg_catalog: false,
+            existing_schemas: None,
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("dbx_test", PostgresSearchPathContext::Query, &explicit_baseline),
@@ -12814,6 +12978,7 @@ mod tests {
             configured: "\"$user\"".to_string(),
             first_resolved_schema: Some("public".to_string()),
             has_explicit_pg_catalog: false,
+            existing_schemas: None,
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("dwd_views", PostgresSearchPathContext::Query, &baseline),
@@ -12824,6 +12989,7 @@ mod tests {
             configured: "$user".to_string(),
             first_resolved_schema: Some("public".to_string()),
             has_explicit_pg_catalog: true,
+            existing_schemas: None,
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql(
@@ -12841,6 +13007,7 @@ mod tests {
             configured: "my$user_schema, \"$user_backup\", public".to_string(),
             first_resolved_schema: Some("public".to_string()),
             has_explicit_pg_catalog: false,
+            existing_schemas: None,
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("dwd_views", PostgresSearchPathContext::Query, &baseline),
@@ -12854,6 +13021,7 @@ mod tests {
             configured: "extensions, pg_catalog, public".to_string(),
             first_resolved_schema: Some("extensions".to_string()),
             has_explicit_pg_catalog: true,
+            existing_schemas: None,
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
@@ -12984,6 +13152,8 @@ mod tests {
             "INSERT INTO users (id) VALUES (1) RETURNING id",
             "UPDATE users SET name = 'Ada' RETURNING id, name",
             "DELETE FROM users WHERE id = 1 RETURNING id",
+            "insert into users (id) values (1) returning id",
+            "-- audit\nUpdate users SET name = 'Ada' Returning id",
             "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name RETURNING target.id",
             "WITH removed AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM removed",
         ] {
@@ -13180,6 +13350,40 @@ mod tests {
         assert_eq!(pg_text_fallback_value("maybe", Some(PgColType::Bool)), (serde_json::json!("maybe"), None));
         // Without a classified column type nothing is coerced.
         assert_eq!(pg_text_fallback_value("f", None), (serde_json::json!("f"), None));
+    }
+
+    #[test]
+    fn postgres_text_fallback_adds_leading_zero_to_fractional_numeric() {
+        // The binary decoder already emits these with a leading zero; text
+        // results from TBase/GaussDB must agree (issue #15198).
+        for (text, expected) in [(".70000000", "0.70000000"), ("-.7", "-0.7"), ("+.7", "+0.7"), (".0", "0.0")] {
+            assert_eq!(pg_text_fallback_value(text, Some(PgColType::Numeric)), (serde_json::json!(expected), None));
+        }
+    }
+
+    #[test]
+    fn postgres_text_fallback_preserves_other_numeric_text() {
+        // Values that already carry an integer digit, special values, and
+        // exponent notation must pass through byte-for-byte.
+        for text in [
+            "0.00",
+            "-0.0012300",
+            "12345.6789",
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            "1e-3",
+            ".",
+            "-.",
+            "",
+            "not a number",
+            ".中",
+        ] {
+            assert_eq!(pg_text_fallback_value(text, Some(PgColType::Numeric)), (serde_json::json!(text), None));
+        }
+        // Without a classified type nothing is reinterpreted, so an ordinary
+        // text column containing ".7" is left alone.
+        assert_eq!(pg_text_fallback_value(".7", None), (serde_json::json!(".7"), None));
     }
 
     #[test]
@@ -15379,9 +15583,9 @@ mod tests {
     #[test]
     fn postgres_partition_batch_metadata_uses_bounded_compat_tiers() {
         let column_tiers = postgres_columns_for_relations_query_tiers();
-        // Two `pg_attribute` tiers plus the information-schema last resort
-        // (#8728); still bounded, and a normal server stops at the first tier.
-        assert_eq!(column_tiers.len(), 3);
+        // Two `pg_attribute` tiers, a comment-preserving information-schema
+        // tier, and the final information-schema last resort (#8728).
+        assert_eq!(column_tiers.len(), 4);
         assert!(column_tiers.iter().all(|sql| sql.contains("c.oid = ANY($1::bigint[])")));
         assert!(column_tiers[0].contains("a.attgenerated"));
         assert!(!column_tiers[0].contains("information_schema.columns"));
@@ -15391,7 +15595,11 @@ mod tests {
         assert!(!column_tiers[1].contains("LEFT JOIN LATERAL"));
         assert!(!column_tiers[1].contains("information_schema.columns"));
         assert!(column_tiers[2].contains("information_schema.columns"));
+        assert!(column_tiers[2].contains("pg_catalog.pg_description"));
         assert!(!column_tiers[2].contains("pg_attribute"));
+        assert!(column_tiers[3].contains("information_schema.columns"));
+        assert!(!column_tiers[3].contains("pg_catalog.pg_description"));
+        assert!(!column_tiers[3].contains("pg_attribute"));
 
         let index_tiers = postgres_indexes_for_relations_query_tiers();
         assert_eq!(index_tiers.len(), 2);
@@ -15479,12 +15687,16 @@ mod tests {
     /// #8728: the batched (partition-tree) column path used to be the only
     /// metadata path without a catalog fallback, so a server that answers the
     /// `pg_attribute` tiers with zero rows for an existing relation still
-    /// reported no columns. It now carries the same information-schema last
-    /// resort as the single-relation path.
+    /// reported no columns. It now carries the same information-schema tiers
+    /// as the single-relation path, including the comment-preserving tier.
     #[test]
     fn postgres_batched_column_metadata_has_information_schema_fallback() {
         let tiers = postgres_columns_for_relations_query_tiers();
-        assert_eq!(tiers.len(), 3);
+        assert_eq!(tiers.len(), 4);
+
+        let comments_sql = postgres_columns_for_relations_information_schema_with_comments_sql();
+        assert!(comments_sql.contains("pg_catalog.pg_description"));
+        assert!(!comments_sql.contains("NULL::text AS column_comment"));
 
         let sql = postgres_columns_for_relations_information_schema_sql();
         assert!(sql.contains("information_schema.columns"));
@@ -15789,7 +16001,7 @@ mod tests {
         let compat_first = column_metadata_tiers(false);
         assert_eq!(
             compat_first.iter().map(|(tier, _)| *tier).collect::<Vec<_>>(),
-            vec!["compat", "information_schema"]
+            vec!["compat", "information_schema_with_comments", "information_schema"]
         );
         assert_eq!(compat_first[0].1, POSTGRES_COLUMNS_COMPAT_SQL);
     }
@@ -15957,6 +16169,44 @@ mod tests {
         assert!(sql.contains("d.deptype = 'e'"));
         assert!(sql.contains("pg_get_function_identity_arguments(p.oid)"));
         assert!(!sql.contains("d.deptype = 'x'"));
+    }
+
+    #[tokio::test]
+    async fn compat_column_fallback_preserves_visible_comments_with_restricted_catalogs() {
+        let Some(container) = start_docker_postgres().await else {
+            return;
+        };
+        let admin = connect(&container.url(), Duration::from_secs(5)).await.unwrap();
+        let client = admin.get().await.unwrap();
+        client
+            .batch_execute(
+                r#"CREATE ROLE comment_reader LOGIN PASSWORD 'reader';
+                   CREATE SCHEMA "App";
+                   CREATE TABLE "App"."Visitor" (id bigint, obsolete text, note text);
+                   ALTER TABLE "App"."Visitor" DROP COLUMN obsolete;
+                   COMMENT ON COLUMN "App"."Visitor".id IS '主键';
+                   GRANT USAGE ON SCHEMA "App" TO comment_reader;
+                   GRANT SELECT ON "App"."Visitor" TO comment_reader;
+                   REVOKE SELECT ON pg_catalog.pg_depend FROM PUBLIC;"#,
+            )
+            .await
+            .unwrap();
+        let reader_url =
+            format!("postgres://comment_reader:reader@127.0.0.1:{}/postgres?sslmode=disable", container.port);
+        let reader = connect(&reader_url, Duration::from_secs(5)).await.unwrap();
+
+        for (literal, expected) in [("'初始备注'", Some("初始备注")), ("'更新备注'", Some("更新备注")), ("NULL", None)]
+        {
+            client.batch_execute(&format!(r#"COMMENT ON COLUMN "App"."Visitor".note IS {literal}"#)).await.unwrap();
+            let columns = get_columns_compat_first(&reader, "App", "Visitor").await.unwrap();
+            let comments: Vec<_> = columns.iter().map(|c| (c.name.as_str(), c.comment.as_deref())).collect();
+            assert_eq!(comments, [("id", Some("主键")), ("note", expected)]);
+        }
+
+        client.batch_execute("REVOKE SELECT ON pg_catalog.pg_description FROM PUBLIC").await.unwrap();
+        let columns = get_columns_compat_first(&reader, "App", "Visitor").await.unwrap();
+        let comments: Vec<_> = columns.iter().map(|c| (c.name.as_str(), c.comment.as_deref())).collect();
+        assert_eq!(comments, [("id", None), ("note", None)]);
     }
 
     #[tokio::test]

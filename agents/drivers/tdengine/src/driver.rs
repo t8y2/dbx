@@ -5,6 +5,7 @@ use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use chrono::FixedOffset;
 use chrono_tz::Tz;
 use futures::future::poll_fn;
 use serde_json::Value;
@@ -20,7 +21,7 @@ use crate::model::{
     ObjectInfo, ObjectSource, QueryOptions, QueryPageResult, QueryResult, TableInfo, DEFAULT_MAX_ROWS,
     TDENGINE_DATA_TYPES,
 };
-use crate::value::borrowed_value_to_json;
+use crate::value::{borrowed_value_to_json, TimestampZone};
 
 /// 表列表快照的兜底有效期。
 ///
@@ -49,7 +50,7 @@ pub struct TdengineDriver {
     connection: Option<Taos>,
     params: ConnectParams,
     server_version: Option<String>,
-    session_timezone: Option<Tz>,
+    session_timezone: Option<TimestampZone>,
     current_database: String,
     query_sessions: HashMap<String, QueryCursor>,
 }
@@ -64,8 +65,8 @@ struct TableSnapshot {
 
 struct QueryCursor {
     result_set: ResultSet,
-    timezone: Option<Tz>,
-    session_timezone: Option<Tz>,
+    timezone: Option<TimestampZone>,
+    session_timezone: Option<TimestampZone>,
     columns: Vec<String>,
     column_types: Vec<String>,
     affected_rows: i64,
@@ -108,7 +109,7 @@ impl TdengineDriver {
         let session_timezone = query_scalar_string(&connection, "SELECT timezone()", &token, 5)
             .await
             .ok()
-            .and_then(|value| parse_server_timezone(&value));
+            .and_then(|value| parse_server_time_zone(&value));
         self.current_database = dsn.database;
         self.server_version = server_version;
         self.session_timezone = session_timezone;
@@ -183,10 +184,110 @@ impl TdengineDriver {
             return Ok(Vec::new());
         }
         let database = effective_database(database, &self.current_database)?.to_string();
+        if let Some(parent) = constraints.parent_name.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            return self.list_child_tables(&database, parent, &constraints, token).await;
+        }
+        // 无搜索词时侧栏只需要根表：超级表很多子表时，读出全部子表既慢又占内存。
+        // 有搜索词仍走完整快照，子表名也要能被搜到。
+        if constraints.page_table_roots && constraints.filter.trim().is_empty() {
+            let roots = self.root_tables(&database, token).await?;
+            return Ok(filter_tables(roots.as_slice(), &constraints));
+        }
         // 元数据接口的返回顺序没有保证，服务端翻页会让 offset 在两次请求间跳行；
         // 这里始终读取完整列表（进程级快照），在本地排序切片。
         let tables = self.all_tables(&database, token).await?;
         Ok(filter_tables(tables.as_slice(), &constraints))
+    }
+
+    /// 读取某个超级表的子表（按子表名排序分页）。
+    ///
+    /// 3.x 直接让 `ins_tables` 按 `stable_name` 过滤并在服务端翻页，不触碰其他超级表的
+    /// 子表；`ORDER BY table_name` 保证 offset 翻页稳定。带搜索词时需要本地模糊匹配，
+    /// 此时读出该超级表的全部子表再切片。2.x 的 `SHOW TABLES` 已带所属超级表，沿用快照。
+    async fn list_child_tables(
+        &self,
+        database: &str,
+        parent: &str,
+        constraints: &MetadataListConstraints,
+        token: &CancellationToken,
+    ) -> Result<Vec<TableInfo>> {
+        if !uses_information_schema_tables(self.server_version.as_deref()) {
+            let tables = self.all_tables(database, token).await?;
+            let children: Vec<TableInfo> = tables
+                .iter()
+                .filter(|table| table.parent_name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case(parent)))
+                .cloned()
+                .collect();
+            return Ok(filter_tables(&children, constraints));
+        }
+        let server_paged = constraints.filter.trim().is_empty();
+        let page = if !server_paged || constraints.limit == 0 {
+            String::new()
+        } else {
+            format!(" LIMIT {} OFFSET {}", constraints.limit, constraints.offset)
+        };
+        let sql = format!(
+            "SELECT table_name FROM information_schema.ins_tables WHERE db_name = {} AND stable_name = {} ORDER BY table_name{}",
+            quote_literal(database),
+            quote_literal(parent),
+            page
+        );
+        let rows = self.query_rows_with_retry(&sql, token).await?;
+        let children: Vec<TableInfo> = tables_from_information_schema_rows(
+            rows.into_iter()
+                .map(|row| vec![row.into_iter().next().unwrap_or(Value::Null), Value::String(parent.to_string())])
+                .collect(),
+        );
+        if server_paged && constraints.limit != 0 {
+            // 偏移已在服务端应用，本地只需按类型/搜索词过滤，不能再跳过 offset。
+            let local = MetadataListConstraints { offset: 0, ..constraints.clone() };
+            return Ok(filter_tables(&children, &local));
+        }
+        Ok(filter_tables(&children, constraints))
+    }
+
+    /// 根表快照：全部超级表 + 不属于任何超级表的普通表。
+    async fn root_tables(&self, database: &str, token: &CancellationToken) -> Result<Arc<Vec<TableInfo>>> {
+        if !uses_information_schema_tables(self.server_version.as_deref()) {
+            // 2.x 没有按超级表过滤的元数据视图，直接从完整快照里取根表。
+            let tables = self.all_tables(database, token).await?;
+            let roots: Vec<TableInfo> = tables.iter().filter(|table| table.parent_name.is_none()).cloned().collect();
+            return Ok(Arc::new(roots));
+        }
+        let cache_key = format!("{}|roots", self.table_cache_key(database));
+        let generation = METADATA_GENERATION.load(Ordering::Relaxed);
+        if let Some(tables) = cached_table_snapshot(&cache_key, generation) {
+            return Ok(tables);
+        }
+        let mut tables = self
+            .query_tables(&format!("SHOW {}STABLES", quote_qualified_prefix(database)), "STABLE", false, token)
+            .await?;
+        let sql = format!(
+            "SELECT table_name, stable_name FROM information_schema.ins_tables WHERE db_name = {} AND stable_name IS NULL",
+            quote_literal(database)
+        );
+        let rows = self.query_rows_with_retry(&sql, token).await?;
+        tables.extend(tables_from_information_schema_rows(rows));
+        let mut seen = HashSet::new();
+        tables.retain(|table| seen.insert(format!("{}:{}", table.table_type, table.name)));
+        sort_tables_for_hierarchy(&mut tables);
+        let tables = Arc::new(tables);
+        store_table_snapshot(&cache_key, generation, tables.clone());
+        Ok(tables)
+    }
+
+    /// 元数据查询失败时重试一次；取消不重试。仍失败则把错误抛给调用方，让侧栏显示错误
+    /// 而不是残缺列表。
+    async fn query_rows_with_retry(&self, sql: &str, token: &CancellationToken) -> Result<Vec<Vec<Value>>> {
+        let mut last_error = None;
+        for _ in 0..2 {
+            match self.query_rows(sql, token, 0).await {
+                Ok(rows) => return Ok(rows),
+                Err(error) if token.is_cancelled() => return Err(error),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow!("TDengine table metadata query failed")))
     }
 
     pub async fn list_objects(
@@ -496,7 +597,7 @@ impl TdengineDriver {
             bail!("SQL is required");
         }
         let result_set = cancellable(token, timeout_secs, self.require_connection()?.query(sql)).await?;
-        let timezone = result_set.timezone();
+        let timezone = result_set.timezone().map(TimestampZone::Iana);
         let columns = result_set.fields().iter().map(|field| field.name().to_string()).collect();
         let column_types = result_set.fields().iter().map(|field| field.ty().name().to_string()).collect();
         let affected_rows = i64::from(result_set.affected_rows());
@@ -584,15 +685,7 @@ impl TdengineDriver {
             "SELECT table_name, stable_name FROM information_schema.ins_tables WHERE db_name = {}",
             quote_literal(database)
         );
-        let mut last_error = None;
-        for _ in 0..2 {
-            match self.query_rows(&sql, token, 0).await {
-                Ok(rows) => return Ok(tables_from_information_schema_rows(rows)),
-                Err(error) if token.is_cancelled() => return Err(error),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        Err(last_error.unwrap_or_else(|| anyhow!("TDengine table metadata query failed")))
+        Ok(tables_from_information_schema_rows(self.query_rows_with_retry(&sql, token).await?))
     }
 
     async fn query_tables(
@@ -680,7 +773,11 @@ impl QueryCursor {
         loop {
             if let Some(block) = &self.pending_block {
                 if self.pending_row_index < block.nrows() {
-                    let timezone = preferred_timezone(self.timezone, block.timezone(), self.session_timezone);
+                    let timezone = preferred_timezone(
+                        self.timezone,
+                        block.timezone().map(TimestampZone::Iana),
+                        self.session_timezone,
+                    );
                     let row_index = self.pending_row_index;
                     self.pending_row_index += 1;
                     let row = (0..block.ncols())
@@ -739,7 +836,7 @@ async fn query_scalar_string(
     timeout_secs: u64,
 ) -> Result<String> {
     let mut result = cancellable(token, timeout_secs, connection.query(sql)).await?;
-    let timezone = result.timezone();
+    let timezone = result.timezone().map(TimestampZone::Iana);
     loop {
         let block = cancellable(token, timeout_secs, poll_fn(|context| result.fetch_raw_block(context))).await?;
         let Some(block) = block else {
@@ -749,7 +846,10 @@ async fn query_scalar_string(
             continue;
         }
         let value = block.get_ref(0, 0).ok_or_else(|| anyhow!("TDengine query returned an empty value"))?;
-        return match borrowed_value_to_json(value, preferred_timezone(timezone, block.timezone(), None)) {
+        return match borrowed_value_to_json(
+            value,
+            preferred_timezone(timezone, block.timezone().map(TimestampZone::Iana), None),
+        ) {
             Value::String(value) => Ok(value),
             value => Ok(value.to_string()),
         };
@@ -757,15 +857,80 @@ async fn query_scalar_string(
 }
 
 fn preferred_timezone(
-    query_timezone: Option<Tz>,
-    block_timezone: Option<Tz>,
-    session_timezone: Option<Tz>,
-) -> Option<Tz> {
+    query_timezone: Option<TimestampZone>,
+    block_timezone: Option<TimestampZone>,
+    session_timezone: Option<TimestampZone>,
+) -> Option<TimestampZone> {
     query_timezone.or(block_timezone).or(session_timezone)
 }
 
-fn parse_server_timezone(value: &str) -> Option<Tz> {
-    value.split_whitespace().next()?.parse().ok()
+fn parse_server_time_zone(value: &str) -> Option<TimestampZone> {
+    if let Some(name) = value.split_whitespace().next() {
+        if let Ok(timezone) = name.parse::<Tz>() {
+            return Some(TimestampZone::Iana(timezone));
+        }
+    }
+    parse_offset_zone(value).map(TimestampZone::Fixed)
+}
+
+/// TDengine 常把服务器时区描述成 `CST (+0800)` 这种形式：首词不是 IANA 名称，
+/// 但括号里的 UTC 偏移足以还原正确墙钟时间。找不到偏移时返回 None。
+fn parse_offset_zone(value: &str) -> Option<FixedOffset> {
+    for (position, character) in value.char_indices() {
+        if character != '+' && character != '-' {
+            continue;
+        }
+        // 只接受位于开头、空白之后或括号内的偏移（`+0800` / `CST (+0800)`），
+        // 避免把时区描述里其它带连字符的文本误读成偏移量。
+        let preceded_by_boundary =
+            position == 0 || value[..position].ends_with(char::is_whitespace) || value[..position].ends_with('(');
+        if !preceded_by_boundary {
+            continue;
+        }
+        if let Some(offset) = parse_offset_at(value, position, character) {
+            return Some(offset);
+        }
+    }
+    None
+}
+
+fn parse_offset_at(value: &str, position: usize, sign: char) -> Option<FixedOffset> {
+    let rest = &value[position + 1..];
+    if rest.len() < 2 {
+        return None;
+    }
+    // 小时必须是两位数字（`+0800` / `+08:00`），单数字形式不猜。
+    let (hours_text, after_hours) = rest.split_at(2);
+    if !hours_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i32 = hours_text.parse().ok()?;
+    let minutes = if let Some(after_colon) = after_hours.strip_prefix(':') {
+        // `+HH:MM`：分钟必须恰好两位，后面不能再跟数字。
+        let (minutes_text, trailing) = after_colon.split_at_checked(2)?;
+        if !minutes_text.bytes().all(|byte| byte.is_ascii_digit())
+            || trailing.bytes().next().is_some_and(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        minutes_text.parse().ok()?
+    } else if after_hours.len() >= 2 && after_hours.as_bytes()[..2].iter().all(u8::is_ascii_digit) {
+        // `+HHMM`：分钟同样必须两位，且后面不能再跟数字或冒号。
+        let (minutes_text, trailing) = after_hours.split_at(2);
+        if let Some(byte) = trailing.bytes().next() {
+            if byte.is_ascii_digit() || byte == b':' {
+                return None;
+            }
+        }
+        minutes_text.parse().ok()?
+    } else {
+        0
+    };
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    let seconds = hours * 3600 + minutes * 60;
+    FixedOffset::east_opt(if sign == '-' { -seconds } else { seconds })
 }
 
 async fn cancellable<T, F>(token: &CancellationToken, timeout_secs: u64, future: F) -> Result<T>
@@ -1123,22 +1288,64 @@ mod tests {
     #[test]
     fn prefers_query_timezone_and_falls_back_to_block_timezone() {
         assert_eq!(
-            preferred_timezone(Some(chrono_tz::UTC), Some(chrono_tz::Asia::Tokyo), Some(chrono_tz::Asia::Shanghai)),
-            Some(chrono_tz::UTC)
+            preferred_timezone(
+                Some(TimestampZone::Iana(chrono_tz::UTC)),
+                Some(TimestampZone::Iana(chrono_tz::Asia::Tokyo)),
+                Some(TimestampZone::Iana(chrono_tz::Asia::Shanghai))
+            ),
+            Some(TimestampZone::Iana(chrono_tz::UTC))
         );
         assert_eq!(
-            preferred_timezone(None, Some(chrono_tz::Asia::Tokyo), Some(chrono_tz::Asia::Shanghai)),
-            Some(chrono_tz::Asia::Tokyo)
+            preferred_timezone(
+                None,
+                Some(TimestampZone::Iana(chrono_tz::Asia::Tokyo)),
+                Some(TimestampZone::Iana(chrono_tz::Asia::Shanghai))
+            ),
+            Some(TimestampZone::Iana(chrono_tz::Asia::Tokyo))
         );
-        assert_eq!(preferred_timezone(None, None, Some(chrono_tz::Asia::Shanghai)), Some(chrono_tz::Asia::Shanghai));
+        assert_eq!(
+            preferred_timezone(None, None, Some(TimestampZone::Iana(chrono_tz::Asia::Shanghai))),
+            Some(TimestampZone::Iana(chrono_tz::Asia::Shanghai))
+        );
         assert_eq!(preferred_timezone(None, None, None), None);
     }
 
     #[test]
     fn parses_tdengine_timezone_description() {
-        assert_eq!(parse_server_timezone("Asia/Shanghai (CST, +0800)"), Some(chrono_tz::Asia::Shanghai));
-        assert_eq!(parse_server_timezone("Etc/UTC (UTC, +0000)"), Some(chrono_tz::Etc::UTC));
-        assert_eq!(parse_server_timezone("unknown (+0800)"), None);
+        assert_eq!(
+            parse_server_time_zone("Asia/Shanghai (CST, +0800)"),
+            Some(TimestampZone::Iana(chrono_tz::Asia::Shanghai))
+        );
+        assert_eq!(parse_server_time_zone("Etc/UTC (UTC, +0000)"), Some(TimestampZone::Iana(chrono_tz::Etc::UTC)));
+        let east_eight = FixedOffset::east_opt(8 * 3600).unwrap();
+        assert_eq!(parse_server_time_zone("CST (+0800)"), Some(TimestampZone::Fixed(east_eight)));
+        assert_eq!(parse_server_time_zone("unknown (+0800)"), Some(TimestampZone::Fixed(east_eight)));
+        assert_eq!(parse_server_time_zone("+08:00"), Some(TimestampZone::Fixed(east_eight)));
+        assert_eq!(parse_server_time_zone("+08"), Some(TimestampZone::Fixed(east_eight)));
+        assert_eq!(
+            parse_server_time_zone("CST (-0530)"),
+            Some(TimestampZone::Fixed(FixedOffset::east_opt(-(5 * 3600 + 30 * 60)).unwrap()))
+        );
+        assert_eq!(
+            parse_server_time_zone("-0530"),
+            Some(TimestampZone::Fixed(FixedOffset::east_opt(-(5 * 3600 + 30 * 60)).unwrap()))
+        );
+        let zero = FixedOffset::east_opt(0).unwrap();
+        assert_eq!(parse_server_time_zone("+0000"), Some(TimestampZone::Fixed(zero)));
+        assert_eq!(parse_server_time_zone("-0000"), Some(TimestampZone::Fixed(zero)));
+        assert_eq!(parse_server_time_zone("中国标准时间 (+08:00)"), Some(TimestampZone::Fixed(east_eight)));
+        assert_eq!(parse_server_time_zone("a + +0800"), Some(TimestampZone::Fixed(east_eight)));
+        assert_eq!(parse_server_time_zone("CST (+0800) other (+0900)"), Some(TimestampZone::Fixed(east_eight)));
+        // 不合法的偏移形式一律不猜，保持原有 UTC 渲染行为。
+        assert_eq!(parse_server_time_zone("+8"), None);
+        assert_eq!(parse_server_time_zone("+08:5"), None);
+        assert_eq!(parse_server_time_zone("+24:00"), None);
+        assert_eq!(parse_server_time_zone("+08:60"), None);
+        assert_eq!(parse_server_time_zone("+0800:30"), None);
+        assert_eq!(parse_server_time_zone("GMT+0800"), None);
+        assert_eq!(parse_server_time_zone("UTC+8"), None);
+        assert_eq!(parse_server_time_zone(""), None);
+        assert_eq!(parse_server_time_zone("CST"), None);
     }
 
     #[test]

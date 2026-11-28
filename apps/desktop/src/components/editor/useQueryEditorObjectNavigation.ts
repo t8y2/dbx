@@ -2,6 +2,9 @@ import type { EditorView as EditorViewType } from "@codemirror/view";
 import { getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
 import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
 import { findCteColumnResolution, findCteReferenceAt } from "@/lib/sql/semantic/cteNavigation";
+import { resolveOraclePackageMemberNavigation } from "@/lib/sql/oraclePackageMemberNavigation";
+import { MAX_ALIAS_HIGHLIGHT_SQL_LENGTH, sqlAliasHighlightGroups } from "@/lib/sql/semantic/aliasHighlights";
+import { resolveSqlStatementWindow } from "@/lib/sql/sqlStatementWindow";
 import { extractIdentifierDetailsAt, isSqlKeyword, matchSqlObject, matchTable, resolveSqlObjectNavigationIdentity, sqlObjectNavigationTarget, sqlObjectNavigationTargetFromIdentity, sqlObjectNavigationTypeFromCompletionObjectType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { matchHoverTableCandidates, pickHoverObjectMatch, resolveHoverTableLookupTarget } from "@/lib/editor/hoverTableLookup";
 import { stabilizeUnfocusedQueryEditorPointerDown } from "@/lib/editor/queryEditorUnfocusedPointer";
@@ -42,7 +45,7 @@ export function useQueryEditorObjectNavigation(options: QueryEditorObjectNavigat
   const MAX_COMPLETION_TABLES = options.maxCompletionTables;
   const tableNavigationHoverClass = "query-editor--table-navigation-hover";
 
-  function jumpToCteRange(target: { from: number; to: number }, highlight: { from: number; to: number }) {
+  function jumpToSqlRange(target: { from: number; to: number }, highlight: { from: number; to: number }) {
     const currentView = view.value;
     if (!currentView || !codeMirrorRuntime.editorViewModule || !codeMirrorRuntime.setResultSourceRangeEffect) return;
     const docLength = currentView.state.doc.length;
@@ -120,7 +123,8 @@ export function useQueryEditorObjectNavigation(options: QueryEditorObjectNavigat
       return false;
     }
 
-    const doc = currentView.state.doc.toString();
+    const clickedDocument = currentView.state.doc;
+    const doc = clickedDocument.toString();
     const dialectId = resolveSqlDialectId({ databaseType: props.databaseType, dialect: props.databaseType ? undefined : props.dialect });
     const extracted = extractIdentifierDetailsAt(doc, pos, dialectId);
     if (!extracted) {
@@ -135,6 +139,22 @@ export function useQueryEditorObjectNavigation(options: QueryEditorObjectNavigat
     event.preventDefault();
     setTimeout(async () => {
       try {
+        // A click on the qualifier jumps to its declaration. A click on the
+        // field continues through the existing CTE/column navigation.
+        const statement = resolveSqlStatementWindow(doc, pos, currentView.state, dialectId);
+        if (statement.to - statement.from <= MAX_ALIAS_HIGHLIGHT_SQL_LENGTH) {
+          const groups = sqlAliasHighlightGroups(doc.slice(statement.from, statement.to), { databaseType: props.databaseType, dialect: props.databaseType ? undefined : props.dialect });
+          const offset = pos - statement.from;
+          const alias = groups.find((group) => group.qualifiers.some((qualifier) => qualifier.start <= offset && offset <= qualifier.end));
+          if (alias) {
+            if (view.value === currentView && currentView.state.doc === clickedDocument) {
+              const range = { from: statement.from + alias.declaration.start, to: statement.from + alias.declaration.end };
+              jumpToSqlRange(range, range);
+            }
+            return;
+          }
+        }
+
         // Single identity model: quote flags + role (relation column list vs routine call vs unknown).
         const identity = resolveSqlObjectNavigationIdentity(doc, pos, dialectId);
         if (!identity) return;
@@ -184,19 +204,35 @@ export function useQueryEditorObjectNavigation(options: QueryEditorObjectNavigat
             if (cteModel) {
               const referenceHit = findCteReferenceAt(cteModel, pos);
               if (referenceHit?.definition.nameSpan) {
-                jumpToCteRange({ from: referenceHit.definition.nameSpan.start, to: referenceHit.definition.nameSpan.end }, { from: referenceHit.definition.sourceSpan.start, to: referenceHit.definition.sourceSpan.end });
+                jumpToSqlRange({ from: referenceHit.definition.nameSpan.start, to: referenceHit.definition.nameSpan.end }, { from: referenceHit.definition.sourceSpan.start, to: referenceHit.definition.sourceSpan.end });
                 return;
               }
               const clickQualifier = identity.parts.length >= 2 ? identity.parts[identity.parts.length - 2]?.value : undefined;
               const columnHit = findCteColumnResolution(cteModel, identity.name, clickQualifier);
               const columnTargetSpan = columnHit?.output?.jumpSpan ?? columnHit?.stars?.[0]?.starSpan;
               if (columnHit && columnTargetSpan) {
-                jumpToCteRange({ from: columnTargetSpan.start, to: columnTargetSpan.end }, { from: columnHit.definition.sourceSpan.start, to: columnHit.definition.sourceSpan.end });
+                jumpToSqlRange({ from: columnTargetSpan.start, to: columnTargetSpan.end }, { from: columnHit.definition.sourceSpan.start, to: columnHit.definition.sourceSpan.end });
                 return;
               }
             }
           } catch (error) {
             console.warn("[DBX] CTE ctrl+click resolution failed:", error);
+          }
+        }
+
+        // 0b. Oracle 包源码：包里的名字先问这个包自己。包头的 `PROCEDURE X(...);` 是声明、
+        //     包体的 `PROCEDURE X(...) IS` 是实现，都不是一个叫 X 的独立过程；拿裸名去查
+        //     数据字典只会落空，然后乐观地开出一个空的 `PROCEDURE X` 源码 tab。
+        if (props.packageSource) {
+          const packageNavigation = resolveOraclePackageMemberNavigation({ source: doc, position: pos, identity, context: props.packageSource });
+          if (packageNavigation?.kind === "document") {
+            const { nameStart, nameEnd, offset } = packageNavigation.entry;
+            if (view.value === currentView && currentView.state.doc === clickedDocument) jumpToSqlRange({ from: nameStart, to: nameEnd }, { from: offset, to: nameEnd });
+            return;
+          }
+          if (packageNavigation?.kind === "packageBody") {
+            emit("openObjectSource", packageNavigation.target, false);
+            return;
           }
         }
 

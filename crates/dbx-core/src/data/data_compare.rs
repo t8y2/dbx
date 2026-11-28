@@ -13,7 +13,7 @@ use crate::schema::get_columns_core;
 use crate::sql_dialect::{
     build_count_table_sql, build_iris_table_select_sql, firebird_rows_clause, pagination_strategy,
     qualified_table_name, quote_iris_identifier, quote_table_identifier, table_data_qualified_table_name,
-    PaginationContext, TablePaginationStrategy,
+    uses_single_row_insert_statements, PaginationContext, TablePaginationStrategy,
 };
 use crate::transfer::{
     generate_comment_ddl, generate_create_table_ddl, is_identity_column_extra,
@@ -46,6 +46,8 @@ async fn compare_query_options(
 pub struct CompareDataRowsOptions {
     pub columns: Vec<String>,
     pub key_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_columns: Vec<String>,
     #[serde(default)]
     pub source_rows: Vec<Vec<Value>>,
     #[serde(default)]
@@ -60,6 +62,8 @@ pub struct DataComparePreparationOptions {
     pub schema: Option<String>,
     pub columns: Vec<String>,
     pub key_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub column_info: Vec<DataGridColumnInfo>,
     #[serde(default)]
@@ -83,6 +87,8 @@ pub struct DataCompareFromTablesOptions {
     pub target_table: String,
     pub columns: Vec<String>,
     pub key_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_columns: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,6 +152,11 @@ pub struct DataCompareResult {
     pub added: Vec<DataCompareRow>,
     pub removed: Vec<DataCompareRow>,
     pub modified: Vec<DataCompareModifiedRow>,
+    /// Rows matching on key columns whose value differences all fall in ignored
+    /// columns. They count as identical for diff and sync purposes, but the count
+    /// is surfaced so an ignore list cannot silently hide real divergence.
+    #[serde(default)]
+    pub ignored_only_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,6 +309,8 @@ pub struct VerifyDataOptions {
     pub target_table: String,
     pub columns: Vec<String>,
     pub key_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_batch_size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -327,6 +340,7 @@ pub fn prepare_data_compare(options: DataComparePreparationOptions) -> Result<Da
         schema,
         columns,
         key_columns,
+        ignored_columns,
         column_info,
         source_rows,
         target_rows,
@@ -335,6 +349,7 @@ pub fn prepare_data_compare(options: DataComparePreparationOptions) -> Result<Da
     let result = compare_data_rows(CompareDataRowsOptions {
         columns: columns.clone(),
         key_columns: key_columns.clone(),
+        ignored_columns,
         source_rows,
         target_rows,
     })?;
@@ -492,13 +507,19 @@ pub async fn prepare_data_compare_from_tables(
     )
     .await?;
 
+    // Checksums must judge the same scope the diff judges: an ignored column's value
+    // difference is tolerated by the diff, so it cannot flip the checksum verdict.
+    let ignored_set = resolve_ignored_columns(&options.columns, &options.ignored_columns, &options.key_columns);
+    let checksum_columns =
+        options.columns.iter().filter(|column| !ignored_set.contains(column.as_str())).cloned().collect::<Vec<_>>();
+
     let source_checksums = if enable_checksum && !source_rows.is_empty() {
-        Some(compute_column_checksums(&options.columns, &source_rows))
+        Some(compute_column_checksums(&checksum_columns, &source_rows))
     } else {
         None
     };
     let target_checksums = if enable_checksum && !target_rows.is_empty() {
-        Some(compute_column_checksums(&options.columns, &target_rows))
+        Some(compute_column_checksums(&checksum_columns, &target_rows))
     } else {
         None
     };
@@ -512,6 +533,7 @@ pub async fn prepare_data_compare_from_tables(
         schema: Some(options.target_schema),
         columns: options.columns,
         key_columns: options.key_columns,
+        ignored_columns: options.ignored_columns,
         column_info: target_columns.into_iter().map(data_grid_column_info).collect(),
         source_rows,
         target_rows,
@@ -724,7 +746,7 @@ fn missing_target_diff(columns: &[String], key_columns: &[String], source_rows: 
         })
         .collect();
 
-    DataCompareResult { added, removed: Vec::new(), modified: Vec::new() }
+    DataCompareResult { added, removed: Vec::new(), modified: Vec::new(), ignored_only_count: 0 }
 }
 
 pub fn compare_data_rows(options: CompareDataRowsOptions) -> Result<DataCompareResult, String> {
@@ -738,9 +760,11 @@ pub fn compare_data_rows(options: CompareDataRowsOptions) -> Result<DataCompareR
     let (target, target_order) =
         collect_compare_rows(&options.columns, &options.key_columns, &column_indexes, options.target_rows, "target")?;
     let key_columns: HashSet<&str> = options.key_columns.iter().map(String::as_str).collect();
+    let ignored_columns = resolve_ignored_columns(&options.columns, &options.ignored_columns, &options.key_columns);
 
     let mut added = Vec::new();
     let mut modified = Vec::new();
+    let mut ignored_only_count = 0usize;
 
     for key in &source_order {
         let source_values = source.get(key).expect("source key should exist");
@@ -769,13 +793,27 @@ pub fn compare_data_rows(options: CompareDataRowsOptions) -> Result<DataCompareR
             })
             .collect::<Vec<_>>();
 
-        if !changes.is_empty() {
+        // An ignored column's difference never affects row identity: only changes on
+        // compared columns are reported, and a row whose differences were all ignored
+        // is counted separately instead of being reported as modified.
+        let visible_changes: Vec<DataCompareChangedCell> = if ignored_columns.is_empty() {
+            changes
+        } else {
+            let visible =
+                changes.iter().filter(|change| !ignored_columns.contains(&change.column)).cloned().collect::<Vec<_>>();
+            if visible.is_empty() && !changes.is_empty() {
+                ignored_only_count += 1;
+            }
+            visible
+        };
+
+        if !visible_changes.is_empty() {
             modified.push(DataCompareModifiedRow {
                 key: key.clone(),
                 key_values: key_values_for_row(source_values, &options.key_columns, &column_indexes),
                 source_values: row_object(&options.columns, source_values),
                 target_values: row_object(&options.columns, target_values),
-                changes,
+                changes: visible_changes,
             });
         }
     }
@@ -791,7 +829,25 @@ pub fn compare_data_rows(options: CompareDataRowsOptions) -> Result<DataCompareR
         }
     }
 
-    Ok(DataCompareResult { added, removed, modified })
+    Ok(DataCompareResult { added, removed, modified, ignored_only_count })
+}
+
+/// Resolves user-supplied ignored column names against the columns being compared.
+/// Matching is case-insensitive so a cross-database compare tolerates case drift;
+/// names matching no compared column are dropped (they may exist only on the source
+/// side or nowhere); a name that is also a key column keeps its key role, because
+/// locating rows must win over ignoring a column.
+fn resolve_ignored_columns(columns: &[String], ignored_columns: &[String], key_columns: &[String]) -> HashSet<String> {
+    if ignored_columns.is_empty() {
+        return HashSet::new();
+    }
+    let key_set: HashSet<&str> = key_columns.iter().map(String::as_str).collect();
+    columns
+        .iter()
+        .filter(|column| !key_set.contains(column.as_str()))
+        .filter(|column| ignored_columns.iter().any(|name| name.eq_ignore_ascii_case(column)))
+        .cloned()
+        .collect()
 }
 
 /// Rows per page when a compare reads a table. Keyset paging keeps each page an index seek,
@@ -948,6 +1004,20 @@ fn generate_data_sync_statements(options: &GenerateDataSyncSqlOptions<'_>) -> Ve
     statements
 }
 
+/// Rows that share one `INSERT … VALUES (…), (…), …` statement.
+///
+/// Oracle-family servers take a single row per `INSERT … VALUES`, so the MySQL
+/// and PostgreSQL multi-row list is a syntax error there (#15442 reports
+/// `ORA-00933: SQL command not properly ended`); those dialects get one
+/// statement per added row instead.
+fn sync_insert_batch_size(database_type: Option<DatabaseType>) -> usize {
+    if database_type.is_some_and(uses_single_row_insert_statements) {
+        1
+    } else {
+        DATA_SYNC_INSERT_BATCH_SIZE
+    }
+}
+
 fn generate_insert_sync_statements(
     options: &GenerateDataSyncSqlOptions<'_>,
     table: &str,
@@ -986,7 +1056,7 @@ fn generate_insert_sync_statements(
     options
         .diff
         .added
-        .par_chunks(DATA_SYNC_INSERT_BATCH_SIZE)
+        .par_chunks(sync_insert_batch_size(options.database_type))
         .map(|chunk| {
             let values = chunk
                 .iter()
@@ -1656,6 +1726,7 @@ fn data_grid_column_info(column: crate::types::ColumnInfo) -> DataGridColumnInfo
         is_primary_key: column.is_primary_key,
         column_default: column.column_default,
         extra: column.extra,
+        collation: column.collation,
     }
 }
 
@@ -2151,6 +2222,7 @@ pub async fn verify_data(state: &AppState, options: VerifyDataOptions) -> Result
         target_table: options.target_table,
         columns: options.columns,
         key_columns: options.key_columns,
+        ignored_columns: options.ignored_columns,
         source_columns: None,
         fetch_batch_size: options.fetch_batch_size,
         degradation_threshold: Some(degradation_threshold),
@@ -2200,6 +2272,7 @@ mod tests {
             is_primary_key: false,
             column_default: None,
             extra: None,
+            collation: None,
         }
     }
 
@@ -2245,6 +2318,7 @@ mod tests {
     #[test]
     fn compares_rows_by_primary_key_and_reports_added_removed_and_modified_rows() {
         let diff = compare_data_rows(CompareDataRowsOptions {
+            ignored_columns: Vec::new(),
             columns: vec!["id".to_string(), "name".to_string(), "active".to_string()],
             key_columns: vec!["id".to_string()],
             source_rows: vec![
@@ -2274,8 +2348,155 @@ mod tests {
     }
 
     #[test]
+    fn ignored_columns_do_not_mark_rows_modified_and_are_counted_separately() {
+        let diff = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["id".to_string(), "name".to_string(), "updated_at".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["updated_at".to_string()],
+            source_rows: vec![
+                vec![json!(1), json!("Ada"), json!("2026-01-01 08:00")],
+                vec![json!(2), json!("Bob"), json!("2026-01-01 09:00")],
+            ],
+            target_rows: vec![
+                vec![json!(1), json!("Ada"), json!("2026-01-01 09:00")],
+                vec![json!(2), json!("Bobby"), json!("2026-01-01 09:00")],
+            ],
+        })
+        .expect("data comparison should succeed");
+
+        // Row 1 differs only in the ignored column: identical for the diff, counted
+        // separately. Row 2 is still modified, but only by the compared column.
+        assert!(diff.added.is_empty() && diff.removed.is_empty());
+        assert_eq!(diff.ignored_only_count, 1);
+        assert_eq!(diff.modified.len(), 1);
+        assert_eq!(diff.modified[0].changes.len(), 1);
+        assert_eq!(diff.modified[0].changes[0].column, "name");
+    }
+
+    #[test]
+    fn ignored_column_names_match_case_insensitively_and_keys_win_over_ignore() {
+        let diff = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["id".to_string(), "name".to_string(), "Version".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["VERSION".to_string(), "ID".to_string()],
+            source_rows: vec![vec![json!(1), json!("Ada"), json!(2)]],
+            target_rows: vec![vec![json!(1), json!("Ada"), json!(3)]],
+        })
+        .expect("data comparison should succeed");
+
+        // "VERSION" ignores the "Version" column despite the case drift; "ID" cannot
+        // demote the key column, so the row is still located by it.
+        assert!(diff.added.is_empty() && diff.removed.is_empty() && diff.modified.is_empty());
+        assert_eq!(diff.ignored_only_count, 1);
+    }
+
+    #[test]
+    fn unknown_ignored_columns_are_dropped_without_error() {
+        let diff = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["id".to_string(), "name".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["nope".to_string(), "also_missing".to_string()],
+            source_rows: vec![vec![json!(1), json!("Ada")]],
+            target_rows: vec![vec![json!(1), json!("Bobby")]],
+        })
+        .expect("data comparison should succeed");
+
+        assert_eq!(diff.modified.len(), 1);
+        assert_eq!(diff.modified[0].changes.len(), 1);
+        assert_eq!(diff.ignored_only_count, 0);
+    }
+
+    #[test]
+    fn ignored_columns_stay_in_row_values_for_display_and_sync() {
+        let diff = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["id".to_string(), "name".to_string(), "version".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["version".to_string()],
+            source_rows: vec![vec![json!(1), json!("Ada"), json!(7)]],
+            target_rows: Vec::new(),
+        })
+        .expect("data comparison should succeed");
+
+        // The added row carries the ignored column's real value so generated INSERTs
+        // keep it and NOT NULL columns without defaults do not break the sync.
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.added[0].values.get("version"), Some(&json!(7)));
+    }
+
+    #[test]
+    fn sync_sql_skips_ignored_columns_on_update_but_keeps_them_on_insert() {
+        let preparation = prepare_data_compare(DataComparePreparationOptions {
+            table_name: "items".to_string(),
+            schema: Some("public".to_string()),
+            columns: vec!["id".to_string(), "name".to_string(), "version".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["version".to_string()],
+            column_info: Vec::new(),
+            source_rows: vec![
+                vec![json!(1), json!("Ada"), json!(9)],
+                vec![json!(2), json!("Bob"), json!(3)],
+                vec![json!(3), json!("Cara"), json!(5)],
+            ],
+            target_rows: vec![vec![json!(1), json!("Ada Lovelace"), json!(4)], vec![json!(2), json!("Bob"), json!(8)]],
+            database_type: Some(DatabaseType::Postgres),
+        })
+        .expect("data compare preparation should succeed");
+
+        // Row 1 is modified by "name" only: the UPDATE must not rewrite "version".
+        // Row 2 differs only in the ignored "version" column: no statement at all.
+        // Row 3 is missing on the target: the INSERT keeps "version" with its value.
+        assert_eq!(
+            preparation.sync_statements,
+            vec![
+                "INSERT INTO \"public\".\"items\" (\"id\", \"name\", \"version\") VALUES (3, 'Cara', 5);",
+                "UPDATE \"public\".\"items\" SET \"name\" = 'Ada' WHERE \"id\" = 1;",
+            ]
+        );
+        assert_eq!(preparation.result.ignored_only_count, 1);
+        assert_eq!(preparation.result.modified.len(), 1);
+    }
+
+    #[test]
+    fn oracle_family_inserts_one_added_row_per_statement() {
+        // Oracle-family servers accept a single row per `INSERT … VALUES`, so the
+        // batched list raised `ORA-00933: SQL command not properly ended` (#15442).
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let preparation = prepare_data_compare(DataComparePreparationOptions {
+                table_name: "role_oper_func".to_string(),
+                schema: Some("HOPS".to_string()),
+                columns: vec!["ROLE_ID".to_string(), "OPER_ID".to_string(), "FUNC_ID".to_string()],
+                key_columns: vec!["ROLE_ID".to_string(), "OPER_ID".to_string(), "FUNC_ID".to_string()],
+                ignored_columns: Vec::new(),
+                column_info: Vec::new(),
+                source_rows: vec![
+                    vec![json!(1), json!(2), json!(10)],
+                    vec![json!(1), json!(2), json!(11)],
+                    vec![json!(1), json!(2), json!(12)],
+                ],
+                target_rows: Vec::new(),
+                database_type: Some(database_type),
+            })
+            .expect("data compare preparation should succeed");
+
+            assert_eq!(
+                preparation.sync_statements,
+                vec![
+                    "INSERT INTO \"HOPS\".\"role_oper_func\" (\"ROLE_ID\", \"OPER_ID\", \"FUNC_ID\") \
+                     VALUES (1, 2, 10);",
+                    "INSERT INTO \"HOPS\".\"role_oper_func\" (\"ROLE_ID\", \"OPER_ID\", \"FUNC_ID\") \
+                     VALUES (1, 2, 11);",
+                    "INSERT INTO \"HOPS\".\"role_oper_func\" (\"ROLE_ID\", \"OPER_ID\", \"FUNC_ID\") \
+                     VALUES (1, 2, 12);",
+                ],
+                "{database_type:?}"
+            );
+        }
+    }
+
+    #[test]
     fn generates_data_synchronization_sql() {
         let preparation = prepare_data_compare(DataComparePreparationOptions {
+            ignored_columns: Vec::new(),
             table_name: "users".to_string(),
             schema: Some("public".to_string()),
             columns: vec!["id".to_string(), "name".to_string(), "active".to_string()],
@@ -2305,6 +2526,7 @@ mod tests {
     #[test]
     fn postgres_sync_omits_generated_columns_but_keeps_identity_columns() {
         let preparation = prepare_data_compare(DataComparePreparationOptions {
+            ignored_columns: Vec::new(),
             table_name: "generated_column_sync_test".to_string(),
             schema: Some("public".to_string()),
             columns: vec!["id".to_string(), "quantity".to_string(), "total_price".to_string()],
@@ -2338,6 +2560,7 @@ mod tests {
     #[test]
     fn postgres_sync_resets_serial_sequences_after_inserts() {
         let preparation = prepare_data_compare(DataComparePreparationOptions {
+            ignored_columns: Vec::new(),
             table_name: "migration".to_string(),
             schema: Some("public".to_string()),
             columns: vec!["id".to_string(), "legacy_id".to_string(), "name".to_string()],
@@ -2371,6 +2594,7 @@ mod tests {
         // A nextval-backed column does not have to be an integer column; without the
         // ::bigint cast COALESCE(MAX(text), 0) fails to resolve types at run time.
         let preparation = prepare_data_compare(DataComparePreparationOptions {
+            ignored_columns: Vec::new(),
             table_name: "legacy_shapes".to_string(),
             schema: Some("public".to_string()),
             columns: vec!["id".to_string(), "legacy_ref".to_string()],
@@ -2402,6 +2626,7 @@ mod tests {
     #[test]
     fn postgres_sync_skips_sequence_reset_without_inserts() {
         let preparation = prepare_data_compare(DataComparePreparationOptions {
+            ignored_columns: Vec::new(),
             table_name: "migration".to_string(),
             schema: Some("public".to_string()),
             columns: vec!["id".to_string(), "name".to_string()],
@@ -2422,6 +2647,7 @@ mod tests {
     #[test]
     fn sqlserver_sync_wraps_identity_inserts_with_identity_insert() {
         let preparation = prepare_data_compare(DataComparePreparationOptions {
+            ignored_columns: Vec::new(),
             table_name: "migration".to_string(),
             schema: Some("dbo".to_string()),
             columns: vec!["id".to_string(), "name".to_string()],
@@ -2446,6 +2672,7 @@ mod tests {
     #[test]
     fn sqlserver_sync_skips_identity_insert_without_identity_columns() {
         let preparation = prepare_data_compare(DataComparePreparationOptions {
+            ignored_columns: Vec::new(),
             table_name: "migration".to_string(),
             schema: Some("dbo".to_string()),
             columns: vec!["id".to_string(), "name".to_string()],
@@ -2477,6 +2704,7 @@ mod tests {
                     "generated always as (base_value + 1) stored",
                 )],
                 diff: DataCompareResult {
+                    ignored_only_count: 0,
                     added: vec![
                         DataCompareRow {
                             key: "0".to_string(),
@@ -2526,6 +2754,7 @@ mod tests {
                     ),
                 ],
                 diff: DataCompareResult {
+                    ignored_only_count: 0,
                     added: Vec::new(),
                     removed: Vec::new(),
                     modified: vec![DataCompareModifiedRow {
@@ -2592,7 +2821,7 @@ mod tests {
                         "generated always as (quantity * unit_price) stored",
                     ),
                 ],
-                diff: DataCompareResult { added: Vec::new(), removed: Vec::new(), modified },
+                diff: DataCompareResult { added: Vec::new(), removed: Vec::new(), modified, ignored_only_count: 0 },
                 database_type: Some(DatabaseType::Postgres),
                 pre_sync_statements: Vec::new(),
                 sync_eligible: true,
@@ -2608,6 +2837,7 @@ mod tests {
     #[test]
     fn sync_keeps_legacy_writes_when_column_metadata_is_missing() {
         let preparation = prepare_data_compare(DataComparePreparationOptions {
+            ignored_columns: Vec::new(),
             table_name: "generated_column_sync_test".to_string(),
             schema: Some("public".to_string()),
             columns: vec!["id".to_string(), "total_price".to_string()],
@@ -2626,6 +2856,7 @@ mod tests {
     #[test]
     fn generates_mysql_bit_synchronization_literals_without_string_quotes() {
         let preparation = prepare_data_compare(DataComparePreparationOptions {
+            ignored_columns: Vec::new(),
             table_name: "users".to_string(),
             schema: None,
             columns: vec!["id".to_string(), "enabled".to_string(), "flags".to_string()],
@@ -2654,6 +2885,7 @@ mod tests {
                 key_columns: vec!["id".to_string()],
                 column_info: Vec::new(),
                 diff: DataCompareResult {
+                    ignored_only_count: 0,
                     added: vec![DataCompareRow {
                         key: "1".to_string(),
                         key_values: HashMap::from([(String::from("id"), json!(1))]),
@@ -2700,6 +2932,7 @@ mod tests {
                 key_columns: vec!["id".to_string()],
                 column_info: Vec::new(),
                 diff: DataCompareResult {
+                    ignored_only_count: 0,
                     added: vec![DataCompareRow {
                         key: "1".to_string(),
                         key_values: HashMap::from([(String::from("id"), json!(1))]),
@@ -2729,6 +2962,7 @@ mod tests {
                 key_columns: vec!["id".to_string()],
                 column_info: Vec::new(),
                 diff: DataCompareResult {
+                    ignored_only_count: 0,
                     added: vec![
                         DataCompareRow {
                             key: "1".to_string(),
@@ -2771,6 +3005,7 @@ mod tests {
                 key_columns: vec!["id".to_string()],
                 column_info: Vec::new(),
                 diff: DataCompareResult {
+                    ignored_only_count: 0,
                     added: Vec::new(),
                     removed: Vec::new(),
                     modified: vec![
@@ -2829,6 +3064,7 @@ mod tests {
                 key_columns: vec!["id".to_string()],
                 column_info: Vec::new(),
                 diff: DataCompareResult {
+                    ignored_only_count: 0,
                     added: Vec::new(),
                     removed: vec![
                         DataCompareRow {
@@ -2862,6 +3098,7 @@ mod tests {
         let column_info = Vec::new();
         let pre_sync_statements = vec!["CREATE TABLE \"public\".\"users\" (\"id\" integer);".to_string()];
         let diff = DataCompareResult {
+            ignored_only_count: 0,
             added: vec![DataCompareRow {
                 key: "1".to_string(),
                 key_values: HashMap::from([(String::from("id"), json!(1))]),
@@ -2927,6 +3164,7 @@ mod tests {
                 key_columns: Vec::new(),
                 column_info: Vec::new(),
                 diff: DataCompareResult {
+                    ignored_only_count: 0,
                     added: vec![DataCompareRow {
                         key: "0".to_string(),
                         key_values: HashMap::new(),
@@ -2965,6 +3203,7 @@ mod tests {
                     ),
                 ],
                 diff: DataCompareResult {
+                    ignored_only_count: 0,
                     added: vec![DataCompareRow {
                         key: "0".to_string(),
                         key_values: HashMap::new(),
@@ -2995,6 +3234,7 @@ mod tests {
     #[test]
     fn requires_at_least_one_key_column() {
         let err = compare_data_rows(CompareDataRowsOptions {
+            ignored_columns: Vec::new(),
             columns: vec!["id".to_string()],
             key_columns: Vec::new(),
             source_rows: vec![vec![json!(1)]],
@@ -3008,6 +3248,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_row_keys_with_key_column_context() {
         let err = compare_data_rows(CompareDataRowsOptions {
+            ignored_columns: Vec::new(),
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
             source_rows: vec![vec![json!(1), json!("Ada")], vec![json!(1), json!("Ada Clone")]],
@@ -3021,6 +3262,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_target_keys_with_key_column_context() {
         let err = compare_data_rows(CompareDataRowsOptions {
+            ignored_columns: Vec::new(),
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
             source_rows: vec![vec![json!(1), json!("Ada")]],
@@ -3034,6 +3276,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_composite_keys_with_both_columns_named() {
         let err = compare_data_rows(CompareDataRowsOptions {
+            ignored_columns: Vec::new(),
             columns: vec!["tenant_id".to_string(), "user_id".to_string(), "name".to_string()],
             key_columns: vec!["tenant_id".to_string(), "user_id".to_string()],
             source_rows: vec![
@@ -3061,6 +3304,7 @@ mod tests {
                     let unique = vec![vec![json!(1), json!("Ada")]];
                     let (source_rows, target_rows) = if label == "source" { (kept, unique) } else { (unique, kept) };
                     let result = compare_data_rows(CompareDataRowsOptions {
+                        ignored_columns: Vec::new(),
                         columns: vec!["id".to_string(), "name".to_string()],
                         key_columns: vec!["id".to_string()],
                         source_rows,
@@ -3110,6 +3354,7 @@ mod tests {
             assert_eq!(kept, rows);
             for (source_rows, target_rows) in [(kept.clone(), rows.clone()), (rows.clone(), kept)] {
                 let diff = compare_data_rows(CompareDataRowsOptions {
+                    ignored_columns: Vec::new(),
                     columns: vec!["id".to_string(), "name".to_string()],
                     key_columns: vec!["id".to_string()],
                     source_rows,
@@ -3142,6 +3387,7 @@ mod tests {
             );
             assert_eq!(source_rows.len(), target_rows.len());
             let error = compare_data_rows(CompareDataRowsOptions {
+                ignored_columns: Vec::new(),
                 columns: vec!["id".to_string(), "name".to_string()],
                 key_columns: vec!["id".to_string()],
                 source_rows,
@@ -3161,6 +3407,7 @@ mod tests {
             let rows = vec![vec![json!(1), json!("Ada")]; 2];
             let (source_rows, target_rows) = if label == "source" { (rows, Vec::new()) } else { (Vec::new(), rows) };
             let error = compare_data_rows(CompareDataRowsOptions {
+                ignored_columns: Vec::new(),
                 columns: vec!["id".to_string(), "name".to_string()],
                 key_columns: vec!["id".to_string()],
                 source_rows,
@@ -3243,6 +3490,7 @@ mod tests {
         // The raw multi-branch sampling result currently trips the duplicate
         // check - this is the #9095 false positive.
         let err = compare_data_rows(CompareDataRowsOptions {
+            ignored_columns: Vec::new(),
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
             source_rows: overlapped.clone(),
@@ -3268,6 +3516,7 @@ mod tests {
         );
 
         let diff = compare_data_rows(CompareDataRowsOptions {
+            ignored_columns: Vec::new(),
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
             source_rows: deduped,
@@ -3297,6 +3546,7 @@ mod tests {
         assert_eq!(kept, rows);
 
         let err = compare_data_rows(CompareDataRowsOptions {
+            ignored_columns: Vec::new(),
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
             source_rows: kept,
@@ -3316,6 +3566,7 @@ mod tests {
         assert_eq!(kept, rows);
 
         let err = compare_data_rows(CompareDataRowsOptions {
+            ignored_columns: Vec::new(),
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
             source_rows: rows,
@@ -3334,6 +3585,7 @@ mod tests {
         let big_b = json!("-9222269855922960742");
 
         let no_diff = compare_data_rows(CompareDataRowsOptions {
+            ignored_columns: Vec::new(),
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
             source_rows: vec![vec![big_a.clone(), json!("Alpha")]],
@@ -3343,6 +3595,7 @@ mod tests {
         assert!(no_diff.added.is_empty() && no_diff.removed.is_empty() && no_diff.modified.is_empty());
 
         let diff = compare_data_rows(CompareDataRowsOptions {
+            ignored_columns: Vec::new(),
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
             source_rows: vec![vec![big_b.clone(), json!("Beta")]],
@@ -3356,6 +3609,7 @@ mod tests {
     #[test]
     fn bigint_duplicate_error_reports_exact_string_key() {
         let err = compare_data_rows(CompareDataRowsOptions {
+            ignored_columns: Vec::new(),
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
             source_rows: vec![

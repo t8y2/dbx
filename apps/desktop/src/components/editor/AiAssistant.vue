@@ -38,6 +38,20 @@ const conversationLoadedSkillIds = createReactiveMap(new Map<string, string[]>()
 const conversationLoadedSkillBodies = createReactiveMap(new Map<string, LoadedSkillBody[]>());
 /** Conversations whose one-time hint has already been shown. */
 const conversationSkillHintSeen = new Set<string>();
+
+/**
+ * Live plugin attachment lists per conversation id, shared by every panel
+ * instance. Desktop background runs keep the old component's closure alive after
+ * the panel is closed and reopened; a per-instance map would let that closure
+ * write its pre-close attachments back over a newer choice made in the new panel.
+ */
+const conversationPluginConnectionIds = createReactiveMap(new Map<string, string[]>());
+/**
+ * Per-conversation write chain for attachment patches. Each toggle enqueues its
+ * patch so two quick clicks land in click order — the database cannot reorder
+ * them, and the last click always wins.
+ */
+const pluginAttachmentWriteChains = new Map<string, Promise<void>>();
 </script>
 
 <script setup lang="ts">
@@ -76,6 +90,8 @@ import {
   MessageSquarePlus,
   Minimize2,
   Pencil,
+  Plug,
+  Pin,
   Plus,
   RefreshCw,
   Server,
@@ -206,6 +222,7 @@ import { databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
+import { comparePluginConnectionOrder } from "@/lib/ai/pluginConnectionOrder";
 import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
 import type { AiSqlActionReport } from "@/lib/ai/aiSqlActionFeedback";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
@@ -214,10 +231,31 @@ import { buildAiAgentStepItems, formatAgentToolName, formatToolDurationMs, toolC
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { aiStream, aiCancelStream, resolveAiToolApproval, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, listUserSkills, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
+import {
+  aiStream,
+  aiCancelStream,
+  resolveAiToolApproval,
+  saveAiConversation,
+  updateAiConversationPluginConnections,
+  saveAiConversationPin,
+  saveAiRun,
+  saveAiRunState,
+  loadAiConversations,
+  loadAiRuns,
+  deleteAiConversation,
+  listSchemas,
+  listTables,
+  listUserSkills,
+  readUserSkills,
+  getAiPluginToolPlugins,
+  listPlugins,
+  type AiConversation,
+  type AiRun,
+  type AiRunStatus,
+} from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
-import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
+import type { ConnectionConfig, InstalledPlugin, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
 import { fetchNamespaceOptionsForConnection, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
@@ -252,6 +290,7 @@ import { saveTextFile } from "@/lib/export/saveTextFile";
 import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
 import { buildAiConversationExport, type AiConversationExportFormat } from "@/lib/export/aiConversationExport";
 import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from "@/lib/ai/aiConversationSearch";
+import { mostRecentConversation, sortAiConversations, splitPinnedConversations } from "@/lib/ai/aiConversationOrder";
 import { applyCapabilities, resolveConversationPicker, resolveDefaultPickerAction, type AiPickerAmbient, type AiPickerConversationRecord, type AiPickerSelection } from "@/lib/ai/aiConversationPicker";
 import { createAiConversationPickerController } from "@/lib/ai/aiConversationPickerState";
 import AiAttachmentCard from "@/components/editor/AiAttachmentCard.vue";
@@ -524,6 +563,242 @@ const assistantMode = picker.mode;
 /** The shown action entry (`auto` included); the next send resolves it (#9118). */
 const activeAction = picker.action;
 
+/*
+ * Plugin tools attached to the shown conversation (#13978).
+ *
+ * Opening a plugin connection (an SSH terminal, for example) is not consent for
+ * the assistant: the backend exposes plugin tools only for connections listed
+ * here, plus the target when the target itself is a plugin connection. The list
+ * is conversation-scoped (persisted on the record, held on a draft until the
+ * first send) and frozen with the run target, so a mid-run change only affects
+ * the next send.
+ */
+const draftPluginConnectionIds = ref<string[]>([]);
+/** Plugins whose "built-in AI tools" switch is on; others cannot contribute tools. */
+const pluginToolPluginIds = ref<Set<string>>(new Set());
+/** Plugin display names for the attachment list, by plugin id. */
+const pluginToolPluginNames = ref<Map<string, string>>(new Map());
+const pluginToolsOpen = ref(false);
+
+async function loadPluginToolCatalog() {
+  const [enabled, plugins] = await Promise.all([getAiPluginToolPlugins().catch(() => [] as string[]), listPlugins().catch(() => [] as InstalledPlugin[])]);
+  pluginToolPluginIds.value = new Set(enabled);
+  pluginToolPluginNames.value = new Map(plugins.filter((plugin) => plugin.compatibility?.compatible !== false).map((plugin) => [plugin.manifest.id, plugin.manifest.name || plugin.manifest.id]));
+}
+void loadPluginToolCatalog();
+
+/** Attachment list owned by `targetConversationId` (or the unsaved draft). */
+function pluginAttachmentIdsFor(targetConversationId: string): string[] {
+  if (!targetConversationId) return draftPluginConnectionIds.value;
+  // The live map wins over a record: a first snapshot can be in flight while the
+  // user toggles, and the record only catches up after that save resolves.
+  const live = conversationPluginConnectionIds.get(targetConversationId);
+  if (live !== undefined) return live;
+  const record = conversations.value.find((conversation) => conversation.id === targetConversationId);
+  return record ? (record.pluginConnectionIds ?? []) : [];
+}
+
+/** Hands the unsaved draft's attachments to the conversation id minted for them. */
+function migrateUnsavedPluginAttachments(id: string) {
+  if (!id || !draftPluginConnectionIds.value.length) return;
+  conversationPluginConnectionIds.set(id, [...draftPluginConnectionIds.value]);
+  draftPluginConnectionIds.value = [];
+}
+
+const attachedPluginConnectionIds = computed(() => pluginAttachmentIdsFor(conversationId.value));
+
+/** The target is a plugin connection: it is always attached and follows the target. */
+const isPluginConnectionTarget = computed(() => boundConnection.value?.db_type === "plugin");
+
+/** Plugin connections the user currently has open, AI tools enabled or not. */
+const openPluginConnections = computed(() => connectionStore.connections.filter((connection) => connection.db_type === "plugin" && connectionStore.connectedIds.has(connection.id)));
+
+/** Open plugin connections whose plugin has built-in AI tools enabled. */
+const eligiblePluginConnections = computed(() => openPluginConnections.value.filter((connection) => !!connection.plugin_id && pluginToolPluginIds.value.has(connection.plugin_id)));
+
+// The control is reachable as soon as any plugin connection is open, because the
+// catalog can be stale: a plugin enabled in Plugin Center while the panel stayed
+// mounted, or a connection opened after mount. Reloading on every open/close (and
+// when the popover opens) makes both orders work without a remount.
+watch(
+  () =>
+    openPluginConnections.value
+      .map((connection) => connection.id)
+      .sort()
+      .join(","),
+  () => void loadPluginToolCatalog(),
+);
+
+const eligiblePluginConnectionIds = computed(() => new Set(eligiblePluginConnections.value.map((connection) => connection.id)));
+
+/**
+ * Mirrors `MAX_OPEN_CONNECTIONS` in `crates/dbx-core/src/ai/plugin_tools.rs`: the
+ * backend filters to the attached connections, sorts them and keeps at most this
+ * many. The UI must compute the same set, or a ninth attachment would look
+ * active and silently do nothing.
+ */
+const MAX_PLUGIN_TOOL_CONNECTIONS = 8;
+
+/** Attached + open + AI-enabled connections, in the order the backend keeps. */
+const effectivePluginConnections = computed(() => {
+  const attached = new Set(attachedPluginConnectionIds.value);
+  return eligiblePluginConnections.value
+    .filter((connection) => attached.has(connection.id))
+    .sort(comparePluginConnectionOrder)
+    .slice(0, MAX_PLUGIN_TOOL_CONNECTIONS);
+});
+
+const effectivePluginConnectionIdSet = computed(() => new Set(effectivePluginConnections.value.map((connection) => connection.id)));
+
+/** Attached connections that can actually contribute tools right now. */
+const activePluginConnectionIds = computed(() => {
+  if (isPluginConnectionTarget.value) return boundConnection.value ? [boundConnection.value.id] : [];
+  return effectivePluginConnections.value.map((connection) => connection.id);
+});
+
+/** Attached connections that are closed (or had their AI tools switched off). */
+const inactivePluginConnectionCount = computed(() => {
+  if (isPluginConnectionTarget.value) return 0;
+  return attachedPluginConnectionIds.value.filter((id) => !eligiblePluginConnectionIds.value.has(id)).length;
+});
+
+/** Attached + eligible connections pushed out by the backend's cap. */
+const overflowPluginConnections = computed(() => eligiblePluginConnections.value.filter((connection) => attachedPluginConnectionIds.value.includes(connection.id) && !effectivePluginConnectionIdSet.value.has(connection.id)).sort(comparePluginConnectionOrder));
+
+interface PluginToolRow {
+  id: string;
+  name: string;
+  pluginId: string;
+  /** Absent when the saved connection no longer exists at all. */
+  connection?: ConnectionConfig;
+  /** Open and AI-enabled: the only rows that can actually contribute tools. */
+  connected: boolean;
+}
+
+const pluginToolGroups = computed(() => {
+  const groups = new Map<string, { pluginId: string; pluginName: string; rows: PluginToolRow[] }>();
+  const add = (row: PluginToolRow) => {
+    const group = groups.get(row.pluginId) ?? {
+      pluginId: row.pluginId,
+      pluginName: row.pluginId ? (pluginToolPluginNames.value.get(row.pluginId) ?? row.pluginId) : "",
+      rows: [],
+    };
+    group.rows.push(row);
+    groups.set(row.pluginId, group);
+  };
+  for (const connection of eligiblePluginConnections.value) {
+    add({ id: connection.id, name: connection.name, pluginId: connection.plugin_id ?? "", connection, connected: true });
+  }
+  // An attached connection that is closed (or had its AI tools switched off)
+  // contributes nothing, but it must stay listed so the user can detach it —
+  // otherwise a selection made while it was open could never be removed.
+  for (const id of attachedPluginConnectionIds.value) {
+    if (eligiblePluginConnectionIds.value.has(id)) continue;
+    const connection = connectionStore.getConfig(id);
+    add({ id, name: connection?.name ?? id, pluginId: connection?.plugin_id ?? "", connection, connected: false });
+  }
+  return [...groups.values()].sort((left, right) => left.pluginName.localeCompare(right.pluginName));
+});
+
+const activePluginConnectionNames = computed(() => eligiblePluginConnections.value.filter((connection) => activePluginConnectionIds.value.includes(connection.id)).map((connection) => connection.name));
+
+const showPluginToolsSelector = computed(() => assistantMode.value === "agent" && !!boundConnection.value && (isPluginConnectionTarget.value || openPluginConnections.value.length > 0 || attachedPluginConnectionIds.value.length > 0));
+
+const pluginToolsTriggerText = computed(() => {
+  if (isPluginConnectionTarget.value) return boundConnection.value?.name ?? "";
+  const names = activePluginConnectionNames.value;
+  if (!names.length) return t("ai.pluginToolsEntry");
+  // Show the extra target(s) in the target row itself: the database stays the SQL
+  // target, while attached plugin connections are additional targets for tool calls.
+  return `${t("ai.pluginToolsEntry")} · ${names[0]}${names.length > 1 ? ` +${names.length - 1}` : ""}`;
+});
+
+const pluginToolsTriggerLabel = computed(() => {
+  if (isPluginConnectionTarget.value) return t("ai.pluginToolsFollowsTarget");
+  if (activePluginConnectionNames.value.length) return t("ai.pluginToolsSelectedTitle", { names: activePluginConnectionNames.value.join(", ") });
+  return t("ai.pluginToolsNoneTitle");
+});
+
+function isPluginConnectionAttached(connectionId: string): boolean {
+  return isPluginConnectionTarget.value ? connectionId === boundConnection.value?.id : attachedPluginConnectionIds.value.includes(connectionId);
+}
+
+/** Patches the attachment column in click order; the last click always wins.
+ *  The chain is module-scoped so a reopened panel serializes against the writes
+ *  an older panel instance still has in flight. The returned promise rejects when
+ *  this write fails, so the caller can tell the user; the chain itself is left
+ *  usable so a later toggle (or repair) can still converge on the latest list. */
+function persistPluginAttachmentIds(targetConversationId: string, ids: string[]): Promise<void> {
+  const previous = pluginAttachmentWriteChains.get(targetConversationId) ?? Promise.resolve();
+  const write = previous.catch(() => {}).then(() => updateAiConversationPluginConnections(targetConversationId, ids));
+  const settled = write.catch(() => {});
+  pluginAttachmentWriteChains.set(targetConversationId, settled);
+  void settled.finally(() => {
+    if (pluginAttachmentWriteChains.get(targetConversationId) === settled) pluginAttachmentWriteChains.delete(targetConversationId);
+  });
+  return write;
+}
+
+function notifyPluginAttachmentSaveFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  toast(t("ai.pluginToolsSaveFailed", { message }), 5000);
+}
+
+/** Shared failure handling for attachment patches (clicks and stale-snapshot
+ *  repairs): tell the user, then retry once with the conversation's current live
+ *  list so a transient failure cannot leave the record on an older selection. */
+function persistPluginAttachmentIdsWithFeedback(targetConversationId: string, ids: string[]): void {
+  void persistPluginAttachmentIds(targetConversationId, ids).catch((error: unknown) => {
+    notifyPluginAttachmentSaveFailure(error);
+    const latest = conversationPluginConnectionIds.get(targetConversationId);
+    if (latest === undefined) return;
+    void persistPluginAttachmentIds(targetConversationId, latest).catch(notifyPluginAttachmentSaveFailure);
+  });
+}
+
+/** Persists one attachment change on the shown conversation (or its draft). */
+function togglePluginConnection(connectionId: string) {
+  if (isPluginConnectionTarget.value) return;
+  const current = attachedPluginConnectionIds.value;
+  const next = current.includes(connectionId) ? current.filter((id) => id !== connectionId) : [...current, connectionId];
+  const targetConversationId = conversationId.value;
+  if (!targetConversationId) {
+    draftPluginConnectionIds.value = next;
+    return;
+  }
+  // Record the click before anything async: a first snapshot built earlier (or
+  // still in flight) must not resurrect the pre-click list.
+  conversationPluginConnectionIds.set(targetConversationId, next);
+  // Patch only this column. A full snapshot save here could race a streaming
+  // transcript save and write older messages over newer ones. A missing row is a
+  // no-op; the landing snapshot's repair below re-applies the live list.
+  persistPluginAttachmentIdsWithFeedback(targetConversationId, next);
+  const record = conversations.value.find((conversation) => conversation.id === targetConversationId);
+  if (!record) return;
+  const updated: AiConversation = { ...record, pluginConnectionIds: next, updatedAt: new Date().toISOString() };
+  const index = conversations.value.findIndex((conversation) => conversation.id === updated.id);
+  if (index >= 0) conversations.value.splice(index, 1, updated);
+}
+
+/**
+ * The plugin connections one run may use. A plugin target always wins (its own
+ * tools only); otherwise the conversation's stored attachments are sent as-is.
+ * The backend resolves them against open + AI-enabled connections, so a closed
+ * or stale id is dropped there rather than racing the catalog load here.
+ */
+function effectivePluginConnectionIds(targetConnectionId: string, targetConversationId: string): string[] {
+  const target = targetConnectionId ? connectionStore.getConfig(targetConnectionId) : undefined;
+  if (target?.db_type === "plugin") return [target.id];
+  return [...pluginAttachmentIdsFor(targetConversationId)];
+}
+
+function onPluginToolsOpenChange(open: boolean) {
+  pluginToolsOpen.value = open;
+  // The eligible set depends on what is open and on Plugin Center switches, both
+  // of which can change while the panel stays mounted.
+  if (open) void loadPluginToolCatalog();
+}
+
 /**
  * Which picker selection each conversation recorded, `raw` only — a capability
  * limit never lands here (R9). Keyed by `skillStateKey`'s convention: a persisted
@@ -688,8 +963,12 @@ function restoreInitialConversation() {
   initialConversationRestored = true;
   // A new detached editor starts its own chat instead of implicitly adopting
   // a conversation that may still be running in the main window.
-  if (aiRuntimeStrategy !== "desktop-cancel-on-close" && settings.restoreLastConversation && conversations.value[0]) {
-    selectConversation(conversations.value[0]);
+  // Pinned conversations sort to index 0, so "restore last" must ask for the
+  // newest one explicitly — otherwise pinning an old chat would hijack startup
+  // (#14226).
+  if (aiRuntimeStrategy !== "desktop-cancel-on-close" && settings.restoreLastConversation) {
+    const lastConversation = mostRecentConversation(conversations.value);
+    if (lastConversation) selectConversation(lastConversation);
   }
 }
 watch(
@@ -699,7 +978,21 @@ watch(
 const conversationSearchQuery = ref("");
 const conversationSearchInput = ref<HTMLInputElement | null>(null);
 const conversationSearchIndex = computed(() => buildAiConversationSearchIndex(conversations.value));
-const filteredConversations = computed(() => filterAiConversationSearchIndex(conversationSearchIndex.value, conversationSearchQuery.value));
+const filteredConversations = computed(() => sortAiConversations(filterAiConversationSearchIndex(conversationSearchIndex.value, conversationSearchQuery.value)));
+// Two sections, pinned on top (#14226). Splitting the FILTERED list keeps a
+// pinned conversation in its section while a search is active, which is where
+// the user expects to find it.
+const conversationSections = computed(() => splitPinnedConversations(filteredConversations.value));
+/** Rows grouped for the history list (#14226). The "Recent" label only shows
+ *  when there is a pinned section above it — with nothing pinned the list stays
+ *  exactly as it was before this feature. */
+const conversationGroups = computed(() => {
+  const { pinned, recent } = conversationSections.value;
+  const groups: { key: string; label: string | null; rows: AiConversation[] }[] = [];
+  if (pinned.length) groups.push({ key: "pinned", label: t("history.pinnedGroup"), rows: pinned });
+  if (recent.length) groups.push({ key: "recent", label: pinned.length ? t("history.recentGroup") : null, rows: recent });
+  return groups;
+});
 const showConversationList = ref(false);
 const renamingConversationId = ref<string | null>(null);
 const renamingConversationTitle = ref("");
@@ -980,6 +1273,10 @@ function discardUnsavedDraftState() {
   conversationLoadedSkillIds.delete(unsavedKey);
   conversationLoadedSkillBodies.delete(unsavedKey);
   conversationPickerSelections.delete(unsavedKey);
+  // Plugin attachments are conversation state too (#13978). The draft can never
+  // be reopened, so a new chat must not inherit the tool surface the abandoned
+  // one had — an attachment is exactly the kind of consent that must not travel.
+  draftPluginConnectionIds.value = [];
   unsavedConversationKey.value = `unsaved:${uuid()}`;
 }
 
@@ -4151,6 +4448,10 @@ async function send() {
   const connection = runBinding.connectionId ? connectionStore.getConfig(runBinding.connectionId) : undefined;
   const tab = runPluginContext ? undefined : aiContextTargetFor(runBinding, props.tab);
   const runSourceName = connection?.name ?? runPluginContext?.pluginName ?? "";
+  // Plugin attachments freeze with the run target (#13978): changing the chip
+  // while this request is in flight must not widen the tool surface it was sent
+  // with, exactly like a mid-run rebind cannot move its SQL target.
+  const runPluginConnectionIds = effectivePluginConnectionIds(runBinding.connectionId, auto ? auto.conversationId : conversationId.value);
   if (!runPluginContext && (!connection || !tab)) {
     clearPendingWriteGrant();
     return;
@@ -4210,6 +4511,9 @@ async function send() {
     // later). Without this the first snapshot of a picker-touched new chat would
     // persist no selection at all (#12075 R4).
     migrateUnsavedPickerSelection(conversationId.value);
+    // The minted id owns the draft's plugin attachments from this tick on, so a
+    // toggle during the first save cannot land in the draft slot and be lost.
+    migrateUnsavedPluginAttachments(conversationId.value);
   }
   const runConversationId = auto ? auto.conversationId : conversationId.value;
   const runMessages = auto ? auto.messages : messages.value;
@@ -4760,6 +5064,7 @@ async function send() {
           context,
           inlineImages: imageAttachments.map(({ mediaType, data }) => ({ mediaType, data })),
           allowSkills,
+          pluginConnectionIds: runPluginConnectionIds,
         },
         history,
         onEvent,
@@ -4829,6 +5134,7 @@ async function send() {
           confirmedDatabase: confirmedTargetDb,
           confirmedSchema: confirmedTargetSchema,
           allowSkills,
+          pluginConnectionIds: runPluginConnectionIds,
         },
         history,
         onEvent,
@@ -5623,6 +5929,9 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
     }
   }
   const loadedSkillIdsForSnapshot = conversationLoadedSkillIds.get(targetConversationId) ?? [];
+  // The live map wins over the record: a toggle can land after this snapshot's
+  // arguments were read but before it is saved.
+  const pluginConnectionIdsForSnapshot = conversationPluginConnectionIds.get(targetConversationId) ?? existingConversation?.pluginConnectionIds ?? [];
   return {
     id: targetConversationId,
     title: first?.pluginContext?.title || renamedConversationTitles.get(targetConversationId) || existingConversation?.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
@@ -5665,6 +5974,14 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
     // so a vector-DB or disconnected-plugin chat cannot have its degraded
     // combination written back over the user's own choice (R9).
     ...pickerSnapshotFor(targetConversationId),
+    // Plugin attachments are user-scoped, not run-scoped: a streaming snapshot
+    // must never overwrite them.
+    ...(pluginConnectionIdsForSnapshot.length ? { pluginConnectionIds: [...pluginConnectionIdsForSnapshot] } : {}),
+    // This path rebuilds the record field by field, so the pin must be carried
+    // explicitly — a normal send would otherwise silently unpin a conversation
+    // (#14226). It comes from the CONFIRMED map, so a snapshot can never persist
+    // a pin whose own write has not succeeded yet.
+    ...pinForSnapshot(targetConversationId),
     createdAt,
     updatedAt: new Date().toISOString(),
   };
@@ -5714,11 +6031,37 @@ const runSnapshotScheduler = createDesktopAiRunSnapshotScheduler<ChatMessage>({
   intervalMs: RUN_SNAPSHOT_PERSIST_INTERVAL_MS,
 });
 
+function sameIdList(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 function syncPersistedConversation(conversation: AiConversation) {
-  const index = conversations.value.findIndex((item) => item.id === conversation.id);
-  if (index >= 0) conversations.value.splice(index, 1, conversation);
-  else conversations.value.unshift(conversation);
-  conversations.value.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  // A snapshot can be built before the latest attachment toggle and resolve
+  // after it. Keep the live list in the record and write it back, so neither the
+  // next load nor the disk copy resurrects the pre-toggle selection.
+  const livePluginConnectionIds = conversationPluginConnectionIds.get(conversation.id);
+  const merged = livePluginConnectionIds === undefined || sameIdList(livePluginConnectionIds, conversation.pluginConnectionIds ?? []) ? conversation : { ...conversation, pluginConnectionIds: [...livePluginConnectionIds] };
+  const index = conversations.value.findIndex((item) => item.id === merged.id);
+  if (index >= 0) {
+    // A content snapshot owns content fields only. Its pin fields were captured
+    // when the snapshot was BUILT — a pin write or a reload that adopted the
+    // disk value can have moved on since — so the live row's pin fields are kept
+    // (#14226 review). This also holds while a pin write is in flight: the
+    // optimistic value is already on the row.
+    const { pinned, pinnedAt } = conversations.value[index];
+    conversations.value.splice(index, 1, { ...merged, pinned, pinnedAt });
+  } else {
+    conversations.value.unshift(merged);
+  }
+  // Same comparator the backend uses, so a save never reshuffles the list into
+  // an order the next load would contradict (#14226).
+  conversations.value = sortAiConversations(conversations.value);
+  if (merged !== conversation) {
+    // Patch only the attachment column: re-saving this older snapshot would
+    // write its stale transcript and title over whatever landed since. The same
+    // failure handling (and one retry) as a user click applies here.
+    persistPluginAttachmentIdsWithFeedback(merged.id, livePluginConnectionIds ?? []);
+  }
 }
 
 /** Re-registers a persisted run at startup. `extra` overrides the transcript
@@ -5768,6 +6111,10 @@ function extractRecoverableDraft(messages: ChatMessage[]): { draft: string; mess
  *  the run, and the conversation transcript without the unsent user message. */
 async function persistPendingInputRecovery(conversation: AiConversation, messages: ChatMessage[], run: AiRun, updatedAt: string) {
   const first = messages.find((m) => m.role === "user" && m.kind !== "contextSummary");
+  // This path rewrites the whole record, so it must carry the plugin
+  // attachments forward too: the live map is still cold at startup, so the
+  // stored list is the source unless a toggle has already happened this session.
+  const pluginConnectionIds = conversationPluginConnectionIds.get(conversation.id) ?? conversation.pluginConnectionIds ?? [];
   const snapshot: AiConversation = {
     id: conversation.id,
     // Same title precedence as buildConversationSnapshot(): a recovered run
@@ -5801,6 +6148,11 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
     // (#12075): this path rewrites the whole record, so the values come from the
     // same raw source as `buildConversationSnapshot` (never `effective`).
     ...pickerSnapshotFor(conversation.id),
+    ...(pluginConnectionIds.length ? { pluginConnectionIds: [...pluginConnectionIds] } : {}),
+    // Recovery rewrites the whole record too; dropping the pin here would
+    // unpin the conversation on the next restart (#14226). Confirmed state only,
+    // same reason as `buildConversationSnapshot`.
+    ...pinForSnapshot(conversation.id),
     createdAt: conversation.createdAt,
     updatedAt,
   };
@@ -5819,13 +6171,59 @@ async function persistConversation() {
   await persistConversationSnapshot(conversationId.value, messages.value, pluginContext.value?.pluginName ?? connection?.name ?? "", pluginContext.value ? "" : binding.database, new Date().toISOString(), binding);
 }
 
+/** Reconciles a freshly LOADED list with pin writes the query could not see (#14226 review).
+ *
+ *  `loadAiConversations()` answers what was on disk when its query ran. Two cases
+ *  must win over that answer: a write still in flight (the user is looking at the
+ *  optimistic value) and a write that finished after this load started (the disk
+ *  answer predates it). Every other row adopts the disk value — a pin changed by
+ *  another window or client must reach this one — and its cached entries are
+ *  retired, so that cache can never mask a later external change either. */
+function reconcileLoadedPins(list: AiConversation[], seqAtLoad: number): AiConversation[] {
+  if (!list.length) return list;
+  let overlaid = false;
+  const merged = list.map((conversation) => {
+    const id = conversation.id;
+    const pending = pendingPinTokens.has(id);
+    if (!pending && (pinMutationSeqs.get(id) ?? -1) <= seqAtLoad) {
+      confirmedPins.delete(id);
+      displayedPins.delete(id);
+      return conversation;
+    }
+    const pin = displayedPins.get(id) ?? confirmedPins.get(id);
+    if (!pin) return conversation;
+    overlaid = true;
+    return { ...conversation, pinned: pin.pinned, pinnedAt: pin.pinnedAt };
+  });
+  return overlaid ? sortAiConversations(merged) : merged;
+}
+
+/** Generation of the newest history load (#14226 review). History loads can
+ *  overlap (popover open racing the mount), and responses can arrive out of
+ *  order: a stale answer must neither replace the list nor retire pin caches,
+ *  or it would undo the newer snapshot AND the writes in between. */
+let conversationLoadGeneration = 0;
+
+/** One history load for both entry points (popover open, mount), so the pin
+ *  reconciliation can never diverge between them. */
+async function reloadConversationList(): Promise<void> {
+  const generation = ++conversationLoadGeneration;
+  // Capture the stamp BEFORE the request: anything that finishes later may be
+  // missing from this answer.
+  const seqAtLoad = pinMutationSeq;
+  const list = await loadAiConversations().catch(() => []);
+  // Superseded by a newer request: it owns the list and the cache cleanup now.
+  if (generation !== conversationLoadGeneration) return;
+  conversations.value = reconcileLoadedPins(list, seqAtLoad);
+}
+
 async function setConversationListOpen(open: boolean) {
   showConversationList.value = open;
   if (open) {
     conversationSearchQuery.value = "";
     await nextTick();
     conversationSearchInput.value?.focus();
-    conversations.value = await loadAiConversations().catch(() => []);
+    await reloadConversationList();
   }
 }
 
@@ -5840,6 +6238,155 @@ function cancelRenameConversation() {
   renamingConversationId.value = null;
   renamingConversationTitle.value = "";
 }
+
+/**
+ * The pin state each conversation is known to have ON DISK (#14226).
+ *
+ * Three jobs. It is the rollback target when a pin write fails (a click's own
+ * "before" value can already be an unpersisted optimistic value from an earlier
+ * failed click), it is what every whole-record writer — `buildConversationSnapshot`
+ * and `persistPendingInputRecovery` — puts in a snapshot, so a run-snapshot flush
+ * can never persist a pin whose own write has not succeeded yet, and a reload
+ * re-applies it for a write that landed after that reload's query ran. Entries
+ * are dropped once a later read has become the source of truth, so this cache
+ * never masks a pin changed by another window.
+ */
+const confirmedPins = new Map<string, { pinned: boolean; pinnedAt?: string }>();
+/** The OPTIMISTIC pin of a write still in flight, per conversation (#14226
+ *  review). Unlike `confirmedPins` it never outlives its write: retired on
+ *  success (disk carries the value now) and on failure (the confirmed value
+ *  takes over). Keeping it short-lived is what lets a reload adopt an external
+ *  change instead of re-asserting an old local one. */
+const displayedPins = new Map<string, { pinned: boolean; pinnedAt?: string }>();
+/** The pin write currently shown optimistically, per conversation. A click token
+ *  is what lets a failed write roll back ONLY its own pin: a newer click owns a
+ *  different token, so it is left alone. */
+const pendingPinTokens = new Map<string, symbol>();
+/** Serializes pin writes per conversation: rapid pin/unpin clicks must reach
+ *  disk in click order, or the slower earlier write finishes last and wins. */
+const pinWriteChains = new Map<string, Promise<void>>();
+/** Ordering stamp of the last FINISHED pin write per conversation, plus the
+ *  counter it comes from. A load captures the counter when its request starts;
+ *  a write whose stamp is newer may be missing from that answer. */
+let pinMutationSeq = 0;
+const pinMutationSeqs = new Map<string, number>();
+
+/** The pin to put in a persisted snapshot: the last confirmed value, never the
+ *  optimistic one. */
+function pinForSnapshot(id: string): { pinned: boolean; pinnedAt?: string } {
+  const confirmed = confirmedPins.get(id);
+  if (confirmed) return confirmed;
+  const existing = conversations.value.find((item) => item.id === id);
+  return { pinned: existing?.pinned ?? false, pinnedAt: existing?.pinnedAt };
+}
+
+/** Rewrites the pin fields of one list entry in place, leaving every other
+ *  field — notably the transcript a run-snapshot flush just synced — untouched. */
+function applyConversationPin(id: string, pinned: boolean, pinnedAt: string | undefined) {
+  const index = conversations.value.findIndex((item) => item.id === id);
+  if (index < 0) return;
+  conversations.value.splice(index, 1, { ...conversations.value[index], pinned, pinnedAt });
+  conversations.value = sortAiConversations(conversations.value);
+}
+
+/** Shows the optimistic pin of a write that is now in flight, and records it as
+ *  pending so list rewrites keep showing it until the write settles. */
+function showPendingConversationPin(id: string, pinned: boolean, pinnedAt: string | undefined) {
+  displayedPins.set(id, { pinned, pinnedAt });
+  applyConversationPin(id, pinned, pinnedAt);
+}
+
+/** One pin write. Runs only inside the conversation's chain. */
+async function writeConversationPin(id: string, pinned: boolean, pinnedAt: string | undefined, token: symbol) {
+  try {
+    // Flush the run's throttled snapshot BEFORE the pin write. The snapshot is
+    // built from `pinForSnapshot`, so it persists the OLD pin: the new one only
+    // ever lands through this call, which is what keeps a failed pin off disk.
+    // Ordering still matters — an earlier snapshot landing after this one would
+    // revert the column.
+    const activeRun = desktopAiRun<ChatMessage>(id);
+    if (activeRun) await runSnapshotScheduler.save(activeRun);
+    // The flush ends with `syncPersistedConversation`, which re-applies the
+    // optimistic pin — so the row still shows this click's value here.
+    // Column-only write: never rewrites `messages_json` / `updated_at` from a
+    // record that a streaming snapshot may already have superseded.
+    const persisted = await saveAiConversationPin(id, pinned, pinnedAt);
+    // Only an explicit `false` means the row is gone; a transport that predates
+    // this result must not make the UI drop a row it cannot judge.
+    if (persisted === false) {
+      // The row no longer exists (deleted or pruned while the click was in
+      // flight). Confirming the pin would leave the list showing a value no
+      // record carries, so the stale row is dropped instead — never re-inserted,
+      // which is what keeps a pin write from resurrecting a deleted conversation.
+      if (pendingPinTokens.get(id) === token) {
+        pendingPinTokens.delete(id);
+        confirmedPins.delete(id);
+        displayedPins.delete(id);
+        pinMutationSeqs.delete(id);
+        conversations.value = conversations.value.filter((item) => item.id !== id);
+      }
+      return;
+    }
+    confirmedPins.set(id, { pinned, pinnedAt });
+    pinMutationSeqs.set(id, ++pinMutationSeq);
+    // Only this click's display value is retired; a newer click owns its own.
+    if (pendingPinTokens.get(id) === token) {
+      pendingPinTokens.delete(id);
+      // The write is on disk, so the optimistic entry has served its purpose; a
+      // later reload must adopt whatever disk says from here on.
+      displayedPins.delete(id);
+    }
+  } catch {
+    // Roll back to the last CONFIRMED state, not to the value this click saw:
+    // two failed clicks in a row would otherwise restore the first click's
+    // never-persisted optimistic value.
+    if (pendingPinTokens.get(id) === token) {
+      pendingPinTokens.delete(id);
+      const confirmed = confirmedPins.get(id) ?? { pinned: false, pinnedAt: undefined };
+      displayedPins.delete(id);
+      applyConversationPin(id, confirmed.pinned, confirmed.pinnedAt);
+      pinMutationSeqs.set(id, ++pinMutationSeq);
+      toast(t("ai.conversationPinFailed"), 5000);
+    }
+  }
+}
+
+/** Pins or unpins a conversation in the history list (#14226).
+ *
+ *  Optimistic like `commitRenameConversation`: the row moves immediately and a
+ *  failed write restores the last confirmed pin.
+ *
+ *  `pinnedAt` records the last pin-STATE change, pin or unpin. The backend uses it
+ *  (together with `updatedAt`) as the eviction order, which is what keeps a
+ *  conversation the user just unpinned from being the next one deleted.
+ *
+ *  Takes an ID, not the row object: the toggle target is read from the live
+ *  list entry. A row object captured by the click handler is stale until Vue
+ *  re-renders, so two clicks in the same tick would both compute the same
+ *  target and the second would be a no-op. */
+async function toggleConversationPin(id: string) {
+  const current = conversations.value.find((item) => item.id === id);
+  if (!current) return;
+  const pinned = !current.pinned;
+  // Seed the confirmed baseline from the list only when nothing is in flight for
+  // this conversation: a pending token means the list already holds an
+  // unconfirmed value.
+  if (!confirmedPins.has(id) && !pendingPinTokens.has(id)) {
+    confirmedPins.set(id, { pinned: current.pinned ?? false, pinnedAt: current.pinnedAt });
+  }
+  const pinnedAt = new Date().toISOString();
+  const token = Symbol(id);
+  pendingPinTokens.set(id, token);
+  showPendingConversationPin(id, pinned, pinnedAt);
+
+  const chain = (pinWriteChains.get(id) ?? Promise.resolve()).then(() => writeConversationPin(id, pinned, pinnedAt, token));
+  pinWriteChains.set(id, chain);
+  try {
+    await chain;
+  } finally {
+    if (pinWriteChains.get(id) === chain) pinWriteChains.delete(id);
+  }
+}
 async function commitRenameConversation(conv: AiConversation) {
   const title = renamingConversationTitle.value.trim().slice(0, 50);
   if (!title || title === conv.title) return cancelRenameConversation();
@@ -5852,8 +6399,15 @@ async function commitRenameConversation(conv: AiConversation) {
     // during the await window cannot persist the previous title over it.
     renamedConversationTitles.set(conv.id, title);
     await saveAiConversation(updated);
-    const i = conversations.value.findIndex((item) => item.id === conv.id);
-    if (i >= 0) conversations.value[i] = updated;
+    // Merge only the fields this rename owns. Assigning `updated` wholesale
+    // would revert a pin — or a transcript a run-snapshot flush synced — that
+    // changed while the save was in flight (#14226 review).
+    const index = conversations.value.findIndex((item) => item.id === conv.id);
+    if (index >= 0) {
+      conversations.value.splice(index, 1, { ...conversations.value[index], title, updatedAt: updated.updatedAt });
+      // A rename bumps `updatedAt`, so re-apply the shared backend order.
+      conversations.value = sortAiConversations(conversations.value);
+    }
   } catch {
     // Save failed: retract the claim so the header, the history row and the
     // persisted record all stay on the old title until a rename succeeds.
@@ -6044,6 +6598,17 @@ async function performDeleteConversation(id: string) {
   conversationSkillHintSeen.delete(id);
   // Its picker selection goes with it too (#12075): the id can never come back.
   conversationPickerSelections.delete(id);
+  // Its plugin attachments too: a live entry outranks the stored record, so a
+  // stale one would shadow whatever a future load of this id carries.
+  conversationPluginConnectionIds.delete(id);
+  // Its pin state goes with it (#14226): the id can never come back, and a stale
+  // entry would make a future conversation that reused the id start out showing
+  // a pin that is not on disk.
+  confirmedPins.delete(id);
+  displayedPins.delete(id);
+  pendingPinTokens.delete(id);
+  pinWriteChains.delete(id);
+  pinMutationSeqs.delete(id);
   await deleteConversationWithCancellation({
     id,
     currentConversationId: () => conversationId.value,
@@ -6103,6 +6668,7 @@ function queueInput() {
     // reason as `send()`, #12075 R4). Only on a mint: moving it for an id that
     // already has a record is exactly what must not happen.
     migrateUnsavedPickerSelection(conversationId.value);
+    migrateUnsavedPluginAttachments(conversationId.value);
   }
   queuedInputs.set(conversationId.value, { text, mode: assistantMode.value, action: activeAction.value });
   prompt.value = "";
@@ -6150,7 +6716,12 @@ async function stopConversationRun(convId: string) {
  *  assistant text/reasoning/tool results it produced (parent PRD §7). */
 function retryConversationRun(convId: string) {
   const run = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(convId) : undefined;
-  const history = run?.messages ?? chatMessagesFromConversation(conversations.value.find((c) => c.id === convId) ?? conversations.value[0]);
+  const stored = conversations.value.find((c) => c.id === convId);
+  // No fallback to index 0: with pinning (#14226) the head of the list is no
+  // longer necessarily the newest conversation, and retrying with another
+  // conversation's transcript would send the wrong history.
+  if (!run && !stored) return;
+  const history = run?.messages ?? chatMessagesFromConversation(stored!);
   let lastUserIdx = -1;
   for (let i = history.length - 1; i >= 0; i--) {
     const m = history[i];
@@ -6211,7 +6782,9 @@ onMounted(async () => {
     }
   }
 
-  conversations.value = await loadAiConversations().catch(() => []);
+  // Same merge as the popover reload (#14226): a harmless no-op on a fresh mount,
+  // but the two load sites must not diverge.
+  await reloadConversationList();
   // Restore per-conversation queued "send later" inputs (parent PRD §5) — they
   // are persisted with the conversation and must surface again after a restart.
   // The queued mode/action belong to the conversation that queued them, not to
@@ -6798,73 +7371,89 @@ async function openExternalUrl(url: string) {
             {{ t("history.emptyConversationSearch") }}
           </div>
           <div v-else class="max-h-64 overflow-auto p-1">
-            <div v-for="conv in filteredConversations" :key="conv.id" class="flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted" :class="{ 'bg-muted': conv.id === conversationId }" @click="selectConversation(conv)">
-              <input
-                v-if="renamingConversationId === conv.id"
-                :ref="
-                  (element) => {
-                    renamingConversationInput = element as HTMLInputElement | null;
-                  }
-                "
-                v-model="renamingConversationTitle"
-                class="min-w-0 flex-1 rounded border bg-background px-1 py-0.5 text-xs"
-                @click.stop
-                @keydown.enter.stop.prevent="commitRenameConversation(conv)"
-                @keydown.esc.stop.prevent="cancelRenameConversation"
-                @blur="commitRenameConversation(conv)"
-              />
-              <!-- The bound connection belongs on the row: a conversation keeps
+            <template v-for="group in conversationGroups" :key="group.key">
+              <div v-if="group.label" class="px-2 pb-0.5 pt-1.5 text-[10px] font-medium text-muted-foreground/70" data-ai-conversation-group>{{ group.label }}</div>
+              <div v-for="conv in group.rows" :key="conv.id" class="flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted" :class="{ 'bg-muted': conv.id === conversationId }" @click="selectConversation(conv)">
+                <input
+                  v-if="renamingConversationId === conv.id"
+                  :ref="
+                    (element) => {
+                      renamingConversationInput = element as HTMLInputElement | null;
+                    }
+                  "
+                  v-model="renamingConversationTitle"
+                  class="min-w-0 flex-1 rounded border bg-background px-1 py-0.5 text-xs"
+                  @click.stop
+                  @keydown.enter.stop.prevent="commitRenameConversation(conv)"
+                  @keydown.esc.stop.prevent="cancelRenameConversation"
+                  @blur="commitRenameConversation(conv)"
+                />
+                <!-- The bound connection belongs on the row: a conversation keeps
                    its own database (#9902), so which one it talks to must be
                    readable without opening it. `isConnectionMissing` marks a
                    binding whose connection was deleted or renamed away. -->
-              <span v-else class="min-w-0 flex-1">
-                <span class="block truncate" :title="conv.title">{{ conv.title }}</span>
-                <span v-if="conv.connectionName" class="block truncate text-[10px]" :class="conversationRowDetail(conv).connectionMissing ? 'text-destructive/80' : 'text-muted-foreground/70'">{{ conv.connectionName }}</span>
-              </span>
-              <button v-if="renamingConversationId !== conv.id" type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground" :title="t('ai.renameConversation')" @click.stop="startRenameConversation(conv)"><Pencil class="h-3 w-3" /></button>
-              <span v-if="conversationRowDetail(conv).hasQueuedInput" class="shrink-0 rounded border border-primary/40 bg-primary/10 px-1 py-px text-[10px] text-primary" :aria-label="t('ai.rowQueuedInput')" :title="t('ai.rowQueuedInput')">{{ t("ai.rowQueuedInput") }}</span>
-              <span v-if="conversationRowDetail(conv).status === 'preparing' || conversationRowDetail(conv).status === 'running'" class="flex min-w-0 shrink-0 items-center gap-1 text-muted-foreground" :aria-label="t('ai.runStatusRunning')" :title="t('ai.runStatusRunning')">
-                <Loader2 class="h-3 w-3 shrink-0 animate-spin" />
-                <span class="hidden truncate min-[430px]:inline">{{ conversationRowDetail(conv).phaseText ?? t("ai.runStatusRunning") }}</span>
-                <span v-if="conversationRowDetail(conv).elapsedSeconds !== null" class="shrink-0 tabular-nums text-muted-foreground/70">{{ formatRunElapsed(conversationRowDetail(conv).elapsedSeconds) }}</span>
-                <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-destructive" :title="t('ai.stopGenerating')" :aria-label="t('ai.stopGenerating')" @click.stop="stopConversationRun(conv.id)">
-                  <Square class="h-3 w-3" />
+                <span v-else class="min-w-0 flex-1">
+                  <span class="block truncate" :title="conv.title">{{ conv.title }}</span>
+                  <span v-if="conv.connectionName" class="block truncate text-[10px]" :class="conversationRowDetail(conv).connectionMissing ? 'text-destructive/80' : 'text-muted-foreground/70'">{{ conv.connectionName }}</span>
+                </span>
+                <button
+                  v-if="renamingConversationId !== conv.id"
+                  type="button"
+                  class="shrink-0 rounded p-0.5"
+                  :class="conv.pinned ? 'text-foreground' : 'text-muted-foreground/40 hover:text-foreground'"
+                  :title="conv.pinned ? t('ai.unpinConversation') : t('ai.pinConversation')"
+                  :aria-label="conv.pinned ? t('ai.unpinConversation') : t('ai.pinConversation')"
+                  :aria-pressed="conv.pinned ? 'true' : 'false'"
+                  data-ai-conversation-pin
+                  @click.stop="toggleConversationPin(conv.id)"
+                >
+                  <Pin class="h-3 w-3" :class="{ 'fill-current': conv.pinned }" />
                 </button>
-              </span>
-              <span v-else-if="conversationRowDetail(conv).status === 'queued'" class="flex shrink-0 items-center gap-1 text-muted-foreground" :aria-label="t('ai.runStatusWaitingToStart')">
-                <Hourglass class="h-3 w-3" />
-                <span>{{ t("ai.runStatusWaitingToStart") }}</span>
-              </span>
-              <span v-else-if="conversationRowDetail(conv).status === 'awaiting_write_confirmation'" class="flex shrink-0 items-center gap-1 font-medium text-amber-600 dark:text-amber-400" :aria-label="t('ai.runStatusAwaitingConfirmation')">
-                <AlertTriangle class="h-3 w-3" />
-                <span>{{ t("ai.runStatusAwaitingConfirmation") }}</span>
-              </span>
-              <span v-else-if="conversationRowDetail(conv).status === 'pending_recoverable'" class="flex shrink-0 items-center gap-1 text-muted-foreground" :aria-label="t('ai.runStatusPendingDraft')">
-                <Clock class="h-3 w-3" />
-                <span>{{ t("ai.runStatusPendingDraft") }}</span>
-              </span>
-              <span v-else-if="conversationRowDetail(conv).status === 'completed'" class="flex min-w-0 shrink-0 items-center gap-1" :aria-label="t('ai.runStatusCompleted')" :title="conversationRowDetail(conv).summary ?? t('ai.runStatusCompleted')">
-                <Check class="h-3 w-3 shrink-0 text-green-500" />
-              </span>
-              <span
-                v-else-if="conversationRowDetail(conv).status === 'failed' || conversationRowDetail(conv).status === 'interrupted'"
-                class="flex min-w-0 shrink-0 items-center gap-1"
-                :aria-label="t(conversationRowDetail(conv).status === 'interrupted' ? 'ai.runStatusInterrupted' : 'ai.runStatusFailed')"
-                :title="conversationRowDetail(conv).reason ?? t(conversationRowDetail(conv).status === 'interrupted' ? 'ai.runStatusInterrupted' : 'ai.runStatusFailed')"
-              >
-                <AlertTriangle class="h-3 w-3 shrink-0 text-destructive" />
-                <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground" :title="t('ai.retryRound')" :aria-label="t('ai.retryRound')" @click.stop="retryConversationRun(conv.id)">
-                  <RefreshCw class="h-3 w-3" />
+                <button v-if="renamingConversationId !== conv.id" type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground" :title="t('ai.renameConversation')" @click.stop="startRenameConversation(conv)"><Pencil class="h-3 w-3" /></button>
+                <span v-if="conversationRowDetail(conv).hasQueuedInput" class="shrink-0 rounded border border-primary/40 bg-primary/10 px-1 py-px text-[10px] text-primary" :aria-label="t('ai.rowQueuedInput')" :title="t('ai.rowQueuedInput')">{{ t("ai.rowQueuedInput") }}</span>
+                <span v-if="conversationRowDetail(conv).status === 'preparing' || conversationRowDetail(conv).status === 'running'" class="flex min-w-0 shrink-0 items-center gap-1 text-muted-foreground" :aria-label="t('ai.runStatusRunning')" :title="t('ai.runStatusRunning')">
+                  <Loader2 class="h-3 w-3 shrink-0 animate-spin" />
+                  <span class="hidden truncate min-[430px]:inline">{{ conversationRowDetail(conv).phaseText ?? t("ai.runStatusRunning") }}</span>
+                  <span v-if="conversationRowDetail(conv).elapsedSeconds !== null" class="shrink-0 tabular-nums text-muted-foreground/70">{{ formatRunElapsed(conversationRowDetail(conv).elapsedSeconds) }}</span>
+                  <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-destructive" :title="t('ai.stopGenerating')" :aria-label="t('ai.stopGenerating')" @click.stop="stopConversationRun(conv.id)">
+                    <Square class="h-3 w-3" />
+                  </button>
+                </span>
+                <span v-else-if="conversationRowDetail(conv).status === 'queued'" class="flex shrink-0 items-center gap-1 text-muted-foreground" :aria-label="t('ai.runStatusWaitingToStart')">
+                  <Hourglass class="h-3 w-3" />
+                  <span>{{ t("ai.runStatusWaitingToStart") }}</span>
+                </span>
+                <span v-else-if="conversationRowDetail(conv).status === 'awaiting_write_confirmation'" class="flex shrink-0 items-center gap-1 font-medium text-amber-600 dark:text-amber-400" :aria-label="t('ai.runStatusAwaitingConfirmation')">
+                  <AlertTriangle class="h-3 w-3" />
+                  <span>{{ t("ai.runStatusAwaitingConfirmation") }}</span>
+                </span>
+                <span v-else-if="conversationRowDetail(conv).status === 'pending_recoverable'" class="flex shrink-0 items-center gap-1 text-muted-foreground" :aria-label="t('ai.runStatusPendingDraft')">
+                  <Clock class="h-3 w-3" />
+                  <span>{{ t("ai.runStatusPendingDraft") }}</span>
+                </span>
+                <span v-else-if="conversationRowDetail(conv).status === 'completed'" class="flex min-w-0 shrink-0 items-center gap-1" :aria-label="t('ai.runStatusCompleted')" :title="conversationRowDetail(conv).summary ?? t('ai.runStatusCompleted')">
+                  <Check class="h-3 w-3 shrink-0 text-green-500" />
+                </span>
+                <span
+                  v-else-if="conversationRowDetail(conv).status === 'failed' || conversationRowDetail(conv).status === 'interrupted'"
+                  class="flex min-w-0 shrink-0 items-center gap-1"
+                  :aria-label="t(conversationRowDetail(conv).status === 'interrupted' ? 'ai.runStatusInterrupted' : 'ai.runStatusFailed')"
+                  :title="conversationRowDetail(conv).reason ?? t(conversationRowDetail(conv).status === 'interrupted' ? 'ai.runStatusInterrupted' : 'ai.runStatusFailed')"
+                >
+                  <AlertTriangle class="h-3 w-3 shrink-0 text-destructive" />
+                  <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground" :title="t('ai.retryRound')" :aria-label="t('ai.retryRound')" @click.stop="retryConversationRun(conv.id)">
+                    <RefreshCw class="h-3 w-3" />
+                  </button>
+                </span>
+                <span v-else-if="conversationRowDetail(conv).status === 'cancelled'" class="flex shrink-0 items-center" :aria-label="t('ai.runStatusCancelled')" :title="t('ai.runStatusCancelled')">
+                  <CircleSlash class="h-3 w-3 text-muted-foreground" />
+                </span>
+                <span v-if="conversationRowDetail(conv).unread" class="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" :aria-label="t('ai.runUnread')" :title="t('ai.runUnread')" />
+                <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-background hover:text-destructive" :title="t('ai.deleteConversation')" :aria-label="t('ai.deleteConversation')" @click.stop="deleteConversation(conv.id)">
+                  <X class="h-3 w-3" />
                 </button>
-              </span>
-              <span v-else-if="conversationRowDetail(conv).status === 'cancelled'" class="flex shrink-0 items-center" :aria-label="t('ai.runStatusCancelled')" :title="t('ai.runStatusCancelled')">
-                <CircleSlash class="h-3 w-3 text-muted-foreground" />
-              </span>
-              <span v-if="conversationRowDetail(conv).unread" class="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" :aria-label="t('ai.runUnread')" :title="t('ai.runUnread')" />
-              <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-background hover:text-destructive" :title="t('ai.deleteConversation')" :aria-label="t('ai.deleteConversation')" @click.stop="deleteConversation(conv.id)">
-                <X class="h-3 w-3" />
-              </button>
-            </div>
+              </div>
+            </template>
           </div>
         </PopoverContent>
       </Popover>
@@ -7445,6 +8034,50 @@ async function openExternalUrl(url: string) {
                   />
                 </div>
               </template>
+              <!-- Plugin tools this conversation may use (#13978). Opening a plugin
+                 connection is not consent for the assistant; only checked
+                 connections reach the model. -->
+              <Popover v-if="showPluginToolsSelector" :open="pluginToolsOpen" @update:open="onPluginToolsOpenChange">
+                <PopoverTrigger as-child>
+                  <button
+                    type="button"
+                    class="ai-plugin-tools-trigger flex min-w-0 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:bg-transparent"
+                    :disabled="isPluginConnectionTarget"
+                    :aria-label="pluginToolsTriggerLabel"
+                    :title="pluginToolsTriggerLabel"
+                  >
+                    <Plug class="h-3 w-3" />
+                    <span class="ai-plugin-tools-label max-w-40 truncate">{{ pluginToolsTriggerText }}</span>
+                    <span v-if="!isPluginConnectionTarget && activePluginConnectionIds.length" class="ai-plugin-tools-count rounded-sm bg-primary px-1 text-[10px] font-medium text-primary-foreground">{{ activePluginConnectionIds.length }}</span>
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent align="start" class="w-72 gap-0 p-1.5">
+                  <div class="px-2 py-1 text-xs font-medium">{{ t("ai.pluginToolsTitle") }}</div>
+                  <p class="px-2 pb-1 text-[11px] leading-4 text-muted-foreground">{{ t("ai.pluginToolsDescription") }}</p>
+                  <div class="max-h-64 overflow-auto">
+                    <template v-for="group in pluginToolGroups" :key="group.pluginId">
+                      <div v-if="group.pluginName" class="px-2 pb-1 pt-2 text-[11px] font-medium text-muted-foreground">{{ group.pluginName }}</div>
+                      <button v-for="row in group.rows" :key="row.id" type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted" :aria-pressed="isPluginConnectionAttached(row.id)" @click="togglePluginConnection(row.id)">
+                        <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="isPluginConnectionAttached(row.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
+                          <Check v-if="isPluginConnectionAttached(row.id)" class="h-3 w-3" />
+                        </span>
+                        <ConnectionIcon v-if="row.connection" :connection="row.connection" class="h-3.5 w-3.5 shrink-0" />
+                        <Plug v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span class="min-w-0 flex-1 truncate">{{ row.name }}</span>
+                        <!-- A stored attachment whose connection is closed stays
+                           listed (so it can be detached) but says it is inactive. -->
+                        <span class="shrink-0 text-[10px]" :class="row.connected ? 'text-muted-foreground' : 'text-amber-600'">{{ row.connected ? t("connection.connected") : t("connection.disconnected") }}</span>
+                      </button>
+                    </template>
+                    <div v-if="!pluginToolGroups.length" class="px-2 py-3 text-xs text-muted-foreground">{{ t("ai.pluginToolsEmpty") }}</div>
+                  </div>
+                  <p v-if="inactivePluginConnectionCount" class="border-t px-2 pt-1.5 text-[10px] leading-4 text-amber-600">{{ t("ai.pluginToolsClosedHint", { count: inactivePluginConnectionCount }) }}</p>
+                  <p v-if="overflowPluginConnections.length" data-ai-plugin-tools-overflow class="border-t px-2 pt-1.5 text-[10px] leading-4 text-amber-600">
+                    {{ t("ai.pluginToolsOverflowHint", { count: overflowPluginConnections.length, names: overflowPluginConnections.map((connection) => connection.name).join(", ") }) }}
+                  </p>
+                  <p class="border-t px-2 pt-1.5 text-[10px] leading-4 text-muted-foreground">{{ t("ai.pluginToolsHowTo") }}</p>
+                </PopoverContent>
+              </Popover>
             </div>
             <div class="flex min-w-0 max-w-full flex-none items-center gap-1">
               <!-- Template selector -->

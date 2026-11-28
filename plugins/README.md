@@ -69,6 +69,8 @@ The official URL is part of the DBX client contract and cannot be edited in Plug
 
 Catalog v1 is defined by `marketplace.schema.json` and includes repository metadata, localized plugin metadata, searchable tags, permissions, versions, release notes, and target artifacts. Each artifact declares `signingKeyId`. DBX first selects the exact current target and then falls back to `universal`. Artifact URLs may be relative to the catalog URL. DBX enforces a 4 MiB catalog limit and a 512 MiB package limit, resolves only HTTP(S) URLs, limits redirects, isolates repository failures, verifies the catalog-declared size and SHA-256, then requires the package Manifest ID, version, publisher, permissions, and Ed25519 key ID to match the reviewed catalog before activation.
 
+The optional root-level `compatibility` array lets a catalog state, per plugin version, the engine requirement copied from that package's manifest (`dbx`, `hostApi`). DBX evaluates it against the running app and host API and annotates the matching version as incompatible, so an outdated DBX can show "requires a newer DBX" and keep the update out of the update badge and automatic updates instead of offering an update that cannot install. The same verdict carries `upgradeRequired`: `false` means upgrading cannot satisfy the requirement (an upper bound such as `<0.7.0`, an exact older version, or a host API range this build does not advertise), so the UI shows "incompatible" without an "Upgrade DBX" entry. The array is root-scoped because plugin and version objects are parsed strictly by older clients; entries that do not resolve to a listed plugin/version, or whose requirement does not parse, are ignored rather than failing the whole catalog. The package manifest stays the authoritative gate: an install that still reaches it is rejected before any runtime teardown.
+
 Run the live official-store smoke test with:
 
 ```bash
@@ -388,9 +390,11 @@ independent. Restoring a tab must not automatically execute a query.
 - `ai.listModels()` — requires `host.ai` and `capabilities.aiCompletion`. Returns only `{ configId, name, model, isDefault }` for configured API models. No endpoints, keys, headers, or CLI environment are exposed. CLI agents are excluded from text completion.
 - `ai.generateText({ configId, model, prompt })` — requires `host.ai` and `capabilities.aiCompletion`; prompts are nonempty and limited to 100000 characters. The desktop host asks for confirmation naming the plugin and selected model before each send, resolves credentials itself, and returns plain text (up to 16000 characters). No tools or file writes are enabled. One generation per workbench may run at a time. Provider failures return a generic error to avoid leaking secrets. Old hosts may omit these methods/capability.
 - `ai.setRecommendations({ context, items })` / `ai.clearRecommendations()` — updates the context-aware quick-question chips shown by the global DBX AI panel; requires `host.ai`. Each item is `{ id, label, prompt, order? }`, supports `{{path.to.value}}` placeholders resolved against the supplied context, and is capped at five visible items. Recommendations belong to the current workbench instance and are not persisted into conversation history. Use `ai.openConversation()` when a user clicks a recommendation; DBX sends the selected prompt through the same snapshot safety boundary.
-- `capabilities` — `{ downloadFile, planApi, schemaMetadataApi, dataApi, connectionsApi, storage, ai, aiModelDiscovery, aiCompletion, aiRecommendations }` advertised in the init message; a missing or `false` entry means that Host API group is unavailable on this host, so gate the matching call on it instead of probing with a request
+- `capabilities` — `{ downloadFile, planApi, schemaMetadataApi, dataApi, connectionsApi, storage, ai, aiModelDiscovery, aiCompletion, aiRecommendations, observations }` advertised in the init message; a missing or `false` entry means that Host API group is unavailable on this host, so gate the matching call on it instead of probing with a request
 - `onEvent(listener)` — events are forwarded only with `host.events`
 - `onBinary(listener)` — binary frames are forwarded only with `host.binary`; listeners receive `{ channel, data: Uint8Array }`
+- `onHostEvent(listener)` — structured host activity (`query.*`, `connection.*`, `ai.*`, `transfer.*`, `plugin.*`) for observability plugins; each event kind is registered to one `host.observe:*` permission (see the table in `plugins/examples/activity-monitor/README.md`), and the plugin also needs the `observations` capability. Only registered kinds are delivered — an unknown kind fails closed rather than inheriting its prefix's permission. Events carry `{ id, tsMs, kind, connectionId?, database?, payload }`; SQL/args/results/deltas/error messages are capped at 16 KiB with a `<field>Truncated` marker, and the host applies the same bound to any other oversized string. `transfer.progress` is content-free (allow-listed ids, state, counters, timings, object names). Sidecars receive the same events as id-less `host/observation` notifications only while already running — observing never activates a plugin. Native batches publish `query.started` and the terminal `query.finished` with `scope: "batch"` (`batchComplete: true` on the terminal one) and one `query.finished` per reported statement with `scope: "statement"`.
+- `onHostGap(listener)` — explicit drop notices (`{ skipped }`) when the bounded observation bus falls behind. Ids are host-global while delivery is permission-filtered, so `id` gaps are not drops. Sidecars receive `host/observation_gap` notifications instead.
 
 The sandbox default is no network access at all. A plugin may declare per-origin permissions such as `host.network:https://api.vendor.com` (https only, no path, at most 8 origins, duplicates rejected); declared origins — and only those — are added to the sandbox `connect-src`, so reviewers can see exactly which services the plugin UI may call.
 
@@ -773,7 +777,7 @@ A plugin can read the **estimated** execution plan of a query without touching a
 }
 ```
 
-- `format` is `json`, `xml` (SQL Server `ShowPlanXML`), or `text`. `rawPlan` is a parsed JSON document for `json` and the plan text otherwise, so the plugin can parse and normalize it itself.
+- `format` is `json`, `xml` (SQL Server `ShowPlanXML`), or `text`. `rawPlan` is a parsed JSON value for `json` and the plan text otherwise, so the plugin can parse and normalize it itself. SQLite `EXPLAIN QUERY PLAN` is returned as an array of row objects retaining the native `id`, `parent`, `notused`, and `detail` fields. DuckDB's `EXPLAIN` plan is returned as text.
 - `warnings` carries `plan_not_json` when the server answered with something that is not JSON (the payload is then reported as `text` rather than pretending it is JSON), `plan_truncated` when the host cut the plan to respect `maxPlanBytes`, and `plan_rows_truncated` when the driver stopped collecting plan rows.
 - `truncated` is `true` whenever the host cut the plan for either reason.
 
@@ -907,6 +911,57 @@ This requires a DBX build with the Redis plugin codec view; older hosts may
 install a plugin but do not offer it in Redis details. Package with the current
 source CLI if an older published CLI rejects `capabilities`: the current
 Manifest schema and runtime accept that field.
+
+## SQL value codec capability
+
+Native plugins can decode SQL result cells, for example columns a business
+system stores encrypted, with the same contract as the Redis codec:
+
+```json
+{ "capabilities": [{ "id": "func-source", "label": "Function source", "kind": "sql-value-codec-v1" }] }
+```
+
+The user right-clicks a cell and chooses **Decode with Plugin**, or picks
+**Plugin decode** in the cell details convert preview, and clicks **Convert**.
+A decoder picker appears only when more than one decoder is installed; a single
+decoder is used directly. Listing the plugins sends no value; only that click
+sends the current cell. The option is hidden while no compatible plugin
+declares the capability. Compatible plugins must have a native backend
+entrypoint.
+
+The host invokes the chosen sidecar's `sql/codec/decode` method:
+
+```json
+{
+  "codecId": "func-source",
+  "rawBase64": "5Lit",
+  "context": { "dbType": "oracle", "columnName": "SOURCE", "columnType": "CLOB" }
+}
+```
+
+`rawBase64` is canonical standard Base64 of the cell: the original bytes for
+binary columns (BLOB, BYTEA, VARBINARY…) and UTF-8 text for every other value.
+`context` carries column facts only; the plugin receives no row values beyond
+this cell, no database credentials, connection configuration or host driver.
+Later versions may add optional `context` fields; plugins must ignore fields
+they do not recognise.
+NULL values and partially loaded large values are not passed to plugins.
+
+Return `{ "format": "json", "value": <JSON value> }` or
+`{ "format": "text", "value": "UTF-8 text" }`, exactly as for Redis. The host
+shows text as is and JSON pretty-printed, never as HTML.
+
+Calls time out after 10 seconds. Raw input and the UTF-8 serialized result
+value are each limited to 2 MiB. The result is a read-only preview: it is not
+written back to the database and does not enter the grid, exports or AI
+context. External-program plugins should use binary stdin/stdout, bounded
+execution/output, and stderr for diagnostics.
+
+To let MCP clients use the same decoder, expose a connection-less tool through
+the plugin's own `mcp` contribution (see "Tools for the built-in AI assistant"):
+declare `external_tools: true` and the tool's `read` access, then call the same
+decoding code from `mcp/call`. Users authorize it per plugin under
+Settings → MCP → Capabilities.
 
 ## Backend protocol
 

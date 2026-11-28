@@ -161,6 +161,10 @@ Completion uses the active database dialect and metadata to suggest:
 - Dialect-specific functions and syntax for MySQL, PostgreSQL, SQL Server, ClickHouse, and others
 - User-defined [SQL Snippets](/en/docs/sql-snippets)
 
+For PostgreSQL, MySQL, and SQLite, completion also reads unexecuted DDL from the whole editor document. `CREATE TABLE`, simple `CREATE TABLE AS SELECT` projections, and `ALTER TABLE ADD COLUMN` can provide table and column candidates before anything is executed, including when remote metadata is empty or unavailable. The overlay is isolated per editor tab, recomputed from the current text after edits, and merged with the existing alias/JOIN completion path; it is never written to connection metadata.
+
+This local overlay is intentionally smaller than a database catalog. It supports qualified and quoted identifiers, skips table constraints, keeps the first duplicate table definition, and does not treat `DROP TABLE` as an executed catalog change. Complex CTAS expressions and other DDL forms may require refreshing real connection metadata instead.
+
 Semantic diagnostics flag selected unresolved tables, columns, aliases, and SQL structures. They help catch mistakes early but do not guarantee that vendor extensions will be accepted or rejected; the server result remains authoritative.
 
 <Callout type="info">Refresh connection metadata after creating or changing objects. DBX caches and lazy-loads table structure to reduce repeated requests in large schemas.</Callout>
@@ -254,6 +258,8 @@ Query history stores executed SQL per connection with time and context. You can:
 The save dialog can search or create folders. Quick Open indexes both SQL Library entries and SQL Files.
 
 On Desktop, the **Locate current file** button in the SQL Files panel expands parent directories, selects the current file, and scrolls it into view. If its directory is not open yet, it is added to the file tree first. Unsaved queries cannot be located. File filters remain in effect; hidden or missing files show a notification.
+
+To open several local SQL files against the same connection, select at least two visible `.sql` files with `Cmd/Ctrl`-click or `Shift`-click, right-click one of them, and choose **Set data source (N files)**. Pick a connection that supports SQL file execution; its default database and configured default schema are recorded for each file. Close any selected files that are already open first. The association is stored locally and applies the next time each file opens; it does not change the files on disk or run them. If the batch would exceed the 200-file association limit, nothing is saved and the dialog reports it.
 
 ## Safety and Boundaries
 

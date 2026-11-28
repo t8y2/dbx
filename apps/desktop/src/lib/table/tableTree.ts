@@ -1,5 +1,5 @@
 import type { DatabaseType, ObjectInfo, OracleTriggerMetadata, TableInfo, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
-import { normalizeSidebarObjectKind, supportsSchemaIndexManagement, type SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
+import { isTableLikeObjectKind, normalizeSidebarObjectKind, supportsSchemaIndexManagement, type SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import { exactOracleTriggerMetadata, exactOracleTriggerObjectMetadata, oracleTriggerIdentityKey } from "@/lib/database/oracleTriggerIdentity";
 
 const databaseObjectNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
@@ -10,10 +10,15 @@ export function normalizeDatabaseObjectName(name: string): string {
 
 export function buildTableTreeNodes({ nodeId, connectionId, database, schema, tables, catalog, includeSchemaInId = false }: { nodeId: string; connectionId: string; database: string; schema?: string; tables: TableInfo[]; catalog?: string; includeSchemaInId?: boolean }): TreeNode[] {
   const entries = tables.flatMap((table) => {
-    const name = normalizeDatabaseObjectName(table.name);
-    if (!name) return [];
+    // Keep the driver-reported table identifier: quoted names may contain
+    // leading or trailing spaces, and trimming would merge two distinct tables
+    // into one node and send later actions to the wrong table (#14905).
     const objectType = normalizeObjectType(table.table_type);
-    const childSchema = table.schema ?? schema;
+    const preserveIdentifier = isTableLikeObjectKind(objectType);
+    const name = preserveIdentifier ? table.name : normalizeDatabaseObjectName(table.name);
+    if (!name.trim()) return [];
+    const rawSchema = table.schema ?? schema;
+    const childSchema = preserveIdentifier ? rawSchema : rawSchema ? normalizeDatabaseObjectName(rawSchema) : undefined;
     return [
       makeTableTreeEntry({
         nodeId,
@@ -29,6 +34,7 @@ export function buildTableTreeNodes({ nodeId, connectionId, database, schema, ta
         parentSchema: table.parent_schema,
         parentName: table.parent_name,
         catalog,
+        preserveIdentifier,
       }),
     ];
   });
@@ -59,6 +65,7 @@ function makeTableTreeEntry({
   parentSchema,
   parentName,
   catalog,
+  preserveIdentifier = false,
 }: {
   nodeId: string;
   connectionId: string;
@@ -73,9 +80,14 @@ function makeTableTreeEntry({
   parentSchema?: string | null;
   parentName?: string | null;
   catalog?: string;
+  preserveIdentifier?: boolean;
 }): TableTreeEntry {
-  const normalizedParentSchema = parentSchema ? normalizeDatabaseObjectName(parentSchema) : undefined;
-  const normalizedParentName = parentName ? normalizeDatabaseObjectName(parentName) : undefined;
+  // Partition parents are DDL targets too: a space-padded parent table must not
+  // be folded into its trimmed sibling.
+  const exactParentSchema = preserveIdentifier ? parentSchema || undefined : undefined;
+  const exactParentName = preserveIdentifier ? parentName || undefined : undefined;
+  const normalizedParentSchema = exactParentSchema ?? (parentSchema ? normalizeDatabaseObjectName(parentSchema) : undefined);
+  const normalizedParentName = exactParentName ?? (parentName ? normalizeDatabaseObjectName(parentName) : undefined);
   const nodeIdSchemaSuffix = includeSchemaInId !== false && schema ? `${schema}:` : "";
   const node: TreeNode = {
     id: `${nodeId}:${nodeIdSchemaSuffix}${name}`,
@@ -243,25 +255,27 @@ export function compareDatabaseObjectNames(left: string, right: string): number 
 
 export function mergeTableInfosIntoObjects(objects: readonly ObjectInfo[], tables: readonly TableInfo[], schema?: string): ObjectInfo[] {
   const merged = [...objects];
+  const objectName = (obj: ObjectInfo, objectType: string) => (isTableLikeObjectKind(objectType) ? obj.name : normalizeDatabaseObjectName(obj.name));
+  const objectSchema = (obj: ObjectInfo, objectType: string): string | undefined => (isTableLikeObjectKind(objectType) ? (obj.schema ?? undefined) : obj.schema ? normalizeDatabaseObjectName(obj.schema) : undefined);
   const seen = new Set(
     merged.map((obj) => {
-      const name = normalizeDatabaseObjectName(obj.name);
-      const objectSchema = obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema || "";
-      return exactObjectIdentityKey(normalizeObjectType(obj.object_type), objectSchema, name);
+      const objectType = normalizeObjectType(obj.object_type);
+      return exactObjectIdentityKey(objectType, objectSchema(obj, objectType) ?? (schema || ""), objectName(obj, objectType));
     }),
   );
 
   for (const table of tables) {
     const objectType = normalizeObjectType(table.table_type);
     if (objectType !== "TABLE" && objectType !== "VIEW" && objectType !== "MATERIALIZED_VIEW") continue;
-    const name = normalizeDatabaseObjectName(table.name);
-    if (!name) continue;
+    const preserveIdentifier = isTableLikeObjectKind(objectType);
+    const name = preserveIdentifier ? table.name : normalizeDatabaseObjectName(table.name);
+    if (!name.trim()) continue;
     const matchingObject = objects.find((obj) => {
-      const objName = normalizeDatabaseObjectName(obj.name);
-      if (objName !== name) return false;
-      return normalizeObjectType(obj.object_type) === objectType;
+      if (normalizeObjectType(obj.object_type) !== objectType) return false;
+      return objectName(obj, objectType) === name;
     });
-    const tableSchema = schema ?? (matchingObject?.schema ? normalizeDatabaseObjectName(matchingObject.schema) : undefined);
+    const matchingSchema = matchingObject ? objectSchema(matchingObject, objectType) : undefined;
+    const tableSchema = schema != null ? (preserveIdentifier ? schema : normalizeDatabaseObjectName(schema)) : matchingSchema;
     const key = exactObjectIdentityKey(objectType, tableSchema, name);
     if (seen.has(key)) {
       // Table already in objects — merge comment if missing
@@ -637,10 +651,12 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
 export type DatabaseObjectTreeKind = SidebarObjectKind;
 
 function buildObjectTreeEntries({ nodeId, connectionId, database, schema, objects, objectType }: { nodeId: string; connectionId: string; database: string; schema?: string; objects: ObjectInfo[]; objectType: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" }): TreeNode[] {
+  const preserveIdentifier = isTableLikeObjectKind(objectType);
   const entries = objects.flatMap((obj) => {
-    const name = normalizeDatabaseObjectName(obj.name);
-    if (!name) return [];
-    const childSchema = obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
+    const name = preserveIdentifier ? obj.name : normalizeDatabaseObjectName(obj.name);
+    if (!name.trim()) return [];
+    const rawSchema = obj.schema ?? schema;
+    const childSchema = preserveIdentifier ? rawSchema : rawSchema ? normalizeDatabaseObjectName(rawSchema) : undefined;
     return [
       makeTableTreeEntry({
         nodeId,
@@ -654,6 +670,7 @@ function buildObjectTreeEntries({ nodeId, connectionId, database, schema, object
         valid: obj.valid,
         parentSchema: obj.parent_schema,
         parentName: obj.parent_name,
+        preserveIdentifier,
       }),
     ];
   });
@@ -754,14 +771,15 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
     }
     const objectType = normalizeObjectType(obj.object_type);
     const schemaIndex = objectType === "INDEX" && supportsSchemaIndexManagement(databaseType);
+    const postgresSequence = objectType === "SEQUENCE" && databaseType === "postgres";
     if (!schemaIndex && !["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"].includes(objectType)) {
       continue;
     }
 
-    const name = schemaIndex ? obj.name : normalizeDatabaseObjectName(obj.name);
+    const name = schemaIndex || postgresSequence ? obj.name : normalizeDatabaseObjectName(obj.name);
     if (!name) continue;
 
-    const childSchema = schemaIndex ? (obj.schema ?? schema) : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
+    const childSchema = schemaIndex || postgresSequence ? (obj.schema ?? schema) : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
     const signature = obj.signature?.trim() || "";
     const triggerParentName = schemaIndex ? (obj.parent_name ?? undefined) : objectType === "TRIGGER" && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : undefined;
     const triggerParentSchema = schemaIndex ? (obj.parent_schema ?? undefined) : objectType === "TRIGGER" && obj.parent_schema ? normalizeDatabaseObjectName(obj.parent_schema) : undefined;
@@ -792,9 +810,10 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
           : objectType === "VIEW" || objectType === "MATERIALIZED_VIEW"
             ? entry.node.id
             : `${nodeId}:${childSchema ? `${childSchema}:` : ""}${name}:${signature}:${triggerParentName || ""}:${objectType}`,
-        label: signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `${name}(${signature})` : triggerParentName ? `${name} (${triggerParentName})` : name,
+        label: signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `${name}(${signature})` : triggerParentName ? `${name} (${triggerParentName})` : postgresSequence ? normalizeDatabaseObjectName(name) || name : name,
         type: simpleNodeType,
         objectName: name,
+        ...(postgresSequence ? { postgresSequenceExactIdentity: true as const } : {}),
         objectScope: schemaIndex ? "schema" : undefined,
         signature: objectType === "FUNCTION" || objectType === "PROCEDURE" ? (obj.signature == null ? undefined : signature) : signature || undefined,
         customTypeKind: obj.custom_type_kind ?? undefined,
@@ -1086,16 +1105,22 @@ export function buildGroupedObjectTreeNodes({
     }
     const t = normalizeObjectType(obj.object_type);
     const schemaIndex = t === "INDEX" && supportsSchemaIndexManagement(databaseType);
-    const name = schemaIndex ? obj.name : normalizeDatabaseObjectName(obj.name);
-    if (!name) continue;
-    const objectSchema = schemaIndex ? (obj.schema ?? schema ?? "") : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema || "";
+    const postgresSequence = t === "SEQUENCE" && databaseType === "postgres";
+    // Table-like rows keep the driver-reported identifier through the group
+    // bucket so the child builders below cannot fold `\` orders \`` into
+    // `\`orders\``.
+    const exactIdentifier = isTableLikeObjectKind(t);
+    const exactIdentity = schemaIndex || postgresSequence || exactIdentifier;
+    const name = exactIdentity ? obj.name : normalizeDatabaseObjectName(obj.name);
+    if (!name.trim()) continue;
+    const objectSchema = exactIdentity ? (obj.schema ?? schema ?? "") : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema || "";
     const signature = (obj.signature ?? "").trim();
     const triggerParentName = t === "TRIGGER" && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : "";
     const key = `${exactObjectIdentityKey(t, objectSchema, name, signature)}\0${triggerParentName}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const arr = buckets.get(t) ?? [];
-    arr.push({ ...obj, name, schema: schemaIndex ? obj.schema : obj.schema ? normalizeDatabaseObjectName(obj.schema) : obj.schema });
+    arr.push({ ...obj, name, schema: exactIdentity ? obj.schema : obj.schema ? normalizeDatabaseObjectName(obj.schema) : obj.schema });
     buckets.set(t, arr);
   }
 
@@ -1119,7 +1144,9 @@ export function buildGroupedObjectTreeNodes({
           if (exactTrigger) return exactTriggerTreeNode(`${nodeId}:${def.key}`, connectionId, database, obj, exactTrigger, catalog);
           const objectType = normalizeObjectType(obj.object_type);
           const schemaIndex = objectType === "INDEX" && supportsSchemaIndexManagement(databaseType);
-          const childSchema = schemaIndex ? (obj.schema ?? schema) : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
+          const postgresSequence = objectType === "SEQUENCE" && databaseType === "postgres";
+          const exactChildIdentifier = isTableLikeObjectKind(objectType);
+          const childSchema = schemaIndex || postgresSequence || exactChildIdentifier ? (obj.schema ?? schema) : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
           const childType = typeof def.childType === "function" ? def.childType(objectType) : def.childType;
           const objectTypeSuffix = objectType === "PACKAGE" || objectType === "PACKAGE_BODY" || objectType === "TYPE" || objectType === "TYPE_BODY" ? `:${objectType}` : "";
           const signature = obj.signature?.trim() || "";
@@ -1128,9 +1155,10 @@ export function buildGroupedObjectTreeNodes({
           const triggerParentSchema = schemaIndex ? (obj.parent_schema ?? undefined) : objectType === "TRIGGER" && obj.parent_schema ? normalizeDatabaseObjectName(obj.parent_schema) : undefined;
           return {
             id: schemaIndex ? `${nodeId}:${def.key}:${JSON.stringify([childSchema, obj.name, triggerParentSchema, triggerParentName])}` : `${nodeId}:${def.key}:${childSchema ? `${childSchema}:` : ""}${obj.name}${signatureIdPart}${triggerParentName ? `:${triggerParentName}` : ""}${objectTypeSuffix}`,
-            label: signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `${obj.name}(${signature})` : triggerParentName ? `${obj.name} (${triggerParentName})` : obj.name,
+            label: signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `${obj.name}(${signature})` : triggerParentName ? `${obj.name} (${triggerParentName})` : postgresSequence ? normalizeDatabaseObjectName(obj.name) || obj.name : obj.name,
             type: childType,
             objectName: obj.name,
+            ...(postgresSequence ? { postgresSequenceExactIdentity: true as const } : {}),
             objectScope: schemaIndex ? ("schema" as const) : undefined,
             signature: objectType === "FUNCTION" || objectType === "PROCEDURE" ? (obj.signature == null ? undefined : signature) : signature || undefined,
             customTypeKind: obj.custom_type_kind ?? undefined,

@@ -18,6 +18,10 @@ export interface DataGridColumnLayoutHandle {
   showOnlyColumns?: (columnIndexes: number[]) => void;
   invertColumnVisibility: () => void;
   hasCustomColumnOrder: boolean;
+  hasTemporaryColumnOrder?: boolean;
+  confirmColumnHeaderReorder?: boolean;
+  setConfirmColumnHeaderReorder?: (value: boolean) => void;
+  savePreviewColumnOrder?: () => void;
   moveDisplayableColumn: (fromDisplayableIndex: number, toDisplayableIndex: number) => void;
   resetColumnOrder: () => void;
   /** Fit every visible column to its content (#9813). Optional so grids that

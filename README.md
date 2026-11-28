@@ -82,17 +82,6 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">
-        <img src="docs/public/sponsors/aicodemirror-card.png" alt="AICodeMirror" width="175" />
-      </a>
-    </td>
-    <td>
-      Special thanks to AICodeMirror for sponsoring this project! AICodeMirror provides a high-stability official relay service for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 7×24 dedicated support. Official-channel pricing for Claude Code / Codex / Gemini is as low as 38% / 2% / 9% of list price, with extra discounts on top-ups! AICodeMirror offers a special benefit for DBX users: register through this link to enjoy 20% off your first top-up, and enterprise customers up to 25% off.
-      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">Visit AICodeMirror</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
       <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
         <img src="docs/public/sponsors/rainyun-card.png" alt="RainYun" width="175" />
       </a>
@@ -115,23 +104,13 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-en" target="_blank">
-        <img src="docs/public/sponsors/hiapi-card.png" alt="HiAPI" width="175" />
-      </a>
-    </td>
-    <td>
-      HiAPI is a developer-focused API platform for image, video, audio, and text models — GPT Image 2.5 (Flare & Sunburst), OpenAI-compatible text endpoints, and Remote MCP/Agent Skills for Claude Code, Cursor, and more. Pay as you go with no minimum spend; new users get 200 Credits on signup, plus 10% bonus Credits on top-ups.
-      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-en" target="_blank">Visit HiAPI</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
         <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
       </a>
     </td>
     <td>
       UCloud is the first public cloud provider listed on China's STAR Market, with 28 global regions for cloud hosting, databases, and CDN; its AstraFlow platform offers one-click access to 200+ mainstream LLMs.
+      <br />Enterprise access: after completing enterprise certification, contact the platform for details if you need access to frontier models.
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">Visit UCloud</a>
     </td>
   </tr>
@@ -520,8 +499,8 @@ When building the frontend yourself with an absolute asset base, set
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) >= 18
-- [pnpm](https://pnpm.io/)
+- [Node.js](https://nodejs.org/) >= 22.13.0
+- [pnpm](https://pnpm.io/) 10.34.7
 - [Rust](https://www.rust-lang.org/tools/install) >= 1.88
 
 #### System Dependencies

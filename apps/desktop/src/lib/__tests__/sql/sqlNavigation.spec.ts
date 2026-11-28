@@ -18,6 +18,7 @@ import {
   resolveSqlObjectNavigationIdentity,
   splitQualifiedIdentifier,
   sqlObjectHoverDetail,
+  sqlObjectNavigationPackageMember,
   sqlObjectNavigationSourceKind,
   sqlObjectNavigationSourceName,
   sqlObjectNavigationSourceSchema,
@@ -199,6 +200,14 @@ describe("SQL object navigation metadata", () => {
     expect(sqlObjectNavigationSourceSchema({ name: "calc_tax", type: "procedure", parentName: "payroll", parentSchema: "hr" }, "app")).toBe("hr");
     expect(isSqlObjectNavigationRoutineType("procedure")).toBe(true);
     expect(isSqlObjectNavigationRoutineType("table")).toBe(false);
+  });
+
+  it("names the package member a navigation target points at", () => {
+    // The package body is the source; the member is only where the cursor goes.
+    expect(sqlObjectNavigationPackageMember({ name: "calc_tax", type: "procedure", parentName: "payroll", signature: "p_id IN NUMBER" })).toEqual({ name: "calc_tax", kind: "procedure", signature: "p_id IN NUMBER" });
+    expect(sqlObjectNavigationPackageMember({ name: "get_version", type: "function", parentName: "payroll" })).toEqual({ name: "get_version", kind: "function" });
+    expect(sqlObjectNavigationPackageMember({ name: "calc_tax", type: "procedure" })).toBeNull();
+    expect(sqlObjectNavigationPackageMember({ name: "payroll", type: "package" })).toBeNull();
   });
 
   it("normalizes relation metadata without collapsing materialized views", () => {

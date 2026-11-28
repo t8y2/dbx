@@ -59,6 +59,7 @@ import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRed
 import { buildGraphCompletionItems, getGraphCompletionContext, graphCompletionValidFor, shouldAutoOpenGraphCompletion } from "@/lib/graph/graphCompletion";
 import { isGraphQueryDatabase, type GraphQueryDatabase } from "@/lib/graph/graphQueryLanguage";
 import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import type { SqlLocalSchemaOverlay, SqlLocalSchemaTable } from "@/lib/sql/semantic/localSchema";
 import type { CompletionAssistantObjectKind, SqlServerCompletionContext } from "@/types/database";
 import type { ShallowRef, ComputedRef } from "vue";
 import type { Composer } from "vue-i18n";
@@ -726,26 +727,26 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       }
     }
 
-    if (props.database && mongoCompletionNeedsCollections(completionContext.mode)) {
+    const activeDatabase = completionContext.database ?? props.database;
+    if (activeDatabase && mongoCompletionNeedsCollections(completionContext)) {
       try {
-        collections = await connectionStore.listMongoCompletionCollections(props.connectionId, completionContext.database ?? props.database);
+        collections = await connectionStore.listMongoCompletionCollections(props.connectionId, activeDatabase);
       } catch {
         collections = [];
       }
     }
 
-    if (props.database && mongoCompletionNeedsFields(completionContext.mode) && completionContext.collection) {
+    if (activeDatabase && mongoCompletionNeedsFields(completionContext.mode) && completionContext.collection) {
       try {
-        fields = await connectionStore.listMongoCompletionFields(props.connectionId, completionContext.database ?? props.database, completionContext.collection);
+        fields = await connectionStore.listMongoCompletionFields(props.connectionId, activeDatabase, completionContext.collection);
       } catch {
         fields = [];
       }
     }
 
-    const indexDatabase = completionContext.database ?? props.database;
-    if (indexDatabase && mongoCompletionNeedsIndexes(completionContext.mode) && completionContext.collection) {
+    if (activeDatabase && mongoCompletionNeedsIndexes(completionContext.mode) && completionContext.collection) {
       try {
-        indexes = await connectionStore.listMongoCompletionIndexes(props.connectionId, indexDatabase, completionContext.collection);
+        indexes = await connectionStore.listMongoCompletionIndexes(props.connectionId, activeDatabase, completionContext.collection);
       } catch {
         indexes = [];
       }
@@ -874,6 +875,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     const currentState = context.state;
     const position = context.pos;
     const explicit = context.explicit;
+    if (!explicit && Date.now() < compositionCompletionNotBefore) return null;
     const typedActivation = isTypedCompletionActivation(explicit);
     if (runtime.imeCompositionActive || view.value?.compositionStarted || view.value?.composing) return null;
     if (!props.connectionId) return null;
@@ -914,6 +916,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       if (origin !== "explicit" && settingsStore.editorSettings.completionTriggerMode === "manual") return null;
       const analysis = await getEditorSqlCompletionAnalysis(fullDoc, position, currentState);
       if (!analysis || context.aborted || epoch !== completionEpoch) return null;
+      const localSchema = analysis.localSchema;
       analyzedCtes = { sql: fullDoc, definitions: analysis.cteDefinitions };
       const sequenceLiteralContext = settingsStore.editorSettings.sequenceCompletionEnabled ? analysis.sequenceLiteralContext : null;
       const { databaseLinkContext, useDatabaseCompletion } = analysis;
@@ -1016,10 +1019,12 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       let completionContext = analysis.completionContext;
 
       if (!hasDatabase) {
+        const localColumnsByTable = new Map<string, SqlCompletionColumn[]>();
+        mergeLocalSchemaColumns(localColumnsByTable, localSchema, completionContext, { database: "", schema: props.schema });
         const items = buildSqlCompletionItemsFromContext(completionContext, {
-          tables: [],
+          tables: mergeLocalSchemaTables([], localSchema),
           objects: [],
-          columnsByTable: new Map(),
+          columnsByTable: localColumnsByTable,
           schemas: [],
           translations: completionTranslations.value,
           snippets: settingsStore.editorSettings.snippets,
@@ -1031,6 +1036,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
           identifierCase: settingsStore.editorSettings.sqlFormatter.identifierCase,
           autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+          preferredTableAlias: settingsStore.editorSettings.preferredTableAlias,
           qualifyColumnCompletions: settingsStore.editorSettings.qualifyColumnCompletions,
           tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
@@ -1084,10 +1090,12 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
         completionContext.suggestTables || completionContext.suggestRoutines || completionContext.exclusiveRoutineSuggestions || !!completionContext.qualifier || !!completionContext.insertTable || completionContext.exclusiveColumnSuggestions || completionContext.referencedTables.length > 0;
 
       if (!needsAsyncData) {
+        const localColumnsByTable = new Map<string, SqlCompletionColumn[]>();
+        mergeLocalSchemaColumns(localColumnsByTable, localSchema, completionContext, completionScope);
         const items = buildSqlCompletionItemsFromContext(completionContext, {
-          tables: [],
+          tables: mergeLocalSchemaTables([], localSchema),
           objects: [],
-          columnsByTable: new Map(),
+          columnsByTable: localColumnsByTable,
           schemas: [],
           translations: completionTranslations.value,
           snippets: settingsStore.editorSettings.snippets,
@@ -1099,6 +1107,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
           identifierCase: settingsStore.editorSettings.sqlFormatter.identifierCase,
           autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+          preferredTableAlias: settingsStore.editorSettings.preferredTableAlias,
           qualifyColumnCompletions: settingsStore.editorSettings.qualifyColumnCompletions,
           tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
@@ -1124,9 +1133,9 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
         qualifierDot: !tableNameCompletion && !!completionContext.qualifier && !completionContext.prefix,
       });
       const shouldResolveAsyncCompletion = tableNameCompletion || shouldResolveColumnCompletion;
-      const localResult = buildLocalSqlCompletionResult(completionContext, fullDoc, position, completionScope);
+      const localResult = buildLocalSqlCompletionResult(completionContext, fullDoc, position, completionScope, localSchema);
       if (localResult) {
-        scheduleCompletionMetadataRefresh(completionContext, fullDoc, position, completionScope);
+        scheduleCompletionMetadataRefresh(completionContext, fullDoc, position, completionScope, localSchema);
         const hasLocalColumnResult = localResult.options.some((option) => option.type === "column");
         // A local snippet hit may skip the async column fetch, but not for on-demand-only
         // column metadata (trino/presto): their fetch is never re-triggered from the
@@ -1136,7 +1145,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
         if ((!explicit || typedActivation) && (!shouldResolveColumnCompletion || hasLocalColumnResult || hasLocalSnippetResult)) return localResult;
       }
       if ((!explicit || typedActivation) && !shouldResolveAsyncCompletion) {
-        scheduleCompletionMetadataRefresh(completionContext, fullDoc, position, completionScope);
+        scheduleCompletionMetadataRefresh(completionContext, fullDoc, position, completionScope, localSchema);
         return null;
       }
 
@@ -1160,7 +1169,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
             return;
           }
           try {
-            const result = await performAsyncCompletionWithResult(epoch, completionContext, fullDoc, position, completionScope);
+            const result = await performAsyncCompletionWithResult(epoch, completionContext, fullDoc, position, completionScope, localSchema);
             resolve(result ?? localResult);
           } catch {
             resolve(localResult);
@@ -1172,48 +1181,69 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     }
   }
 
-  // Manual-trigger shortcut (default Alt+/). Opens the completion popup on the
-  // explicit path so auto-trigger mode gating is bypassed. Unlike
-  // scheduleSqlCompletionStart, it must NOT mark the activation as typed, or the
-  // session would be misclassified as typing and gated for 500ms.
+  // The shortcut starts a new explicit session even if an automatic trigger is pending.
   function triggerSqlCompletion(currentView: EditorViewType): boolean {
     if (!runtime.codeMirrorStartCompletion || isEditorComposing(currentView)) return false;
+    clearDeferredCompletionTrigger();
+    typedCompletionActivationUntil = 0;
+    activeCompletionOrigin = "explicit";
     return runtime.codeMirrorStartCompletion(currentView);
   }
 
-  function scheduleSqlCompletionStart(currentView: EditorViewType, delayMs = 0) {
-    window.setTimeout(() => {
-      if (!runtime.codeMirrorStartCompletion || isEditorComposing(currentView)) return;
-      markTypedCompletionActivation();
-      activeCompletionOrigin = originForTypedSqlCompletionStart(activeCompletionOrigin);
-      runtime.codeMirrorStartCompletion(currentView);
-    }, delayMs);
+  function startTypedSqlCompletion(currentView: EditorViewType) {
+    if (!runtime.codeMirrorStartCompletion || isEditorComposing(currentView)) return;
+    markTypedCompletionActivation();
+    activeCompletionOrigin = originForTypedSqlCompletionStart(activeCompletionOrigin);
+    runtime.codeMirrorStartCompletion(currentView);
   }
 
+  function scheduleSqlCompletionStart(currentView: EditorViewType, delayMs = 0) {
+    window.setTimeout(() => startTypedSqlCompletion(currentView), delayMs);
+  }
+
+  let deferredCompletionTriggerVersion = 0;
+  let compositionCompletionNotBefore = 0;
+
   function clearDeferredCompletionTrigger() {
+    deferredCompletionTriggerVersion++;
     if (deferredCompletionTriggerTimer === null) return;
     clearTimeout(deferredCompletionTriggerTimer);
     deferredCompletionTriggerTimer = null;
   }
 
-  function scheduleDeferredCompletionTrigger(currentView: EditorViewType, insertedText: string, removedText: string) {
+  function scheduleDeferredCompletionTrigger(currentView: EditorViewType, insertedText?: string, removedText = "") {
     clearDeferredCompletionTrigger();
+    const version = deferredCompletionTriggerVersion;
     const expectedDoc = currentView.state.doc;
-    const expectedPosition = currentView.state.selection.main.head;
-    deferredCompletionTriggerTimer = setTimeout(async () => {
-      deferredCompletionTriggerTimer = null;
-      if (view.value !== currentView || currentView.state.doc !== expectedDoc || currentView.state.selection.main.head !== expectedPosition || isEditorComposing(currentView)) return;
-      if (await shouldStartSqlCompletionAfterInput(insertedText, removedText, currentView)) {
-        if (view.value !== currentView || currentView.state.doc !== expectedDoc || currentView.state.selection.main.head !== expectedPosition || isEditorComposing(currentView)) return;
-        scheduleSqlCompletionStart(currentView);
-      }
-    }, COMPLETION_TRIGGER_DEFER_DELAY_MS);
+    const expectedSelection = currentView.state.selection;
+    const delay = settingsStore.editorSettings.completionAutoActivationDelayMs;
+    const mode = settingsStore.editorSettings.completionTriggerMode;
+    const compositionEnded = insertedText === undefined;
+    // CodeMirror can start an implicit query immediately after composition ends.
+    compositionCompletionNotBefore = compositionEnded ? Date.now() + delay : 0;
+    const stillCurrent = () =>
+      version === deferredCompletionTriggerVersion &&
+      view.value === currentView &&
+      currentView.state.doc === expectedDoc &&
+      currentView.state.selection.eq(expectedSelection) &&
+      settingsStore.editorSettings.completionAutoActivationDelayMs === delay &&
+      settingsStore.editorSettings.completionTriggerMode === mode &&
+      !isEditorComposing(currentView);
+    const alreadyCompleting = () => !!runtime.codeMirrorCompletionStatus?.(currentView.state);
+    // This fallback handles edits CodeMirror doesn't activate on, such as deletion
+    // or paste. startCompletion bypasses CodeMirror's activateOnTypingDelay.
+    deferredCompletionTriggerTimer = setTimeout(
+      async () => {
+        deferredCompletionTriggerTimer = null;
+        if (!stillCurrent() || alreadyCompleting()) return;
+        const canStart = compositionEnded ? await shouldTriggerSqlCompletionForPosition(expectedDoc.toString(), expectedSelection.main.head) : await shouldStartSqlCompletionAfterInput(insertedText, removedText, currentView);
+        if (canStart && stillCurrent() && !alreadyCompleting()) startTypedSqlCompletion(currentView);
+      },
+      Math.max(COMPLETION_TRIGGER_DEFER_DELAY_MS, delay),
+    );
   }
 
-  /**
-   * Returns true when the current SQL position should trigger completion under the active trigger mode.
-   * Used by flushImeComposition and shouldStartSqlCompletionAfterInput.
-   */
+  /** Returns whether the current SQL position should trigger automatic completion. */
   async function shouldTriggerSqlCompletionForPosition(fullDoc: string, position: number): Promise<boolean> {
     const mode = settingsStore.editorSettings.completionTriggerMode;
     if (mode === "manual") return false;
@@ -1271,6 +1301,64 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     return shouldTriggerSqlCompletionForPosition(fullDoc, position);
   }
 
+  function localSchemaNameMatches(left: string, leftQuoted: boolean | undefined, right: string, rightQuoted: boolean | undefined): boolean {
+    return leftQuoted || rightQuoted ? left === right : normalizeIdentifierPart(left) === normalizeIdentifierPart(right);
+  }
+
+  function localSchemaTableForReference(overlay: SqlLocalSchemaOverlay, reference: SqlCompletionContext["referencedTables"][number], scope: CompletionMetadataScope): SqlLocalSchemaTable | undefined {
+    const matches = overlay.tables.filter((table) => {
+      if (!localSchemaNameMatches(table.name, table.nameQuoted, reference.name, reference.nameQuoted)) return false;
+      if (reference.schema) {
+        if (table.schema) {
+          if (!localSchemaNameMatches(table.schema, table.schemaQuoted, reference.schema, reference.schemaQuoted)) return false;
+        } else if (normalizeIdentifierPart(scope.schema ?? "") !== normalizeIdentifierPart(reference.schema)) return false;
+      }
+      if (reference.database) {
+        const localDatabase = table.database ?? table.schema;
+        if (localDatabase) {
+          if (normalizeIdentifierPart(localDatabase) !== normalizeIdentifierPart(reference.database)) return false;
+        } else if (normalizeIdentifierPart(scope.database ?? "") !== normalizeIdentifierPart(reference.database)) return false;
+      }
+      return true;
+    });
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  function mergeLocalSchemaColumns(columnsByTable: Map<string, SqlCompletionColumn[]>, overlay: SqlLocalSchemaOverlay, completionContext: SqlCompletionContext, scope: CompletionMetadataScope): void {
+    for (const reference of completionContext.referencedTables) {
+      const table = localSchemaTableForReference(overlay, reference, scope);
+      if (!table) continue;
+      const columns = table.columns.map((column) => ({ ...column, table: table.name, schema: table.schema }));
+      columnsByTable.set(completionCacheKey(reference, scope), columns);
+      columnsByTable.set(reference.name, columns);
+    }
+  }
+
+  function localSchemaTableKey(table: SqlCompletionTable & { nameQuoted?: boolean; schemaQuoted?: boolean }): string {
+    const part = (value: string | undefined, quoted: boolean | undefined) => (value === undefined ? "" : `${quoted ? "quoted" : "unquoted"}:${quoted ? value : value.toLowerCase()}`);
+    return JSON.stringify([part(table.catalog, false), part(table.database, false), part(table.schema, table.schemaQuoted), part(table.name, table.nameQuoted)]);
+  }
+
+  function mergeLocalSchemaTables(tables: SqlCompletionTable[], overlay: SqlLocalSchemaOverlay): SqlCompletionTable[] {
+    const merged = [...tables];
+    const indexes = new Map(merged.map((table, index) => [localSchemaTableKey(table), index]));
+    for (const table of overlay.tables) {
+      const key = localSchemaTableKey(table);
+      const index = indexes.get(key);
+      if (index === undefined) {
+        indexes.set(key, merged.length);
+        merged.push(table);
+      } else {
+        merged[index] = { ...merged[index], ...table };
+      }
+    }
+    return merged;
+  }
+
+  function localSchemaIncludesReference(overlay: SqlLocalSchemaOverlay, reference: SqlCompletionContext["referencedTables"][number], scope: CompletionMetadataScope): boolean {
+    return localSchemaTableForReference(overlay, reference, scope) !== undefined;
+  }
+
   function searchesAcrossPostgresSchemas(completionContext: SqlCompletionContext, scope: CompletionMetadataScope): boolean {
     return props.databaseType === "postgres" && !scope.schema && completionContext.suggestTables && !completionContext.qualifier;
   }
@@ -1281,7 +1369,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     return searchesAcrossPostgresSchemas(completionContext, scope) && mode !== "never" ? "always" : mode;
   }
 
-  function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope) {
+  function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope, localSchema: SqlLocalSchemaOverlay) {
     if (!props.connectionId || props.database == null) return null;
     const databaseNames = localCompletionDatabaseNames(completionContext);
     const currentDatabaseSchemaNames = localCompletionSchemasForDatabaseDisambiguation(completionContext, databaseNames, scope);
@@ -1363,6 +1451,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
 
     const cteDefs = analyzedCtes?.sql === fullDoc ? analyzedCtes.definitions : extractCteDefinitions(fullDoc, props.databaseType);
     for (const refTable of completionContext.referencedTables) {
+      if (localSchemaIncludesReference(localSchema, refTable, scope)) continue;
       if (refTable.columns?.length) {
         columnsByTable.set(
           refTable.name,
@@ -1410,8 +1499,10 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       }
     }
 
+    mergeLocalSchemaColumns(columnsByTable, localSchema, completionContext, scope);
+    const tablesWithLocalSchema = mergeLocalSchemaTables(tables, localSchema);
     if (
-      tables.length === 0 &&
+      tablesWithLocalSchema.length === 0 &&
       completionObjects.length === 0 &&
       schemaNames.length === 0 &&
       columnsByTable.size === 0 &&
@@ -1422,7 +1513,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     }
 
     const items = buildSqlCompletionItemsFromContext(completionContext, {
-      tables,
+      tables: tablesWithLocalSchema,
       objects: completionObjects,
       columnsByTable,
       foreignKeysByTable: cachedForeignKeysByTable,
@@ -1437,6 +1528,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
       identifierCase: settingsStore.editorSettings.sqlFormatter.identifierCase,
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+      preferredTableAlias: settingsStore.editorSettings.preferredTableAlias,
       qualifyColumnCompletions: settingsStore.editorSettings.qualifyColumnCompletions,
       tableCompletionSchemaQualification: tableSchemaQualification(completionContext, scope),
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
@@ -1448,7 +1540,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);
   }
 
-  function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope) {
+  function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope, localSchema: SqlLocalSchemaOverlay) {
     if (!props.connectionId || props.database == null) return;
     const localOnlyMetadata = usesLocalOnlyCompletionMetadata();
     const onDemandOnlyColumns = usesOnDemandOnlyCompletionColumns();
@@ -1475,7 +1567,11 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (!localOnlyMetadata && !schemaLookupDatabase && (completionContext.suggestTables || (!!completionContext.qualifier && !isReferencedTableQualifier(completionContext)))) {
       const crossSchemaSearch = searchesAcrossPostgresSchemas(completionContext, scope);
       const globalTableSearch = crossSchemaSearch || (isOracleCompletionDatabase(props.databaseType) && completionContext.suggestTables && !completionContext.qualifier);
-      const localTableKeys = crossSchemaSearch ? new Set(connectionStore.lookupLocalCompletionTables(connectionId, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, undefined, props.catalog).map((table) => JSON.stringify([table.schema, table.name]))) : undefined;
+      const qualifiedSchemaTableSearch = tableNameCompletion && !!completionContext.qualifier && !!tableLookupTarget.schema;
+      const localTableKeys =
+        crossSchemaSearch || qualifiedSchemaTableSearch
+          ? new Set(connectionStore.lookupLocalCompletionTables(connectionId, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, tableLookupTarget.schema, props.catalog).map((table) => JSON.stringify([table.schema, table.name])))
+          : undefined;
       const refreshEpoch = completionEpoch;
       queueTableCompletionRefresh(async () => {
         if (refreshEpoch !== completionEpoch) return;
@@ -1555,13 +1651,14 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (!onDemandOnlyColumns && !tableNameCompletion) {
       const refreshEpoch = completionEpoch;
       for (const refTable of completionContext.referencedTables) {
+        if (localSchemaIncludesReference(localSchema, refTable, scope)) continue;
         if (isVirtualCompletionTableReference(refTable)) continue;
         if (refTable.columns && refTable.columns.length > 0) continue;
         let resolvedRef = refTable;
         if (!usesOracleSessionCompletionColumns(resolvedRef.schema) && !resolvedRef.schema) {
           const cachedTable =
-            completionMetadata.cachedTables.find((table) => table.name.toLowerCase() === resolvedRef.name.toLowerCase()) ??
-            connectionStore.lookupLocalCompletionTables(connectionId, scope.database, resolvedRef.name, 20, undefined, props.catalog).find((table) => table.name.toLowerCase() === resolvedRef.name.toLowerCase());
+            findCachedTableForUnqualifiedRef(completionMetadata.cachedTables, resolvedRef.name, scope.schema) ??
+            findCachedTableForUnqualifiedRef(connectionStore.lookupLocalCompletionTables(connectionId, scope.database, resolvedRef.name, 20, scope.schema, props.catalog), resolvedRef.name, scope.schema);
           if (cachedTable?.schema) {
             resolvedRef = { ...resolvedRef, schema: cachedTable.schema };
           }
@@ -1588,12 +1685,23 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     }
   }
 
+  function findCachedTableForUnqualifiedRef(candidates: SqlCompletionTable[], tableName: string, activeSchema?: string): SqlCompletionTable | undefined {
+    const normalizedName = tableName.toLowerCase();
+    const normalizedActiveSchema = activeSchema?.trim().toLowerCase();
+    if (normalizedActiveSchema) {
+      return candidates.find((table) => table.name.toLowerCase() === normalizedName && table.schema?.trim().toLowerCase() === normalizedActiveSchema);
+    }
+    return candidates.find((table) => table.name.toLowerCase() === normalizedName);
+  }
+
   function shouldLoadCompletionObjects(completionContext: ReturnType<typeof getSqlCompletionContext>): boolean {
     // Doris/StarRocks external catalogs currently expose table and column
     // metadata through catalog-aware APIs. The generic routine/object endpoint
     // is catalogless and would query the internal catalog, aborting completion.
     if (props.catalog) return false;
-    const routineContext = completionContext.suggestRoutines || completionContext.exclusiveRoutineSuggestions || (!!completionContext.qualifier && !completionContext.exclusiveColumnSuggestions);
+    const sqlServerTableValuedFunctionContext = props.databaseType === "sqlserver" && (completionContext.suggestTables || completionContext.exclusiveTableSuggestions);
+    const qualifiedRoutineContext = !!completionContext.qualifier && !completionContext.exclusiveColumnSuggestions && !completionContext.exclusiveTableSuggestions;
+    const routineContext = completionContext.suggestRoutines || completionContext.exclusiveRoutineSuggestions || completionContext.oracleTableFunctionContext || sqlServerTableValuedFunctionContext || qualifiedRoutineContext;
     return routineContext && !isReferencedTableQualifier(completionContext);
   }
 
@@ -1746,7 +1854,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     return { database: (supportsDatabaseSchemaQualifierCompletion() ? table.database : undefined) ?? scope.database, schema: table.schema ?? scope.schema, catalog: props.catalog };
   }
 
-  async function performAsyncCompletionWithResult(epoch: number, completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope) {
+  async function performAsyncCompletionWithResult(epoch: number, completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope, localSchema: SqlLocalSchemaOverlay) {
     const localOnlyMetadata = usesLocalOnlyCompletionMetadata();
     const onDemandOnlyColumns = usesOnDemandOnlyCompletionColumns();
     // Handle INSERT column list: fetch columns for the target table
@@ -1826,7 +1934,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       if (owners.size === 1) resolvedRoutineSchema = owners.values().next().value;
     }
 
-    if (!props.catalog && !isOracleCompletionDatabase(props.databaseType) && !localOnlyMetadata && completionContext.qualifier && completionObjects.length === 0) {
+    if (shouldLoadObjects && !props.catalog && !isOracleCompletionDatabase(props.databaseType) && !localOnlyMetadata && completionContext.qualifier && completionObjects.length === 0) {
       const target = routineCompletionTargetForContext(completionContext, scope);
       const schemaObjects = await connectionStore.listCompletionObjects(props.connectionId!, target.database, target.mask, MAX_COMPLETION_TABLES, target.schema, undefined, false, scope.schema);
       if (schemaObjects.length > 0) {
@@ -1874,7 +1982,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     let refs = completionContext.referencedTables.map((rt) => {
       if (usesOracleSessionCompletionColumns(rt.schema)) return rt;
       if (!rt.schema) {
-        const cached = tables.find((t) => t.name.toLowerCase() === rt.name.toLowerCase());
+        const cached = findCachedTableForUnqualifiedRef(tables, rt.name, scope.schema);
         if (cached && cached.schema) {
           return { ...rt, schema: cached.schema };
         }
@@ -1930,6 +2038,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (shouldFetchColumnsForCompletion) {
       await Promise.all(
         columnRefs.map(async (refTable) => {
+          if (localSchemaIncludesReference(localSchema, refTable, scope)) return;
           if (isVirtualCompletionTableReference(refTable)) return;
           if (refTable.columns && refTable.columns.length > 0) return;
           const cacheKey = completionCacheKey(refTable, scope);
@@ -1966,6 +2075,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       }
     } else {
       for (const refTable of refs) {
+        if (localSchemaIncludesReference(localSchema, refTable, scope)) continue;
         if (hasQualifiedColumnPrefix && !columnRefs.includes(refTable)) continue;
         if (refTable.columns && refTable.columns.length > 0) {
           const key = refTable.name;
@@ -2014,6 +2124,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
         }
       : completionContext;
 
+    tables = mergeLocalSchemaTables(tables, localSchema);
+    mergeLocalSchemaColumns(columnsByTable, localSchema, effectiveContext, scope);
     const items = buildSqlCompletionItemsFromContext(effectiveContext, {
       tables,
       objects: completionObjects,
@@ -2030,6 +2142,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
       identifierCase: settingsStore.editorSettings.sqlFormatter.identifierCase,
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+      preferredTableAlias: settingsStore.editorSettings.preferredTableAlias,
       qualifyColumnCompletions: settingsStore.editorSettings.qualifyColumnCompletions,
       tableCompletionSchemaQualification: tableSchemaQualification(completionContext, scope),
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
@@ -2068,7 +2181,6 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     triggerSqlCompletion,
     markCompletionAccepted,
     shouldTriggerSqlCompletionForPosition,
-    scheduleSqlCompletionStart,
     provideSqlCompletions,
     getProcedureCall: (source: string, truncatedPrefix: boolean) => getSqlProcedureCall(source, sqlCompletionDialectOptions(), truncatedPrefix),
     loadProcedureSignatures,
@@ -2076,6 +2188,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     scheduleDeferredCompletionTrigger,
     clearDeferredCompletionTrigger,
     invalidateRequests() {
+      clearDeferredCompletionTrigger();
       completionEpoch++;
       cancelEditorSqlCompletionAnalysis();
     },

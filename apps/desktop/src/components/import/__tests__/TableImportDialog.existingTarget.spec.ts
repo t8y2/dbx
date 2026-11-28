@@ -806,6 +806,56 @@ describe("TableImportDialog existing targets", () => {
     expect(nameSelects.map((s) => s.value)).toEqual(["__skip__", "__skip__"]);
   });
 
+  it("saves the column mapping as a template, reapplies it after a reset and deletes it (#11290)", async () => {
+    i18n.global.locale.value = "en";
+    localStorage.removeItem("dbx-table-import-mapping-templates");
+    mocks.previewTableImportFile.mockResolvedValue({
+      fileName: "unmatched.csv",
+      filePath: "/tmp/unmatched.csv",
+      fileType: "csv",
+      sizeBytes: 24,
+      columns: ["col_1", "col_2"],
+      rows: [["1", "Alice"]],
+      totalRows: 1,
+      sourceFingerprint: "unmatched",
+    });
+
+    await mountDialog({ prefillTable: "existing_target" });
+    await selectWorkbook("unmatched.csv");
+    await vi.waitFor(() => expect(buttonContaining("Next")?.disabled).toBe(false));
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+
+    const mappingValues = () => [...document.body.querySelectorAll<HTMLSelectElement>("select:not([data-action='apply-template'])")].map((select) => select.value);
+    expect(mappingValues()).toEqual(["id", "name"]);
+    expect(document.body.querySelector("select[data-action='apply-template']")).toBeNull();
+
+    document.body.querySelector<HTMLButtonElement>('button[data-action="save-template"]')!.click();
+    await flushAsyncUpdates();
+    const nameInput = document.body.querySelector<HTMLInputElement>("[data-template-save-form] input")!;
+    nameInput.value = "Customers";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    [...document.body.querySelectorAll<HTMLButtonElement>("[data-template-save-form] button")].find((button) => button.textContent?.trim() === "Save")!.click();
+    await flushAsyncUpdates();
+    expect(JSON.parse(localStorage.getItem("dbx-table-import-mapping-templates")!)).toEqual([{ name: "Customers", mapping: { col_1: "id", col_2: "name" } }]);
+
+    document.body.querySelector<HTMLButtonElement>('button[data-action="skip-all"]')!.click();
+    await flushAsyncUpdates();
+    expect(mappingValues()).toEqual(["__skip__", "__skip__"]);
+
+    const templateSelect = document.body.querySelector<HTMLSelectElement>("select[data-action='apply-template']")!;
+    templateSelect.value = "Customers";
+    templateSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(mappingValues()).toEqual(["id", "name"]);
+
+    document.body.querySelector<HTMLButtonElement>('button[data-action="delete-template"]')!.click();
+    await flushAsyncUpdates();
+    expect(JSON.parse(localStorage.getItem("dbx-table-import-mapping-templates")!)).toEqual([]);
+    expect(document.body.querySelector("select[data-action='apply-template']")).toBeNull();
+  });
+
   it("renders strikethrough on skipped column header and preview cells in mapping step", async () => {
     i18n.global.locale.value = "en";
     mocks.previewTableImportFile.mockResolvedValueOnce({

@@ -257,6 +257,35 @@ async fn directory_static_cache_policy(request: Request<axum::body::Body>, next:
     response
 }
 
+/// Response headers a security scanner expects on the browser build (#15439).
+///
+/// The bundle is served over whatever TLS the operator terminates in front of
+/// it, so the headers are unconditional: `Strict-Transport-Security` is ignored
+/// by browsers on plain HTTP and takes effect as soon as the client sees HTTPS.
+/// `X-XSS-Protection: 0` is the current recommendation (the legacy auditor is
+/// itself an XSS vector) while still answering scanners that only look for the
+/// header's presence.
+const SECURITY_RESPONSE_HEADERS: [(&str, &str); 7] = [
+    ("x-content-type-options", "nosniff"),
+    ("x-frame-options", "SAMEORIGIN"),
+    ("referrer-policy", "strict-origin-when-cross-origin"),
+    ("x-xss-protection", "0"),
+    ("x-download-options", "noopen"),
+    ("x-permitted-cross-domain-policies", "none"),
+    ("strict-transport-security", "max-age=31536000"),
+];
+
+/// Applies [`SECURITY_RESPONSE_HEADERS`] to every response, API and assets alike.
+async fn security_headers(request: Request<axum::body::Body>, next: middleware::Next) -> Response {
+    use axum::http::header::{HeaderName, HeaderValue};
+
+    let mut response = next.run(request).await;
+    for (name, value) in SECURITY_RESPONSE_HEADERS {
+        response.headers_mut().insert(HeaderName::from_static(name), HeaderValue::from_static(value));
+    }
+    response
+}
+
 fn add_public_base_path_redirect<S>(app: Router<S>, public_base_path: &str) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -810,6 +839,7 @@ async fn serve() -> Result<(), String> {
         .route("/schema/mysql/auto-increment", get(routes::schema::get_mysql_table_auto_increment))
         .route("/schema/schemas", get(routes::schema::list_schemas))
         .route("/schema/tables", get(routes::schema::list_tables))
+        .route("/schema/table-children", get(routes::schema::list_table_children))
         .route("/schema/table-comment", get(routes::schema::get_table_comment))
         .route("/schema/objects", get(routes::schema::list_objects))
         .route("/schema/object-statistics", get(routes::schema::list_object_statistics))
@@ -920,6 +950,7 @@ async fn serve() -> Result<(), String> {
         .route("/query/build-rename-object-sql", post(routes::query::build_rename_object_sql))
         .route("/query/build-rename-database-sql", post(routes::query::build_rename_database_sql))
         .route("/query/build-rename-database-preflight-sql", post(routes::query::build_rename_database_preflight_sql))
+        .route("/query/build-mysql-rename-database-sql", post(routes::query::build_mysql_rename_database_sql))
         .route("/query/build-create-database-sql", post(routes::query::build_create_database_sql))
         .route("/query/build-sqlite-attach-database-sql", post(routes::query::build_sqlite_attach_database_sql))
         .route("/query/build-drop-object-sql", post(routes::query::build_drop_object_sql))
@@ -1410,6 +1441,8 @@ async fn serve() -> Result<(), String> {
         .route("/ai/config-item", post(routes::ai::save_ai_config_item))
         .route("/ai/config/{config_id}", delete(routes::ai::delete_ai_config))
         .route("/ai/conversation", post(routes::ai::save_ai_conversation))
+        .route("/ai/conversation/plugin-connections", post(routes::ai::update_ai_conversation_plugin_connections))
+        .route("/ai/conversation/pin", post(routes::ai::save_ai_conversation_pin))
         .route("/ai/conversations", get(routes::ai::load_ai_conversations))
         .route("/ai/conversation/{id}", delete(routes::ai::delete_ai_conversation))
         .route("/ai/complete", post(routes::ai::ai_complete))
@@ -1636,6 +1669,11 @@ async fn serve() -> Result<(), String> {
         }
     };
     app = mount_static_assets(app, &public_base_path, static_source);
+    // Outermost layer so the scanner-visible headers land on API responses,
+    // static assets and error pages alike (#15439). Keep every route, nested
+    // router and fallback mounted above this line: anything added below would
+    // silently escape the headers.
+    app = app.layer(middleware::from_fn(security_headers));
 
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
@@ -1753,8 +1791,9 @@ async fn serve() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        mount_static_assets, normalize_public_base_path, password_viewer_enabled_from_env, web_agent_dir_from_env,
-        web_body_limit_bytes_from_value, web_compression_predicate, StaticSource, XLSX_CONTENT_TYPE,
+        mount_static_assets, normalize_public_base_path, password_viewer_enabled_from_env, security_headers,
+        web_agent_dir_from_env, web_body_limit_bytes_from_value, web_compression_predicate, StaticSource,
+        SECURITY_RESPONSE_HEADERS, XLSX_CONTENT_TYPE,
     };
     use crate::routes::table_import;
     use axum::body::Body;
@@ -1807,6 +1846,54 @@ mod tests {
 
     fn compression_response(content_type: &str) -> Response<Body> {
         Response::builder().header(CONTENT_TYPE, content_type).body(Body::from(vec![b'x'; 64])).unwrap()
+    }
+
+    /// The header set the browser hardening scan looks for (#15439), kept
+    /// literal so renaming or dropping one fails here instead of only in the
+    /// scanner.
+    const EXPECTED_SECURITY_RESPONSE_HEADERS: [(&str, &str); 7] = [
+        ("x-content-type-options", "nosniff"),
+        ("x-frame-options", "SAMEORIGIN"),
+        ("referrer-policy", "strict-origin-when-cross-origin"),
+        ("x-xss-protection", "0"),
+        ("x-download-options", "noopen"),
+        ("x-permitted-cross-domain-policies", "none"),
+        ("strict-transport-security", "max-age=31536000"),
+    ];
+
+    #[test]
+    fn security_response_headers_cover_the_reported_set() {
+        use axum::http::header::{HeaderName, HeaderValue};
+
+        assert_eq!(SECURITY_RESPONSE_HEADERS, EXPECTED_SECURITY_RESPONSE_HEADERS);
+        for (name, value) in EXPECTED_SECURITY_RESPONSE_HEADERS {
+            HeaderName::from_static(name);
+            HeaderValue::from_static(value);
+        }
+    }
+
+    #[tokio::test]
+    async fn security_headers_land_on_every_response() {
+        let router =
+            Router::new().route("/api/ok", get(|| async { "ok" })).layer(axum::middleware::from_fn(security_headers));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::new();
+
+        for (path, status) in [("/api/ok", StatusCode::OK), ("/missing", StatusCode::NOT_FOUND)] {
+            let response = client.get(format!("http://{address}{path}")).send().await.unwrap();
+            assert_eq!(response.status(), status, "{path}");
+            for (name, expected) in EXPECTED_SECURITY_RESPONSE_HEADERS {
+                assert_eq!(
+                    response.headers().get(name).and_then(|value| value.to_str().ok()),
+                    Some(expected),
+                    "{path} is missing {name}"
+                );
+            }
+        }
+
+        server.abort();
     }
 
     #[test]

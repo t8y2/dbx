@@ -15,6 +15,7 @@ import { BINARY_CELL_DOWNLOAD_MODES, isBinaryCellColumnType, binaryCellUtf8Text,
 import { canPreviewCellGeometry, cellDetailPreviewText } from "@/lib/dataGrid/cellDetailPresentation";
 import { renderWktOnCanvas } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
+import type { PluginDecodeRequest } from "@/lib/dataGrid/sqlPluginCodec";
 import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
@@ -32,6 +33,8 @@ const props = defineProps<{
   importBinaryValue: (detail: DataGridCellDetail | null) => void | Promise<void>;
   /** BLOB / BYTEA 文本预览与编辑写回一致，在 MySQL / Oracle（含 OceanBase-Oracle）或 PostgreSQL 连接开启。 */
   databaseType?: DatabaseType;
+  /** 右键"插件解码"：打开对应单元格的转换面板并切到插件解码。 */
+  pluginDecodeRequest?: PluginDecodeRequest | null;
 }>();
 
 const emit = defineEmits<{
@@ -167,7 +170,22 @@ watch(
               <!-- Binary cells keep `0x<hex>` as the canonical value; the transform kinds below
                    (timestamp/JSON/radix…) have text semantics and would misread hex. Offer the
                    explicit, read-only bytes decode instead. -->
-              <DataGridCellDetailTextPreview v-if="open && isBinaryCellColumnType(detail.type)" :identity="`${detail.rowId}:${detail.colIndex}`" :value="detail.value" :column-type="detail.type" :database-type="databaseType" :incomplete="detail.isSourceTruncated" />
+              <template v-if="open && isBinaryCellColumnType(detail.type)">
+                <DataGridCellDetailTextPreview :identity="`${detail.rowId}:${detail.colIndex}`" :value="detail.value" :column-type="detail.type" :database-type="databaseType" :incomplete="detail.isSourceTruncated" />
+                <!-- Plugin codecs receive the original bytes, so binary cells may still use them. -->
+                <DataGridValueTransform
+                  v-model:open="valueTransformOpen"
+                  plugin-only
+                  :source="(detail.isNull ?? detail.value === null) ? null : detail.rawValue"
+                  :identity="`${detail.rowId}:${detail.colIndex}`"
+                  :incomplete="detail.isSourceTruncated"
+                  :column="detail.column"
+                  :row-number="detail.rowNumber"
+                  :column-type="detail.type"
+                  :database-type="databaseType"
+                  :plugin-decode-request="pluginDecodeRequest"
+                />
+              </template>
               <DataGridValueTransform
                 v-else-if="open"
                 v-model:open="valueTransformOpen"
@@ -177,6 +195,9 @@ watch(
                 :unsafe-number="typeof detail.value === 'number' && Number.isInteger(detail.value) && !Number.isSafeInteger(detail.value)"
                 :column="detail.column"
                 :row-number="detail.rowNumber"
+                :column-type="detail.type"
+                :database-type="databaseType"
+                :plugin-decode-request="pluginDecodeRequest"
               />
               <Button v-if="detail.formattedJson" :variant="jsonView ? 'secondary' : 'ghost'" size="sm" class="h-6 gap-1 px-2 text-xs" :title="t('grid.formattedJson')" @click="toggleJsonFormatted">
                 <Code2 class="h-3 w-3" />

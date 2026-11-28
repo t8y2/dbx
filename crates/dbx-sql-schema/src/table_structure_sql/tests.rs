@@ -484,6 +484,33 @@ fn saphana_table_structure_uses_add_drop_and_alter_syntax() {
 }
 
 #[test]
+fn saphana_creates_table_with_columns() {
+    let result = build_create_table_sql(structure_change_options(
+        DatabaseType::SapHana,
+        Some("APP"),
+        "users",
+        vec![column("new_col")],
+    ));
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.statements, vec!["CREATE TABLE \"APP\".\"users\" (\n  \"new_col\" varchar(255)\n);"]);
+}
+
+#[test]
+fn saphana_adds_primary_key_without_separately_changing_nullability() {
+    let mut id = existing_pk_column("id", "INTEGER", false, true);
+    id.original.as_mut().unwrap().is_nullable = true;
+    let code = existing_pk_column("code", "INTEGER", false, true);
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::SapHana,
+        Some("APP"),
+        "users",
+        vec![id, code],
+    ));
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.statements, vec!["ALTER TABLE \"APP\".\"users\" ADD PRIMARY KEY (\"id\", \"code\");"]);
+}
+
+#[test]
 fn transwarp_table_comments_use_inceptor_syntax() {
     let mut options =
         structure_change_options(DatabaseType::Transwarp, Some("analytics"), "users", vec![column("name")]);
@@ -1778,6 +1805,91 @@ fn doris_single_column_alter_renames_then_modifies_column_definition() {
             "ALTER TABLE `dim_prod_sp_vkorg` MODIFY COLUMN `dtp_flag_jt` int COMMENT 'Group DTP';",
         ]
     );
+}
+
+#[test]
+fn doris_creates_index_with_create_index_on_table() {
+    let result = build_table_structure_change_sql(index_change_options(
+        DatabaseType::Doris,
+        None,
+        index("idx_course_id", &["course_id"]),
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["CREATE INDEX `idx_course_id` ON `USERS` (`course_id`);"]);
+}
+
+#[test]
+fn doris_drops_index_with_drop_index_on_table() {
+    let mut dropped = existing_index("idx_course_id", &["course_id"], false);
+    dropped.marked_for_drop = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Doris, None, dropped));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["DROP INDEX `idx_course_id` ON `USERS`;"]);
+}
+
+#[test]
+fn doris_unique_index_is_refused_with_a_clear_message() {
+    let mut unique = index("idx_unique_email", &["email"]);
+    unique.is_unique = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Doris, None, unique));
+
+    assert_eq!(result.warnings, vec!["Unique indexes are not supported for doris from this editor.".to_string()]);
+    assert!(result.statements.is_empty());
+}
+
+#[test]
+fn doris_composite_index_is_refused_because_create_index_takes_one_column() {
+    let result = build_table_structure_change_sql(index_change_options(
+        DatabaseType::Doris,
+        None,
+        index("idx_multi", &["first_name", "last_name"]),
+    ));
+
+    assert_eq!(result.warnings, vec!["Doris supports single-column indexes only from this editor.".to_string()]);
+    assert!(result.statements.is_empty());
+}
+
+#[test]
+fn doris_unique_index_is_refused_when_creating_a_table_too() {
+    let mut unique = index("idx_unique_email", &["email"]);
+    unique.is_unique = true;
+    let mut options = index_change_options(DatabaseType::Doris, None, unique);
+    options.columns = vec![column("email")];
+
+    let result = build_create_table_sql(options);
+
+    assert_eq!(result.warnings, vec!["Unique indexes are not supported for doris from this editor.".to_string()]);
+    assert!(!result.statements.iter().any(|statement| statement.contains("UNIQUE INDEX")));
+}
+
+#[test]
+fn doris_schema_qualified_table_still_emits_an_unqualified_create_index() {
+    let result = build_table_structure_change_sql(index_change_options(
+        DatabaseType::Doris,
+        Some("analytics"),
+        index("idx_course_id", &["course_id"]),
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["CREATE INDEX `idx_course_id` ON `USERS` (`course_id`);"]);
+}
+
+#[test]
+fn doris_key_index_from_the_table_model_is_not_droppable() {
+    let mut key_index = existing_index("UNIQUE KEY", &["email"], true);
+    key_index.marked_for_drop = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Doris, None, key_index));
+
+    assert_eq!(
+        result.warnings,
+        vec!["The Doris key index \"UNIQUE KEY\" is part of the table's UNIQUE KEY and cannot be dropped from this editor.".to_string()]
+    );
+    assert!(result.statements.is_empty());
 }
 
 #[test]

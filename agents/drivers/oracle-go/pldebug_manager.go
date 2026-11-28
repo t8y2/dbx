@@ -714,6 +714,7 @@ func (e *plDebugNativeEntry) executeTarget(tx *sql.Tx, p *plDebugSession, block 
 	if e.namedCall != nil {
 		arguments = e.namedCall.arguments
 		observer.lobs = e.namedCall.lobOutputs()
+		observer.cursors = e.namedCall.cursorOutputs()
 	}
 	capture, executionErr = plDebugExecuteObservedCapture(ctx, tx, e.server.nativeDebuggeeAllocation(), p.oci, block, arguments, observer)
 }

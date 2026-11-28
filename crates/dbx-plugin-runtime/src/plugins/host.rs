@@ -3,10 +3,14 @@ use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
 use crate::models::connection::{ConnectionConfig, ConnectionTestResult, DatabaseType};
+use dbx_types::models::observability::ObservationInterest;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
+use super::observation::{
+    PluginObservation, PluginObservationSink, KIND_ACTIVATED, KIND_ACTIVATE_FAILED, KIND_STATUS_CHANGED, KIND_STOPPED,
+};
 use super::{
     InstalledPlugin, PluginBinaryMessage, PluginConnectionActionContribution, PluginConnectionCapability,
     PluginConnectionProviderContribution, PluginEvent, PluginFormFieldBinding, PluginFormFieldDefinition,
@@ -14,6 +18,91 @@ use super::{
     PluginSidecarSession, PluginTrustStore, PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD,
     PLUGIN_CONNECTION_DISCONNECT_METHOD, PLUGIN_CONNECTION_TEST_METHOD,
 };
+
+/// Upper bound for one sidecar notification during observation fan-out. A
+/// sidecar that stopped draining its stdin must not stall the whole fan-out
+/// (and with it every other observer) forever.
+const OBSERVATION_NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Per-observer queue depth. A sidecar that falls this far behind loses events
+/// (it is told through a gap notification), never memory.
+const OBSERVATION_QUEUE_CAPACITY: usize = 256;
+
+/// Notification method used to report dropped events to a sidecar observer.
+const OBSERVATION_GAP_METHOD: &str = "host/observation_gap";
+
+/// Write one observation notification to a sidecar. Returns `false` once the
+/// session was stopped and its worker must exit.
+///
+/// Every write goes through here so a timeout always has the same containment:
+/// dropping the in-flight `write_all` can leave a partial JSONL frame in the
+/// sidecar's stdin pipe, and every later frame (events and gap notices alike)
+/// would splice onto that fragment. Stopping the stalled session is the only
+/// safe containment; observers see it as `plugin.stopped`. Other observers are
+/// unaffected because each has its own worker.
+async fn deliver_observation(session: &PluginSidecarSession, method: &str, params: serde_json::Value) -> bool {
+    let plugin_id = session.plugin().manifest.id.clone();
+    match tokio::time::timeout(OBSERVATION_NOTIFY_TIMEOUT, session.notify(method, params, None)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            log::debug!("Failed to deliver host observation to plugin '{plugin_id}': {error}");
+            true
+        }
+        Err(_) => {
+            log::warn!(
+                "Host observation to plugin '{plugin_id}' timed out after {OBSERVATION_NOTIFY_TIMEOUT:?}; \
+                 stopping its session to avoid a corrupted stdin frame"
+            );
+            if let Err(stop_error) = session.shutdown().await {
+                log::warn!("Failed to stop stalled plugin '{plugin_id}' after observation timeout: {stop_error}");
+            }
+            false
+        }
+    }
+}
+
+/// One queued delivery for a single observer.
+enum ObservationDelivery {
+    Event { method: String, params: serde_json::Value },
+    Gap { skipped: u64 },
+}
+
+/// Queue handle for one session's observation worker.
+///
+/// Each running observer drains its own bounded queue on its own task, so
+/// deliveries are ordered per observer and a slow or wedged sidecar only
+/// affects itself. The dispatch side only enqueues; it never waits for a
+/// sidecar's stdin write or process shutdown.
+#[derive(Clone)]
+struct ObservationWorker {
+    sender: tokio::sync::mpsc::Sender<ObservationDelivery>,
+    session: Arc<PluginSidecarSession>,
+    dropped: Arc<std::sync::atomic::AtomicU64>,
+    /// Interest-registry owner id, `None` when the host has no registry.
+    owner: Option<String>,
+}
+
+impl ObservationWorker {
+    fn enqueue(&self, delivery: ObservationDelivery) {
+        match self.sender.try_send(delivery) {
+            Ok(()) => {}
+            // The consumer is behind: drop this event and let the worker report
+            // the loss in-band once it catches up.
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            // The worker exited (a stalled session was stopped). Dispatch only
+            // reaches here while the session still looks running; the next
+            // stop path retires the entry.
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+}
+
+fn observation_owner_nonce() -> u64 {
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,10 +216,40 @@ struct PluginHostInner {
     connection_lifecycles: StdMutex<ConnectionLifecycleTable>,
     events: broadcast::Sender<PluginEvent>,
     binary_messages: broadcast::Sender<PluginBinaryMessage>,
+    /// Receives plugin lifecycle observations (activated / failed / status /
+    /// stopped). `None` disables observation entirely (tests, MCP clients).
+    observation_sink: Option<PluginObservationSink>,
+    /// Observer registry the bus publishes against. Registered observers gate
+    /// payload construction upstream, so a session that declares a
+    /// `host.observe:*` permission must hold interest while it runs.
+    observation_interest: Option<ObservationInterest>,
+    /// One dispatch queue per running observer session, keyed by plugin id.
+    observation_workers: StdMutex<HashMap<String, ObservationWorker>>,
 }
 
 impl PluginHost {
     pub fn new(registry: PluginRegistry) -> Self {
+        Self::new_with_observation_sink(registry, None)
+    }
+
+    /// Build a host that reports plugin lifecycle observations through `sink`.
+    /// The sink is invoked from activation/stop paths and a per-session status
+    /// watcher, so it must not block.
+    pub fn new_with_observation_sink(
+        registry: PluginRegistry,
+        observation_sink: Option<PluginObservationSink>,
+    ) -> Self {
+        Self::with_observations(registry, observation_sink, None)
+    }
+
+    /// Like [`Self::new_with_observation_sink`], and registers the observer
+    /// interest of every running sidecar that declared `host.observe:*` so the
+    /// shell's bus only builds payloads while such a sidecar is alive.
+    pub fn with_observations(
+        registry: PluginRegistry,
+        observation_sink: Option<PluginObservationSink>,
+        observation_interest: Option<ObservationInterest>,
+    ) -> Self {
         let (events, _) = broadcast::channel(512);
         let (binary_messages, _) = broadcast::channel(128);
         Self {
@@ -141,7 +260,16 @@ impl PluginHost {
                 connection_lifecycles: StdMutex::new(HashMap::new()),
                 events,
                 binary_messages,
+                observation_sink,
+                observation_interest,
+                observation_workers: StdMutex::new(HashMap::new()),
             }),
+        }
+    }
+
+    fn emit_observation(&self, observation: PluginObservation) {
+        if let Some(sink) = self.inner.observation_sink.as_ref() {
+            sink(observation);
         }
     }
 
@@ -174,6 +302,27 @@ impl PluginHost {
     }
 
     pub async fn activate_with_env(
+        &self,
+        plugin_id: &str,
+        env: PluginRuntimeEnv,
+    ) -> Result<Arc<PluginSidecarSession>, String> {
+        match self.activate_with_env_inner(plugin_id, env).await {
+            Ok(session) => Ok(session),
+            Err(error) => {
+                // Report every failed activation attempt (including "not
+                // installed" / "incompatible"): audit plugins need to see
+                // retries and misconfiguration, not just successful starts.
+                self.emit_observation(PluginObservation {
+                    plugin_id: plugin_id.to_string(),
+                    kind: KIND_ACTIVATE_FAILED,
+                    payload: serde_json::json!({ "pluginId": plugin_id, "error": error }),
+                });
+                Err(error)
+            }
+        }
+    }
+
+    async fn activate_with_env_inner(
         &self,
         plugin_id: &str,
         env: PluginRuntimeEnv,
@@ -214,7 +363,231 @@ impl PluginHost {
         self.inner.sessions.write().await.insert(plugin_id.to_string(), session.clone());
         self.watch_session(&session, probe);
         startup.disarm();
+        // Observe before reporting activation: a plugin that watches
+        // `host.observe:plugins` must receive its own `plugin.activated`, and
+        // the bus only publishes while the category has interest.
+        self.watch_session_status(&session);
+        self.attach_observation_worker(&session);
+        self.emit_observation(PluginObservation {
+            plugin_id: plugin_id.to_string(),
+            kind: KIND_ACTIVATED,
+            payload: serde_json::json!({
+                "pluginId": plugin_id,
+                "version": session.plugin().manifest.version,
+            }),
+        });
         Ok(session)
+    }
+
+    /// Forward `PluginSessionState` transitions (Running → Stopping →
+    /// Stopped/Exited) to the observation sink, and retire the session's
+    /// observation interest and dispatch queue as soon as it stops Running.
+    ///
+    /// The initial `Running` snapshot is skipped because `plugin.activated`
+    /// already reports it.
+    fn watch_session_status(&self, session: &Arc<PluginSidecarSession>) {
+        let sink = self.inner.observation_sink.clone();
+        let declares_observation =
+            session.plugin().manifest.permissions.iter().any(|permission| permission.starts_with("host.observe:"));
+        if sink.is_none() && !declares_observation {
+            return;
+        }
+        // Weak: this watcher runs for the whole session lifetime and must not
+        // keep the host alive. `watch_session` relies on `inner` being
+        // droppable to stop a sidecar whose host went away (see its comment),
+        // and a strong clone here would defeat that containment.
+        let owner = Arc::downgrade(&self.inner);
+        let watched = session.clone();
+        let plugin_id = session.plugin().manifest.id.clone();
+        let mut status = session.subscribe_status();
+        tokio::spawn(async move {
+            while status.changed().await.is_ok() {
+                let current = status.borrow_and_update().clone();
+                let terminal = matches!(current.state, PluginSessionState::Stopped | PluginSessionState::Exited);
+                // `plugin.stopped` is the terminal marker; non-terminal
+                // transitions keep their own kind so consumers can drive a
+                // state machine without guessing from `state`.
+                let kind = if terminal { KIND_STOPPED } else { KIND_STATUS_CHANGED };
+                let state = serde_json::to_value(&current.state).unwrap_or(serde_json::Value::Null);
+                if let Some(sink) = &sink {
+                    sink(PluginObservation {
+                        plugin_id: plugin_id.clone(),
+                        kind,
+                        payload: serde_json::json!({
+                            "pluginId": plugin_id,
+                            "state": state,
+                            "message": current.message,
+                        }),
+                    });
+                }
+                if current.state != PluginSessionState::Running {
+                    // Delivery only happens while the session is `Running`, so
+                    // retire the worker and its interest as soon as it leaves
+                    // that state. A failed stop parks the session in `Stopping`
+                    // (kept for retry); without this the interest would stay
+                    // registered and keep payload construction enabled for a
+                    // session that can never receive another event.
+                    //
+                    // When the host is already gone nothing can retire the
+                    // entry; that only happens while the whole shell (and the
+                    // bus sharing this registry) is being torn down.
+                    if let Some(inner) = owner.upgrade() {
+                        PluginHost { inner }.detach_observation_worker(&watched);
+                    }
+                }
+                if terminal {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Route one observation event to every already-running plugin session
+    /// whose manifest declares `permission`.
+    ///
+    /// Deliberately does **not** activate plugins: observation must never
+    /// spawn a sidecar process for a plugin the user has not opened. This is
+    /// the key difference from [`PluginHost::notify`], which auto-activates.
+    ///
+    /// This only enqueues: each running observer owns a bounded queue served by
+    /// its own worker, so one sidecar that stops draining stdin cannot delay
+    /// (or lose events for) any other observer. See [`ObservationWorker`].
+    pub fn broadcast_observation(&self, permission: &str, method: &str, params: serde_json::Value) {
+        let workers = self.observation_workers();
+        for worker in workers {
+            if worker.session.status().state != PluginSessionState::Running {
+                continue;
+            }
+            if !worker.session.plugin().manifest.permissions.iter().any(|declared| declared == permission) {
+                continue;
+            }
+            worker.enqueue(ObservationDelivery::Event { method: method.to_string(), params: params.clone() });
+        }
+    }
+
+    /// Tell running observers that the host observation bus dropped `skipped`
+    /// events before they reached delivery (the broadcast channel is bounded
+    /// and disconnects lagging consumers instead of blocking publishers).
+    ///
+    /// Gap notifications go to every running session that declared any
+    /// `host.observe:*` permission, because the drop happens before the
+    /// per-category filter; the UI path receives the same signal without a
+    /// permission filter for the same reason.
+    pub fn broadcast_observation_gap(&self, skipped: u64) {
+        let workers = self.observation_workers();
+        for worker in workers {
+            if !worker
+                .session
+                .plugin()
+                .manifest
+                .permissions
+                .iter()
+                .any(|declared| declared.starts_with("host.observe:"))
+            {
+                continue;
+            }
+            worker.enqueue(ObservationDelivery::Gap { skipped });
+        }
+    }
+
+    fn observation_workers(&self) -> Vec<ObservationWorker> {
+        let workers = self.inner.observation_workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        workers.values().cloned().collect()
+    }
+
+    /// Start the per-session observation worker for a freshly activated
+    /// session, plus the interest registration its events are gated on.
+    fn attach_observation_worker(&self, session: &Arc<PluginSidecarSession>) {
+        // Delivery only happens while the session is `Running`. A session that
+        // already left that state must not gain a worker: the status watcher
+        // only reports transitions, so nothing would ever retire it (and its
+        // interest) afterwards.
+        if session.status().state != PluginSessionState::Running {
+            return;
+        }
+        let plugin_id = session.plugin().manifest.id.clone();
+        let declared = &session.plugin().manifest.permissions;
+        if !declared.iter().any(|permission| permission.starts_with("host.observe:")) {
+            return;
+        }
+        // The session only receives events while it is alive, so the bus may
+        // publish the categories it declared. Owner ids are unique per
+        // activation attempt (`backend:<id>#<nonce>`) so a late stop
+        // observation from a replaced session cannot drop the new one's
+        // interest.
+        let owner = self.inner.observation_interest.as_ref().map(|interest| {
+            let owner = format!("backend:{plugin_id}#{}", observation_owner_nonce());
+            interest.acquire(&owner, declared);
+            owner
+        });
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(OBSERVATION_QUEUE_CAPACITY);
+        let dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let worker = ObservationWorker { sender, session: session.clone(), dropped: dropped.clone(), owner };
+        let worker_session = session.clone();
+        tokio::spawn(async move {
+            while let Some(delivery) = receiver.recv().await {
+                let skipped = dropped.swap(0, std::sync::atomic::Ordering::Relaxed);
+                if skipped > 0 {
+                    let gap = serde_json::json!({ "skipped": skipped });
+                    if !deliver_observation(&worker_session, OBSERVATION_GAP_METHOD, gap).await {
+                        return;
+                    }
+                }
+                let delivered = match delivery {
+                    ObservationDelivery::Gap { skipped } => {
+                        let gap = serde_json::json!({ "skipped": skipped });
+                        deliver_observation(&worker_session, OBSERVATION_GAP_METHOD, gap).await
+                    }
+                    ObservationDelivery::Event { method, params } => {
+                        deliver_observation(&worker_session, &method, params).await
+                    }
+                };
+                if !delivered {
+                    return;
+                }
+            }
+        });
+        let previous = self
+            .inner
+            .observation_workers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(plugin_id, worker);
+        // The status watcher retires a stopped session's worker asynchronously,
+        // so a replaced session may still be registered here. Release its
+        // interest now instead of leaving it to that race.
+        if let Some(previous) = previous {
+            if let (Some(interest), Some(owner)) = (&self.inner.observation_interest, previous.owner.as_deref()) {
+                interest.release(owner);
+            }
+        }
+        // The session may have left `Running` between the guard above and this
+        // insert; the watcher already fired then, so retire it here to avoid a
+        // worker (and interest) nobody will ever release.
+        if session.status().state != PluginSessionState::Running {
+            self.detach_observation_worker(session);
+        }
+    }
+
+    /// Stop delivering to `session` and release the interest it held.
+    ///
+    /// A worker (and its interest) is only retired when it still belongs to
+    /// this session: a replaced session's terminal status must not clear the
+    /// interest the replacement just registered.
+    fn detach_observation_worker(&self, session: &Arc<PluginSidecarSession>) {
+        let plugin_id = session.plugin().manifest.id.clone();
+        let worker = {
+            let mut workers = self.inner.observation_workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            match workers.get(&plugin_id) {
+                Some(worker) if Arc::ptr_eq(&worker.session, session) => workers.remove(&plugin_id),
+                _ => None,
+            }
+        };
+        if let Some(worker) = worker {
+            if let (Some(interest), Some(owner)) = (&self.inner.observation_interest, worker.owner.as_deref()) {
+                interest.release(owner);
+            }
+        }
     }
 
     /// Discovery must not leave one idle process per installed plugin in every MCP client.
@@ -1054,6 +1427,10 @@ mod tests {
     };
     use crate::models::connection::ConnectionConfig;
     use crate::plugins::PluginConnectionProviderContribution;
+    // The unix-only observation fan-out test below bounds its waits; Windows
+    // builds skip that test, so the import is unused there.
+    #[cfg(unix)]
+    use std::time::Duration;
 
     #[tokio::test]
     async fn uninstall_plugin_holds_one_update_lease_across_the_runtime_and_the_store() {
@@ -1912,5 +2289,186 @@ while IFS= read -r _; do :; done
         // A follow-up activate starts a fresh process with a clean state.
         host.activate("sample.quarantine").await.unwrap();
         host.stop("sample.quarantine").await.unwrap();
+    }
+
+    /// Observation must never spawn a sidecar: plugins that only observe stay
+    /// dormant until the user actually opens their UI or connection.
+    #[tokio::test]
+    async fn broadcast_observation_never_activates_plugins() {
+        use crate::plugins::{PluginHost, PluginRegistry};
+
+        let temp = tempfile::tempdir().unwrap();
+        let plugin_dir = temp.path().join("sample.observer");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "id": "sample.observer",
+                "name": "Observer",
+                "version": "1.0.0",
+                "publisher": "sample",
+                "engines": { "dbx": ">=0.5.0", "host_api": "^1.0" },
+                "permissions": ["host.observe:queries"],
+                "entrypoints": { "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "missing-binary"
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let registry = PluginRegistry::new_with_app_version(temp.path().to_path_buf(), "0.5.67");
+        let host = PluginHost::new(registry);
+        host.broadcast_observation(
+            "host.observe:queries",
+            "host/observation",
+            serde_json::json!({ "kind": "query.started" }),
+        );
+        assert!(host.inner.sessions.read().await.is_empty(), "observation must not activate plugins");
+    }
+
+    /// Sidecar fan-out is permission-filtered and only reaches running sessions.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn broadcast_observation_delivers_only_to_running_permitted_sessions() {
+        use crate::plugins::{PluginHost, PluginRegistry};
+        use std::os::unix::fs::PermissionsExt;
+
+        fn write_plugin(root: &std::path::Path, id: &str, permission: &str) {
+            let dir = root.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let executable = dir.join("plugin.sh");
+            // Minimal sidecar: answers plugin/initialize, then echoes every
+            // id-less notification back as an `observed` event.
+            let script = r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":[],"plugin":{"id":"PLUGIN_ID","version":"1.0.0"}}}\n' "$initialize_id"
+while IFS= read -r line; do
+  method=$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/')
+  printf '{"jsonrpc":"2.0","method":"observed","params":{"method":"%s"}}\n' "$method"
+done
+"#
+            .replace("PLUGIN_ID", id);
+            std::fs::write(&executable, script).unwrap();
+            let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&executable, permissions).unwrap();
+            std::fs::write(
+                dir.join("manifest.json"),
+                serde_json::json!({
+                    "manifest_version": 1,
+                    "id": id,
+                    "name": id,
+                    "version": "1.0.0",
+                    "publisher": "dbx",
+                    "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                    "permissions": [permission],
+                    "entrypoints": { "backend": {
+                        "protocol_versions": [1],
+                        "transport": "stdio-jsonl",
+                        "executable": "plugin.sh"
+                    }}
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        write_plugin(temp.path(), "sample.observed", "host.observe:queries");
+        write_plugin(temp.path(), "sample.unrelated", "host.observe:transfers");
+        let registry = PluginRegistry::new_with_app_version(temp.path().to_path_buf(), "0.5.67");
+        let host = PluginHost::new(registry);
+
+        let observed = host.activate("sample.observed").await.unwrap();
+        let unrelated = host.activate("sample.unrelated").await.unwrap();
+        let mut observed_events = observed.subscribe_events();
+        let mut unrelated_events = unrelated.subscribe_events();
+
+        host.broadcast_observation(
+            "host.observe:queries",
+            "host/observation",
+            serde_json::json!({ "kind": "query.started" }),
+        );
+
+        let event = tokio::time::timeout(Duration::from_secs(5), observed_events.recv())
+            .await
+            .expect("permitted sidecar should receive the observation")
+            .expect("event channel open");
+        assert_eq!(event.method, "observed");
+        assert_eq!(event.params["method"], "host/observation");
+
+        let unexpected = tokio::time::timeout(Duration::from_millis(300), unrelated_events.recv()).await;
+        assert!(unexpected.is_err(), "a plugin without the permission must not receive observations");
+
+        observed.shutdown().await.unwrap();
+        unrelated.shutdown().await.unwrap();
+    }
+
+    /// The bus only builds payloads for categories with interest, so a running
+    /// sidecar that declared `host.observe:*` must hold interest for exactly its
+    /// categories, and a stopped one must release it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn running_observer_holds_interest_until_it_stops() {
+        use crate::plugins::{PluginHost, PluginRegistry};
+        use dbx_types::models::observability::{ObservationCategory, ObservationInterest};
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("sample.interest");
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nIFS= read -r initialize\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"capabilities\":[],\"plugin\":{\"id\":\"sample.interest\",\"version\":\"1.0.0\"}}}\\n'\nwhile IFS= read -r line; do :; done\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "id": "sample.interest",
+                "name": "Interest",
+                "version": "1.0.0",
+                "publisher": "dbx",
+                "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                "permissions": ["host.observe:queries"],
+                "entrypoints": { "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "plugin.sh"
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let registry = PluginRegistry::new_with_app_version(temp.path().to_path_buf(), "0.5.67");
+        let interest = ObservationInterest::default();
+        let host = PluginHost::with_observations(registry, None, Some(interest.clone()));
+        assert_eq!(interest.count(ObservationCategory::Queries), 0);
+
+        let session = host.activate("sample.interest").await.unwrap();
+        assert_eq!(interest.count(ObservationCategory::Queries), 1);
+        assert_eq!(interest.count(ObservationCategory::Ai), 0);
+
+        session.shutdown().await.unwrap();
+        // The terminal status watcher retires the worker (and its interest).
+        let released = tokio::time::timeout(Duration::from_secs(5), async {
+            while interest.count(ObservationCategory::Queries) != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(released.is_ok(), "a stopped observer must release its interest");
+        assert!(interest.is_empty());
     }
 }

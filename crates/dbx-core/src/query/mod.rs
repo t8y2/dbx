@@ -11,6 +11,7 @@ pub mod pl_debug;
 pub mod plugin_data;
 pub mod plugin_plan;
 pub mod query_cancel;
+pub mod read_only_gate;
 pub mod redis_ops;
 pub mod snapshot_export;
 mod sqlserver_agent_batch;
@@ -34,6 +35,7 @@ use sqlparser::dialect::{GenericDialect, MsSqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -48,6 +50,7 @@ use crate::query_execution_sql::{is_oracle_proven_read_only_statement, is_write_
 use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword_for_database};
 use crate::sql_dialect::{quote_iris_identifier, resolve_for_db, CAP_TRANSACTIONAL_DDL};
 use crate::sql_risk::{classify_sql_risk_for_database, SqlRisk};
+use dbx_types::models::observability::{cap_observation_text, KIND_QUERY_FINISHED, KIND_QUERY_STARTED};
 
 pub const AGENT_PROTOCOL_MAX_ROWS: usize = i32::MAX as usize;
 pub const METADATA_POOL_BUSY_ERROR: &str = "DBX metadata pool is busy; please retry";
@@ -1366,6 +1369,272 @@ pub struct QueryExecutionOptions {
     /// INVALID. Imports and transfers leave this off, because forward references
     /// legitimately stay invalid until their dependencies exist.
     pub report_compilation_errors: bool,
+    /// Marks a statement DBX issues on its own (never SQL a user typed) whose DBMS_OUTPUT
+    /// nobody reads. The Oracle agent honours it for two shapes only:
+    /// - plain SELECT/WITH dictionary reads: no DBMS_OUTPUT capture, and the session's
+    ///   schema may be reused, which removes three of four round trips per metadata query
+    ///   on a high-latency link;
+    /// - routine definitions (CREATE [OR REPLACE] PROCEDURE/FUNCTION/PACKAGE [BODY]/
+    ///   TRIGGER/TYPE [BODY]): no DBMS_OUTPUT capture only; the schema is still switched
+    ///   and compilation errors are still read back on the same session.
+    ///
+    /// DML, other DDL and PL/SQL blocks always keep the full path even if this is set.
+    pub skip_server_output: bool,
+}
+
+/// How one statement's runtime is bounded.
+///
+/// The difference between "stop waiting" and "stop the server" is the whole
+/// point. Cancelling a read costs nothing. Cancelling a write leaves the caller
+/// unable to say whether the rows landed, so a retry duplicates data and no
+/// retry loses it. Cancelling a schema change makes the server roll it back
+/// while it still holds metadata locks, and any replica that already applied the
+/// same binlog event drifts out of sync — which is not self-healing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatementTimeout {
+    /// Reads: give up and cancel the server statement.
+    Cancel(Duration),
+    /// Writes with an explicit limit: stop waiting, leave the server alone.
+    Detach(Duration),
+    /// Schema changes, and writes by default: no deadline at all.
+    Unlimited,
+}
+
+impl StatementTimeout {
+    /// Server-side budget. `Detach` returns `None` on purpose: not cancelling the
+    /// statement is exactly what `Detach` means.
+    pub fn server_budget(self) -> Option<Duration> {
+        match self {
+            Self::Cancel(after) => Some(after),
+            Self::Detach(_) | Self::Unlimited => None,
+        }
+    }
+
+    /// How long the client is willing to wait for a result.
+    pub fn client_wait(self) -> Option<Duration> {
+        match self {
+            Self::Cancel(after) | Self::Detach(after) => Some(after),
+            Self::Unlimited => None,
+        }
+    }
+
+    /// Whether the client may send a cancel to the server when the wait expires.
+    pub fn cancels_on_timeout(self) -> bool {
+        matches!(self, Self::Cancel(_))
+    }
+}
+
+/// What a statement is allowed to change. Drives the timeout decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatementScope {
+    Read,
+    Write,
+    SchemaChange,
+}
+
+const SCHEMA_CHANGE_KEYWORDS: &[&str] = &[
+    "CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "COMMENT", "GRANT", "REVOKE", "REINDEX", "VACUUM", "ANALYZE",
+    "ANALYSE", "OPTIMIZE", "REPAIR",
+];
+
+const WRITE_KEYWORDS: &[&str] =
+    &["INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "COPY", "LOAD", "IMPORT", "CALL", "EXEC", "EXECUTE"];
+
+fn leading_statement_keyword(sql: &str) -> Option<String> {
+    let stripped = strip_sql_comments_and_literals(sql);
+    let trimmed = stripped.trim_start();
+    let end = trimmed.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(trimmed.len());
+    (end > 0).then(|| trimmed[..end].to_ascii_uppercase())
+}
+
+/// Classify one statement without parsing it where possible.
+///
+/// The keyword pass runs first on purpose: sqlparser cannot parse every vendor
+/// extension (`ALTER TABLE ... ADD PARTITION`, Oracle packages, ClickHouse DDL),
+/// and a statement it failed to parse must not silently fall back to the read
+/// deadline just because the AST was unavailable.
+pub fn statement_scope(sql: &str, db_type: Option<DatabaseType>) -> StatementScope {
+    if db_type == Some(DatabaseType::SqlServer) {
+        // GO batches may contain transaction control followed by DML or DDL.
+        // The risk classifier ranks transaction control above both.
+        let statements = split_sql_batches(sql)
+            .into_iter()
+            .flat_map(|batch| crate::sql::split_sql_statements_for_database(&batch, DatabaseType::SqlServer));
+        return highest_statement_scope(statements, db_type);
+    }
+    single_statement_scope(sql, db_type)
+}
+
+fn highest_statement_scope(
+    statements: impl IntoIterator<Item = String>,
+    db_type: Option<DatabaseType>,
+) -> StatementScope {
+    let mut scope = StatementScope::Read;
+    for sql in statements {
+        match single_statement_scope(&sql, db_type) {
+            StatementScope::SchemaChange => return StatementScope::SchemaChange,
+            StatementScope::Write => scope = StatementScope::Write,
+            StatementScope::Read => {}
+        }
+    }
+    scope
+}
+
+fn single_statement_scope(sql: &str, db_type: Option<DatabaseType>) -> StatementScope {
+    if let Some(keyword) = leading_statement_keyword(sql) {
+        if SCHEMA_CHANGE_KEYWORDS.contains(&keyword.as_str()) {
+            return StatementScope::SchemaChange;
+        }
+        if WRITE_KEYWORDS.contains(&keyword.as_str()) {
+            return StatementScope::Write;
+        }
+        if db_type == Some(DatabaseType::SqlServer) && keyword == "WAITFOR" && sqlserver_waitfor_is_read_only(sql) {
+            return StatementScope::Read;
+        }
+    }
+    match db_type.map(|db_type| classify_sql_risk_for_database(sql, db_type)) {
+        Some(Ok(SqlRisk::Ddl)) => StatementScope::SchemaChange,
+        Some(Ok(SqlRisk::Write | SqlRisk::Transaction)) => StatementScope::Write,
+        _ => StatementScope::Read,
+    }
+}
+
+// WAITFOR DELAY/TIME with a literal only waits. Other forms can consume
+// Service Broker messages or contain more SQL in the same batch.
+fn sqlserver_waitfor_is_read_only(sql: &str) -> bool {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+
+    let Ok(tokens) = Tokenizer::new(&MsSqlDialect {}, sql).tokenize() else {
+        return false;
+    };
+    let tokens = tokens.into_iter().filter(|token| !matches!(token, Token::Whitespace(_))).collect::<Vec<_>>();
+    let tokens = tokens.strip_suffix(&[Token::SemiColon]).unwrap_or(&tokens);
+    matches!(tokens, [Token::Word(waitfor), Token::Word(mode), Token::SingleQuotedString(_)]
+        if waitfor.quote_style.is_none() && waitfor.value.eq_ignore_ascii_case("WAITFOR")
+            && mode.quote_style.is_none()
+            && (mode.value.eq_ignore_ascii_case("DELAY") || mode.value.eq_ignore_ascii_case("TIME")))
+}
+
+/// True when `sql` is a schema change or a data write.
+pub fn statement_outlives_read_timeout_budget(sql: &str, db_type: Option<DatabaseType>) -> bool {
+    statement_scope(sql, db_type) != StatementScope::Read
+}
+
+/// Resolve how one statement is bounded.
+///
+/// `read_secs` and `write_secs` mirror the connection settings: `None` keeps the
+/// built-in read default and `Some(0)` means unlimited. Schema changes are always
+/// unlimited — there is no sensible default for "how long may a rebuild take", so
+/// the product does not offer one to get wrong.
+pub fn resolve_statement_timeout(
+    read_secs: Option<u64>,
+    write_secs: Option<u64>,
+    db_type: Option<DatabaseType>,
+    sql: &str,
+) -> StatementTimeout {
+    timeout_for_scope(statement_scope(sql, db_type), read_secs, write_secs)
+}
+
+fn timeout_for_scope(scope: StatementScope, read_secs: Option<u64>, write_secs: Option<u64>) -> StatementTimeout {
+    match scope {
+        StatementScope::SchemaChange => StatementTimeout::Unlimited,
+        StatementScope::Write => match write_secs {
+            Some(secs) if secs > 0 => StatementTimeout::Detach(Duration::from_secs(secs)),
+            _ => StatementTimeout::Unlimited,
+        },
+        StatementScope::Read => match resolve_query_timeout(read_secs) {
+            Some(after) => StatementTimeout::Cancel(after),
+            None => StatementTimeout::Unlimited,
+        },
+    }
+}
+
+/// Timeout decision for a statement about to run on `connection_id`, using the
+/// stored connection settings.
+pub async fn connection_statement_timeout(
+    state: &AppState,
+    connection_id: &str,
+    sql: &str,
+    read_override: Option<u64>,
+) -> StatementTimeout {
+    let (read_secs, write_secs, db_type) = {
+        let configs = state.configs.read().await;
+        match configs.get(connection_id) {
+            Some(config) => (
+                read_override.or(Some(config.effective_query_timeout_secs())),
+                config.effective_write_timeout_secs(),
+                Some(statement_split_database_type(config)),
+            ),
+            None => (read_override, None, None),
+        }
+    };
+    let scope = if db_type == Some(DatabaseType::SqlServer) {
+        statement_scope(sql, db_type)
+    } else {
+        highest_statement_scope(query_execution_plan(sql, db_type, false).statements, db_type)
+    };
+    timeout_for_scope(scope, read_secs, write_secs)
+}
+
+/// Run one statement on a background task so a `Detach` deadline can stop the
+/// client wait without touching the server statement.
+///
+/// Dropping the returned receiver does not abort the task and does not cancel the
+/// database call; the caller is expected to keep waiting only as long as
+/// [`StatementTimeout::client_wait`] allows.
+pub fn spawn_detached_statement<K: Send + 'static>(
+    state: Arc<AppState>,
+    connection_id: String,
+    database: String,
+    sql: String,
+    schema: Option<String>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+    keep_alive: K,
+    messages: Option<query_messages::QueryMessagesCallback>,
+) -> tokio::sync::oneshot::Receiver<Result<db::QueryResult, QueryExecutionError>> {
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        // Keep the running-task registration alive until the server call really
+        // finishes, so the user can still cancel it after the deadline passes.
+        let _keep_alive = keep_alive;
+        // The message sink is task-local, so the scope has to be entered inside
+        // the detached task rather than around the caller's wait.
+        let result = query_messages::with_query_messages(
+            messages,
+            execute_sql_statement_with_options_typed(
+                &state,
+                &connection_id,
+                &database,
+                &sql,
+                schema.as_deref(),
+                cancel_token,
+                options,
+            ),
+        )
+        .await;
+        let _ = result_tx.send(result);
+    });
+    result_rx
+}
+
+/// Message shown when a write exceeded its configured `write_timeout_secs`.
+/// The wording must not claim the statement failed: it did not.
+pub fn detached_write_timeout_message(wait: Duration) -> String {
+    format!(
+        "Statement has not returned after {}s. It is still running on the server and its result is unknown — check the data before retrying. Nothing was cancelled.",
+        wait.as_secs().max(1)
+    )
+}
+
+/// Server-side budget for one statement.
+pub fn statement_server_budget(
+    read_secs: Option<u64>,
+    write_secs: Option<u64>,
+    db_type: Option<DatabaseType>,
+    sql: &str,
+) -> Option<Duration> {
+    resolve_statement_timeout(read_secs, write_secs, db_type, sql).server_budget()
 }
 
 fn validate_query_execution_mode(
@@ -1434,6 +1703,9 @@ pub fn agent_execute_query_params(
     }
     if options.report_compilation_errors {
         params["reportCompilationErrors"] = serde_json::json!(true);
+    }
+    if options.skip_server_output {
+        params["skipServerOutput"] = serde_json::json!(true);
     }
     params
 }
@@ -1858,10 +2130,23 @@ fn apply_query_timeout_override(budget: &mut DbOperationBudget, timeout_secs: Op
     }
 }
 
-fn oceanbase_mysql_session_timeout_sql(config: Option<&ConnectionConfig>, timeout_secs: Option<u64>) -> Option<String> {
+fn oceanbase_mysql_session_timeout_sql(config: Option<&ConnectionConfig>, timeout: Option<Duration>) -> Option<String> {
     let config = config?;
-    let timeout_secs = timeout_secs.unwrap_or(config.query_timeout_secs);
-    crate::db::oceanbase_mysql::query_timeout_sql(config, timeout_secs)
+    if !crate::db::oceanbase_mysql::is_config(config) {
+        return None;
+    }
+    // OceanBase has no documented unlimited sentinel. Use the documented
+    // session variable maximum when DBX has no statement deadline.
+    const MAX_TIMEOUT_MICROS: u128 = 3_216_672_000_000_000;
+    let micros = timeout.map_or(MAX_TIMEOUT_MICROS, |duration| duration.as_micros().min(MAX_TIMEOUT_MICROS));
+    Some(format!("SET ob_query_timeout = {micros}"))
+}
+
+async fn set_oceanbase_mysql_session_timeout(conn: &mut mysql_async::Conn, sql: Option<&str>) -> Result<(), String> {
+    if let Some(sql) = sql {
+        conn.query_drop(sql).await.map_err(|err| format!("Failed to apply OceanBase query timeout: {err}"))?;
+    }
+    Ok(())
 }
 
 // Keep do_execute_typed's future shallow, as with MySQL transaction settlement.
@@ -1906,18 +2191,13 @@ async fn apply_oceanbase_mysql_session_timeout(
     state: &AppState,
     pool_key: &str,
     conn: &mut mysql_async::Conn,
-    timeout_secs: Option<u64>,
+    timeout: Option<Duration>,
 ) -> Result<(), String> {
     let sql = {
         let configs = state.configs.read().await;
-        oceanbase_mysql_session_timeout_sql(crate::connection::config_for_pool_key(pool_key, &configs), timeout_secs)
+        oceanbase_mysql_session_timeout_sql(crate::connection::config_for_pool_key(pool_key, &configs), timeout)
     };
-    if let Some(sql) = sql {
-        // OceanBase enforces query timeouts through a session variable; set it
-        // on the checked-out connection in case the pooled session was reset.
-        conn.query_drop(&sql).await.map_err(|err| format!("Failed to apply OceanBase query timeout: {err}"))?;
-    }
-    Ok(())
+    set_oceanbase_mysql_session_timeout(conn, sql.as_deref()).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1939,13 +2219,23 @@ async fn do_execute_typed(
     state.touch_pool_activity(pool_key).await;
     let _activity_touch = state.pool_activity_touch(pool_key);
 
-    let query_timeout = resolve_query_timeout(options.timeout_secs);
+    let (statement_read_secs, statement_write_secs, statement_db_type) = {
+        let configs = state.configs.read().await;
+        let config = crate::connection::config_for_pool_key(pool_key, &configs);
+        (
+            options.timeout_secs.or_else(|| config.map(|config| config.query_timeout_secs)),
+            config.and_then(|config| config.effective_write_timeout_secs()),
+            config.map(statement_split_database_type),
+        )
+    };
+    let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
+    let query_timeout =
+        statement_server_budget(statement_read_secs, statement_write_secs, statement_db_type.or(pool_db_type), sql);
     // Re-check at statement start so a write that becomes ready after the
     // temporary unlock window expires is still blocked, even if an earlier
     // statement in the same batch is still running.
     check_read_only_for_connection(state, pool_key, sql).await?;
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
-    let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
     let mysql_catalog_dialect = connection_mysql_catalog_dialect_for_pool_key(state, pool_key).await;
     let pool = state.pool_handle(pool_key).await.ok_or("Connection not found")?;
     // Everything the driver dispatch does for this statement — pool checkout,
@@ -2045,7 +2335,7 @@ async fn do_execute_typed(
                     });
                 });
             }
-            apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
+            apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, query_timeout).await?;
             wait_for_result_opt(
                 cancel_token.clone(),
                 query_timeout,
@@ -2445,6 +2735,10 @@ async fn do_execute_typed(
             let schema = schema_for_execution_context(pool_db_type, schema).map(|s| s.to_string());
             let max_rows = options.max_rows;
             let rpc_timeout = query_timeout;
+            let options = QueryExecutionOptions {
+                timeout_secs: Some(query_timeout.map_or(0, |timeout| timeout.as_secs())),
+                ..options
+            };
             if is_canceled(&cancel_token) {
                 return Err(canceled_error().into());
             }
@@ -3052,6 +3346,77 @@ type ExecutedSqlStatement<'a> =
 /// Result of [`ExecutedSqlStatement`].
 type ExecutedSqlStatementOutcome = Result<(db::QueryResult, Option<MysqlAutoCommitTransaction>), QueryExecutionError>;
 
+/// Publish `query.started` for one funnel execution. The caller must have
+/// checked `host_observations.is_enabled(KIND_QUERY_STARTED)` first — this
+/// helper allocates unconditionally.
+fn publish_query_started(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    catalog: Option<&str>,
+    execution_id: Option<&str>,
+) {
+    let (sql_text, sql_truncated) = cap_observation_text(sql);
+    state.host_observations.publish(
+        KIND_QUERY_STARTED,
+        Some(connection_id.to_string()),
+        Some(database.to_string()),
+        serde_json::json!({
+            "executionId": execution_id,
+            "sql": sql_text,
+            "sqlTruncated": sql_truncated,
+            "schema": schema,
+            "catalog": catalog,
+        }),
+    );
+}
+
+/// Publish `query.finished` for one funnel execution. `result` borrows the
+/// outcome so the caller keeps ownership of the execution result.
+#[allow(clippy::too_many_arguments)]
+fn publish_query_finished(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    execution_id: Option<&str>,
+    duration_ms: u64,
+    result: Result<&db::QueryResult, &QueryExecutionError>,
+    cancelled: bool,
+) {
+    let (sql_text, sql_truncated) = cap_observation_text(sql);
+    let mut payload = serde_json::json!({
+        "executionId": execution_id,
+        "sql": sql_text,
+        "sqlTruncated": sql_truncated,
+        "durationMs": duration_ms,
+    });
+    match result {
+        Ok(query_result) => {
+            payload["status"] = serde_json::json!("ok");
+            payload["rowCount"] = serde_json::json!(query_result.rows.len());
+            payload["affectedRows"] = serde_json::json!(query_result.affected_rows);
+            payload["truncated"] = serde_json::json!(query_result.truncated);
+            payload["serverExecuteTimeUs"] = serde_json::json!(query_result.server_execute_time_us);
+            payload["statementDurationMs"] = serde_json::json!(query_result.execution_time_ms as u64);
+        }
+        Err(error) => {
+            payload["status"] = serde_json::json!(if cancelled { "cancelled" } else { "error" });
+            let (message, message_truncated) = cap_observation_text(&error.to_string());
+            payload["error"] = serde_json::json!(message);
+            payload["errorTruncated"] = serde_json::json!(message_truncated);
+        }
+    }
+    state.host_observations.publish(
+        KIND_QUERY_FINISHED,
+        Some(connection_id.to_string()),
+        Some(database.to_string()),
+        payload,
+    );
+}
+
 /// Same as [`execute_sql_statement_with_options_typed`], but also returns how
 /// the MySQL auto-commit settlement left the tab-scoped connection (see
 /// [`MysqlAutoCommitTransaction`]). `None` means the statement did not run on a
@@ -3072,6 +3437,27 @@ pub(crate) async fn execute_sql_statement_with_options_typed_with_outcome(
     // reported with the duration of the whole request, including creating or
     // reconnecting the pool, so the summary matches the loading indicator.
     let request_start = std::time::Instant::now();
+    // Observability tap. This is the single funnel for standalone statements,
+    // every statement of the generic sequential batch loop, AI agent tools and
+    // SQL-file imports, so it is also the only place that must publish query
+    // events. The interest check keeps the hot path allocation-free unless a
+    // plugin actually observes queries.
+    let observe = state.host_observations.is_enabled(KIND_QUERY_STARTED);
+    let observation_execution_id = options.execution_id.clone();
+    if observe {
+        publish_query_started(
+            state,
+            connection_id,
+            database,
+            sql,
+            schema,
+            options.catalog.as_deref(),
+            observation_execution_id.as_deref(),
+        );
+    }
+    // The token is consumed by the inner call; keep a clone so a cancelled
+    // statement can be reported as such instead of as a generic error.
+    let cancel_token_for_observation = cancel_token.clone();
     let result = execute_sql_statement_with_options_typed_inner(
         state,
         connection_id,
@@ -3083,6 +3469,18 @@ pub(crate) async fn execute_sql_statement_with_options_typed_with_outcome(
         &mut transaction,
     )
     .await;
+    if observe {
+        publish_query_finished(
+            state,
+            connection_id,
+            database,
+            sql,
+            observation_execution_id.as_deref(),
+            request_start.elapsed().as_millis() as u64,
+            result.as_ref(),
+            is_canceled(&cancel_token_for_observation),
+        );
+    }
     if invalidate {
         crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
     }
@@ -3361,9 +3759,10 @@ async fn execute_postgres_drop_database(
         }
     };
 
-    let query_timeout = resolve_query_timeout(options.timeout_secs);
+    // DROP DATABASE waits for every other session to leave; the read budget is not
+    // the right bound for that.
     let max_rows = options.max_rows;
-    wait_for_query_opt(cancel_token, query_timeout, async {
+    wait_for_query_opt(cancel_token, None, async {
         db::postgres::terminate_current_user_database_backends(&pool, target_database).await?;
         db::postgres::execute_query_with_max_rows(&pool, sql, max_rows).await
     })
@@ -3386,6 +3785,13 @@ fn postgres_drop_database_admin_database(target_database: &str) -> &'static str 
 }
 
 fn parse_drop_database_target(sql: &str) -> Option<String> {
+    // Every PostgreSQL statement passes through here; only parse the ones
+    // that can be a DROP DATABASE.
+    if !crate::sql::contains_ascii_case_insensitive(sql, "drop")
+        || !crate::sql::contains_ascii_case_insensitive(sql, "database")
+    {
+        return None;
+    }
     let dialect = PostgreSqlDialect {};
     let statements = Parser::parse_sql(&dialect, sql).ok()?;
     let [Statement::Drop { object_type, names, .. }] = statements.as_slice() else {
@@ -4043,6 +4449,172 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     })
 }
 
+/// Batch-scoped observation state for the native batch paths (MySQL
+/// multi-statement pipeline and SQL Server agent GO batches).
+///
+/// Event shape: one `query.started` for the batch (`scope: "batch"`, with
+/// `statementCount`), one `query.finished` per reported statement
+/// (`scope: "statement"`, with `statementIndex`), and one terminal
+/// `query.finished` (`scope: "batch"`, `batchComplete: true`). `scope` is the
+/// stable discriminator: a consumer that counts statements must ignore
+/// `scope: "batch"` events, and only the `batchComplete` event closes the
+/// batch. Because a native batch can fail before the driver reports anything
+/// (read-only rejection, pool start failure, cancellation before the first
+/// statement), [`BatchObservation::finish`] publishes that terminal event on
+/// every exit path, so observers never keep an execution open.
+struct BatchObservation {
+    bus: crate::observability::HostObservationBus,
+    execution_id: Option<String>,
+    connection_id: String,
+    database: String,
+    statement_count: usize,
+    started_at: std::time::Instant,
+    completed_statements: Arc<AtomicUsize>,
+}
+
+impl BatchObservation {
+    fn start(
+        bus: &crate::observability::HostObservationBus,
+        connection_id: &str,
+        database: &str,
+        sql: &str,
+        schema: Option<&str>,
+        statement_count: usize,
+        execution_id: Option<String>,
+    ) -> Self {
+        let (batch_sql, batch_sql_truncated) = cap_observation_text(sql);
+        bus.publish(
+            KIND_QUERY_STARTED,
+            Some(connection_id.to_string()),
+            Some(database.to_string()),
+            serde_json::json!({
+                "executionId": execution_id,
+                "sql": batch_sql,
+                "sqlTruncated": batch_sql_truncated,
+                "schema": schema,
+                "statementCount": statement_count,
+                "batch": true,
+                "scope": "batch",
+            }),
+        );
+        Self {
+            bus: bus.clone(),
+            execution_id,
+            connection_id: connection_id.to_string(),
+            database: database.to_string(),
+            statement_count,
+            started_at: std::time::Instant::now(),
+            completed_statements: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Wraps the caller's progress callback so every reported statement also
+    /// produces a `query.finished` observation.
+    fn progress_callback(
+        &self,
+        statements: Vec<String>,
+        original: Option<ExecuteMultiProgressCallback>,
+    ) -> ExecuteMultiProgressCallback {
+        let bus = self.bus.clone();
+        let execution_id = self.execution_id.clone();
+        let connection_id = self.connection_id.clone();
+        let database = self.database.clone();
+        let completed_statements = self.completed_statements.clone();
+        Arc::new(move |item: ExecuteMultiProgress| {
+            completed_statements.fetch_add(1, Ordering::Relaxed);
+            let mut payload = serde_json::json!({
+                "executionId": execution_id,
+                "statementIndex": item.statement_index,
+                "statementTotal": item.total,
+                "durationMs": item.execution_time_ms as u64,
+                "affectedRows": item.affected_rows,
+                "batch": true,
+                "scope": "statement",
+            });
+            // The generic loop reports `statement_index + offset` for grouped
+            // statements; `get` tolerates a report that runs past the split.
+            if let Some(statement_sql) = statements.get(item.statement_index) {
+                let (sql_text, sql_truncated) = cap_observation_text(statement_sql);
+                payload["sql"] = serde_json::json!(sql_text);
+                payload["sqlTruncated"] = serde_json::json!(sql_truncated);
+            }
+            payload["status"] = serde_json::json!(if item.success { "ok" } else { "error" });
+            if let Some(error) = &item.error {
+                // `BackendError` models structured failures and has no Display
+                // impl; its JSON form is the same shape the frontend receives.
+                let message = serde_json::to_string(error).unwrap_or_else(|_| format!("{error:?}"));
+                let (message, message_truncated) = cap_observation_text(&message);
+                payload["error"] = serde_json::json!(message);
+                payload["errorTruncated"] = serde_json::json!(message_truncated);
+            }
+            bus.publish(KIND_QUERY_FINISHED, Some(connection_id.clone()), Some(database.clone()), payload);
+            if let Some(original) = &original {
+                original(item);
+            }
+        })
+    }
+
+    /// Publishes the batch terminal event. Exactly one call per started batch.
+    fn finish(&self, status: &str, failed_statements: usize, error: Option<String>) {
+        let mut payload = serde_json::json!({
+            "executionId": self.execution_id,
+            "batch": true,
+            "batchComplete": true,
+            "scope": "batch",
+            "status": status,
+            "statementCount": self.statement_count,
+            "completedStatements": self.completed_statements.load(Ordering::Relaxed),
+            "failedStatements": failed_statements,
+            "durationMs": self.started_at.elapsed().as_millis() as u64,
+        });
+        if let Some(error) = error {
+            let (message, truncated) = cap_observation_text(&error);
+            payload["error"] = serde_json::json!(message);
+            payload["errorTruncated"] = serde_json::json!(truncated);
+        }
+        self.bus.publish(KIND_QUERY_FINISHED, Some(self.connection_id.clone()), Some(self.database.clone()), payload);
+    }
+}
+
+/// Terminal status for a native batch.
+///
+/// The outer `Result` alone is not enough: MySQL connection acquisition and
+/// other pre-statement failures return `Ok` with a single `execution_error`
+/// result, and `continue_on_error` batches return `Ok` results that still
+/// contain failures. Cancellation wins over statement errors because the user
+/// stopped the run; `failedStatements` still tells consumers whether any
+/// statement had failed before that.
+fn batch_terminal_status(
+    outcome: &Result<Vec<ExecuteMultiResult>, QueryExecutionError>,
+    cancelled: bool,
+) -> (&'static str, usize, Option<String>) {
+    match outcome {
+        Err(error) => {
+            // A cancel can surface as an error (for example
+            // `wait_for_result_opt` while switching the MySQL catalog context)
+            // and the cancellation token may be the only evidence, so check
+            // both before reporting a failure.
+            let cancelled = cancelled || matches!(error, QueryExecutionError::Canceled { .. });
+            (if cancelled { "cancelled" } else { "error" }, 0, Some(error.to_string()))
+        }
+        Ok(results) => {
+            let failed = results.iter().filter(|result| result.execution_error).count();
+            let error = results
+                .iter()
+                .find(|result| result.execution_error)
+                .and_then(|result| result.error.as_ref())
+                .map(|error| serde_json::to_string(error).unwrap_or_else(|_| format!("{error:?}")));
+            if cancelled {
+                ("cancelled", failed, error)
+            } else if failed > 0 {
+                ("error", failed, error)
+            } else {
+                ("ok", 0, None)
+            }
+        }
+    }
+}
+
 async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
     state: &AppState,
     connection_id: &str,
@@ -4199,120 +4771,156 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
         );
     }
 
-    if let Some((pool, mode)) = mysql_pool {
-        // Read-only check for MySQL batch path
-        check_read_only_for_connection_multi(state, &pool_key, &statements).await?;
-        let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-        let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
-        return execute_multi_mysql(
-            state,
-            &pool_key,
-            db_type,
-            &pool,
-            mode,
-            mysql_dialect,
-            mysql_catalog_dialect,
+    // Native batch paths (MySQL multi-statement pipeline and SQL Server GO
+    // batches) bypass the per-statement funnel, so their observations come
+    // from the progress reports. The generic sequential loop below re-enters
+    // `execute_sql_statement_with_options_typed` for each statement and is
+    // already covered by the funnel; wrapping it again would double count.
+    let native_batch = mysql_pool.is_some() || complete_sqlserver_agent_batch;
+    let batch_observation = if native_batch && state.host_observations.is_enabled(KIND_QUERY_STARTED) {
+        Some(BatchObservation::start(
+            &state.host_observations,
+            connection_id,
             database,
-            &statements,
-            cancel_token,
-            options,
-            progress.as_ref(),
-        )
-        .await
-        .map_err(Into::into);
-    }
+            sql,
+            schema,
+            statements.len(),
+            options.execution_id.clone(),
+        ))
+    } else {
+        None
+    };
+    let progress = match &batch_observation {
+        Some(observation) => Some(observation.progress_callback(statements.clone(), progress)),
+        None => progress,
+    };
 
-    // Some Agent drivers cannot execute another statement while a paged result
-    // cursor remains open on the same physical connection. Multi-result execution
-    // therefore reads a bounded first page without retaining those cursors.
-    let statement_options = options_for_sequential_statements(&options, statements.len(), db_type);
-    let mut results = Vec::with_capacity(statements.len());
-    for (statement_index, stmt) in statements.iter().enumerate() {
-        if is_canceled(&cancel_token) {
-            let error = canceled_query_execution_error();
-            results.push(ExecuteMultiResult::execution_error_with_backend(
-                error_query_result(error.clone().into_legacy_string()),
-                Some(statement_index),
-                error.into_backend_error(),
-            ));
-            break;
+    // Early failures (read-only rejection, pool start failure, cancellation
+    // before the first statement) never reach the progress callback, so the
+    // batch terminal is published here for every exit path.
+    let cancel_token_for_observation = cancel_token.clone();
+    let outcome: Result<Vec<ExecuteMultiResult>, QueryExecutionError> = if let Some((pool, mode)) = mysql_pool {
+        // Read-only check for MySQL batch path
+        match check_read_only_for_connection_multi(state, &pool_key, &statements).await {
+            Err(error) => Err(error.into()),
+            Ok(()) => {
+                let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
+                let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
+                execute_multi_mysql(
+                    state,
+                    &pool_key,
+                    db_type,
+                    &pool,
+                    mode,
+                    mysql_dialect,
+                    mysql_catalog_dialect,
+                    database,
+                    &statements,
+                    cancel_token,
+                    options,
+                    progress.as_ref(),
+                )
+                .await
+                .map_err(Into::into)
+            }
         }
-        let execution = if complete_sqlserver_agent_batch {
-            Box::pin(sqlserver_agent_batch::execute(
-                state,
-                &pool_key,
-                database,
-                stmt,
-                schema,
-                cancel_token.clone(),
-                statement_options.clone(),
-            ))
-            .await
-        } else {
-            execute_sql_statement_with_options_typed(
-                state,
-                connection_id,
-                database,
-                stmt,
-                schema,
-                cancel_token.clone(),
-                statement_options.clone(),
-            )
-            .await
-            .map(|result| vec![result])
-        };
-        match execution {
-            Ok(batch_results) => {
-                for result in batch_results {
+    } else {
+        // Some Agent drivers cannot execute another statement while a paged result
+        // cursor remains open on the same physical connection. Multi-result execution
+        // therefore reads a bounded first page without retaining those cursors.
+        let statement_options = options_for_sequential_statements(&options, statements.len(), db_type);
+        let mut results = Vec::with_capacity(statements.len());
+        for (statement_index, stmt) in statements.iter().enumerate() {
+            if is_canceled(&cancel_token) {
+                let error = canceled_query_execution_error();
+                results.push(ExecuteMultiResult::execution_error_with_backend(
+                    error_query_result(error.clone().into_legacy_string()),
+                    Some(statement_index),
+                    error.into_backend_error(),
+                ));
+                break;
+            }
+            let execution = if complete_sqlserver_agent_batch {
+                Box::pin(sqlserver_agent_batch::execute(
+                    state,
+                    &pool_key,
+                    database,
+                    stmt,
+                    schema,
+                    cancel_token.clone(),
+                    statement_options.clone(),
+                ))
+                .await
+            } else {
+                execute_sql_statement_with_options_typed(
+                    state,
+                    connection_id,
+                    database,
+                    stmt,
+                    schema,
+                    cancel_token.clone(),
+                    statement_options.clone(),
+                )
+                .await
+                .map(|result| vec![result])
+            };
+            match execution {
+                Ok(batch_results) => {
+                    for result in batch_results {
+                        report_execute_multi_progress(
+                            progress.as_ref(),
+                            statement_index,
+                            statements.len(),
+                            &result,
+                            true,
+                            None,
+                        );
+                        results.push(if complete_sqlserver_agent_batch {
+                            // One GO batch can contain several statements/results;
+                            // do not label every result as its first statement.
+                            ExecuteMultiResult::success_with_optional_server_large_values(
+                                result,
+                                options.table_data_preview,
+                            )
+                        } else {
+                            ExecuteMultiResult::success_with_index_and_optional_server_large_values(
+                                result,
+                                statement_index,
+                                options.table_data_preview,
+                            )
+                        });
+                    }
+                }
+                Err(error) => {
+                    let action = query_execution_error_action(db_type, stmt, &error);
+                    let result = error_query_result(error.clone().into_legacy_string());
+                    let backend_error = error.into_backend_error();
                     report_execute_multi_progress(
                         progress.as_ref(),
                         statement_index,
                         statements.len(),
                         &result,
-                        true,
-                        None,
+                        false,
+                        Some(backend_error.clone()),
                     );
-                    results.push(if complete_sqlserver_agent_batch {
-                        // One GO batch can contain several statements/results;
-                        // do not label every result as its first statement.
-                        ExecuteMultiResult::success_with_optional_server_large_values(
-                            result,
-                            options.table_data_preview,
-                        )
-                    } else {
-                        ExecuteMultiResult::success_with_index_and_optional_server_large_values(
-                            result,
-                            statement_index,
-                            options.table_data_preview,
-                        )
-                    });
-                }
-            }
-            Err(error) => {
-                let action = query_execution_error_action(db_type, stmt, &error);
-                let result = error_query_result(error.clone().into_legacy_string());
-                let backend_error = error.into_backend_error();
-                report_execute_multi_progress(
-                    progress.as_ref(),
-                    statement_index,
-                    statements.len(),
-                    &result,
-                    false,
-                    Some(backend_error.clone()),
-                );
-                results.push(ExecuteMultiResult::execution_error_with_backend(
-                    result,
-                    Some(statement_index),
-                    backend_error,
-                ));
-                if !should_continue_batch_after_error(continue_on_error, action) {
-                    break;
+                    results.push(ExecuteMultiResult::execution_error_with_backend(
+                        result,
+                        Some(statement_index),
+                        backend_error,
+                    ));
+                    if !should_continue_batch_after_error(continue_on_error, action) {
+                        break;
+                    }
                 }
             }
         }
+        Ok(results)
+    };
+    if let Some(observation) = &batch_observation {
+        let (status, failed, error) = batch_terminal_status(&outcome, is_canceled(&cancel_token_for_observation));
+        observation.finish(status, failed, error);
     }
-
-    Ok(results)
+    outcome
 }
 
 /// Split a batch script into the statements the core will execute, using the
@@ -4460,7 +5068,11 @@ struct MysqlBatchConnection<'a> {
     data_charset: Option<db::mysql::MySqlDataCharset>,
     conn: &'a mut mysql_async::Conn,
     cancel_token: Option<CancellationToken>,
-    query_timeout: Option<Duration>,
+    oceanbase_read_timeout_sql: Option<String>,
+    oceanbase_unlimited_timeout_sql: Option<String>,
+    statement_read_secs: Option<u64>,
+    statement_write_secs: Option<u64>,
+    db_type: Option<DatabaseType>,
     bare: bool,
     max_rows: Option<usize>,
     max_result_bytes: Option<usize>,
@@ -4468,6 +5080,14 @@ struct MysqlBatchConnection<'a> {
     table_data_preview: bool,
     dialect: db::mysql::MySqlQueryDialect,
     diagnostic_trace_id: Option<&'a str>,
+}
+
+impl MysqlBatchConnection<'_> {
+    async fn apply_session_timeout(&mut self, timeout: Option<Duration>) -> Result<(), String> {
+        let sql =
+            if timeout.is_some() { &self.oceanbase_read_timeout_sql } else { &self.oceanbase_unlimited_timeout_sql };
+        set_oceanbase_mysql_session_timeout(self.conn, sql.as_deref()).await
+    }
 }
 
 impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
@@ -4480,9 +5100,14 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
     }
 
     async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::mysql::MySqlQueryResult>, String> {
+        // Each statement owns its decision: reads may be cancelled, writes and
+        // schema changes may not.
+        let statement_timeout =
+            statement_server_budget(self.statement_read_secs, self.statement_write_secs, self.db_type, statement);
+        self.apply_session_timeout(statement_timeout).await?;
         wait_for_result_opt(
             self.cancel_token.clone(),
-            self.query_timeout,
+            statement_timeout,
             db::mysql::execute_query_results_on_conn_with_limits_with_data_charset(
                 &mut *self.conn,
                 statement,
@@ -4504,6 +5129,18 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
         on_result: &mut (dyn FnMut(usize, &db::QueryResult) + Send),
     ) -> db::mysql::MySqlNonResultBatchOutcome {
         let sql = mysql_non_result_batch_sql(statements);
+        // A pipelined batch is one wire round trip, so the whole batch shares a
+        // budget: if any statement in it is a write or schema change, none of them
+        // may be cancelled by the read deadline.
+        let statement_timeout =
+            if statements.iter().any(|statement| statement_outlives_read_timeout_budget(statement, self.db_type)) {
+                None
+            } else {
+                resolve_query_timeout(self.statement_read_secs)
+            };
+        if let Err(error) = self.apply_session_timeout(statement_timeout).await {
+            return db::mysql::MySqlNonResultBatchOutcome { results: Vec::new(), error: Some(error) };
+        }
         let mut completed_results = Vec::with_capacity(statements.len());
         let mut record_result = |statement_index: usize, result: &db::QueryResult| {
             completed_results.push(result.clone());
@@ -4511,7 +5148,7 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
         };
         match wait_for_result_opt(
             self.cancel_token.clone(),
-            self.query_timeout,
+            statement_timeout,
             db::mysql::execute_non_result_batch_on_conn(&mut *self.conn, &sql, statements.len(), &mut record_result),
         )
         .await
@@ -4904,7 +5541,17 @@ async fn execute_multi_mysql(
 ) -> Result<Vec<ExecuteMultiResult>, String> {
     let trace_id = options.execution_id.as_deref().unwrap_or("none");
     let total_started_at = std::time::Instant::now();
-    let query_timeout = resolve_query_timeout(options.timeout_secs);
+    let (statement_read_secs, statement_write_secs) = {
+        let configs = state.configs.read().await;
+        let config = crate::connection::config_for_pool_key(pool_key, &configs);
+        (
+            options.timeout_secs.or_else(|| config.map(|config| config.query_timeout_secs)),
+            config.and_then(|config| config.effective_write_timeout_secs()),
+        )
+    };
+    // Checkout / catalog work keeps the read budget; each statement gets its own
+    // decision inside the batch executor.
+    let query_timeout = resolve_query_timeout(statement_read_secs);
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
     let bare = mode == crate::connection::MysqlMode::Bare;
     let max_rows = options.max_rows;
@@ -4932,7 +5579,11 @@ async fn execute_multi_mysql(
     };
     let checkout_ms = checkout_started_at.elapsed().as_millis();
     apply_mysql_client_session_context(state, pool_key, pool, &mut conn, database).await?;
-    apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
+    let (oceanbase_read_timeout_sql, oceanbase_unlimited_timeout_sql) = {
+        let configs = state.configs.read().await;
+        let config = crate::connection::config_for_pool_key(pool_key, &configs);
+        (oceanbase_mysql_session_timeout_sql(config, query_timeout), oceanbase_mysql_session_timeout_sql(config, None))
+    };
     let catalog_started_at = std::time::Instant::now();
     wait_for_result_opt(
         cancel_token.clone(),
@@ -4955,7 +5606,11 @@ async fn execute_multi_mysql(
         data_charset: pool.data_charset(),
         conn: &mut conn,
         cancel_token: cancel_token.clone(),
-        query_timeout,
+        oceanbase_read_timeout_sql,
+        oceanbase_unlimited_timeout_sql,
+        statement_read_secs,
+        statement_write_secs,
+        db_type,
         bare,
         max_rows,
         max_result_bytes,
@@ -5128,7 +5783,14 @@ async fn execute_multi_sqlserver(
     check_read_only_for_connection_multi(state, pool_key, &batches).await?;
     let mut all_results = Vec::new();
     let max_rows = options.max_rows;
-    let query_timeout = resolve_query_timeout(options.timeout_secs);
+    let (statement_read_secs, statement_write_secs) = {
+        let configs = state.configs.read().await;
+        let config = crate::connection::config_for_pool_key(pool_key, &configs);
+        (
+            options.timeout_secs.or_else(|| config.map(|config| config.query_timeout_secs)),
+            config.and_then(|config| config.effective_write_timeout_secs()),
+        )
+    };
     let execution_mode = options.execution_mode;
 
     for batch in &batches {
@@ -5149,8 +5811,10 @@ async fn execute_multi_sqlserver(
             _ => return Err("Expected SQL Server connection".to_string()),
         };
 
+        let batch_timeout =
+            statement_server_budget(statement_read_secs, statement_write_secs, Some(DatabaseType::SqlServer), batch);
         let (mut client_guard, lock_wait_ms) =
-            match lock_shared_client_with_wait(&client, cancel_token.clone(), query_timeout).await {
+            match lock_shared_client_with_wait(&client, cancel_token.clone(), batch_timeout).await {
                 Ok(value) => value,
                 Err(err) => {
                     all_results.push(ExecuteMultiResult::execution_error_with_backend(
@@ -5197,7 +5861,7 @@ async fn execute_multi_sqlserver(
                 db::sqlserver::execute_batch_with_max_rows_metadata(&mut client_guard, &execution_sql, max_rows).await
             }
         };
-        let result = wait_for_result_opt(cancel_token.clone(), query_timeout, execution).await;
+        let result = wait_for_result_opt(cancel_token.clone(), batch_timeout, execution).await;
         let abandoned = client_guard.take_abandoned_after_row_limit();
         drop(client_guard);
         if abandoned {
@@ -5436,7 +6100,14 @@ async fn execute_statements_inner(
         };
         let mut client = client.lock().await;
         let database = if database.trim().is_empty() { None } else { Some(database) };
-        let result = execute_multi_agent(&mut client, database, statements, execution_schema, timeout_secs).await;
+        // A batch that contains a write or a schema change owns its runtime, so
+        // the read budget is not forwarded to the agent either.
+        let agent_timeout_secs = if statements.iter().any(|sql| statement_outlives_read_timeout_budget(sql, db_type)) {
+            Some(0)
+        } else {
+            timeout_secs
+        };
+        let result = execute_multi_agent(&mut client, database, statements, execution_schema, agent_timeout_secs).await;
         drop(client);
         match result {
             Ok(result) => return Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result }),
@@ -5934,6 +6605,12 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
     let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
     let mut operation_budget = configured_operation_budget_for_pool_key(state, pool_key).await;
     apply_query_timeout_override(&mut operation_budget, timeout_secs);
+    // These statements share one transaction outcome. A read deadline in a
+    // mixed transaction must not roll back writes that already completed.
+    let statement_db_type = connection_statement_split_database_type(state, connection_id).await.or(db_type);
+    if statements.iter().any(|sql| statement_outlives_read_timeout_budget(sql, statement_db_type)) {
+        operation_budget.query_timeout = None;
+    }
 
     // This is the single capability model for explicit batch transactions.
     // Do not add a backend here unless its execution path keeps every statement
@@ -6188,7 +6865,7 @@ async fn exec_tx_mysql_inner(
     database: &str,
 ) -> Result<db::QueryResult, String> {
     let mut conn = db::mysql::get_conn_with_health_check_with_timeout(&pool, budget.checkout_timeout).await?;
-    apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, None).await?;
+    apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, budget.query_timeout).await?;
     db::mysql::apply_catalog_database_context(&mut conn, catalog_dialect, catalog, database).await?;
     mysql_query_drop_with_timeout(
         &mut conn,
@@ -8165,6 +8842,119 @@ mod tests {
     use std::sync::atomic::Ordering;
     use tokio::time::timeout;
 
+    #[test]
+    fn statement_scope_checks_sqlserver_transaction_scripts_and_go_batches() {
+        let sqlserver = Some(DatabaseType::SqlServer);
+        for sql in [
+            "BEGIN TRANSACTION; UPDATE t SET a = 1; COMMIT;",
+            "SELECT 1\nGO\nUPDATE t SET a = 1",
+            "SELECT a INTO t2 FROM t",
+            "WAITFOR DELAY '00:00:02'; INSERT INTO t VALUES (1);",
+            "WAITFOR (RECEIVE TOP(1) * FROM queue), TIMEOUT 2000",
+        ] {
+            assert_eq!(statement_scope(sql, sqlserver), StatementScope::Write, "{sql}");
+            assert_eq!(statement_server_budget(Some(1), Some(1), sqlserver, sql), None, "{sql}");
+        }
+        assert_eq!(
+            statement_scope("BEGIN TRANSACTION; CREATE TABLE t (id int); COMMIT;", sqlserver),
+            StatementScope::SchemaChange
+        );
+        assert_eq!(statement_scope("SELECT 1\nGO\nSELECT 2", sqlserver), StatementScope::Read);
+        assert_eq!(statement_scope("WAITFOR DELAY '00:00:10'; SELECT 1", sqlserver), StatementScope::Read);
+    }
+
+    #[test]
+    fn statement_scope_classifies_ddl_writes_and_reads() {
+        let mysql = Some(DatabaseType::Mysql);
+        // Vendor DDL that sqlparser cannot always parse must still be recognised.
+        assert_eq!(
+            statement_scope("CREATE TABLE t (id INT) PARTITION BY HASH(id) PARTITIONS 4", mysql),
+            StatementScope::SchemaChange
+        );
+        assert_eq!(
+            statement_scope("ALTER TABLE t ADD PARTITION (PARTITION p1 VALUES LESS THAN (10))", mysql),
+            StatementScope::SchemaChange
+        );
+        assert_eq!(statement_scope("DROP TABLE t", mysql), StatementScope::SchemaChange);
+        assert_eq!(statement_scope("INSERT INTO t SELECT * FROM s", mysql), StatementScope::Write);
+        assert_eq!(statement_scope("/* migration */\n  update t set a = 1", mysql), StatementScope::Write);
+        assert_eq!(statement_scope("SELECT * FROM t", mysql), StatementScope::Read);
+        assert_eq!(statement_scope("SHOW CREATE TABLE t", mysql), StatementScope::Read);
+    }
+
+    #[test]
+    fn schema_changes_are_never_bounded_by_any_timeout() {
+        let mysql = Some(DatabaseType::Mysql);
+        // Even an explicitly configured write limit must not reach a schema change:
+        // cancelling one leaves the server rolling back while holding metadata locks.
+        assert_eq!(
+            resolve_statement_timeout(
+                Some(60),
+                Some(5),
+                mysql,
+                "ALTER TABLE t ADD PARTITION (PARTITION p1 VALUES LESS THAN (10))"
+            ),
+            StatementTimeout::Unlimited
+        );
+        assert_eq!(
+            resolve_statement_timeout(Some(60), Some(5), mysql, "CREATE TABLE t (id INT)"),
+            StatementTimeout::Unlimited
+        );
+    }
+
+    #[test]
+    fn writes_are_unlimited_by_default_and_detached_when_limited() {
+        let mysql = Some(DatabaseType::Mysql);
+        assert_eq!(
+            resolve_statement_timeout(Some(60), Some(0), mysql, "INSERT INTO t VALUES (1)"),
+            StatementTimeout::Unlimited
+        );
+        assert_eq!(resolve_statement_timeout(Some(60), None, mysql, "UPDATE t SET a = 1"), StatementTimeout::Unlimited);
+        assert_eq!(
+            resolve_statement_timeout(Some(60), Some(5), mysql, "INSERT INTO t VALUES (1)"),
+            StatementTimeout::Detach(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn reads_keep_the_cancel_semantics() {
+        let mysql = Some(DatabaseType::Mysql);
+        assert_eq!(
+            resolve_statement_timeout(Some(60), Some(5), mysql, "SELECT 1"),
+            StatementTimeout::Cancel(Duration::from_secs(60))
+        );
+        assert_eq!(
+            resolve_statement_timeout(None, Some(5), mysql, "SELECT 1"),
+            StatementTimeout::Cancel(QUERY_TIMEOUT)
+        );
+        assert_eq!(resolve_statement_timeout(Some(0), Some(5), mysql, "SELECT 1"), StatementTimeout::Unlimited);
+    }
+
+    #[test]
+    fn detach_never_asks_the_server_to_cancel() {
+        let detach = StatementTimeout::Detach(Duration::from_secs(5));
+        assert_eq!(detach.server_budget(), None);
+        assert_eq!(detach.client_wait(), Some(Duration::from_secs(5)));
+        assert!(!detach.cancels_on_timeout());
+
+        let cancel = StatementTimeout::Cancel(Duration::from_secs(60));
+        assert_eq!(cancel.server_budget(), Some(Duration::from_secs(60)));
+        assert_eq!(cancel.client_wait(), Some(Duration::from_secs(60)));
+        assert!(cancel.cancels_on_timeout());
+
+        let unlimited = StatementTimeout::Unlimited;
+        assert_eq!(unlimited.server_budget(), None);
+        assert_eq!(unlimited.client_wait(), None);
+        assert!(!unlimited.cancels_on_timeout());
+    }
+
+    #[test]
+    fn detached_timeout_message_does_not_claim_failure() {
+        let message = detached_write_timeout_message(Duration::from_secs(5));
+        assert!(message.contains("still running"), "{message}");
+        assert!(message.contains("Nothing was cancelled"), "{message}");
+    }
+
     #[tokio::test]
     #[ignore = "requires DBX_NAVICAT_MYSQL_SOCKET for an isolated MySQL instance"]
     async fn stateless_mysql_context_survives_pool_replacement_on_first_execution() {
@@ -8874,6 +9664,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_execution_publishes_observation_events() {
+        use dbx_types::models::observability::{KIND_CONNECTION_OPENED, KIND_QUERY_FINISHED, KIND_QUERY_STARTED};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let storage =
+            crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.expect("open test storage");
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-observation";
+        let db_path = dir.path().join("observation.db");
+        std::fs::File::create(&db_path).expect("create SQLite database file");
+        let mut config = test_connection_config(DatabaseType::Sqlite);
+        config.id = connection_id.to_string();
+        config.host = db_path.to_string_lossy().into_owned();
+        config.query_timeout_secs = 0;
+        state.configs.write().await.insert(connection_id.to_string(), config);
+
+        // Attach the observer before the pool exists so the connection tap is
+        // exercised from the same funnel the query tap uses. Interest, not a
+        // bare receiver, is what enables publishing.
+        state.host_observations.interest().acquire(
+            "test",
+            &[
+                dbx_types::models::observability::OBSERVE_CONNECTIONS_PERMISSION.to_string(),
+                dbx_types::models::observability::OBSERVE_QUERIES_PERMISSION.to_string(),
+            ],
+        );
+        let mut events = state.host_observations.subscribe();
+
+        state.get_or_create_pool_for_session(connection_id, Some(""), None).await.expect("create SQLite pool");
+
+        let opened = events.recv().await.expect("connection.opened event");
+        assert_eq!(opened.kind, KIND_CONNECTION_OPENED);
+        assert_eq!(opened.connection_id.as_deref(), Some(connection_id));
+        assert_eq!(opened.payload["reason"], "on_demand");
+        assert_eq!(opened.payload["dbType"], "sqlite");
+
+        let result = execute_sql_statement_with_options_typed(
+            &state,
+            connection_id,
+            "",
+            "SELECT 1 AS n",
+            None,
+            None,
+            QueryExecutionOptions { execution_id: Some("obs-1".to_string()), ..Default::default() },
+        )
+        .await
+        .expect("execute select");
+        assert_eq!(result.rows.len(), 1);
+
+        let started = loop {
+            let event = events.recv().await.expect("observation event");
+            if event.kind == KIND_QUERY_STARTED {
+                break event;
+            }
+        };
+        assert_eq!(started.connection_id.as_deref(), Some(connection_id));
+        assert_eq!(started.payload["executionId"], "obs-1");
+        assert_eq!(started.payload["sql"], "SELECT 1 AS n");
+
+        let finished = loop {
+            let event = events.recv().await.expect("observation event");
+            if event.kind == KIND_QUERY_FINISHED {
+                break event;
+            }
+        };
+        assert_eq!(finished.payload["executionId"], "obs-1");
+        assert_eq!(finished.payload["status"], "ok");
+        assert_eq!(finished.payload["rowCount"], 1);
+        assert!(finished.payload["durationMs"].is_u64());
+    }
+
+    #[tokio::test]
     async fn sqlite_cancelled_query_can_execute_again_on_same_client_session() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -9465,6 +10327,7 @@ for line in sys.stdin:
             transport_layers: Vec::new(),
             connect_timeout_secs: 10,
             query_timeout_secs: 30,
+            write_timeout_secs: 0,
             idle_timeout_secs: 60,
             manual_transaction_timeout_secs: 300,
             idle_disconnect_secs: 0,
@@ -9505,6 +10368,7 @@ for line in sys.stdin:
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }
@@ -12360,14 +13224,14 @@ done
     }
 
     #[test]
-    fn oceanbase_mysql_session_timeout_sql_uses_connection_timeout_by_default() {
+    fn oceanbase_mysql_session_timeout_sql_replaces_a_previous_read_deadline_when_unlimited() {
         let mut config = test_connection_config(DatabaseType::Mysql);
         config.driver_profile = Some("oceanbase".to_string());
         config.query_timeout_secs = 300_000;
 
         assert_eq!(
             oceanbase_mysql_session_timeout_sql(Some(&config), None),
-            Some("SET ob_query_timeout = 300000000000".to_string())
+            Some("SET ob_query_timeout = 3216672000000000".to_string())
         );
     }
 
@@ -12378,7 +13242,7 @@ done
         config.query_timeout_secs = 30;
 
         assert_eq!(
-            oceanbase_mysql_session_timeout_sql(Some(&config), Some(600)),
+            oceanbase_mysql_session_timeout_sql(Some(&config), Some(Duration::from_secs(600))),
             Some("SET ob_query_timeout = 600000000".to_string())
         );
     }
@@ -12387,7 +13251,7 @@ done
     fn oceanbase_mysql_session_timeout_sql_skips_plain_mysql() {
         let config = test_connection_config(DatabaseType::Mysql);
 
-        assert_eq!(oceanbase_mysql_session_timeout_sql(Some(&config), Some(600)), None);
+        assert_eq!(oceanbase_mysql_session_timeout_sql(Some(&config), Some(Duration::from_secs(600))), None);
     }
 
     #[tokio::test]
@@ -12858,6 +13722,7 @@ done
             transport_layers: Vec::new(),
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
+            write_timeout_secs: 0,
             idle_timeout_secs: 60,
             manual_transaction_timeout_secs: 300,
             idle_disconnect_secs: 0,
@@ -12898,6 +13763,7 @@ done
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         };
 
@@ -12923,6 +13789,22 @@ done
         assert_eq!(params["fetchSize"], 250);
         assert_eq!(params["rowOffset"], 100);
         assert_eq!(params["timeoutSecs"], 600);
+    }
+
+    #[test]
+    fn agent_execute_query_params_mark_only_flagged_metadata_reads() {
+        // The Oracle agent skips DBMS_OUTPUT capture and may reuse the session schema only
+        // for flagged reads, so ordinary queries must never carry the flag.
+        let plain =
+            agent_execute_query_params("SELECT 1 FROM DUAL", None, Some("APP"), QueryExecutionOptions::default());
+        assert!(plain.get("skipServerOutput").is_none());
+        let metadata = agent_execute_query_params(
+            "SELECT OWNER FROM ALL_OBJECTS",
+            None,
+            Some("APP"),
+            QueryExecutionOptions { skip_server_output: true, ..Default::default() },
+        );
+        assert_eq!(metadata["skipServerOutput"], serde_json::json!(true));
     }
 
     #[test]
@@ -13218,6 +14100,8 @@ done
         assert_eq!(parse_drop_database_target("DROP TABLE vaultwarden;"), None);
         assert_eq!(parse_drop_database_target("DROP DATABASE vaultwarden; SELECT 1;"), None);
         assert_eq!(parse_drop_database_target("DROP DATABASE 123bad;"), None);
+        assert_eq!(parse_drop_database_target("INSERT INTO events (id) VALUES (1);"), None);
+        assert_eq!(parse_drop_database_target("INSERT INTO notes (body) VALUES ('drop database later');"), None);
     }
 
     #[test]
@@ -15083,5 +15967,136 @@ for line in sys.stdin:
         });
 
         assert!(!mysql_error_is_syntax_error(&polardbx_non_parser_error));
+    }
+}
+
+#[cfg(test)]
+mod batch_observation_tests {
+    use super::*;
+
+    fn observing_bus() -> crate::observability::HostObservationBus {
+        let bus = crate::observability::HostObservationBus::new();
+        bus.interest().acquire("test", &[dbx_types::models::observability::OBSERVE_QUERIES_PERMISSION.to_string()]);
+        bus
+    }
+
+    fn progress(statement_index: usize, total: usize) -> ExecuteMultiProgress {
+        ExecuteMultiProgress {
+            statement_index,
+            completed: statement_index + 1,
+            total,
+            success: true,
+            execution_time_ms: 5,
+            affected_rows: 0,
+            error: None,
+        }
+    }
+
+    /// A batch that fails before the driver reports anything (read-only
+    /// rejection, pool start failure, cancel) must still close its execution,
+    /// otherwise observers keep a `query.started` open forever.
+    #[tokio::test]
+    async fn batch_terminal_is_published_when_no_statement_reported() {
+        let bus = observing_bus();
+        let mut receiver = bus.subscribe();
+        let observation = BatchObservation::start(
+            &bus,
+            "conn-1",
+            "db",
+            "insert into t values (1); delete from t",
+            Some("public"),
+            2,
+            Some("exec-1".into()),
+        );
+        observation.finish("error", 0, Some("read-only connection".into()));
+
+        let started = receiver.recv().await.expect("query.started");
+        assert_eq!(started.kind, KIND_QUERY_STARTED);
+        assert_eq!(started.payload["batch"], true);
+        assert_eq!(started.payload["scope"], "batch");
+        assert_eq!(started.payload["statementCount"], 2);
+        assert_eq!(started.payload["sql"], "insert into t values (1); delete from t");
+
+        let terminal = receiver.recv().await.expect("batch terminal");
+        assert_eq!(terminal.kind, KIND_QUERY_FINISHED);
+        assert_eq!(terminal.payload["batchComplete"], true);
+        assert_eq!(terminal.payload["scope"], "batch");
+        assert_eq!(terminal.payload["status"], "error");
+        assert_eq!(terminal.payload["completedStatements"], 0);
+        assert_eq!(terminal.payload["error"], "read-only connection");
+    }
+
+    #[tokio::test]
+    async fn batch_terminal_counts_reported_statements() {
+        let bus = observing_bus();
+        let mut receiver = bus.subscribe();
+        let observation = BatchObservation::start(&bus, "conn-1", "db", "select 1; select 2", None, 2, None);
+        let callback = observation.progress_callback(vec!["select 1".into(), "select 2".into()], None);
+        callback(progress(0, 2));
+        callback(progress(1, 2));
+        observation.finish("ok", 0, None);
+
+        let _started = receiver.recv().await.expect("query.started");
+        for index in 0..2 {
+            let statement = receiver.recv().await.expect("statement finished");
+            assert_eq!(statement.kind, KIND_QUERY_FINISHED);
+            assert_eq!(statement.payload["batch"], true);
+            assert_eq!(statement.payload["scope"], "statement");
+            assert_eq!(statement.payload["statementIndex"], index);
+            assert_eq!(statement.payload["status"], "ok");
+        }
+        let terminal = receiver.recv().await.expect("batch terminal");
+        assert_eq!(terminal.payload["batchComplete"], true);
+        assert_eq!(terminal.payload["status"], "ok");
+        assert_eq!(terminal.payload["completedStatements"], 2);
+        assert_eq!(terminal.payload["failedStatements"], 0);
+        assert!(terminal.payload.get("error").is_none());
+    }
+
+    /// MySQL connection acquisition returns `Ok` with one `execution_error`
+    /// result and never reaches the progress callback, so the outer `Result`
+    /// alone would report a failed batch as successful.
+    #[test]
+    fn batch_status_treats_execution_error_results_as_failure() {
+        let outcome = Ok(vec![ExecuteMultiResult::execution_error(error_query_result("connect failed".into()))]);
+        let (status, failed, error) = batch_terminal_status(&outcome, false);
+        assert_eq!(status, "error");
+        assert_eq!(failed, 1);
+        assert!(error.is_some());
+    }
+
+    /// A cancel delivered as an error (for example during the MySQL catalog
+    /// switch) must report `cancelled`; a plain error stays an error.
+    #[test]
+    fn batch_status_reports_cancelled_for_error_outcomes() {
+        let canceled: Result<Vec<ExecuteMultiResult>, QueryExecutionError> = Err(canceled_query_execution_error());
+        assert_eq!(batch_terminal_status(&canceled, false).0, "cancelled");
+
+        let failed: Result<Vec<ExecuteMultiResult>, QueryExecutionError> = Err("boom".to_string().into());
+        assert_eq!(batch_terminal_status(&failed, false).0, "error");
+
+        // A string-converted cancel is only visible through the token.
+        assert_eq!(batch_terminal_status(&failed, true).0, "cancelled");
+    }
+
+    #[test]
+    fn batch_status_reports_partial_failures_and_cancellation() {
+        let outcome = Ok(vec![
+            ExecuteMultiResult::success_with_index(error_query_result("ok".into()), 0),
+            ExecuteMultiResult::execution_error_with_index(error_query_result("syntax error".into()), 1),
+        ]);
+        let (status, failed, error) = batch_terminal_status(&outcome, false);
+        assert_eq!(status, "error");
+        assert_eq!(failed, 1);
+        assert!(error.is_some());
+
+        // Cancellation wins over statement errors, but the failed count is kept
+        // so consumers can still see that a statement had failed.
+        let (status, failed, _) = batch_terminal_status(&outcome, true);
+        assert_eq!(status, "cancelled");
+        assert_eq!(failed, 1);
+
+        let all_ok = Ok(vec![ExecuteMultiResult::success_with_index(error_query_result("ok".into()), 0)]);
+        assert_eq!(batch_terminal_status(&all_ok, false).0, "ok");
     }
 }

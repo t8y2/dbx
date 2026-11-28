@@ -828,6 +828,31 @@ describe("connectionStore completion assistant", () => {
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
   });
 
+  // #14075: a busy metadata pool made completion give up on the first failure,
+  // so one large-schema load left the editor without columns.
+  it("retries a busy metadata pool instead of returning no columns", async () => {
+    const getColumns = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("DBX metadata pool is busy; please retry"))
+      .mockResolvedValueOnce([{ name: "REPORT_ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+
+    const columns = await store.listCompletionColumns("oracle-1", "ORCL", "ORDERS", undefined, { clientSessionId: "tab-a", version: 0 });
+
+    expect(getColumns).toHaveBeenCalledTimes(2);
+    expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS" })]);
+  });
+
   it("passes OceanBase synonym lookup context separately and isolates selected schemas", async () => {
     const getColumns = vi.fn().mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_nullable: false }]);
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
@@ -2314,5 +2339,69 @@ describe("connectionStore completion assistant", () => {
     const loaded = await store.loadTableForLocate({ connectionId: "oracle-1", database: "hr", schema: "hr", tableName: "EMP" });
     expect(loaded).toBe(true);
     expect(store.treeNodes[0]?.children?.[0]?.children?.map((child) => child.label)).toContain("EMP");
+  });
+
+  it("uses currentSchema for Dameng non-global table assistant searches (#15630)", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "SYS_USER", kind: "table", schema: "YJ1235" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [damengConnection()];
+    store.connectedIds.add("dameng-1");
+
+    const tables = await store.listCompletionTables("dameng-1", "", "", 500, undefined, false, "YJ1235");
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ schema: "YJ1235", parent_schema: "YJ1235", global_search: false }));
+    expect(tables).toEqual([{ name: "SYS_USER", schema: "YJ1235", type: "table" }]);
+  });
+
+  it("forwards identifier quoting as case_sensitive and avoids caching empty column results (#15630)", async () => {
+    const completionAssistantSearch = vi
+      .fn()
+      .mockResolvedValueOnce({ candidates: [], incomplete: false, fallback_used: false })
+      .mockResolvedValueOnce({
+        candidates: [{ name: "id", kind: "column", schema: "YJ1235", parent_schema: "YJ1235", parent_name: "SYS_USER", data_type: "VARCHAR(36 CHAR)" }],
+        incomplete: false,
+        fallback_used: false,
+      })
+      .mockResolvedValueOnce({
+        candidates: [{ name: "ExactId", kind: "column", schema: "YJ1235", parent_schema: "YJ1235", parent_name: "Sys_User", data_type: "BIGINT" }],
+        incomplete: false,
+        fallback_used: false,
+      });
+    const getColumns = vi.fn().mockResolvedValueOnce([]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [damengConnection()];
+    store.connectedIds.add("dameng-1");
+
+    // Transient empty response must not poison the column cache.
+    await expect(store.listCompletionColumns("dameng-1", "", "sys_user", "YJ1235", { tableQuoted: false, schemaQuoted: false })).resolves.toEqual([]);
+    const retried = await store.listCompletionColumns("dameng-1", "", "sys_user", "YJ1235", { tableQuoted: false, schemaQuoted: false });
+    expect(retried).toEqual([expect.objectContaining({ name: "id", table: "SYS_USER", schema: "YJ1235" })]);
+
+    // Quoted identifiers set case_sensitive: true.
+    const quoted = await store.listCompletionColumns("dameng-1", "", "Sys_User", "YJ1235", { tableQuoted: true, schemaQuoted: false });
+    expect(quoted).toEqual([expect.objectContaining({ name: "ExactId", table: "Sys_User", schema: "YJ1235" })]);
+    expect(completionAssistantSearch).toHaveBeenNthCalledWith(1, expect.objectContaining({ parent_name: "SYS_USER", parent_schema: "YJ1235", case_sensitive: false }));
+    expect(completionAssistantSearch).toHaveBeenNthCalledWith(3, expect.objectContaining({ parent_name: "Sys_User", parent_schema: "YJ1235", case_sensitive: true }));
   });
 });

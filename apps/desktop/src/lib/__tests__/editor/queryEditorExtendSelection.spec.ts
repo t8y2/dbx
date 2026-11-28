@@ -337,6 +337,55 @@ describe("query editor extend selection", () => {
     expect(sequence).toContain(doc);
   });
 
+  it("extends SQL selections inside square brackets and curly braces including nested brackets", () => {
+    const arrayDoc = "select * from t where x = array[arr[a + b * c] + d] and enabled = 1";
+    const arraySequence = selectionSequence(arrayDoc, arrayDoc.indexOf("b * c") + 1, "sql");
+    expect(arraySequence).toContain("b * c");
+    expect(arraySequence).toContain("a + b * c");
+    expect(arraySequence).toContain("[a + b * c]");
+    expect(arraySequence).toContain("arr[a + b * c]");
+    expect(arraySequence).toContain("arr[a + b * c] + d");
+    expect(arraySequence).toContain("[arr[a + b * c] + d]");
+    expect(arraySequence).toContain("array[arr[a + b * c] + d]");
+    expect(arraySequence).toContain("x = array[arr[a + b * c] + d]");
+
+    const objectDoc = "select * from t where payload = object{a: {b: 1}, c: [2, 3]} and enabled = 1";
+    const objectSequence = selectionSequence(objectDoc, objectDoc.indexOf("b: 1"), "sql");
+    expect(objectSequence).toContain("b");
+    expect(objectSequence).toContain("b: 1");
+    expect(objectSequence).toContain("{b: 1}");
+    expect(objectSequence).toContain("a: {b: 1}, c: [2, 3]");
+    expect(objectSequence).toContain("{a: {b: 1}, c: [2, 3]}");
+    expect(objectSequence).toContain("object{a: {b: 1}, c: [2, 3]}");
+    expect(objectSequence).toContain("payload = object{a: {b: 1}, c: [2, 3]}");
+
+    const mixedDoc = "select fn(array[obj{a: (1 + 2)}]) from t";
+    const mixedSequence = selectionSequence(mixedDoc, mixedDoc.indexOf("1 + 2"), "sql");
+    expect(mixedSequence).toContain("1 + 2");
+    expect(mixedSequence).toContain("(1 + 2)");
+    expect(mixedSequence).toContain("a: (1 + 2)");
+    expect(mixedSequence).toContain("{a: (1 + 2)}");
+    expect(mixedSequence).toContain("obj{a: (1 + 2)}");
+    expect(mixedSequence).toContain("[obj{a: (1 + 2)}]");
+    expect(mixedSequence).toContain("array[obj{a: (1 + 2)}]");
+    expect(mixedSequence).toContain("fn(array[obj{a: (1 + 2)}])");
+  });
+
+  it("extends selections inside SQL Server bracket-quoted identifiers and plain text brackets", () => {
+    const sqlServerDoc = "select [Order Details] from [dbo].[Orders]";
+    const cursor = sqlServerDoc.indexOf("Order") + 2;
+    const sqlServerCandidates = [
+      ...plainTextSelectionRanges({ doc: sqlServerDoc, cursor, current: { from: cursor, to: cursor }, preferDelimitedContent: true }),
+      ...sqlSemanticSelectionRanges({ doc: sqlServerDoc, cursor, current: { from: cursor, to: cursor }, preferDelimitedContent: true }, { databaseType: "sqlserver" }),
+    ];
+    const texts = sqlServerCandidates.map((range) => sqlServerDoc.slice(range.from, range.to));
+    expect(texts).toContain("Order Details");
+    expect(texts).toContain("[Order Details]");
+
+    expect(plainTextSelectionSequence("array[a + b]", "array[".length + 1)).toEqual(["a", "a + b", "[a + b]", "array[a + b]"]);
+    expect(plainTextSelectionSequence("object{a: 1}", "object{".length + 1)).toEqual(["a", "a: 1", "{a: 1}", "object{a: 1}"]);
+  });
+
   it("keeps valid statement semantics when a later statement is incomplete", () => {
     const doc = "select * from t where a = 1;\nselect (";
     const sequence = selectionSequence(doc, doc.indexOf("a ="), "sql");

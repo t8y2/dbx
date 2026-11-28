@@ -89,6 +89,18 @@ const mysqlCapabilities = capabilities({
   foreignKey: true,
 });
 
+// Doris reuses the MySQL dialect for column/index SQL, but its index DDL is
+// narrower than MySQL's: an existing index cannot be rebuilt (no drop+create
+// flow), `CREATE INDEX` takes a single column and no index type/comment, and
+// there is no unique secondary index. Keep the flags in sync with the backend
+// `TableStructureCapabilities` for `DatabaseType::Doris`.
+const dorisCapabilities: TableStructureCapabilities = {
+  ...mysqlCapabilities,
+  rebuildIndex: false,
+  indexType: false,
+  indexComment: false,
+};
+
 const starrocksCapabilities = capabilities({
   dialect: "mysql",
   createTable: true,
@@ -292,7 +304,9 @@ const informixCapabilities = capabilities({
 
 const sapHanaCapabilities = capabilities({
   dialect: "oracle",
+  createTable: true,
   addColumn: true,
+  addPrimaryKey: true,
   dropColumn: true,
   renameColumn: true,
   alterExistingColumn: true,
@@ -373,7 +387,7 @@ const firebirdCapabilities = capabilities({
 
 const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>> = {
   mysql: mysqlCapabilities,
-  doris: mysqlCapabilities,
+  doris: dorisCapabilities,
   starrocks: starrocksCapabilities,
   goldendb: mysqlCapabilities,
   sundb: mysqlCapabilities,

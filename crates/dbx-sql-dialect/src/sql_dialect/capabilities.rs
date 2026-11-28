@@ -162,6 +162,16 @@ pub fn pagination_strategy(database_type: Option<DatabaseType>, context: Paginat
         Some(DatabaseType::Firebird) => TablePaginationStrategy::FirebirdRows,
         Some(DatabaseType::OceanbaseOracle) => TablePaginationStrategy::Rownum,
         Some(DatabaseType::Questdb) => TablePaginationStrategy::QuestDbLimit,
+        // Trino (and PrestoSQL, same grammar) only accepts OFFSET before the row
+        // limit, so `LIMIT n OFFSET m` is a syntax error and every table data
+        // page after the first fails (#15231). `OFFSET m ROWS FETCH FIRST n ROWS
+        // ONLY` is accepted. User queries keep their current path: the statement
+        // is sent unchanged and later pages come from the result session.
+        Some(DatabaseType::Trino | DatabaseType::PrestoSql)
+            if matches!(context, PaginationContext::TablePreview | PaginationContext::BoundedRead) =>
+        {
+            TablePaginationStrategy::FetchFirst
+        }
         _ => TablePaginationStrategy::LimitOffset,
     }
 }

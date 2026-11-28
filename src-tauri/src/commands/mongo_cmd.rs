@@ -671,7 +671,7 @@ pub async fn mongo_delete_document(
         connection_id,
         database,
         collection,
-        id,
+        dbx_core::document_ops::DocumentDeleteId::Text(id),
         routing,
         None,
     )

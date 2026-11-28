@@ -81,7 +81,7 @@ function mongoExtendedJsonDateValue(value: unknown): string | number | undefined
   return Object.keys(canonical).length === 1 && typeof canonical.$numberLong === "string" ? canonical.$numberLong : undefined;
 }
 
-export function mongoDocumentGridColumnTypes(documents: readonly Record<string, unknown>[], columns: readonly string[]): string[] {
+export function mongoDocumentGridColumnTypes(documents: readonly Record<string, unknown>[], columns: readonly string[], mode: "all" | "datesOnly" = "all"): string[] {
   return columns.map((column) => {
     let inferredType: string | undefined;
     for (const document of documents) {
@@ -92,6 +92,7 @@ export function mongoDocumentGridColumnTypes(documents: readonly Record<string, 
         inferredType = "datetime";
         continue;
       }
+      if (mode === "datesOnly") return "";
       const numericType = mongoDocumentNumericValueType(value);
       if (!numericType || inferredType === "datetime") return "";
       inferredType = inferredType && inferredType !== numericType ? "number" : numericType;
@@ -296,7 +297,7 @@ function mongoDocumentGridEscapedString(value: unknown): string | undefined {
   return typeof value === "string" && value.startsWith(MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX) ? value.slice(MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX.length) : undefined;
 }
 
-function mongoDocumentGridJson(value: unknown): string | undefined {
+export function mongoDocumentGridJson(value: unknown): string | undefined {
   return typeof value === "string" && value.startsWith(MONGO_DOCUMENT_GRID_JSON_PREFIX) ? value.slice(MONGO_DOCUMENT_GRID_JSON_PREFIX.length) : undefined;
 }
 
@@ -732,6 +733,32 @@ export function serializeMongoDocumentId(value: unknown): string {
   if (typeof value === "string") return `__dbx_mongo_string_id__${JSON.stringify(value)}`;
   if (isMongoExtendedJsonId(value)) return JSON.stringify(value);
   return String(value);
+}
+
+function hasReorderedMongoIdKeys(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasReorderedMongoIdKeys);
+  if (!value || typeof value !== "object") return false;
+  // JavaScript enumerates array-index keys in numeric order, which can change BSON equality.
+  return Object.entries(value).some(([key, nested]) => (String(Number(key) >>> 0) === key && key !== "4294967295") || hasReorderedMongoIdKeys(nested));
+}
+
+export type MongoDeleteId = string | { bsonDocument: Record<string, unknown> };
+
+function isEmbeddedMongoId(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value) && !Object.keys(value).some((key) => key.startsWith("$"));
+}
+
+export function serializeMongoDeleteId(value: unknown, canonicalId: unknown): MongoDeleteId {
+  if (isEmbeddedMongoId(canonicalId)) {
+    if (hasReorderedMongoIdKeys(canonicalId)) throw new Error("Cannot preserve the MongoDB document ID's field order.");
+    return { bsonDocument: canonicalId };
+  }
+  if (isEmbeddedMongoId(value)) throw new Error("Cannot delete a MongoDB document without its canonical BSON ID.");
+  return serializeMongoDocumentId(value);
+}
+
+export function formatMongoDeleteIdCondition(value: unknown, deleteId?: MongoDeleteId): string {
+  return deleteId && typeof deleteId !== "string" ? `{$eq: ${formatMongoShellLiteral(deleteId.bsonDocument)}}` : formatMongoShellLiteral(value);
 }
 
 export function mongoDocumentIdForGrid(value: unknown): MongoInputValue {

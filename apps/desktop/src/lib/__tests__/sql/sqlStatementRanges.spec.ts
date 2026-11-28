@@ -2683,6 +2683,81 @@ WHERE t2.product_name = '12345'
   });
 });
 
+describe("nested execution candidates (#15213)", () => {
+  it("offers the peeled subquery and keeps current mode on the full statement", () => {
+    const sql = "INSERT INTO t (a) SELECT a FROM (SELECT 1 AS a) src;";
+    const cursor = indexOf(sql, "1 AS a");
+    const candidates = buildExecutionCandidates(sql, cursor);
+
+    expect(candidateKinds(candidates)).toEqual(["nested", "all"]);
+    expect(candidates[0].sql).toBe("SELECT 1 AS a");
+    // The bracket peel must drop the `src` alias — running `SELECT 1 AS a) src`
+    // would be a syntax error, and keeping the alias would run the outer shape.
+    expect(candidates[0].sql.endsWith(") src")).toBe(false);
+    // cursor 候选的真实契约包含结尾分号（statementRangeAtCursor 语义）
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(sql);
+  });
+
+  it("sorts nested candidates innermost-first across nesting levels", () => {
+    const sql = "SELECT * FROM (SELECT * FROM (SELECT 1) x) y;";
+    const cursor = indexOf(sql, "SELECT 1");
+    const candidates = buildExecutionCandidates(sql, cursor);
+
+    expect(candidateKinds(candidates)).toEqual(["nested", "nested", "all"]);
+    expect(candidates[0].sql).toBe("SELECT 1");
+    expect(candidates[0].level).toBe(1);
+    // The middle peel keeps `x`: it is the inner subquery's alias inside the
+    // middle FROM clause, so the executable form of the middle query needs it.
+    expect(candidates[1].sql).toBe("SELECT * FROM (SELECT 1) x");
+    expect(candidates[1].level).toBe(2);
+  });
+
+  it("offers nothing when the cursor is outside every bracket group", () => {
+    const sql = "SELECT * FROM (SELECT 1) x WHERE id = 1;";
+    const cursor = indexOf(sql, "id = 1");
+    const candidates = buildExecutionCandidates(sql, cursor);
+
+    expect(candidateKinds(candidates)).toEqual(["all"]);
+  });
+
+  it("does not treat function-argument or value-list brackets as executable queries", () => {
+    const callSql = "SELECT f(a, (1 + 2)) FROM t;";
+    expect(buildExecutionCandidates(callSql, indexOf(callSql, "1 + 2")).every((item) => item.kind !== "nested")).toBe(true);
+
+    const valuesSql = "INSERT INTO t VALUES (1, 2);";
+    expect(buildExecutionCandidates(valuesSql, indexOf(valuesSql, "1, 2")).every((item) => item.kind !== "nested")).toBe(true);
+  });
+
+  it("ignores brackets inside string literals", () => {
+    const sql = "SELECT '(' FROM t WHERE c = ')';";
+    const cursor = indexOf(sql, "FROM t");
+    expect(buildExecutionCandidates(sql, cursor).every((item) => item.kind !== "nested")).toBe(true);
+  });
+
+  it("offers nothing for an unterminated bracket group", () => {
+    const sql = "SELECT * FROM (SELECT 1";
+    expect(buildExecutionCandidates(sql, indexOf(sql, "SELECT 1")).every((item) => item.kind !== "nested")).toBe(true);
+  });
+
+  it("skips nested collection inside Oracle PL/SQL anonymous blocks", () => {
+    const sql = "BEGIN UPDATE t SET a = 1 WHERE b IN (SELECT c FROM d); END;";
+    const cursor = indexOf(sql, "SELECT c");
+    expect(buildExecutionCandidates(sql, cursor, "oracle").every((item) => item.kind !== "nested")).toBe(true);
+  });
+
+  it("adds a nested candidate next to cursor + all for later statements", () => {
+    const inner = "SELECT 2";
+    const sql = `SELECT 1;\nINSERT INTO t SELECT * FROM (${inner}) s;`;
+    const cursor = indexOf(sql, inner);
+    const candidates = buildExecutionCandidates(sql, cursor);
+
+    expect(candidateKinds(candidates)).toEqual(["nested", "cursor", "all"]);
+    expect(candidates[0].sql).toBe(inner);
+    // 非文末语句的分号是分隔符，不进 cursor 候选（文末语句则含尾分号）
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(`INSERT INTO t SELECT * FROM (${inner}) s`);
+  });
+});
+
 describe("hasMultipleExecutionTargets", () => {
   it("returns false for a single SQL statement", () => {
     expect(hasMultipleExecutionTargets("SELECT 1;")).toBe(false);

@@ -1,16 +1,27 @@
-import type { MongoCollectionKind, ObjectBrowserFilter, ObjectInfo, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
+import type { DatabaseType, MongoCollectionKind, ObjectBrowserFilter, ObjectInfo, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
 export type { ObjectBrowserFilter } from "@/types/database";
 import { pinnedTreeNodeIdentityMatches, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
 import { buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
 import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
+import { preservesExactTableIdentifier } from "@/lib/database/databaseObjectCapabilities";
 import { exactOracleTriggerMetadata, exactOracleTriggerObjectMetadata, oracleTriggerIdentityKey } from "@/lib/database/oracleTriggerIdentity";
 
 export type ObjectBrowserRow = {
   id: string;
   name: string;
   displayName: string;
+  /**
+   * Which side of the server identifier carries whitespace. `displayName` is the
+   * trimmed text used for search, sorting and copying, so a padded name such as
+   * `` ` orders` `` would otherwise be indistinguishable from `orders` in the
+   * object list even though they are different tables (#14905). The name column
+   * renders these flags as visible markers.
+   */
+  nameSpaces?: ObjectBrowserNameSpaces;
   schema?: string;
+  /** Server identifiers retained separately from normalized display names. */
+  postgresSequenceIdentity?: { name: string; schema?: string };
   type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "INDEX" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
   parentSchema?: string;
   parentName?: string;
@@ -27,6 +38,8 @@ export type ObjectBrowserRow = {
   partitionParentName?: string;
   estimatedRows?: number | null;
   totalBytes?: number | null;
+  /** MySQL storage engine reported by `information_schema.TABLES`. */
+  engine?: string | null;
   /** MySQL AUTO_INCREMENT as returned by the server: a string, since BIGINT UNSIGNED values exceed 2^53. */
   autoIncrement?: string | null;
   characterSet?: string | null;
@@ -37,13 +50,34 @@ export type ObjectBrowserRow = {
   foreignTable?: boolean;
 };
 
+/**
+ * Whitespace kept around a preserved server identifier. Only MySQL-family
+ * quoted names can carry it; `orders` and ` orders` are separate tables, so the
+ * list must show which one a row addresses before the user opens a menu.
+ */
+export interface ObjectBrowserNameSpaces {
+  leading: boolean;
+  trailing: boolean;
+}
+
+export function objectBrowserNameSpaces(name: string): ObjectBrowserNameSpaces | undefined {
+  const leading = name !== name.trimStart();
+  const trailing = name !== name.trimEnd();
+  return leading || trailing ? { leading, trailing } : undefined;
+}
+
+/** Hover text that keeps whitespace visible: the exact identifier in backticks. */
+export function objectBrowserNameTooltip(row: Pick<ObjectBrowserRow, "name" | "displayName" | "nameSpaces">): string {
+  return row.nameSpaces ? `\`${row.name}\`` : row.displayName;
+}
+
 /** True when the backend-reported object type is a PostgreSQL foreign table. */
 export function isForeignTableObjectType(objectType: string | null | undefined): boolean {
   if (!objectType) return false;
   return objectType.toUpperCase().replace(/[\s-]+/g, "_") === "FOREIGN_TABLE";
 }
 
-export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
+export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "engine" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 
@@ -86,10 +120,10 @@ export function objectBrowserRowPinnedTreeNodeIdentity(row: ObjectBrowserRow, co
   return {
     connectionId: context.connectionId,
     database: context.database,
-    schema: row.schema ?? context.schema ?? "",
+    schema: row.postgresSequenceIdentity?.schema ?? row.schema ?? context.schema ?? "",
     catalog: context.catalog || "",
     type: objectBrowserRowTreeNodeType(row.type),
-    name: row.name,
+    name: row.postgresSequenceIdentity?.name ?? row.name,
     signature: row.type === "FUNCTION" || row.type === "PROCEDURE" ? row.signature?.trim() || "" : "",
     id: row.id,
   };
@@ -162,9 +196,11 @@ export function objectBrowserRowLegacyPinnedTreeNodeIds(row: ObjectBrowserRow, c
   return [...legacyIds];
 }
 
-export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] {
-  const value = type.toUpperCase();
+export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] | null {
+  const value = type.trim().toUpperCase();
   const normalized = value.replace(/[\s-]+/g, "_");
+  // These objects have their own sidebar paths. They must not fall through as tables.
+  if (normalized === "SYNONYM" || normalized === "JOB") return null;
   if (normalized === "INDEX") return "INDEX";
   if (normalized.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
   if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
@@ -180,7 +216,7 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
   return "TABLE";
 }
 
-export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; database: string; fallbackSchema: string; rowSchema?: string }): ObjectBrowserRow[] {
+export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; database: string; fallbackSchema: string; rowSchema?: string; databaseType?: DatabaseType }): ObjectBrowserRow[] {
   const seen = new Map<string, number>();
   const rows = options.objects.flatMap<ObjectBrowserRow>((object) => {
     const exactTrigger = exactOracleTriggerObjectMetadata(object);
@@ -204,14 +240,24 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
       ];
     }
     const type = normalizeObjectBrowserType(object.object_type);
-    const name = type === "INDEX" ? object.name : normalizeDatabaseObjectName(object.name);
-    if (!name) return [];
-    const objectSchema = type === "INDEX" ? object.schema : object.schema ? normalizeDatabaseObjectName(object.schema) : undefined;
+    if (!type) return [];
+    // Table-like identifiers are DDL targets. MySQL-family databases allow
+    // leading/trailing spaces inside quoted names, so only those rows keep the
+    // driver-reported name and normalize the display text; trimming would make
+    // `ALTER TABLE` address a different table (#14905). Other dialects keep
+    // their normalized name, preserving the pre-fix behavior.
+    const preserveIdentifier = preservesExactTableIdentifier(options.databaseType, type);
+    const postgresSequenceIdentity = type === "SEQUENCE" && options.databaseType === "postgres" ? { name: object.name, schema: object.schema ?? options.rowSchema } : undefined;
+    const name = type === "INDEX" || preserveIdentifier ? object.name : normalizeDatabaseObjectName(object.name);
+    if (!name.trim() && !postgresSequenceIdentity?.name) return [];
+    const objectSchema = type === "INDEX" || preserveIdentifier ? object.schema : object.schema ? normalizeDatabaseObjectName(object.schema) : undefined;
     const schema = objectSchema || options.rowSchema;
     const signature = routineSignatureForDisplay(type, object.signature);
-    const displayName = signature === undefined ? name : `${name}(${signature})`;
+    const displayNameBase = preserveIdentifier ? name.trim() : name;
+    const displayName = signature === undefined ? displayNameBase : `${displayNameBase}(${signature})`;
+    const nameSpaces = preserveIdentifier ? objectBrowserNameSpaces(name) : undefined;
     const signatureIdPart = signature === undefined ? "" : `:${signature}`;
-    const baseId = `${schema || options.fallbackSchema || options.database}:${name}:${type}${signatureIdPart}`;
+    const baseId = postgresSequenceIdentity ? `SEQUENCE:${JSON.stringify([postgresSequenceIdentity.schema ?? options.fallbackSchema, postgresSequenceIdentity.name])}` : `${schema || options.fallbackSchema || options.database}:${name}:${type}${signatureIdPart}`;
     const index = seen.get(baseId) ?? 0;
     seen.set(baseId, index + 1);
     return [
@@ -219,7 +265,9 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
         id: `${baseId}:${index}`,
         name,
         displayName,
+        ...(nameSpaces ? { nameSpaces } : {}),
         schema,
+        ...(postgresSequenceIdentity ? { postgresSequenceIdentity } : {}),
         type,
         foreignTable: isForeignTableObjectType(object.object_type) || undefined,
         valid: object.valid,

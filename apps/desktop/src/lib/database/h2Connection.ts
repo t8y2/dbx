@@ -20,14 +20,34 @@ function decodeH2UrlPart(value: string): string {
   }
 }
 
-function extractH2JdbcSemicolonParams(source: string): { username?: string; password?: string; urlParams: string } {
+function h2JdbcOptionParts(source: string): string[] {
+  const firstSeparator = source.indexOf(";");
+  if (firstSeparator < 0) return [];
+
+  // H2 allows escaped semicolons in option values. Keep the raw text for JDBC.
+  const parts: string[] = [];
+  let start = firstSeparator + 1;
+  for (let index = start; index < source.length; index++) {
+    if (source[index] === "\\") {
+      index++;
+    } else if (source[index] === ";") {
+      parts.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(source.slice(start));
+  return parts;
+}
+
+function extractH2JdbcSemicolonParams(source: string): { username?: string; password?: string; urlParams: string; hasAutoServer: boolean } {
   let username: string | undefined;
   let password: string | undefined;
+  let hasAutoServer = false;
   const urlParams: string[] = [];
 
-  for (const part of source.split(";").slice(1)) {
+  for (const part of h2JdbcOptionParts(source)) {
     if (!part) continue;
-    const [rawKey, ...rest] = part.split("=");
+    const [rawKey, ...rest] = part.replace(/\\(.)/gs, "$1").split("=");
     const key = decodeH2UrlPart(rawKey).trim().toLowerCase();
     const value = decodeH2UrlPart(rest.join("=")).trim();
     if (key === "user") {
@@ -36,27 +56,19 @@ function extractH2JdbcSemicolonParams(source: string): { username?: string; pass
       password = value;
     } else {
       urlParams.push(part);
+      hasAutoServer ||= key === "auto_server";
     }
   }
 
-  return { username, password, urlParams: urlParams.join(";") };
-}
-
-function hasH2JdbcSemicolonParam(source: string | undefined, name: string): boolean {
-  for (const part of (source || "").split(";").slice(1)) {
-    if (!part) continue;
-    const [rawKey] = part.split("=");
-    if (decodeH2UrlPart(rawKey).trim().toLowerCase() === name) return true;
-  }
-  return false;
+  return { username, password, urlParams: urlParams.join(";"), hasAutoServer };
 }
 
 export function h2JdbcUrlHasUserParam(source: string | undefined): boolean {
-  return hasH2JdbcSemicolonParam(source, "user");
+  return extractH2JdbcSemicolonParams(source || "").username !== undefined;
 }
 
 export function h2JdbcUrlHasPasswordParam(source: string | undefined): boolean {
-  return hasH2JdbcSemicolonParam(source, "password");
+  return extractH2JdbcSemicolonParams(source || "").password !== undefined;
 }
 
 function databaseNameFromPath(path: string): string | undefined {
@@ -84,13 +96,19 @@ export function h2FilePathFromJdbcUrl(value: string | undefined | null): string 
   return rawPath;
 }
 
-export function isH2SplitJdbcUrl(value: string | undefined | null): value is string {
-  return (value || "").trim().toLowerCase().startsWith(H2_SPLIT_PREFIX);
-}
-
 export function h2FileJdbcUrlWithPath(source: string | undefined | null, path: string): string {
   const trimmed = (source || "").trim();
-  if (!isH2SplitJdbcUrl(trimmed)) return h2FileJdbcUrl(path);
+  const prefix = h2FileJdbcUrlPrefix(trimmed);
+  if (prefix === H2_FILE_PREFIX) {
+    // The form supplies USER and PASSWORD separately.
+    const { urlParams, hasAutoServer } = extractH2JdbcSemicolonParams(trimmed);
+    if (hasAutoServer) return `${H2_FILE_PREFIX}${h2JdbcFileBasePath(path)};${urlParams}`;
+
+    // Keep the default that lets DBX's separate agents open the same file.
+    const defaultUrl = h2FileJdbcUrl(path);
+    return urlParams ? `${defaultUrl};${urlParams}` : defaultUrl;
+  }
+  if (prefix !== H2_SPLIT_PREFIX) return h2FileJdbcUrl(path);
 
   const rest = trimmed.slice(H2_SPLIT_PREFIX.length);
   const [rawPath, ...optionParts] = rest.split(";");

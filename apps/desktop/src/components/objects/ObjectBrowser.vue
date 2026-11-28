@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
-import { mysqlTableCharsetFromCollation } from "@/lib/table/mysqlTableCollation";
+import { createDatabaseCollationOptionsForCharset, parseCreateDatabaseCharsetMetadata, type CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import { MYSQL_CHARACTER_SETS_SQL, MYSQL_COLLATIONS_SQL, mysqlTableCharsetChangeSql, mysqlTableCharsetFromCollation, mysqlTableCollationBelongsToCharset } from "@/lib/table/mysqlTableCollation";
+import { MYSQL_STORAGE_ENGINES_SQL, mysqlTableEngineChangeSql, parseMysqlTableEngineMetadata, quoteMysqlTableIdentifier, supportsMysqlTableEngine } from "@/lib/table/mysqlTableEngine";
 import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { uuid } from "@/lib/common/utils";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
@@ -83,6 +85,7 @@ import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMe
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import ObjectNameLabel from "@/components/objects/ObjectNameLabel.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import { launchPlDebug } from "@/components/debug/plDebugLaunch";
@@ -94,6 +97,7 @@ import * as api from "@/lib/backend/api";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
 import { objectDependencyTarget, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import { oraclePackageMemberSourceRequest, type OraclePackageSourceContext } from "@/lib/sql/oraclePackageMemberNavigation";
 import type { QueryTab } from "@/types/database";
 import type {
   ColumnInfo,
@@ -113,7 +117,6 @@ import type {
   TreeNode,
   TriggerInfo,
 } from "@/types/database";
-import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsAiAssistantContext, supportsDataDictionary, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -158,6 +161,7 @@ import {
 import { confirmOracleTriggerPlan } from "@/lib/database/oracleTriggerActions";
 import OracleTriggerStatus from "@/components/objects/OracleTriggerStatus.vue";
 import ObjectSourceDialog from "@/components/objects/ObjectSourceDialog.vue";
+import PostgresSequenceDialog from "@/components/objects/PostgresSequenceDialog.vue";
 import { assertSourceIdentity, beginSourceSave, captureSourceIdentity, freezeSourceIdentities, renewSourceIdentity, type SourceIdentitySnapshot } from "@/lib/table/objectSourceIdentity";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { prepareOracleViewRename, executeOracleViewRename, OracleViewRenameFailure, type OracleViewRenamePlan } from "@/lib/table/oracleViewRename";
@@ -221,7 +225,7 @@ import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { COLUMN_NAME_COPY_SEPARATOR_VALUES } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
-import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
+import { orderObjectBrowserDropRows, runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { foreignKeyChecksPreview, foreignKeyChecksTargetResults, isForeignKeyChecksOverride, runForeignKeyChecksBatch, supportsForeignKeyChecksOption, type ForeignKeyChecksMode } from "@/lib/table/foreignKeyChecks";
 import ForeignKeyChecksSelect from "@/components/objects/ForeignKeyChecksSelect.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -262,7 +266,7 @@ import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPr
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRowsForScaffold, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
-import { metadataLoadBudgetMs } from "@/lib/metadata/metadataLoadBudget";
+import { metadataLoadBudgetMs, waitForMetadata } from "@/lib/metadata/metadataLoadBudget";
 import { shareObjectBrowserRead } from "@/lib/table/objectBrowserPendingReads";
 import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
@@ -276,7 +280,7 @@ import { createLocateTabMenuItem } from "@/lib/tabs/tabMenu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type ObjectFilter = ObjectBrowserFilter;
-type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
+type ObjectBrowserColumnKey = "select" | "name" | "type" | "engine" | "estimatedRows" | "totalBytes" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -288,7 +292,7 @@ const props = defineProps<{
   initialEventOpenRequestId?: number;
   /** 显式"新建事件"请求号：每次菜单点击递增，用于打开/重新进入 CREATE 编辑器 */
   initialEventCreateRequestId?: number;
-  initialObjectFilter?: "tables" | "events" | "indexes";
+  initialObjectFilter?: ObjectFilter;
   initialIndexCreateRequestId?: number;
   initialViewTarget?: SchemaIndexIdentity;
   initialViewRequestId?: number;
@@ -328,6 +332,48 @@ const refreshTooltip = computed(() => {
 const firebirdManagerOpen = ref(false);
 const schemas = ref<string[]>([]);
 const selectedSchema = ref<string | undefined>(props.schema);
+const postgresSequenceOpen = ref(false);
+type PostgresSequenceTarget = { connectionId: string; database: string; schema: string; name: string; catalog?: string; browserSchema?: string };
+const postgresSequenceTarget = shallowRef<PostgresSequenceTarget>();
+function postgresSequenceTargetForRow(row: ObjectBrowserRow): PostgresSequenceTarget | undefined {
+  const identity = row.postgresSequenceIdentity;
+  const schema = identity?.schema ?? selectedSchema.value;
+  if (props.connection.db_type !== "postgres" || row.type !== "SEQUENCE" || !identity || !schema) return;
+  return { connectionId: props.connection.id, database: props.database, schema, name: identity.name, catalog: props.catalog, browserSchema: selectedSchema.value };
+}
+function openPostgresSequence(target: PostgresSequenceTarget | undefined) {
+  if (!target || props.connection.db_type !== "postgres" || target.connectionId !== props.connection.id || target.database !== props.database || target.catalog !== props.catalog || target.browserSchema !== selectedSchema.value) return;
+  postgresSequenceTarget.value = target;
+  postgresSequenceOpen.value = true;
+}
+watch(
+  [() => props.connection.id, () => props.connection.db_type, () => props.database, () => props.catalog, selectedSchema],
+  () => {
+    postgresSequenceOpen.value = false;
+  },
+  { flush: "sync" },
+);
+watch(postgresSequenceOpen, (open) => {
+  if (!open) postgresSequenceTarget.value = undefined;
+});
+onDeactivated(() => {
+  postgresSequenceOpen.value = false;
+});
+async function refreshPostgresSequence() {
+  const target = postgresSequenceTarget.value;
+  if (!target) return;
+  const scope = { connectionId: target.connectionId, database: target.database, schema: target.schema, tableName: target.name };
+  try {
+    await Promise.all([invalidateObjectMetadataCache(scope), invalidateObjectDdlCache(scope)]);
+    invalidateObjectBrowserRowsCache({ connectionId: target.connectionId, database: target.database, schema: target.schema });
+    await connectionStore.refreshObjectListTreeNode(target.connectionId, target.database, target.schema, target.catalog);
+    if (!objectBrowserUnmounted && props.connection.id === target.connectionId && props.database === target.database && props.catalog === target.catalog && selectedSchema.value === target.browserSchema) {
+      await reload({ preserveExistingRows: true });
+    }
+  } catch (error) {
+    toast(translateBackendError(t, error), 5000);
+  }
+}
 const triggerCreateOpen = ref(false);
 const triggerCreateDialog = ref<InstanceType<typeof ObjectSourceDialog>>();
 const triggerCreateContext = ref<{ connectionId: string; database: string; catalog?: string; schema: string; databaseType: ConnectionConfig["db_type"] }>();
@@ -355,21 +401,24 @@ let invalidObjectsDialogGeneration = 0;
 let invalidObjectSourceRequestGeneration = 0;
 let objectBrowserUnmounted = false;
 const rows = ref<ObjectBrowserRow[]>([]);
-// MySQL browser split (#14139): names first, details automatically afterwards.
-// Phase-two (details) reads are tracked per cache write token; see
-// scheduleObjectBrowserDetails(). Declared here because loadObjects() starts the
-// passes and helpers below only read from it.
-const objectBrowserDetailsPasses = new Map<ObjectBrowserRowsCacheWriteToken, Promise<unknown>>();
-const detailsPassEnabled = computed(() => usesLightweightMysqlBrowser(props.connection));
 const rootRef = ref<HTMLElement>();
 const search = ref(props.initialSearchQuery ?? "");
-function initialObjectBrowserFilter(): ObjectFilter {
-  const preferred = props.selectedObjectFilter ?? props.initialObjectFilter;
+/**
+ * Single normalization for the first mount and for tab reuse. The sidebar sets
+ * the preferred category when a group row is double-clicked; resolving it in one
+ * place keeps that group opening the same category whether the tab already
+ * exists or is created on the spot.
+ */
+function resolvedObjectBrowserFilter(preferred: ObjectFilter | undefined): ObjectFilter {
   if (preferred === "indexes") return "indexes";
   if (props.connection.db_type === "oceanbase-oracle") return preferred ?? "tables";
-  return preferred === "triggers" && oracleTriggerObjectReadOptions(props.connection, ["TRIGGER"], props.catalog) ? "triggers" : "all";
+  // 非 OceanBase-Oracle 连接：显式分类（表/视图/存储过程/函数/触发器/事件…）
+  // 都要生效。此前把「触发器」分类绑定到 Oracle 精确读取能力，会让双击
+  // MySQL 的「触发器」分组先落到「全部」；而对象列表本来就会带出触发器，
+  // 该分类可以直接生效（空分类另有「全部」入口兜底）。
+  return preferred ?? "all";
 }
-const objectFilter = ref<ObjectFilter>(initialObjectBrowserFilter());
+const objectFilter = ref<ObjectFilter>(resolvedObjectBrowserFilter(props.selectedObjectFilter ?? props.initialObjectFilter));
 const userHasSelectedFilter = ref(false);
 const sortKey = ref<ObjectBrowserSortKey>("name");
 const sortDirection = ref<ObjectBrowserSortDirection>("asc");
@@ -383,6 +432,9 @@ let objectPageNextAnchor: string | undefined;
 let objectSearchTimer: ReturnType<typeof setTimeout> | undefined;
 const refreshingObjects = ref(false);
 const scaffoldRefreshError = ref("");
+const loadingObjectDetails = ref(false);
+const objectDetailsError = ref("");
+let retryObjectDetails: (() => void) | undefined;
 const sourceLoading = ref(false);
 const sourceContent = ref("");
 const sourceError = ref("");
@@ -567,6 +619,10 @@ const showTableStatistics = computed(() => !usesServerObjectPaging.value && effe
 const showObjectRowStats = computed(() => showTableStatistics.value);
 const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
 const showMysqlTableCharsetColumns = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
+// 存储引擎只在 MySQL 原生连接上既展示又可改；其它方言的统计接口不返回 engine。
+const showMysqlTableEngineColumn = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
+// 表级元数据（引擎、字符集、排序规则）只在原生 MySQL 连接上可改，与后端 DDL 构造器一致。
+const canChangeMysqlTableMetadata = computed(() => showMysqlTableCharsetColumns.value && supportsMysqlTableEngine(props.connection));
 // Only the native MySQL statistics read returns AUTO_INCREMENT (same query and gate as the collation).
 const showMysqlAutoIncrementColumn = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
 const isTiDb = computed(() => {
@@ -686,6 +742,7 @@ const batchDropExecuting = ref(false);
 const batchDropProgress = ref({ completed: 0, total: 0 });
 const batchDropPreviewSql = ref("");
 const batchDropPreviewError = ref("");
+const batchDropPreviewPending = ref(false);
 const batchTriggerDropRequested = ref(false);
 const batchTriggerDropPreview = shallowRef<BrowserTriggerDropPreview>();
 const showBatchTruncateConfirm = ref(false);
@@ -733,6 +790,7 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   type: 110,
   estimatedRows: 110,
   totalBytes: 100,
+  engine: 110,
   autoIncrement: 130,
   characterSet: 120,
   collation: 220,
@@ -747,6 +805,7 @@ const objectColumnOrderStorageKey = computed(() => `${objectColumnVisibilityStor
 const availableObjectColumnDefinitions = computed(() => [
   { key: "name" as const, label: t("objects.name") },
   { key: "type" as const, label: t("objects.type") },
+  ...(showMysqlTableEngineColumn.value ? [{ key: "engine" as const, label: t("grid.tableInfoEngine") }] : []),
   ...(showObjectRowStats.value ? [{ key: "estimatedRows" as const, label: objectRowsLabel.value }] : []),
   { key: "comment" as const, label: t("objects.comment") },
   ...(showObjectSizeStats.value ? [{ key: "totalBytes" as const, label: t("objects.size") }] : []),
@@ -924,29 +983,44 @@ const supportsVacuumTable = computed(() => !connectionIsEffectivelyReadOnly(prop
 const vacuumRiskMessage = computed(() => (vacuumExecuting.value ? t("contextMenu.vacuumTableRunningHint") : vacuumTableFull.value ? t("contextMenu.vacuumTableFullRisk") : vacuumTableAnalyze.value ? t("contextMenu.vacuumTableAnalyzeRisk") : t("contextMenu.vacuumTableDefaultRisk")));
 const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(effectiveDatabaseType.value));
+function objectFiltersForCounts(filters: ObjectFilter[]): ObjectFilter[] {
+  // 选中的分类必须始终可选：空分组（只有表的库里的「视图」分组）在计数为 0
+  // 时会被过滤掉，连整条分类控件都可能被判定为冗余而隐藏，用户就再也回不到
+  // 「全部」，只能看一个空列表。
+  if (objectFilter.value === "all" || filters.includes(objectFilter.value)) return filters;
+  return [filters[0], objectFilter.value, ...filters.slice(1)];
+}
+
 const objectFilters = computed<ObjectFilter[]>(() =>
-  props.connection.db_type === "oceanbase-oracle"
-    ? ["all", "tables", "views", "procedures", "functions", "triggers", "sequences", ...(supportsSchemaIndexes.value ? ["indexes" as const] : []), "packages", "types"]
-    : (
-        [
-          ["all", objectCounts.value.all],
-          ["tables", objectCounts.value.tables],
-          ["views", objectCounts.value.views],
-          ["materializedViews", objectCounts.value.materializedViews],
-          ["procedures", objectCounts.value.procedures],
-          ["functions", objectCounts.value.functions],
-          ["triggers", objectCounts.value.triggers],
-          ["events", objectCounts.value.events],
-          ["sequences", objectCounts.value.sequences],
-          ["indexes", objectCounts.value.indexes],
-          ["packages", objectCounts.value.packages],
-          ["types", objectCounts.value.types],
-        ] as Array<[ObjectFilter, number]>
-      )
-        .filter(([filter, count]) => filter === "all" || count > 0 || (filter === "triggers" && supportsExactTriggerDiscovery.value) || (filter === "indexes" && supportsSchemaIndexes.value))
-        .map(([filter]) => filter),
+  objectFiltersForCounts(
+    props.connection.db_type === "oceanbase-oracle"
+      ? ["all", "tables", "views", "procedures", "functions", "triggers", "sequences", ...(supportsSchemaIndexes.value ? ["indexes" as const] : []), "packages", "types"]
+      : (
+          [
+            ["all", objectCounts.value.all],
+            ["tables", objectCounts.value.tables],
+            ["views", objectCounts.value.views],
+            ["materializedViews", objectCounts.value.materializedViews],
+            ["procedures", objectCounts.value.procedures],
+            ["functions", objectCounts.value.functions],
+            ["triggers", objectCounts.value.triggers],
+            ["events", objectCounts.value.events],
+            ["sequences", objectCounts.value.sequences],
+            ["indexes", objectCounts.value.indexes],
+            ["packages", objectCounts.value.packages],
+            ["types", objectCounts.value.types],
+          ] as Array<[ObjectFilter, number]>
+        )
+          .filter(([filter, count]) => filter === "all" || count > 0 || (filter === "triggers" && supportsExactTriggerDiscovery.value) || (filter === "indexes" && supportsSchemaIndexes.value))
+          .map(([filter]) => filter),
+  ),
 );
-const showObjectFilter = computed(() => objectFilters.value.length > 2 || (supportsExactTriggerDiscovery.value && objectFilters.value.length > 1) || (supportsSchemaIndexes.value && objectFilters.value.includes("indexes")));
+// A category other than 全部 that happens to be empty still needs its strip: that
+// chip row is the only control that can take the user back to 全部. A non-empty
+// selection keeps the #11624 behaviour (single-kind scopes stay a plain count).
+const showObjectFilter = computed(
+  () => objectFilters.value.length > 2 || (supportsExactTriggerDiscovery.value && objectFilters.value.length > 1) || (supportsSchemaIndexes.value && objectFilters.value.includes("indexes")) || (objectFilter.value !== "all" && objectCounts.value[objectFilter.value] === 0),
+);
 // A scope that holds a single object kind makes "全部 14" and "表 14" the same number, so the
 // strip is dropped as redundant — which used to drop the only object count the toolbar could
 // show at all (t8y2/dbx#11624, the common MySQL "tables only" database). Keep that one kind's
@@ -969,6 +1043,9 @@ const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [
   () => objectFilter.value,
   () => canCreateSchemaIndex.value,
   () => oracleInvalidObjectsSupported.value,
+  // The paste-table button is driven by the clipboard, which can change from
+  // another object browser's tab without resizing this row.
+  () => connectionStore.treeClipboard,
   () => settingsStore.editorSettings.objectBrowserViewMode,
 ]);
 const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
@@ -1321,7 +1398,7 @@ const hasSelectedSchemaIndexes = computed(() => selectedTableRows.value.some((ro
 const hasSelectedTablesOnly = computed(() => selectedTableRows.value.length > 0 && selectedTableRows.value.every((row) => row.type === "TABLE"));
 const batchDropConfirmTitle = computed(() => (hasSelectedTablesOnly.value ? t("objects.confirmBatchDropTitle") : t("contextMenu.confirmBatchDropTitle")));
 const batchDropConfirmMessage = computed(() => (hasSelectedTablesOnly.value ? t("objects.confirmBatchDropMessage", { count: selectedTableCount.value }) : t("contextMenu.confirmBatchDropMessage", { count: selectedTableCount.value })));
-const canBatchDropCascade = computed(() => selectedTableCount.value > 0 && supportsDropTableCascade(effectiveDatabaseType.value));
+const canBatchDropCascade = computed(() => supportsDropTableCascade(effectiveDatabaseType.value) && selectedTableRows.value.some((row) => row.type === "TABLE"));
 const canBatchTruncateCascade = computed(() => selectedTableCount.value > 0 && supportsTruncateTableCascade(effectiveDatabaseType.value));
 
 // Column resizes change the scrollable content width, so the header's clamped
@@ -1396,6 +1473,7 @@ watch(sortKeyOptions, (options) => {
 function sortKeyLabel(key: ObjectBrowserSortKey): string {
   if (key === "name") return t("objects.name");
   if (key === "type") return t("objects.type");
+  if (key === "engine") return t("grid.tableInfoEngine");
   if (key === "characterSet") return t("structureEditor.characterSet");
   if (key === "collation") return t("structureEditor.collation");
   if (key === "estimatedRows") return objectRowsLabel.value;
@@ -2428,6 +2506,37 @@ function openTableStructureEditor() {
   const row = sidePanelRow.value;
   if (!row || row.type !== "TABLE" || !canOpenTableStructureEditor.value) return;
   queryStore.openTableStructure(props.connection.id, props.database, row.schema || selectedSchema.value, row.name, tableInfoTab.value === "relations" ? "columns" : tableInfoTab.value, undefined, props.catalog);
+}
+
+/**
+ * 源码面板显示的包。编辑器拿它把包内的裸名解析成这个包的成员，而不是去数据字典里
+ * 找一个同名的独立过程 —— 包成员不是独立对象，那样只会取回空源码。
+ */
+const sourcePackageIdentity = computed<OraclePackageSourceContext | undefined>(() => {
+  const row = sourceRow.value;
+  if (!row || (row.type !== "PACKAGE" && row.type !== "PACKAGE_BODY")) return undefined;
+  const type = effectiveDatabaseType.value;
+  if (type !== "oracle" && type !== "oceanbase-oracle" && type !== "dameng") return undefined;
+  return { name: row.name, schema: row.schema || selectedSchema.value || props.database, objectType: row.type };
+});
+
+/**
+ * 包头里 Ctrl+点击一个成员声明。面板本身只装得下一个对象的源码，所以把包体开成源码
+ * tab，并让光标落在该成员的实现上。
+ */
+function openPackageMemberSource(target: SqlObjectNavigationTarget) {
+  const request = oraclePackageMemberSourceRequest(target, selectedSchema.value || props.database);
+  if (!request) return;
+  queryStore.openObjectSourceTabPending({
+    connectionId: props.connection.id,
+    database: props.database,
+    title: `Source - ${request.name}`,
+    schema: request.schema || props.database,
+    catalog: props.catalog,
+    initialEditing: false,
+    request: { name: request.name, objectType: request.objectType },
+    focusMember: request.focusMember,
+  });
 }
 
 /**
@@ -3652,21 +3761,14 @@ function openBatchDatabaseExport() {
   };
 }
 
-async function fetchSortedTableRowsForDrop(): Promise<ObjectBrowserRow[]> {
-  const rows = [...selectedTableRows.value];
-  if (rows.length <= 1) return rows;
-
-  const fkResults = await Promise.all(rows.map((row) => (row.type === "TABLE" ? api.listForeignKeys(props.connection.id, props.database, row.schema || selectedSchema.value || "", row.name, props.catalog).catch(() => [] as ForeignKeyInfo[]) : Promise.resolve([] as ForeignKeyInfo[]))));
-
-  const tablesWithFk: TableWithFk[] = rows.map((row, i) => ({
-    name: row.name,
-    schema: row.schema || selectedSchema.value,
-    foreignKeys: fkResults[i] ?? [],
-  }));
-
-  const sorted = sortTablesByFkDependency(tablesWithFk);
-  const nameToRow = new Map(rows.map((r) => [r.name, r]));
-  return sorted.map((t) => nameToRow.get(t.name)!).filter(Boolean);
+async function fetchBatchDropPlan() {
+  const connectionId = props.connection.id;
+  const database = props.database;
+  const catalog = props.catalog;
+  const schema = selectedSchema.value;
+  const useCascade = canBatchDropCascade.value && batchDropCascade.value;
+  const rows = await orderObjectBrowserDropRows([...selectedTableRows.value], schema, (row) => api.listForeignKeys(connectionId, database, row.schema || schema || "", row.name, catalog).catch(() => [] as ForeignKeyInfo[]));
+  return Promise.all(rows.map(async (target) => ({ target, sql: await buildDropSqlForRow(target, { cascade: useCascade }) })));
 }
 
 interface BrowserTriggerDropPreview {
@@ -3676,7 +3778,7 @@ interface BrowserTriggerDropPreview {
   pinnedContext: ReturnType<typeof objectBrowserPinnedTreeNodeContext>;
   isCurrent: () => boolean;
 }
-let batchTriggerDropPreviewRequestId = 0;
+let batchDropPreviewRequestId = 0;
 
 function usesExactTriggerDrop(row: ObjectBrowserRow): boolean {
   return row.type === "TRIGGER" && (!!exactOracleTriggerMetadata(row.trigger) || !!oracleTriggerObjectReadOptions(props.connection, undefined, props.catalog));
@@ -3696,14 +3798,10 @@ async function prepareBrowserTriggerDrops(selected: readonly ObjectBrowserRow[],
     browserTriggerContext() === context &&
     (batch ? showBatchDropConfirm.value && [...selectedTableIds.value].sort().join("\n") === selection && (canBatchDropCascade.value && batchDropCascade.value) === cascade : showDropConfirm.value && dropTarget.value?.id === selected[0]?.id) &&
     expected.every((item) => rows.value.some((row) => row.id === item.id && (item.objectId === undefined || exactOracleTriggerMetadata(row.trigger)?.objectId === item.objectId)));
-  // Verify triggers before dropping a selected parent. The existing FK sorter
-  // still orders tables, with exact tuple keys instead of collapsing bare names.
-  const tables = selected.filter((row) => row.type === "TABLE");
-  const key = (schema: string | undefined | null, name: string) => JSON.stringify([schema ?? fixed.executionSchema, name]);
-  const tableIds = new Map(tables.map((row) => [key(row.schema, row.name), row.id]));
-  const foreignKeys = await Promise.all(tables.map((row) => api.listForeignKeys(fixed.connectionId, fixed.database, row.schema || fixed.executionSchema, row.name, fixed.catalog).catch(() => [] as ForeignKeyInfo[])));
-  const sortedTables = sortTablesByFkDependency(tables.map((row, index) => ({ name: row.id, foreignKeys: foreignKeys[index].map((fk) => ({ ...fk, ref_table: tableIds.get(key(fk.ref_schema ?? row.schema, fk.ref_table)) ?? "" })) })));
-  const ordered = [...selected.filter((row) => usesExactTriggerDrop(row)), ...sortedTables.map((table) => tables.find((row) => row.id === table.name)!), ...selected.filter((row) => row.type !== "TABLE" && !usesExactTriggerDrop(row))];
+  // Verify triggers before dropping a selected parent.
+  const triggers = selected.filter(usesExactTriggerDrop);
+  const otherRows = [...selected.filter((row) => row.type === "TABLE"), ...selected.filter((row) => row.type !== "TABLE" && !usesExactTriggerDrop(row))];
+  const ordered = [...triggers, ...(await orderObjectBrowserDropRows(otherRows, fixed.executionSchema, (row) => api.listForeignKeys(fixed.connectionId, fixed.database, row.schema || fixed.executionSchema, row.name, fixed.catalog).catch(() => [] as ForeignKeyInfo[])))];
   const entries = [];
   let engine: OracleTriggerDropBatchPlan["engine"] | undefined;
   for (const row of ordered) {
@@ -3802,29 +3900,26 @@ async function executeBrowserTriggerDrops(preview: BrowserTriggerDropPreview, ba
 }
 
 async function refreshBatchDropPreviewSql() {
-  if (batchTriggerDropRequested.value) {
-    const requestId = ++batchTriggerDropPreviewRequestId;
-    batchTriggerDropPreview.value = undefined;
-    batchDropPreviewSql.value = "";
-    batchDropPreviewError.value = "";
-    try {
+  const requestId = ++batchDropPreviewRequestId;
+  batchTriggerDropPreview.value = undefined;
+  batchDropPreviewSql.value = "";
+  batchDropPreviewError.value = "";
+  batchDropPreviewPending.value = true;
+  try {
+    if (batchTriggerDropRequested.value) {
       const prepared = await prepareBrowserTriggerDrops([...selectedTableRows.value], true);
-      if (requestId !== batchTriggerDropPreviewRequestId || !prepared.isCurrent()) return;
+      if (requestId !== batchDropPreviewRequestId || !prepared.isCurrent()) return;
       batchTriggerDropPreview.value = prepared;
       batchDropPreviewSql.value = prepared.plan.entries.map((entry) => entry.sql).join("\n\n");
-    } catch (error) {
-      if (requestId === batchTriggerDropPreviewRequestId) batchDropPreviewError.value = error instanceof Error ? error.message : String(error);
+    } else {
+      const plan = await fetchBatchDropPlan();
+      if (requestId === batchDropPreviewRequestId) batchDropPreviewSql.value = plan.map((entry) => entry.sql).join("\n");
     }
-    return;
+  } catch (error) {
+    if (requestId === batchDropPreviewRequestId) batchDropPreviewError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (requestId === batchDropPreviewRequestId) batchDropPreviewPending.value = false;
   }
-  const statements: string[] = [];
-  const sortedRows = await fetchSortedTableRowsForDrop();
-  const useCascade = canBatchDropCascade.value && batchDropCascade.value;
-  for (const row of sortedRows) {
-    const sql = await buildDropSqlForRow(row, { cascade: useCascade }).catch(() => "");
-    if (sql) statements.push(sql);
-  }
-  batchDropPreviewSql.value = statements.join("\n");
 }
 
 function requestBatchDropTables() {
@@ -3858,7 +3953,7 @@ function requestBatchDropTables() {
 }
 
 async function confirmBatchDropTables() {
-  if (batchDropExecuting.value) return;
+  if (batchDropExecuting.value || batchDropPreviewPending.value || batchDropPreviewError.value) return;
   if (selectedTableRows.value.some((row) => row.type === "INDEX")) return;
   if (batchTriggerDropRequested.value) {
     if (batchTriggerDropPreview.value) await executeBrowserTriggerDrops(batchTriggerDropPreview.value, true);
@@ -3870,16 +3965,10 @@ async function confirmBatchDropTables() {
   let targets: ObjectBrowserRow[] = [];
   const start = Date.now();
   try {
-    targets = await fetchSortedTableRowsForDrop();
-    if (targets.length === 0) return;
+    const plan = await fetchBatchDropPlan();
+    if (plan.length === 0) return;
+    targets = plan.map(({ target }) => target);
     batchDropProgress.value = { completed: 0, total: targets.length };
-    const useCascade = canBatchDropCascade.value && batchDropCascade.value;
-    const plan = await Promise.all(
-      targets.map(async (target) => ({
-        target,
-        sql: await buildDropSqlForRow(target, { cascade: useCascade }),
-      })),
-    );
     const useForeignKeyChecks = batchForeignKeyChecksOverride.value;
     batchSql = useForeignKeyChecks ? foreignKeyChecksPreview(plan.map(({ sql }) => sql).join("\n"), batchForeignKeyChecks.value, effectiveDatabaseType.value) : plan.map(({ sql }) => sql).join(";\n");
     const result = await executeObjectBrowserSqlWithProductionGuard(batchSql, async () => {
@@ -4633,6 +4722,7 @@ function objectBrowserTableCopyColumns() {
           if (key === "type") return typeLabel(row);
           if (key === "estimatedRows") return formatObjectBrowserCount(row.estimatedRows);
           if (key === "totalBytes") return formatObjectBrowserBytes(row.totalBytes);
+          if (key === "engine") return row.engine ?? "";
           if (key === "autoIncrement") return formatObjectBrowserAutoIncrement(row.autoIncrement);
           if (key === "characterSet") return row.characterSet ?? "";
           if (key === "collation") return row.collation ?? "";
@@ -4731,6 +4821,7 @@ async function fetchAllObjectRowsForCopy(): Promise<ObjectBrowserRow[]> {
     database: copyDatabase,
     fallbackSchema: schema,
     rowSchema,
+    databaseType: copyConnection.db_type,
   });
   return rows.filter((row) => matchesTableNameFilter(row.name, copyNameFilters[row.type]));
 }
@@ -5653,7 +5744,9 @@ function openInitialEventIfNeeded() {
 
 function finishObjectBrowserRowsLoad() {
   loadingObjects.value = false;
-  const preferredFilter = props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables");
+  // 首次加载完成后会再对齐一次分类，这里也必须走与挂载/复用相同的归一化，
+  // 否则同一个分组会因为「谁的判定生效」不同而落到不同分类。
+  const preferredFilter = props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : resolvedObjectBrowserFilter(props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables");
   if (!usesServerObjectPaging.value && !userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
     // The default table filter is a presentation choice, not a user query
     // change, so preserve the tab's saved scroll offset across remounts.
@@ -5676,13 +5769,13 @@ watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () =
 // 匹配 0 行；schema 解析失败（loadSchemas 抛错或返回空列表）时标签会整体空白
 // (#8301)。经 objectListSchemaForConnection 回退到连接用户名（大写），仅限
 // 达梦；oracle/oceanbase-oracle 维持空 schema 由后端解析当前 schema。
-// MySQL is two-phase and automatic (#14139 follow-up): this pass only enumerates
-// names, and scheduleObjectBrowserDetails() upgrades the rows on screen in the
-// background. No caller has to ask for "details" any more.
 async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean }) {
   clearTimeout(objectSearchTimer);
   if (usesServerObjectPaging.value) return loadObjectPage(false, { preserveExistingRows: options?.preserveExistingRows });
   error.value = "";
+  loadingObjectDetails.value = false;
+  objectDetailsError.value = "";
+  retryObjectDetails = undefined;
   // A new load supersedes any in-flight one, so reset the transient refresh flags
   // on entry. A superseded request's finally() can no longer run (the guard's
   // epoch moved on) and would otherwise leave refreshingObjects stuck spinning
@@ -5718,15 +5811,14 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     // Explicit refresh and metadata invalidation still bypass this branch.
     applyObjectBrowserRows(cached.rows);
     finishOnce();
-    // 统计信息随对象列表缓存，过期时只在后台刷新统计，保留对象列表本身。
-    // Backfill MySQL scaffolds cached before all table metadata was merged,
-    // even while fresh. Null timestamps are known to be unavailable.
+    // Refresh stale or incomplete metadata without replacing cached membership.
+    // Null timestamps are known to be unavailable and do not need backfilling.
     const missingMysqlTableMetadata = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && (row.collation === undefined || row.autoIncrement === undefined || row.created_at === undefined || row.updated_at === undefined));
-    const statistics = cached.stale || missingMysqlTableMetadata ? revalidateCachedObjectStatistics(request, cacheWriteToken) : undefined;
-    // 缺失的注释/时间戳在统计读完后补齐，避免两条重读同时打库。
-    if (detailsPassEnabled.value && !rows.value.some((row) => row.comment?.trim() || row.created_at?.trim() || row.updated_at?.trim())) {
-      detailsPassStarter(request, cacheWriteToken, statistics)();
-    }
+    if (usesLightweightMysqlBrowser(props.connection)) {
+      if (!cached.detailsComplete || cached.stale || missingMysqlTableMetadata) {
+        void loadMysqlObjectDetails(request, cacheWriteToken, !cached.detailsComplete);
+      }
+    } else if (cached.stale || missingMysqlTableMetadata) void revalidateCachedObjectStatistics(request, cacheWriteToken);
     return;
   } else {
     // No scaffold: first load in this scope, cache invalidated by a DDL mutation,
@@ -5747,11 +5839,15 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     const nextRows = await objectBrowserRowsLoadGuard.wait(request.epoch, load, metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     applyObjectBrowserRows(nextRows);
-    const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
-    // Row/size statistics come from a separate aggregate read; the MySQL split only
-    // skips them on the enumeration, not for the whole view.
-    const statistics = loadObjectStatistics(request, cacheWriteToken, cachedAt);
-    if (detailsPassEnabled.value) detailsPassStarter(request, cacheWriteToken, statistics)();
+    const progressive = usesLightweightMysqlBrowser(props.connection);
+    const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows, { detailsComplete: !progressive });
+    if (progressive) {
+      // Publish names and release the blocking spinner before awaiting details.
+      loadingObjects.value = false;
+      refreshingObjects.value = false;
+      finishOnce();
+      void loadMysqlObjectDetails(request, cacheWriteToken);
+    } else void loadObjectStatistics(request, cacheWriteToken, cachedAt);
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     // Keep visible rows on a background revalidate failure — surface a lightweight
@@ -5844,6 +5940,7 @@ async function loadObjectPage(append: boolean, options?: { preserveExistingRows?
       database: request.scope.database,
       fallbackSchema: request.scope.schema,
       rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
+      databaseType: props.connection.db_type,
     });
     applyObjectBrowserRows(replaceWindow ? pageRows : [...rows.value, ...pageRows]);
     objectPageOffset = (replaceWindow ? 0 : offset) + page.length;
@@ -5868,17 +5965,66 @@ async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle, de
   // unbounded exact subset into the legacy all view defeats both contracts.
   const types = supportsSchemaIndexes.value ? sidebarObjectKindsForDatabase(effectiveDatabaseType.value).filter((type) => type !== "INDEX") : undefined;
   const readOptions = usesLightweightMysqlBrowser(props.connection) ? { lightweight: !details } : oracleTriggerObjectReadOptions(props.connection, types, request.scope.catalog);
-  const objects: ObjectInfo[] = await shareObjectBrowserRead(objectBrowserReadKey(request, types, readOptions), () =>
-    readOptions
+  const readKey = JSON.stringify([createObjectBrowserRowsCacheWriteToken(request.scope), types, readOptions]);
+  const objects: ObjectInfo[] = await shareObjectBrowserRead(readKey, () => {
+    const read = readOptions
       ? api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog, undefined, undefined, readOptions)
-      : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog),
-  );
+      : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog);
+    // Evict a timed-out shared detail read too, so retry starts a new request.
+    // This bounds local waiting; backend statement cancellation remains separate.
+    return details ? waitForMetadata(read, metadataLoadBudgetMs(props.connection.query_timeout_secs)) : read;
+  });
   return buildObjectBrowserRows({
     objects: objects.filter((object) => !supportsSchemaIndexes.value || object.object_type !== "INDEX"),
     database: request.scope.database,
     fallbackSchema: request.scope.schema,
     rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
+    databaseType: props.connection.db_type,
   });
+}
+
+/** One deferred enrichment pass: statistics first, then missing details. */
+async function loadMysqlObjectDetails(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, needsDetails = true) {
+  if (!objectBrowserRowsLoadGuard.isCurrent(request) || loadingObjectDetails.value) return;
+  loadingObjectDetails.value = true;
+  objectDetailsError.value = "";
+  retryObjectDetails = () => void loadMysqlObjectDetails(request, cacheWriteToken, needsDetails);
+  const budget = metadataLoadBudgetMs(props.connection.query_timeout_secs);
+  const failures: string[] = [];
+  try {
+    // Keep the names render ahead of phase two, including a cached scaffold.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+    cacheObjectBrowserRows(cacheWriteToken, rows.value, { detailsComplete: false });
+    if (rows.value.some((row) => row.type === "TABLE")) {
+      try {
+        const statistics = shareObjectBrowserRead(JSON.stringify(["statistics", cacheWriteToken]), () => waitForMetadata(api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema), budget));
+        const stats = await objectBrowserRowsLoadGuard.wait(request.epoch, statistics, budget);
+        if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+        mergeObjectStatistics(stats, request.scope.schema, cacheWriteToken, undefined, false);
+      } catch (e) {
+        if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+        failures.push(translateBackendError(t, e));
+      }
+    }
+    if (needsDetails) {
+      try {
+        const details = await objectBrowserRowsLoadGuard.wait(request.epoch, loadSqlObjectBrowserRows(request, true), budget);
+        if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+        // Only detail fields are merged; preserve statistics, collation and identity.
+        applyObjectBrowserDetails(details);
+        needsDetails = false;
+      } catch (e) {
+        if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+        failures.push(translateBackendError(t, e));
+      }
+    }
+    cacheObjectBrowserRows(cacheWriteToken, rows.value, { detailsComplete: failures.length === 0 });
+    objectDetailsError.value = failures.join(" · ");
+    if (!failures.length) retryObjectDetails = undefined;
+  } finally {
+    if (objectBrowserRowsLoadGuard.isCurrent(request)) loadingObjectDetails.value = false;
+  }
 }
 
 async function loadMongoObjectBrowserRows(connectionId: string, database: string) {
@@ -5886,79 +6032,6 @@ async function loadMongoObjectBrowserRows(connectionId: string, database: string
   return buildMongoObjectBrowserRows({ collections: visibleMongoCollections(collections), database });
 }
 
-interface ObjectBrowserDetailsPass {
-  epoch: number;
-  cacheWriteToken: ObjectBrowserRowsCacheWriteToken;
-  waitFor?: Promise<unknown>;
-}
-
-/**
- * Phase two of the MySQL browser read (#14139 follow-up).
- *
- * The lightweight enumeration ships names immediately and leaves comments,
- * create/update times and row/size statistics for later. Instead of a manual
- * toolbar button, run that detail read in the background as soon as the names
- * are visible: rows are patched in place (never blanked), failures stay silent
- * (names remain usable), and a superseded scope drops its result.
- *
- * The pass is started through a bound starter that defers it onto a timer:
- * calling it inline from `loadObjects()` reaches the pass bookkeeping while the
- * row list is still being applied, and deferring one task keeps the list's own
- * render ahead of the second read.
- */
-function detailsPassStarter(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, waitFor?: Promise<unknown>): () => void {
-  const epoch = request.epoch;
-  return () => {
-    // The pass is decorative and must never surface as a load failure: defer it and
-    // keep any throw inside the pass.
-    window.setTimeout(() => {
-      void scheduleObjectBrowserDetails({ epoch, scope: cacheWriteToken.scope } as ObjectBrowserRowsLoadHandle, cacheWriteToken, waitFor);
-    }, 0);
-  };
-}
-
-function scheduleObjectBrowserDetails(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, waitFor?: Promise<unknown>): Promise<unknown> {
-  const existing = objectBrowserDetailsPasses.get(cacheWriteToken);
-  if (existing) return existing;
-  const pending = startObjectBrowserDetails({ epoch: request.epoch, cacheWriteToken, waitFor });
-  objectBrowserDetailsPasses.set(cacheWriteToken, pending);
-  void pending
-    .finally(() => {
-      if (objectBrowserDetailsPasses.get(cacheWriteToken) === pending) objectBrowserDetailsPasses.delete(cacheWriteToken);
-    })
-    .catch(() => undefined);
-  return pending;
-}
-
-function startObjectBrowserDetails(pass: ObjectBrowserDetailsPass): Promise<unknown> {
-  // `loadSqlObjectBrowserRows()` carries no cache-write-token argument, so this handle
-  // only has to describe the same scope and epoch for the load guard.
-  const request: ObjectBrowserRowsLoadHandle = { epoch: pass.epoch, scope: pass.cacheWriteToken.scope };
-  return (async () => {
-    // Let the background statistics read finish first: both statements hit
-    // information_schema on the same metadata pool.
-    await pass.waitFor?.catch(() => undefined);
-    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
-    // A previous full read may have filled the rows while this pass waited on the
-    // statistics; then there is nothing left to fetch.
-    if (rows.value.some((row) => Boolean(row.comment?.trim()))) return;
-    try {
-      const details = await loadSqlObjectBrowserRows(request, true);
-      if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
-      applyObjectBrowserDetails(details);
-      cacheObjectBrowserRows(pass.cacheWriteToken, rows.value);
-    } catch (e) {
-      // Details are decorative: keep the names already rendered and stay quiet.
-      console.debug("[ObjectBrowser] object details unavailable", e);
-    }
-  })();
-}
-
-/**
- * Merges the details read into the rendered list by object identity: the
- * lightweight pass and the details pass may return different orders, and any
- * other field already on screen must survive untouched.
- */
 function applyObjectBrowserDetails(details: readonly ObjectBrowserRow[]) {
   const byId = new Map(details.map((row) => [row.id, row]));
   rows.value = rows.value.map((row) => {
@@ -5971,16 +6044,6 @@ function applyObjectBrowserDetails(details: readonly ObjectBrowserRow[]) {
       updated_at: detail.updated_at ?? row.updated_at,
     };
   });
-}
-
-/**
- * Shared-read key for an object enumeration. Built from plain values only: the
- * previous `JSON.stringify([writeToken, ...])` embedded the token's generation and
- * frozen scope, so two equivalent browsers never shared a pending read.
- */
-function objectBrowserReadKey(request: ObjectBrowserRowsLoadHandle, types: (SidebarObjectKind | "EVENT")[] | undefined, readOptions: import("@/types/database").MetadataReadOptions | undefined): string {
-  const { connectionId, database, schema, catalog } = request.scope;
-  return JSON.stringify([connectionId, database, schema, catalog ?? "", types ?? null, readOptions?.lightweight ?? null, readOptions?.identityMode ?? null]);
 }
 
 async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
@@ -6005,11 +6068,20 @@ async function revalidateCachedObjectStatistics(request: ObjectBrowserRowsLoadHa
   await loadObjectStatistics(request, cacheWriteToken, undefined);
 }
 
-function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
-  const statsByKey = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
+function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined, detailsComplete = true) {
+  const exactStats = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
+  // MySQL with lower_case_table_names=0 keeps `Orders` and `orders` as two
+  // different tables. Fold case only when the folded key is unambiguous so a
+  // case-sensitive pair never shares one table's engine/charset statistics.
+  const foldedStats = new Map<string, ObjectStatistics | null>();
+  for (const stat of stats) {
+    const foldedKey = objectStatisticKey(stat.schema || fallbackSchema, stat.name).toLowerCase();
+    foldedStats.set(foldedKey, foldedStats.has(foldedKey) ? null : stat);
+  }
   rows.value = rows.value.map((row) => {
     if (row.type !== "TABLE") return row;
-    const stat = statsByKey.get(objectStatisticKey(row.schema || fallbackSchema, row.name));
+    const key = objectStatisticKey(row.schema || fallbackSchema, row.name);
+    const stat = exactStats.get(key) ?? foldedStats.get(key.toLowerCase()) ?? undefined;
     if (!stat) return row;
     return {
       ...row,
@@ -6017,18 +6089,201 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
       created_at: stat.created_at ?? row.created_at ?? null,
       updated_at: stat.updated_at ?? row.updated_at ?? null,
-      ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null, autoIncrement: stat.auto_increment?.trim() || null } : {}),
+      ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null, engine: stat.engine?.trim() || null, autoIncrement: stat.auto_increment?.trim() || null } : {}),
     };
   });
-  cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt });
+  cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt, detailsComplete });
 }
 
 function objectStatisticKey(schema: string | undefined, name: string) {
-  return `${schema || ""}\0${name}`.toLowerCase();
+  // Case-preserving on purpose: callers fold the key themselves only after the
+  // exact key misses, and never fold an ambiguous pair.
+  return `${schema || ""}\0${name}`;
 }
 
 function normalizeStatisticNumber(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+// ---- MySQL 存储引擎列：下拉选择后执行 ALTER TABLE ... ENGINE ----
+const mysqlEngineOptions = ref<string[]>([]);
+const mysqlEngineOptionsLoading = ref(false);
+const mysqlEngineOptionsError = ref("");
+let mysqlEngineOptionsRequestId = 0;
+/** 只允许同时打开一行引擎菜单，避免虚拟滚动复用行时残留多个弹层。 */
+const mysqlEngineMenuRowId = ref<string | null>(null);
+const mysqlEngineChangeTarget = ref<{ row: ObjectBrowserRow; engine: string } | null>(null);
+const showMysqlEngineChangeConfirm = ref(false);
+const mysqlEngineChangeExecuting = ref(false);
+const mysqlEngineChangeSql = computed(() => {
+  const target = mysqlEngineChangeTarget.value;
+  if (!target) return "";
+  return mysqlTableEngineChangeSql({ database: target.row.schema || props.database, table: target.row.name, engine: target.engine }) ?? "";
+});
+/** 确认弹窗展示带反引号的原始标识符，首尾空格不会被 HTML 折叠。 */
+const mysqlEngineChangeTableLabel = computed(() => (mysqlEngineChangeTarget.value ? quoteMysqlTableIdentifier(mysqlEngineChangeTarget.value.row.name) : ""));
+
+async function loadMysqlEngineOptions(force = false) {
+  if (!canChangeMysqlTableMetadata.value) return;
+  if (!force && (mysqlEngineOptionsLoading.value || mysqlEngineOptions.value.length > 0)) return;
+  const requestId = ++mysqlEngineOptionsRequestId;
+  mysqlEngineOptionsLoading.value = true;
+  mysqlEngineOptionsError.value = "";
+  try {
+    await connectionStore.ensureConnected(props.connection.id);
+    const result = await api.executeQuery(props.connection.id, props.database, MYSQL_STORAGE_ENGINES_SQL, undefined, undefined, { maxRows: 100 });
+    if (requestId !== mysqlEngineOptionsRequestId) return;
+    mysqlEngineOptions.value = parseMysqlTableEngineMetadata(result).engines;
+  } catch (e: any) {
+    if (requestId !== mysqlEngineOptionsRequestId) return;
+    mysqlEngineOptionsError.value = e?.message || String(e);
+  } finally {
+    if (requestId === mysqlEngineOptionsRequestId) mysqlEngineOptionsLoading.value = false;
+  }
+}
+
+function setMysqlEngineMenuOpen(row: ObjectBrowserRow, open: boolean) {
+  mysqlEngineMenuRowId.value = open ? row.id : mysqlEngineMenuRowId.value === row.id ? null : mysqlEngineMenuRowId.value;
+  if (open) void loadMysqlEngineOptions();
+}
+
+function selectMysqlTableEngine(row: ObjectBrowserRow, engine: string) {
+  mysqlEngineMenuRowId.value = null;
+  const next = engine.trim();
+  if (!next || next.toLowerCase() === (row.engine ?? "").trim().toLowerCase()) return;
+  mysqlEngineChangeTarget.value = { row, engine: next };
+  showMysqlEngineChangeConfirm.value = true;
+}
+
+async function confirmMysqlTableEngineChange() {
+  const target = mysqlEngineChangeTarget.value;
+  if (!target || mysqlEngineChangeExecuting.value) return;
+  const sql = mysqlTableEngineChangeSql({ database: target.row.schema || props.database, table: target.row.name, engine: target.engine });
+  if (!sql) {
+    toast(t("objects.engineChangeInvalid"), 5000);
+    return;
+  }
+  const schema = target.row.schema || selectedSchema.value;
+  mysqlEngineChangeExecuting.value = true;
+  try {
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
+    if (!executed) return;
+    toast(t("objects.engineChangeSuccess", { name: target.row.name, engine: target.engine }));
+    showMysqlEngineChangeConfirm.value = false;
+    mysqlEngineChangeTarget.value = null;
+    await reload({ preserveExistingRows: true });
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
+  } catch (e: any) {
+    toast(t("objects.engineChangeFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    mysqlEngineChangeExecuting.value = false;
+  }
+}
+
+// ---- MySQL 字符集 / 排序规则列：下拉选择后执行 ALTER TABLE ... DEFAULT CHARACTER SET ----
+/** `SHOW CHARACTER SET` + `SHOW COLLATION` 的结果，两个下拉共用一次读取。 */
+const mysqlCharsetMetadata = ref<CreateDatabaseCharsetMetadata | undefined>();
+const mysqlCharsetMetadataLoading = ref(false);
+const mysqlCharsetMetadataError = ref("");
+let mysqlCharsetMetadataRequestId = 0;
+/** 同一时刻只允许打开一个字符集/排序规则弹层，避免虚拟滚动复用行时残留多个浮层。 */
+const mysqlCharsetMenuTarget = ref<{ rowId: string; kind: "charset" | "collation" } | null>(null);
+const mysqlTableCharsetOptions = computed<string[]>(() => mysqlCharsetMetadata.value?.charsets ?? []);
+const mysqlCharsetChangeTarget = ref<{ row: ObjectBrowserRow; charset: string; collation: string } | null>(null);
+const showMysqlCharsetChangeConfirm = ref(false);
+const mysqlCharsetChangeExecuting = ref(false);
+const mysqlCharsetChangeSql = computed(() => {
+  const target = mysqlCharsetChangeTarget.value;
+  if (!target) return "";
+  return mysqlTableCharsetChangeSql({ database: target.row.schema || props.database, table: target.row.name, charset: target.charset, collation: target.collation }) ?? "";
+});
+const mysqlCharsetChangeTableLabel = computed(() => (mysqlCharsetChangeTarget.value ? quoteMysqlTableIdentifier(mysqlCharsetChangeTarget.value.row.name) : ""));
+
+function mysqlCollationOptionsForCharset(charset: string): string[] {
+  const metadata = mysqlCharsetMetadata.value;
+  if (!metadata) return [];
+  // 统计信息里没有表排序规则时（例如权限不足），退回全量列表，选中后由排序规则反推字符集。
+  if (!charset.trim()) return Array.from(new Set(Object.values(metadata.collationsByCharset).flat()));
+  return createDatabaseCollationOptionsForCharset(charset, metadata.collationsByCharset);
+}
+
+async function loadMysqlCharsetMetadata(force = false) {
+  if (!canChangeMysqlTableMetadata.value) return;
+  if (!force && (mysqlCharsetMetadataLoading.value || mysqlCharsetMetadata.value)) return;
+  const requestId = ++mysqlCharsetMetadataRequestId;
+  mysqlCharsetMetadataLoading.value = true;
+  mysqlCharsetMetadataError.value = "";
+  try {
+    await connectionStore.ensureConnected(props.connection.id);
+    const [charsetResult, collationResult] = await Promise.all([
+      api.executeQuery(props.connection.id, props.database, MYSQL_CHARACTER_SETS_SQL, undefined, undefined, { maxRows: 1000 }),
+      api.executeQuery(props.connection.id, props.database, MYSQL_COLLATIONS_SQL, undefined, undefined, { maxRows: 10000 }),
+    ]);
+    if (requestId !== mysqlCharsetMetadataRequestId) return;
+    mysqlCharsetMetadata.value = parseCreateDatabaseCharsetMetadata(charsetResult, collationResult);
+  } catch (e: any) {
+    if (requestId !== mysqlCharsetMetadataRequestId) return;
+    mysqlCharsetMetadataError.value = e?.message || String(e);
+  } finally {
+    if (requestId === mysqlCharsetMetadataRequestId) mysqlCharsetMetadataLoading.value = false;
+  }
+}
+
+function setMysqlCharsetMenuOpen(row: ObjectBrowserRow, kind: "charset" | "collation", open: boolean) {
+  const current = mysqlCharsetMenuTarget.value;
+  mysqlCharsetMenuTarget.value = open ? { rowId: row.id, kind } : current?.rowId === row.id && current?.kind === kind ? null : current;
+  if (open) void loadMysqlCharsetMetadata();
+}
+
+/** 换字符集时保留仍然合法的排序规则，否则退回该字符集的默认排序规则（服务端返回的首项）。 */
+function mysqlCollationForCharset(row: ObjectBrowserRow, charset: string): string {
+  const current = (row.collation ?? "").trim();
+  if (current && mysqlTableCollationBelongsToCharset(current, charset)) return current;
+  return mysqlCollationOptionsForCharset(charset)[0] ?? "";
+}
+
+function selectMysqlTableCharset(row: ObjectBrowserRow, charset: string) {
+  mysqlCharsetMenuTarget.value = null;
+  const next = charset.trim();
+  if (!next) return;
+  const collation = mysqlCollationForCharset(row, next);
+  if (next.toLowerCase() === (row.characterSet ?? "").trim().toLowerCase() && collation.toLowerCase() === (row.collation ?? "").trim().toLowerCase()) return;
+  mysqlCharsetChangeTarget.value = { row, charset: next, collation };
+  showMysqlCharsetChangeConfirm.value = true;
+}
+
+function selectMysqlTableCollation(row: ObjectBrowserRow, collation: string) {
+  mysqlCharsetMenuTarget.value = null;
+  const next = collation.trim();
+  if (!next || next.toLowerCase() === (row.collation ?? "").trim().toLowerCase()) return;
+  const charset = (row.characterSet ?? "").trim() || mysqlTableCharsetFromCollation(next);
+  mysqlCharsetChangeTarget.value = { row, charset, collation: next };
+  showMysqlCharsetChangeConfirm.value = true;
+}
+
+async function confirmMysqlTableCharsetChange() {
+  const target = mysqlCharsetChangeTarget.value;
+  if (!target || mysqlCharsetChangeExecuting.value) return;
+  const sql = mysqlTableCharsetChangeSql({ database: target.row.schema || props.database, table: target.row.name, charset: target.charset, collation: target.collation });
+  if (!sql) {
+    toast(t("objects.charsetChangeInvalid"), 5000);
+    return;
+  }
+  const schema = target.row.schema || selectedSchema.value;
+  mysqlCharsetChangeExecuting.value = true;
+  try {
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
+    if (!executed) return;
+    toast(t("objects.charsetChangeSuccess", { name: target.row.name, charset: target.charset, collation: target.collation }));
+    showMysqlCharsetChangeConfirm.value = false;
+    mysqlCharsetChangeTarget.value = null;
+    await reload({ preserveExistingRows: true });
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
+  } catch (e: any) {
+    toast(t("objects.charsetChangeFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    mysqlCharsetChangeExecuting.value = false;
+  }
 }
 
 async function reload(options?: { allowCachedObjects?: boolean; contextEpoch?: number; preserveExistingRows?: boolean }) {
@@ -6064,6 +6319,11 @@ useDatabaseBrowserMutation(({ connectionId, database, operation }) => {
 });
 
 function refresh(): boolean {
+  if (usesLightweightMysqlBrowser(props.connection)) {
+    // A user refresh must not join a pre-refresh detail read or accept its result.
+    objectBrowserRowsLoadGuard.invalidate();
+    invalidateObjectBrowserRowsCache({ connectionId: props.connection.id, database: props.database });
+  }
   void reload({ preserveExistingRows: true });
   void refreshActiveTableInfo();
   return true;
@@ -6073,7 +6333,7 @@ function onSchemaChange(value: any) {
   selectedSchema.value = typeof value === "string" && value ? value : undefined;
   emit("schemaChange", selectedSchema.value);
   userHasSelectedFilter.value = false;
-  objectFilter.value = initialObjectBrowserFilter();
+  objectFilter.value = resolvedObjectBrowserFilter(props.selectedObjectFilter ?? props.initialObjectFilter);
   void loadObjects();
 }
 
@@ -6125,7 +6385,12 @@ function selectObjectFilter(filter: ObjectFilter) {
 watch(
   () => props.selectedObjectFilter ?? props.initialObjectFilter,
   (filter) => {
-    if (filter && (filter === "indexes" || objectFilter.value === "indexes")) selectObjectFilter(filter);
+    if (!filter) return;
+    // 复用标签页时双击另一个分组只会改 initialObjectFilter，因此除了 indexes
+    // 的既有语义，任何显式分类也要跟着切换——并且必须走与首次挂载相同的
+    // 归一化，否则同一个分组在首次打开和复用时会落到不同分类。
+    const resolved = resolvedObjectBrowserFilter(filter);
+    if (resolved === "indexes" || objectFilter.value === "indexes" || resolved !== "all") selectObjectFilter(resolved);
   },
 );
 
@@ -6184,6 +6449,9 @@ watch(
   () => {
     clearTimeout(objectSearchTimer);
     objectBrowserRowsLoadGuard.invalidate();
+    loadingObjectDetails.value = false;
+    objectDetailsError.value = "";
+    retryObjectDetails = undefined;
     schemaListLoadGuard.invalidate();
     closeSidePanel();
     selectedRowId.value = null;
@@ -6198,10 +6466,13 @@ watch(
   [() => props.connection.id, () => props.database, () => props.schema, () => props.catalog],
   async () => {
     objectBrowserRowsLoadGuard.invalidate();
+    loadingObjectDetails.value = false;
+    objectDetailsError.value = "";
+    retryObjectDetails = undefined;
     const contextEpoch = schemaListLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
-    objectFilter.value = initialObjectBrowserFilter();
+    objectFilter.value = resolvedObjectBrowserFilter(props.selectedObjectFilter ?? props.initialObjectFilter);
     clearTableSelection();
     selectedRowId.value = null;
     // Close side panel and invalidate any pending source/table-info requests
@@ -6480,7 +6751,9 @@ function getEventMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 }
 
 function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  const sequenceTarget = postgresSequenceTargetForRow(item);
   return [
+    ...(props.connection.db_type === "postgres" && item.type === "SEQUENCE" ? [{ label: t("postgresSequence.title"), action: () => openPostgresSequence(sequenceTarget), icon: PencilLine, disabled: !sequenceTarget }] : []),
     ...((effectiveDatabaseType.value === "oracle" || effectiveDatabaseType.value === "oceanbase-oracle") && (item.type === "PACKAGE" || item.type === "PACKAGE_BODY") ? [{ label: t("objects.packageSaveAsTitle"), action: () => requestPackageSaveAs(item), icon: CopyPlus }] : []),
     ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
     { sidebarActionId: "contextMenu.editObject", label: t("contextMenu.editObject"), action: () => openSource(item), icon: PencilLine },
@@ -6600,6 +6873,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     @confirm="cloneDialog.confirm"
   />
   <FirebirdObjectManager v-if="effectiveDatabaseType === 'firebird'" v-model:open="firebirdManagerOpen" :connection-id="connection.id" :database="database" />
+  <PostgresSequenceDialog v-if="postgresSequenceTarget" v-model:open="postgresSequenceOpen" :connection-id="postgresSequenceTarget.connectionId" :database="postgresSequenceTarget.database" :schema="postgresSequenceTarget.schema" :name="postgresSequenceTarget.name" @saved="refreshPostgresSequence" />
   <ObjectSourceDialog
     v-if="triggerCreateContext"
     :key="JSON.stringify(triggerCreateContext)"
@@ -6638,15 +6912,15 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   />
   <div ref="rootRef" data-object-browser-root class="flex h-full min-h-0 min-w-0 flex-col bg-background outline-none" tabindex="0" @keydown="onObjectBrowserKeydown">
     <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
-    <div v-if="!isEventEditor" ref="toolbarRef" class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
+    <div v-if="!isEventEditor" ref="toolbarRef" data-toolbar-row class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
       <Button v-if="effectiveDatabaseType === 'firebird'" variant="outline" size="sm" @click="firebirdManagerOpen = true">{{ t("tree.firebirdObjectManager") }}</Button>
       <Button v-if="canCreateSchemaIndex" data-create-schema-index variant="outline" size="sm" class="h-7 shrink-0 gap-1 px-2 text-xs" @click="createSchemaIndex"> <CopyPlus class="h-3.5 w-3.5" />{{ t("structureEditor.addIndex") }} </Button>
       <Button v-if="oracleInvalidObjectsSupported" variant="ghost" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="setOracleInvalidObjectsOpen(true)">{{ t("processList.oracleInvalidObjects.title") }}</Button>
-      <div class="flex min-w-12 items-center gap-2">
-        <span class="inline-flex max-w-[14rem] min-w-0 items-center rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium truncate" :title="selectedSchema || props.database">
+      <div class="flex min-w-12 items-center gap-2" :class="{ 'shrink-0': showDatabaseChip }">
+        <span class="max-w-[14rem] min-w-0 truncate rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium" :title="selectedSchema || props.database">
           {{ selectedSchema || props.database }}
         </span>
-        <span v-if="selectedSchema && showDatabaseChip" class="inline-flex max-w-[14rem] min-w-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground truncate" :title="props.database">
+        <span v-if="selectedSchema && showDatabaseChip" class="max-w-[14rem] min-w-0 truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground" :title="props.database">
           {{ props.database }}
         </span>
         <DatabaseActionsMenu :connection="connection" :database="database" :catalog="catalog" />
@@ -6735,6 +7009,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button v-if="showInlineSidePanelToggle" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': isSidePanelOpen }" :title="isSidePanelOpen ? t('objects.closeDetailPanel') : t('objects.openDetailPanel')" @click="toggleSidePanel">
         <PanelRight class="h-3.5 w-3.5" />
       </Button>
+      <span v-if="loadingObjectDetails" role="status" class="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Loader2 class="h-3.5 w-3.5 animate-spin" />
+        {{ t("common.loading") }}
+      </span>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="refreshTooltip" :disabled="loadingObjects" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects || refreshingObjects }" />
       </Button>
@@ -6835,7 +7113,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </div>
     <div v-if="selectedTableCount > 0 && supportsBatchTableActions" class="flex h-9 shrink-0 items-center gap-2 overflow-x-auto border-b bg-muted/30 px-3 text-xs">
       <div class="min-w-0 flex-1 truncate text-muted-foreground">
-        {{ t("objects.selectedTables", { count: selectedTableCount }) }}
+        {{ t(hasSelectedTablesOnly ? "objects.selectedTables" : "objects.selectedObjects", { count: selectedTableCount }) }}
       </div>
       <Button v-if="supportsBatchTableActions && !hasSelectedSchemaIndexes" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
         <Upload class="mr-1.5 h-3.5 w-3.5" />
@@ -6859,6 +7137,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </Button>
     </div>
 
+    <div v-if="objectDetailsError" role="status" class="flex h-8 shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-3 text-xs text-destructive">
+      <span class="min-w-0 flex-1 truncate">{{ objectDetailsError }}</span>
+      <Button variant="ghost" size="sm" @click="retryObjectDetails?.()">{{ t("common.retry") }}</Button>
+    </div>
     <div v-if="scaffoldRefreshError" role="status" class="flex h-8 shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-3 text-xs text-destructive">
       <RefreshCw class="h-3 w-3 shrink-0" />
       <span class="min-w-0 truncate">{{ scaffoldRefreshError }}</span>
@@ -6919,6 +7201,21 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
                       @mousedown="onObjectColumnResizeStart('type', $event)"
                       @dblclick="resetObjectColumnWidth('type', 110, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
+                  <div v-if="columnKey === 'engine'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('engine')">
+                      <span class="truncate">{{ t("grid.tableInfoEngine") }}</span>
+                      <component :is="sortIconFor('engine')" v-if="sortIconFor('engine')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('engine')"
+                      data-object-column-resize="engine"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('engine', $event)"
+                      @dblclick="resetObjectColumnWidth('engine', 110, $event)"
                     >
                       <GripVertical class="h-3 w-3" />
                     </div>
@@ -7126,7 +7423,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                         <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
                         <CircleX v-if="item.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
                       </span>
-                      <span class="truncate text-[13px] font-medium text-foreground" :title="item.displayName">{{ item.displayName }}</span>
+                      <ObjectNameLabel :row="item" class="truncate text-[13px] font-medium text-foreground" />
                       <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
                         {{ t("objects.partitions", { count: item.partitionCount }) }}
                       </span>
@@ -7137,11 +7434,105 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                         {{ t(item.valid ? "objects.validStatus" : "objects.invalidStatus") }}
                       </span>
                     </div>
-                    <div v-if="columnKey === 'characterSet'" class="truncate text-xs text-muted-foreground" :title="item.characterSet || ''">
-                      {{ item.characterSet || "" }}
+                    <div v-if="columnKey === 'engine'" class="min-w-0">
+                      <Popover v-if="canChangeMysqlTableMetadata && item.type === 'TABLE'" :open="mysqlEngineMenuRowId === item.id" @update:open="setMysqlEngineMenuOpen(item, $event)">
+                        <PopoverTrigger as-child>
+                          <button type="button" class="flex h-6 w-full min-w-0 items-center gap-1 truncate rounded px-1 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.engineChangeTitle')" data-object-engine-trigger @click.stop>
+                            <span class="truncate">{{ item.engine || "—" }}</span>
+                            <ChevronDown class="h-3 w-3 shrink-0 opacity-60" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent align="start" class="w-56 p-1" @click.stop>
+                          <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.engineChangeTitle") }}</div>
+                          <div v-if="mysqlEngineOptionsLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+                            <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                            {{ t("common.loading") }}
+                          </div>
+                          <div v-else-if="mysqlEngineOptionsError" class="space-y-2 px-2 py-2 text-xs text-destructive">
+                            <p class="whitespace-normal leading-4">{{ t("objects.engineLoadFailed", { message: mysqlEngineOptionsError }) }}</p>
+                            <Button variant="outline" size="sm" class="h-7 w-full text-xs" @click="loadMysqlEngineOptions(true)">{{ t("objects.engineLoadRetry") }}</Button>
+                          </div>
+                          <div v-else class="max-h-64 overflow-auto">
+                            <button v-for="engine in mysqlEngineOptions" :key="engine" type="button" class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :data-object-engine-option="engine" @click="selectMysqlTableEngine(item, engine)">
+                              <Check v-if="(item.engine || '').toLowerCase() === engine.toLowerCase()" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                              <span v-else class="h-3.5 w-3.5 shrink-0" />
+                              <span class="truncate">{{ engine }}</span>
+                            </button>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                      <div v-else class="truncate text-xs text-muted-foreground" :title="item.engine || ''">
+                        {{ item.engine || "" }}
+                      </div>
                     </div>
-                    <div v-if="columnKey === 'collation'" class="truncate text-xs text-muted-foreground" :title="item.collation || ''">
-                      {{ item.collation || "" }}
+                    <div v-if="columnKey === 'characterSet'" class="min-w-0">
+                      <Popover v-if="canChangeMysqlTableMetadata && item.type === 'TABLE'" :open="mysqlCharsetMenuTarget?.rowId === item.id && mysqlCharsetMenuTarget?.kind === 'charset'" @update:open="setMysqlCharsetMenuOpen(item, 'charset', $event)">
+                        <PopoverTrigger as-child>
+                          <button type="button" class="flex h-6 w-full min-w-0 items-center gap-1 truncate rounded px-1 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.charsetChangeTitle')" data-object-charset-trigger @click.stop>
+                            <span class="truncate">{{ item.characterSet || "—" }}</span>
+                            <ChevronDown class="h-3 w-3 shrink-0 opacity-60" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent align="start" class="w-64 p-1" @click.stop>
+                          <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.charsetChangeTitle") }}</div>
+                          <div v-if="mysqlCharsetMetadataLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+                            <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                            {{ t("common.loading") }}
+                          </div>
+                          <div v-else-if="mysqlCharsetMetadataError" class="space-y-2 px-2 py-2 text-xs text-destructive">
+                            <p class="whitespace-normal leading-4">{{ t("objects.charsetLoadFailed", { message: mysqlCharsetMetadataError }) }}</p>
+                            <Button variant="outline" size="sm" class="h-7 w-full text-xs" @click="loadMysqlCharsetMetadata(true)">{{ t("objects.engineLoadRetry") }}</Button>
+                          </div>
+                          <div v-else class="max-h-64 overflow-auto">
+                            <button v-for="charset in mysqlTableCharsetOptions" :key="charset" type="button" class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :data-object-charset-option="charset" @click="selectMysqlTableCharset(item, charset)">
+                              <Check v-if="(item.characterSet || '').toLowerCase() === charset.toLowerCase()" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                              <span v-else class="h-3.5 w-3.5 shrink-0" />
+                              <span class="truncate">{{ charset }}</span>
+                            </button>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                      <div v-else class="truncate text-xs text-muted-foreground" :title="item.characterSet || ''">
+                        {{ item.characterSet || "" }}
+                      </div>
+                    </div>
+                    <div v-if="columnKey === 'collation'" class="min-w-0">
+                      <Popover v-if="canChangeMysqlTableMetadata && item.type === 'TABLE'" :open="mysqlCharsetMenuTarget?.rowId === item.id && mysqlCharsetMenuTarget?.kind === 'collation'" @update:open="setMysqlCharsetMenuOpen(item, 'collation', $event)">
+                        <PopoverTrigger as-child>
+                          <button type="button" class="flex h-6 w-full min-w-0 items-center gap-1 truncate rounded px-1 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.collationChangeTitle')" data-object-collation-trigger @click.stop>
+                            <span class="truncate">{{ item.collation || "—" }}</span>
+                            <ChevronDown class="h-3 w-3 shrink-0 opacity-60" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent align="start" class="w-64 p-1" @click.stop>
+                          <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.collationChangeTitle") }}</div>
+                          <div v-if="mysqlCharsetMetadataLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+                            <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                            {{ t("common.loading") }}
+                          </div>
+                          <div v-else-if="mysqlCharsetMetadataError" class="space-y-2 px-2 py-2 text-xs text-destructive">
+                            <p class="whitespace-normal leading-4">{{ t("objects.charsetLoadFailed", { message: mysqlCharsetMetadataError }) }}</p>
+                            <Button variant="outline" size="sm" class="h-7 w-full text-xs" @click="loadMysqlCharsetMetadata(true)">{{ t("objects.engineLoadRetry") }}</Button>
+                          </div>
+                          <div v-else class="max-h-64 overflow-auto">
+                            <button
+                              v-for="collation in mysqlCollationOptionsForCharset(item.characterSet || '')"
+                              :key="collation"
+                              type="button"
+                              class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent"
+                              :data-object-collation-option="collation"
+                              @click="selectMysqlTableCollation(item, collation)"
+                            >
+                              <Check v-if="(item.collation || '').toLowerCase() === collation.toLowerCase()" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                              <span v-else class="h-3.5 w-3.5 shrink-0" />
+                              <span class="truncate">{{ collation }}</span>
+                            </button>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                      <div v-else class="truncate text-xs text-muted-foreground" :title="item.collation || ''">
+                        {{ item.collation || "" }}
+                      </div>
                     </div>
                     <div v-if="columnKey === 'estimatedRows'" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
                       {{ formatObjectBrowserCount(item.estimatedRows) }}
@@ -7191,7 +7582,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <component :is="iconFor(item)" class="h-6 w-6" :class="iconClass(item.type)" />
                       <CircleX v-if="item.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-0.5 -bottom-0.5 h-4 w-4 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
                     </div>
-                    <span class="w-full truncate text-sm font-medium leading-tight text-foreground">{{ item.displayName }}</span>
+                    <ObjectNameLabel :row="item" class="w-full truncate text-sm font-medium leading-tight text-foreground" />
                     <div class="flex items-center gap-1.5">
                       <span class="text-xs text-muted-foreground">{{ typeLabel(item) }}</span>
                       <span v-if="item.valid != null" class="rounded border px-1 py-px text-[10px] font-medium" :class="item.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
@@ -7235,7 +7626,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <Square v-else class="h-3.5 w-3.5" />
                     </button>
                     <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" aria-hidden="true" />
-                    <span class="min-w-0 truncate font-medium">{{ item.displayName }}</span>
+                    <ObjectNameLabel :row="item" class="min-w-0 truncate font-medium" />
                   </div>
                 </CustomContextMenu>
               </div>
@@ -7591,8 +7982,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 :database-type="props.connection.db_type"
                 :dialect="sourceDialect"
                 :format-dialect="sourceFormatDialect"
+                :package-source="sourcePackageIdentity"
                 force-word-wrap
                 @save="sourceSection === 'source' && saveSource()"
+                @open-object-source="openPackageMemberSource"
               />
             </div>
             <QueryEditor
@@ -7606,9 +7999,11 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               :database-type="props.connection.db_type"
               :dialect="sourceDialect"
               :format-dialect="sourceFormatDialect"
+              :package-source="sourcePackageIdentity"
               force-word-wrap
               read-only
               data-object-source-preview
+              @open-object-source="openPackageMemberSource"
             />
             <div v-if="sourceSaveError" class="shrink-0 whitespace-pre-wrap break-words border-t px-3 py-2 text-xs text-destructive">
               {{ sourceSaveError }}
@@ -7649,12 +8044,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     :sql="batchDropDisplaySql"
     :confirm-label="t('objects.dropSelected')"
     :loading="batchDropExecuting && !batchTriggerDropRequested"
-    :confirm-disabled="batchTriggerDropRequested && (!batchTriggerDropPreview?.isCurrent() || browserTriggerBusy)"
+    :confirm-disabled="batchDropPreviewPending || !!batchDropPreviewError || (batchTriggerDropRequested && (!batchTriggerDropPreview?.isCurrent() || browserTriggerBusy))"
     :close-on-confirm="false"
     @confirm="confirmBatchDropTables"
   >
     <template #options>
       <p v-if="batchDropPreviewError" role="alert" class="mb-3 text-sm text-destructive">{{ batchDropPreviewError }}</p>
+      <p v-if="selectedTableRows.some((row) => row.type === 'PACKAGE')" class="mb-3 text-sm text-muted-foreground">{{ t("objects.dropPackageBodyHint") }}</p>
       <p v-if="batchTriggerDropPreview" class="mb-3 text-sm text-muted-foreground">{{ t("oracleTrigger.executionSchema") }}: {{ batchTriggerDropPreview.plan.target.executionSchema }}</p>
       <div v-if="batchDropExecuting" class="mb-3 rounded-md border bg-muted/20 px-3 py-2.5">
         <div class="mb-1.5 flex items-center justify-between text-xs tabular-nums text-muted-foreground">
@@ -7875,6 +8271,26 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </label>
     </template>
   </DangerConfirmDialog>
+
+  <DangerConfirmDialog
+    v-model:open="showMysqlEngineChangeConfirm"
+    :title="t('objects.engineChangeTitle')"
+    :message="t('objects.engineChangeMessage', { name: mysqlEngineChangeTableLabel, from: mysqlEngineChangeTarget?.row.engine || '—', to: mysqlEngineChangeTarget?.engine ?? '' })"
+    :sql="mysqlEngineChangeSql"
+    :loading="mysqlEngineChangeExecuting"
+    :confirm-label="t('objects.engineChangeConfirm')"
+    @confirm="confirmMysqlTableEngineChange"
+  />
+
+  <DangerConfirmDialog
+    v-model:open="showMysqlCharsetChangeConfirm"
+    :title="t('objects.charsetChangeTitle')"
+    :message="t('objects.charsetChangeMessage', { name: mysqlCharsetChangeTableLabel, charset: mysqlCharsetChangeTarget?.charset ?? '', collation: mysqlCharsetChangeTarget?.collation || '—' })"
+    :sql="mysqlCharsetChangeSql"
+    :loading="mysqlCharsetChangeExecuting"
+    :confirm-label="t('objects.charsetChangeConfirm')"
+    @confirm="confirmMysqlTableCharsetChange"
+  />
 
   <DangerConfirmDialog v-model:open="showEmptyConfirm" :title="t('contextMenu.confirmEmptyTableTitle')" :message="t('contextMenu.confirmEmptyTableMessage', { name: emptyTarget?.name ?? '' })" :sql="emptyPreviewSql" :confirm-label="t('contextMenu.emptyTable')" @confirm="confirmEmptyTable" />
 

@@ -1,4 +1,4 @@
-import { buildMongoUpdateDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { buildMongoUpdateDocument, formatMongoDeleteIdCondition, formatMongoShellLiteral, type MongoDeleteId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 
 export interface MongoQueryResultGridChanges {
   dirtyRows: Map<number, Map<number, MongoInputValue>>;
@@ -61,8 +61,9 @@ export function mongoCollectionExpression(collection: string): string {
   return `db.getCollection(${JSON.stringify(collection)})`;
 }
 
-export function formatMongoQueryResultOperationPreview(collection: string, operation: MongoQueryResultOperation): string {
-  const filter = `{_id: ${formatMongoShellLiteral(operation.id)}}`;
+export function formatMongoQueryResultOperationPreview(collection: string, operation: MongoQueryResultOperation, deleteId?: MongoDeleteId): string {
+  const condition = formatMongoDeleteIdCondition(operation.id, deleteId);
+  const filter = `{_id: ${condition}}`;
   if (operation.kind === "delete") return `${mongoCollectionExpression(collection)}.deleteOne(${filter})`;
   return `${mongoCollectionExpression(collection)}.updateOne(${filter}, ${formatMongoShellLiteral(operation.update)})`;
 }

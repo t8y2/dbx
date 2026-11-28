@@ -93,6 +93,29 @@ describe("useToolbarOverflow", () => {
     expect(tierRef.value).toBe(0);
   });
 
+  it("restores the full layout after a side panel closes, like the data-grid header toolbar", async () => {
+    const { rootRef, tierRef, measure } = createHarness();
+
+    // The regression behind issue #15107: opening the history panel narrows
+    // the data tab's header row, the row condenses to icon-only buttons, and
+    // closing the panel must restore the labels once the width comes back.
+    const row = fakeRow(900, (tier) => (tier >= 1 ? 520 : 700), tierRef);
+    rootRef.value = row;
+    await flush();
+    expect(tierRef.value).toBe(0);
+
+    // History panel opens: the row loses ~300px and condenses.
+    Object.defineProperty(row, "clientWidth", { value: 600, configurable: true });
+    measure();
+    expect(tierRef.value).toBe(1);
+
+    // History panel closes: the pane regrows by the panel width (well past
+    // the growth hysteresis) and the recorded tier-0 requirement fits again.
+    Object.defineProperty(row, "clientWidth", { value: 900, configurable: true });
+    measure();
+    expect(tierRef.value).toBe(0);
+  });
+
   it("restores a tier when condensed content shrinks with the viewport", async () => {
     const { rootRef, tierRef, measure } = createHarness();
     let availableWidth = 200;

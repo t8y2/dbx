@@ -7,8 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import { loadRoutineParameters } from "@/lib/table/routineParameters";
-import { acceptsRoutineInput, buildProcedureExecutionSql, buildProcedureExecutionSqlFromValues, type RoutineParameterValue } from "@/lib/table/routineExecutionSql";
+import { loadOraclePackageProcedureParameters, loadRoutineParameters, type OraclePackageProcedureTarget } from "@/lib/table/routineParameters";
+import { acceptsRoutineInput, buildProcedureExecutionSqlFromValues, type RoutineParameterValue } from "@/lib/table/routineExecutionSql";
 import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
@@ -21,6 +21,7 @@ const props = defineProps<{
   databaseType?: DatabaseType;
   schema?: string;
   routineName: string;
+  packageProcedure?: OraclePackageProcedureTarget;
 }>();
 
 const emit = defineEmits<{
@@ -29,36 +30,44 @@ const emit = defineEmits<{
 }>();
 
 const loading = ref(false);
-const loadError = ref("");
+const loadError = ref(false);
+const packageError = ref<"notCallable" | "overloaded">();
 const parameters = ref<RoutineParameterValue[]>([]);
 const sqlDraft = ref("");
 const manualSqlDirty = ref(false);
 let loadToken = 0;
 
+const packageReady = computed(() => !props.packageProcedure || (!loading.value && !loadError.value && !packageError.value));
 const generatedSql = computed(() => {
-  if (parameters.value.length) {
-    return buildProcedureExecutionSqlFromValues({
-      databaseType: props.databaseType,
-      schema: props.schema,
-      routineName: props.routineName,
-      parameters: parameters.value,
-    });
-  }
-  return buildProcedureExecutionSql({
+  if (!packageReady.value) return "";
+  return buildProcedureExecutionSqlFromValues({
     databaseType: props.databaseType,
     schema: props.schema,
+    packageName: props.packageProcedure?.packageName,
     routineName: props.routineName,
+    parameters: parameters.value,
   });
+});
+const qualifiedName = computed(() => [props.schema, props.packageProcedure?.packageName, props.routineName].filter(Boolean).join("."));
+const canSubmit = computed(() => packageReady.value && !!sqlDraft.value.trim());
+
+const loadErrorMessage = computed(() => {
+  if (packageError.value === "overloaded") return t("objects.packageProcedureOverloaded");
+  if (packageError.value === "notCallable") return t("objects.packageProcedureNotCallable");
+  return t(props.packageProcedure ? "objects.packageProcedureMetadataUnavailable" : "contextMenu.procedureParametersUnavailable");
 });
 
 const inputParameterCount = computed(() => parameters.value.filter(acceptsRoutineInput).length);
-const outputParameterCount = computed(() => parameters.value.filter((parameter) => parameter.mode === "OUT" || (props.databaseType === "xugu" && parameter.mode === "INOUT")).length);
+const outputParameterCount = computed(() => parameters.value.filter((parameter) => parameter.mode === "OUT" || ((props.packageProcedure || props.databaseType === "xugu") && parameter.mode === "INOUT")).length);
 const isXugu = computed(() => props.databaseType === "xugu");
 
 watch(
-  () => [open.value, props.connectionId, props.database, props.databaseType, props.schema, props.routineName] as const,
+  () => [open.value, props.connectionId, props.database, props.databaseType, props.schema, props.routineName, props.packageProcedure] as const,
   ([isOpen]) => {
-    if (!isOpen || !props.connectionId || !props.database || !props.routineName) return;
+    if (!isOpen || !props.connectionId || !props.database || !props.routineName) {
+      loadToken += 1;
+      return;
+    }
     void refreshParameters();
   },
   { immediate: true },
@@ -75,32 +84,39 @@ watch(
 async function refreshParameters() {
   const token = ++loadToken;
   loading.value = true;
-  loadError.value = "";
+  loadError.value = false;
+  packageError.value = undefined;
   parameters.value = [];
   manualSqlDirty.value = false;
   sqlDraft.value = generatedSql.value;
   try {
-    const loaded = await loadRoutineParameters({
+    const options = {
       connectionId: props.connectionId,
       database: props.database,
       databaseType: props.databaseType,
       schema: props.schema,
       routineName: props.routineName,
-    });
+    };
+    const result = props.packageProcedure ? await loadOraclePackageProcedureParameters(props.packageProcedure) : { parameters: await loadRoutineParameters(options) };
     if (token !== loadToken) return;
-    parameters.value = loaded.map((parameter) => ({
+    if ("unavailable" in result) {
+      packageError.value = result.unavailable;
+      return;
+    }
+    parameters.value = result.parameters.map((parameter) => ({
       ...parameter,
       value: "",
       useNull: false,
       useDefault: !!parameter.hasDefault,
     }));
-    sqlDraft.value = generatedSql.value;
-  } catch (e: any) {
+  } catch {
     if (token !== loadToken) return;
-    loadError.value = e?.message || String(e);
-    sqlDraft.value = generatedSql.value;
+    loadError.value = true;
   } finally {
-    if (token === loadToken) loading.value = false;
+    if (token === loadToken) {
+      loading.value = false;
+      sqlDraft.value = generatedSql.value;
+    }
   }
 }
 
@@ -120,14 +136,14 @@ function close() {
 
 function openSql() {
   const sql = sqlDraft.value.trim();
-  if (!sql) return;
+  if (!canSubmit.value) return;
   close();
   emit("openSql", sql);
 }
 
 function execute() {
   const sql = sqlDraft.value.trim();
-  if (!sql) return;
+  if (!canSubmit.value) return;
   close();
   emit("execute", sql);
 }
@@ -156,7 +172,7 @@ function displayParameterDefault(parameter: RoutineParameterValue): string {
               {{ t("contextMenu.confirmExecuteProcedureMessage", { name: props.routineName }) }}
             </p>
             <p class="truncate font-mono text-xs text-muted-foreground">
-              {{ props.schema ? `${props.schema}.${props.routineName}` : props.routineName }}
+              {{ qualifiedName }}
             </p>
           </div>
           <div class="flex shrink-0 items-center gap-2">
@@ -214,15 +230,15 @@ function displayParameterDefault(parameter: RoutineParameterValue): string {
           </div>
         </div>
 
-        <p v-else-if="loadError" class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-          {{ t("contextMenu.procedureParametersUnavailable") }}
+        <p v-else-if="loadError || packageError" class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          {{ loadErrorMessage }}
         </p>
 
         <p v-else class="rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
           {{ t("contextMenu.noProcedureParameters") }}
         </p>
 
-        <div class="grid gap-2">
+        <div v-if="packageReady" class="grid gap-2">
           <div class="flex items-center justify-between gap-2">
             <div class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.sqlPreview") }}</div>
             <Button v-if="manualSqlDirty" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="resetSqlPreview">
@@ -235,10 +251,10 @@ function displayParameterDefault(parameter: RoutineParameterValue): string {
 
       <DialogFooter>
         <Button variant="outline" @click="close">{{ t("dangerDialog.cancel") }}</Button>
-        <Button variant="outline" :disabled="!sqlDraft.trim()" @click="openSql">
+        <Button variant="outline" :disabled="!canSubmit" @click="openSql">
           {{ t("contextMenu.openInSqlEditor") }}
         </Button>
-        <Button :disabled="!sqlDraft.trim()" @click="execute">
+        <Button :disabled="!canSubmit" @click="execute">
           {{ t("contextMenu.executeProcedure") }}
         </Button>
       </DialogFooter>

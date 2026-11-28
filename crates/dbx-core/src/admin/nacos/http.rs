@@ -188,8 +188,9 @@ impl NacosOpenApiAdmin {
         cfg: NacosAdminConfig,
         rnacos_console_session: RNacosConsoleSessionHandle,
     ) -> Result<Self, String> {
+        // DBX resolves explicitly configured transport layers to an endpoint before building this client.
         let mut builder =
-            reqwest::Client::builder().timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS)).cookie_store(true);
+            reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS)).cookie_store(true);
         if cfg.tls_skip_verify {
             builder = builder.danger_accept_invalid_certs(true);
         }

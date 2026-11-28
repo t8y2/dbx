@@ -594,6 +594,17 @@ mod tests {
     }
 
     #[test]
+    fn metadata_constraints_accept_root_and_parent_scopes() {
+        let constraints: crate::model::MetadataListConstraints =
+            decode(&json!({"page_table_roots": true, "parent_name": "meters"})).unwrap();
+        assert!(constraints.page_table_roots);
+        assert_eq!(constraints.parent_name.as_deref(), Some("meters"));
+        let defaults: crate::model::MetadataListConstraints = decode(&json!({})).unwrap();
+        assert!(!defaults.page_table_roots);
+        assert!(defaults.parent_name.is_none());
+    }
+
+    #[test]
     fn query_options_accept_protocol_camel_case_fields() {
         let options: crate::model::QueryOptions =
             decode(&json!({"sql": "SELECT 1", "pageSize": 25, "maxRows": 100})).unwrap();

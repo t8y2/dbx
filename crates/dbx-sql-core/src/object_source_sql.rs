@@ -715,6 +715,13 @@ pub fn fingerprint_oracle_routine_object_source(input: EditableObjectSourceSqlIn
                 Token::Whitespace(Whitespace::Space | Whitespace::Tab | Whitespace::Newline) | Token::EOF
             )
         })
+        // DBMS_METADATA.GET_DDL spells out the default `EDITIONABLE` clause, ALL_SOURCE never
+        // stores it. Comparing token text would then call an unchanged package a mismatch
+        // purely because it was read through a different catalog, which is what made a
+        // save report a definition mismatch right after committing its own DDL. Only the
+        // default is ignored: NONEDITIONABLE is a real property of the object and must keep
+        // distinguishing definitions.
+        .filter(|token| !token_unquoted_word_is(&token.token, "EDITIONABLE"))
         .collect::<Vec<_>>();
     let last_statement_token = tokens.iter().rposition(|token| {
         !matches!(
@@ -725,12 +732,15 @@ pub fn fingerprint_oracle_routine_object_source(input: EditableObjectSourceSqlIn
     if last_statement_token.is_some_and(|index| tokens[index].token == Token::SemiColon) {
         tokens.remove(last_statement_token.unwrap());
     }
+    let locator = RoutineSourceLocator::new(&input.source);
     let token_fingerprints = tokens
         .iter()
         .map(|token| {
-            let start = routine_location_to_byte_offset(&input.source, token.span.start)
+            let start = locator
+                .offset(token.span.start)
                 .ok_or_else(|| "Cannot map Oracle routine token positions to the source text.".to_string())?;
-            let end = routine_location_to_byte_offset(&input.source, token.span.end)
+            let end = locator
+                .offset(token.span.end)
                 .ok_or_else(|| "Cannot map Oracle routine token positions to the source text.".to_string())?;
             if start >= end || end > input.source.len() {
                 return Err("Oracle routine token positions overlap or exceed the source text.".to_string());
@@ -761,13 +771,13 @@ fn validate_oracle_object_source(
             token_word_is(token, keyword)
         }
     };
-    let identifier_is = |token: &Token, expected: &str| {
-        if is_type {
-            matches!(token, Token::Word(word) if if word.quote_style.is_some() { word.value == expected } else { word.value.to_ascii_uppercase() == expected })
-        } else {
-            oracle_identifier_matches(token, expected)
-        }
-    };
+    // The declaration position fixes the role of these tokens: whatever follows
+    // `PACKAGE BODY` (or the owner's period) is the object name. Oracle accepts most
+    // words sqlparser lists as keywords as unquoted names (TRY, DATA, STATUS, ...), so
+    // rejecting keyword-shaped words here refused to read back or save such objects.
+    // An unquoted name still has to equal the expected one case-insensitively, and a
+    // quoted one exactly, so no other object can pass.
+    let identifier_is = |token: &Token, expected: &str| matches!(token, Token::Word(word) if if word.quote_style.is_some() { word.value == expected } else { word.value.to_ascii_uppercase() == expected });
     let initial_tokens =
         Tokenizer::new(&OracleDialect {}, source).tokenize_with_location().map_err(|error| error.to_string())?;
     let first_significant = initial_tokens.iter().find(|token| !matches!(token.token, Token::Whitespace(_)));
@@ -1078,10 +1088,6 @@ pub fn build_oracle_type_management_trigger_source(
     sql.replace_range(start..end, &replacement);
     input.source = sql;
     build_oracle_type_management_source(input)
-}
-
-fn oracle_identifier_matches(token: &Token, expected: &str) -> bool {
-    matches!(token, Token::Word(word) if identifier_matches(word, expected))
 }
 
 fn unquoted_keyword_is(token: &Token, expected: &str) -> bool {
@@ -2326,21 +2332,46 @@ fn rewrite_oracle_routine_self_references(
     Ok(result)
 }
 
-fn routine_location_to_byte_offset(source: &str, location: sqlparser::tokenizer::Location) -> Option<usize> {
-    let mut line = 1;
-    let mut column = 1;
-    for (offset, character) in source.char_indices() {
-        if line == location.line && column == location.column {
-            return Some(offset);
-        }
-        if character == '\n' {
-            line += 1;
-            column = 1;
-        } else {
-            column += 1;
-        }
+/// Maps tokenizer locations (1-based line, 1-based character column; only `\n` starts a
+/// line) to byte offsets in one source text.
+///
+/// Built once per text so that mapping every token of a source stays linear. Scanning from
+/// the start for each token made fingerprinting a 40K-character package body quadratic:
+/// comparing a saved package with its readback took about ten seconds of pure CPU.
+struct RoutineSourceLocator<'a> {
+    source: &'a str,
+    line_starts: Vec<usize>,
+}
+
+impl<'a> RoutineSourceLocator<'a> {
+    fn new(source: &'a str) -> Self {
+        let mut line_starts = vec![0];
+        // `\n` is never part of a multi-byte UTF-8 sequence, so a byte scan is exact.
+        line_starts.extend(source.bytes().enumerate().filter(|(_, byte)| *byte == b'\n').map(|(offset, _)| offset + 1));
+        Self { source, line_starts }
     }
-    (line == location.line && column == location.column).then_some(source.len())
+
+    fn offset(&self, location: sqlparser::tokenizer::Location) -> Option<usize> {
+        let line = usize::try_from(location.line).ok()?.checked_sub(1)?;
+        let column = usize::try_from(location.column).ok()?;
+        let start = *self.line_starts.get(line)?;
+        let mut current = 1;
+        for (offset, character) in self.source[start..].char_indices() {
+            if current == column {
+                return Some(start + offset);
+            }
+            // The newline itself is the last addressable column of its line.
+            if character == '\n' {
+                return None;
+            }
+            current += 1;
+        }
+        (current == column).then_some(self.source.len())
+    }
+}
+
+fn routine_location_to_byte_offset(source: &str, location: sqlparser::tokenizer::Location) -> Option<usize> {
+    RoutineSourceLocator::new(source).offset(location)
 }
 
 fn token_word_is(token: &Token, expected: &str) -> bool {
@@ -2473,6 +2504,165 @@ fn parse_object_source_kind(value: &str) -> Option<ObjectSourceKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oracle_objects_named_like_sqlparser_keywords_validate_and_save() {
+        // TRY, DATA and STATUS are keywords to sqlparser but ordinary unquoted Oracle names;
+        // packages called like that could not be read back or saved at all.
+        let validate = |kind: ObjectSourceKind, name: &str, source: &str| {
+            validate_oracle_executable_object_source(OracleObjectSourceValidationInput {
+                database_type: DatabaseType::Oracle,
+                object_type: kind,
+                schema: Some("SCOTT".into()),
+                name: name.into(),
+                source: source.into(),
+            })
+        };
+        for name in ["try", "data", "status"] {
+            let upper = name.to_uppercase();
+            let spec = format!(
+                "PACKAGE {name} IS
+  PROCEDURE RUN(IRET OUT VARCHAR2);
+end {name};
+"
+            );
+            let body = format!(
+                "PACKAGE BODY {name} IS
+  PROCEDURE RUN(IRET OUT VARCHAR2) IS
+  BEGIN
+    IRET := '1';
+  END;
+end {name};
+"
+            );
+            assert_eq!(validate(ObjectSourceKind::Package, &upper, &spec), Ok(()), "{name} spec");
+            assert_eq!(validate(ObjectSourceKind::PackageBody, &upper, &body), Ok(()), "{name} body");
+            let prepared = prepare_oracle_routine_definition(OracleRoutineDefinitionInput {
+                database_type: DatabaseType::Oracle,
+                object_type: ObjectSourceKind::PackageBody,
+                source_owner: "SCOTT".into(),
+                target_owner: "SCOTT".into(),
+                name: upper.clone(),
+                source: format!("CREATE OR REPLACE {body}"),
+                replace: true,
+            })
+            .unwrap();
+            assert!(prepared.contains(&format!("PACKAGE BODY \"SCOTT\".\"{upper}\" IS")), "{prepared}");
+        }
+
+        // The name still has to be the selected object: another name, a quoted name that
+        // differs in case, or another owner are all refused.
+        let body = "PACKAGE BODY try IS
+  PROCEDURE RUN IS BEGIN NULL; END;
+end try;
+";
+        assert!(validate(ObjectSourceKind::PackageBody, "TRX", body).is_err());
+        let quoted = "PACKAGE BODY \"try\" IS
+  PROCEDURE RUN IS BEGIN NULL; END;
+end \"try\";
+";
+        assert!(validate(ObjectSourceKind::PackageBody, "TRY", quoted).is_err());
+        assert_eq!(validate(ObjectSourceKind::PackageBody, "try", quoted), Ok(()));
+        let owned = "PACKAGE BODY data.try IS
+  PROCEDURE RUN IS BEGIN NULL; END;
+end try;
+";
+        assert!(validate(ObjectSourceKind::PackageBody, "TRY", owned).is_err(), "owner DATA is not SCOTT");
+    }
+
+    /// The original per-call scan, kept as the reference the locator must match exactly.
+    fn reference_location_to_byte_offset(source: &str, location: sqlparser::tokenizer::Location) -> Option<usize> {
+        let mut line = 1;
+        let mut column = 1;
+        for (offset, character) in source.char_indices() {
+            if line == location.line && column == location.column {
+                return Some(offset);
+            }
+            if character == '\n' {
+                line += 1;
+                column = 1;
+            } else {
+                column += 1;
+            }
+        }
+        (line == location.line && column == location.column).then_some(source.len())
+    }
+
+    #[test]
+    fn routine_source_locator_matches_the_reference_scan_at_every_position() {
+        // Deterministic LCG so the generated texts are reproducible without a dependency.
+        let mut seed: u64 = 0x5eed_1234_abcd_0001;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize
+        };
+        let alphabet = ["a", "Z", " ", "\t", "\n", "\r", "\r\n", "é", "中", "😀", ";", "'"];
+        let mut texts = vec![String::new(), "\n".into(), "\r\n".into(), "abc".into(), "abc\n".into(), "\n\n".into()];
+        for _ in 0..300 {
+            let length = next() % 40;
+            texts.push((0..length).map(|_| alphabet[next() % alphabet.len()]).collect());
+        }
+        for text in &texts {
+            let locator = RoutineSourceLocator::new(text);
+            let lines = text.matches('\n').count() as u64 + 1;
+            let widest = text.split('\n').map(|line| line.chars().count()).max().unwrap_or(0) as u64;
+            for line in 0..=lines + 2 {
+                for column in 0..=widest + 3 {
+                    let location = sqlparser::tokenizer::Location { line, column };
+                    assert_eq!(
+                        locator.offset(location),
+                        reference_location_to_byte_offset(text, location),
+                        "text {text:?} at line {line} column {column}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn large_package_body() -> String {
+        let mut source = String::from("CREATE OR REPLACE PACKAGE BODY \"APP\".\"BIG_PKG\" AS\r\n");
+        for index in 0..400 {
+            source.push_str(&format!(
+                "  -- 过程 {index}: 注释含中文\r\n  PROCEDURE P_{index}(I_ID IN NUMBER, O_MSG OUT VARCHAR2) IS\r\n    V_NAME VARCHAR2(100) := 'n''{index}';\r\n  BEGIN\r\n    SELECT NAME INTO V_NAME FROM T_ITEM WHERE ID = I_ID AND FLAG = {index};\r\n    O_MSG := V_NAME || ' ok';\r\n  END P_{index};\r\n"
+            ));
+        }
+        source.push_str("END BIG_PKG;\r\n");
+        source
+    }
+
+    #[test]
+    fn routine_source_locator_maps_every_token_of_a_large_package_like_the_reference() {
+        let source = large_package_body();
+        assert!(source.len() > 40_000, "fixture should be at least as large as a real package body");
+        let tokens = Tokenizer::new(&OracleDialect {}, &source).tokenize_with_location().unwrap();
+        let locator = RoutineSourceLocator::new(&source);
+        // Every 7th token keeps the quadratic reference affordable in a debug test run.
+        for token in tokens.iter().step_by(7) {
+            for location in [token.span.start, token.span.end] {
+                assert_eq!(locator.offset(location), reference_location_to_byte_offset(&source, location));
+            }
+        }
+    }
+
+    #[test]
+    fn fingerprinting_a_large_package_body_is_not_quadratic() {
+        let source = large_package_body();
+        let started = std::time::Instant::now();
+        let fingerprint = fingerprint_oracle_routine_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::PackageBody,
+            schema: Some("APP".into()),
+            name: "BIG_PKG".into(),
+            source: source.clone(),
+            identifier_quote: None,
+        })
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert!(fingerprint.contains("P_399"));
+        // Scanning from the start for every token took seconds on a body this size; the
+        // linear mapping stays far below this generous bound even in debug builds.
+        assert!(elapsed < std::time::Duration::from_secs(3), "fingerprint took {elapsed:?}");
+    }
 
     fn oracle_routine_fingerprint(source: &str) -> Result<String, String> {
         fingerprint_oracle_routine_object_source(EditableObjectSourceSqlInput {

@@ -222,6 +222,37 @@ async fn live_manual_transaction_timeout_invalidates_session_without_replay() {
 }
 
 #[tokio::test]
+#[ignore = "requires DBX_TEST_SQLSERVER_* writable endpoint; repeat with native and sqlserver-legacy profiles"]
+async fn live_slow_manual_write_remains_committable() {
+    let (state, config, mut observer, _dir) = setup().await;
+    let database = config.database.as_deref().unwrap();
+    let table = format!("dbo.dbx_manual_slow_{}", uuid::Uuid::new_v4().simple());
+    sqlserver::execute_simple_batch_with_max_rows(&mut observer, &format!("CREATE TABLE {table} (n int)"), None)
+        .await
+        .unwrap();
+    let session = begin_manual_transaction(&state, &config.id, database, None, None).await.unwrap();
+    assert_driver(&state, &session).await;
+    let started = std::time::Instant::now();
+    execute_in_manual_transaction_with_options(
+        &state,
+        &session,
+        &format!("WAITFOR DELAY '00:00:02'; INSERT INTO {table} VALUES (1);"),
+        database,
+        None,
+        ManualTransactionExecutionOptions { timeout_secs: Some(1), ..Default::default() },
+    )
+    .await
+    .unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    commit_manual_transaction(&state, &session).await.unwrap();
+    let rows = sqlserver::execute_simple_batch_with_max_rows(&mut observer, &format!("SELECT n FROM {table}"), None)
+        .await
+        .unwrap();
+    sqlserver::execute_simple_batch_with_max_rows(&mut observer, &format!("DROP TABLE {table}"), None).await.unwrap();
+    assert_eq!(rows[0].rows, vec![vec![serde_json::json!(1)]]);
+}
+
+#[tokio::test]
 #[ignore = "requires DBX_TEST_SQLSERVER_* writable endpoint"]
 async fn live_manual_transaction_failures_and_idle_expiry_acknowledge_rollback() {
     let (state, config, _observer, _dir) = setup().await;

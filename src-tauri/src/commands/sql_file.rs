@@ -422,6 +422,12 @@ async fn execute_sql_files_inner(
         // failing disk stays out of the execution path.
         counters.observe(&progress);
         failure_log.record(&progress);
+        crate::commands::observability::publish_transfer_progress(
+            state.inner().as_ref(),
+            "sql-file",
+            &progress.execution_id,
+            &progress,
+        );
         let _ = app.emit("sql-file-progress", progress);
     });
     progress_emitter.emit(sql_file_progress(

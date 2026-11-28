@@ -235,6 +235,8 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
+
+            write_timeout_secs: 0,
             idle_timeout_secs: default_idle_timeout_secs(),
             manual_transaction_timeout_secs: default_manual_transaction_timeout_secs(),
             idle_disconnect_secs: default_idle_disconnect_secs(),
@@ -277,6 +279,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }

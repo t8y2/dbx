@@ -78,6 +78,7 @@ watch(
 
 <template>
   <section data-grid-filter-workbench class="shrink-0 border-b bg-muted/10 text-foreground">
+    <slot name="filter-group-controls" />
     <div ref="rulesScrollerRef" data-filter-rules-scroll class="filter-rules-scroll min-h-11 overflow-auto px-3 py-2">
       <DataGridLocalFilterSummary v-if="hasLocalColumnFilters" class="mb-1.5" :count="localFilterCount ?? 0" :summaries="localFilterSummaries ?? []" @clear-all="emit('clearLocalFilter')" @clear-column="(columnIndex) => emit('clearLocalFilter', columnIndex)" />
       <DataGridFilterBuilder

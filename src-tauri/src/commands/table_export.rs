@@ -5,7 +5,8 @@ use crate::commands::connection::AppState;
 
 pub use dbx_core::table_export::{ExportStatus, TableExportProgress, TableExportRequest};
 
-fn emit_progress(app: &AppHandle, progress: TableExportProgress) {
+fn emit_progress(app: &AppHandle, state: &AppState, progress: TableExportProgress) {
+    crate::commands::observability::publish_transfer_progress(state, "table-export", &progress.export_id, &progress);
     let _ = app.emit("table-export-progress", progress);
 }
 
@@ -78,7 +79,7 @@ pub async fn start_table_export(
     dbx_core::export_runtime::spawn_export_task(async move {
         let terminal = Mutex::new(None);
         let completion = dbx_core::table_export::export_table_data_core_with_completion(&state, &request, |progress| {
-            route_core_progress(progress, &terminal, |progress| emit_progress(&app, progress));
+            route_core_progress(progress, &terminal, |progress| emit_progress(&app, &state, progress));
         })
         .await;
 
@@ -89,17 +90,16 @@ pub async fn start_table_export(
             completion.result,
             terminal,
             async { completion.cleanup },
-            |progress| emit_progress(&app, progress),
+            |progress| emit_progress(&app, &state, progress),
         )
         .await;
         if let Err(error) = completion {
-            let _ = app.emit(
-                "table-export-progress",
-                serde_json::json!({
-                    "exportId": export_id, "tableName": request.table_name,
-                    "rowsExported": 0, "totalRows": null, "status": "Unknown", "errorMessage": error,
-                }),
-            );
+            let payload = serde_json::json!({
+                "exportId": export_id, "tableName": request.table_name,
+                "rowsExported": 0, "totalRows": null, "status": "Unknown", "errorMessage": error,
+            });
+            crate::commands::observability::publish_transfer_progress(&state, "table-export", &export_id, &payload);
+            let _ = app.emit("table-export-progress", payload);
         }
     });
 

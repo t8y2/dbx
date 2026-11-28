@@ -86,6 +86,20 @@ dbx dbml <connection> [--out path] [--notes path] [--schema name] [--database na
 - run: git diff --exit-code docs/schema.dbml
 ```
 
+## HTML 导出
+
+在文档查看器中点击**导出 HTML**，会把当前快照写成一个自包含的 `.html` 文件：样式和查看器脚本都内嵌在文件中，用浏览器直接打开即可，不需要 DBX 或数据库连接。应用语言在支持范围内时按当前语言导出，否则使用英文。
+
+命令行可以无界面生成同样的文件：
+
+```bash
+dbx docs <connection> [--out path] [--notes path] [--lang code] [--schema name] [--database name] [--tables a,b]
+```
+
+不指定 `--out` 时，HTML 输出到 stdout。`--lang` 默认为 `en`，支持 `en`、`es`、`it`、`ja`、`ko`、`pt-BR`、`zh-CN` 和 `zh-TW`。只有 `--notes` 明确指定文件时才会合并笔记；快照的警告会输出到 stderr。
+
+导出的文件是生成时刻的副本：修改 Schema 或笔记后需要重新导出。
+
 ## 支持范围与边界
 
 - 仅支持关系型数据库。文档型数据库和键值存储没有对应的 DBML 表达方式，不在支持范围内。

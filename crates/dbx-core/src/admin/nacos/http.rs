@@ -4128,6 +4128,9 @@ fn parse_config_history_item(
         app_name: optional_string_field(&item, &["appName", "app_name"]),
         operation: optional_string_field(&item, &["opType", "operation", "operateType", "type"]),
         operator: optional_string_field(&item, &["operator", "opUser", "srcUser", "createUser", "modifyUser", "user"]),
+        src_ip: optional_string_field(&item, &["srcIp"]),
+        src_user: optional_string_field(&item, &["srcUser"]),
+        op_type: optional_string_field(&item, &["opType"]),
         last_modified_time: optional_string_field(
             &item,
             &[

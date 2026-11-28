@@ -291,11 +291,21 @@ pub(super) async fn prepare_table_ddl(
         )
     };
 
+    // PostgreSQL's IF NOT EXISTS also suppresses a conflict with an index or
+    // sequence. Let the executor see the failure and verify the target kind.
+    let mut ddl = if *target_db_type == DatabaseType::Postgres {
+        match ddl.strip_prefix("CREATE TABLE IF NOT EXISTS ") {
+            Some(tail) => format!("CREATE TABLE {tail}"),
+            None => ddl,
+        }
+    } else {
+        ddl
+    };
+
     // MySQL-family targets: defer the foreign keys to ALTER statements so the table
     // creation order never has to satisfy foreign key dependencies (a foreign key cycle
     // has no valid CREATE TABLE order at all). The rebuild path above guarantees the
     // metadata behind `foreign_keys` is trustworthy before anything is stripped.
-    let mut ddl = ddl;
     let mut deferred_fk_alters = Vec::new();
     let mut deferred_fk_names = Vec::new();
     if supports_deferred_mysql_foreign_keys(target_db_type) && !foreign_keys.is_empty() {

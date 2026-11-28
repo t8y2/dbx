@@ -715,6 +715,14 @@ const DAMENG_RESERVED_IDENTIFIER_KEYWORDS = new Set([
   "XMLTABLE",
 ]);
 
+export function normalizePreferredTableAlias(value: unknown): string {
+  const alias = typeof value === "string" ? value.trim() : "";
+  // Leave space for numeric suffixes in dialects with 30-byte identifiers.
+  if (!/^[a-z][a-z0-9_]{0,23}$/i.test(alias)) return "";
+  if (requiresMysqlIdentifierQuote(alias) || requiresClickhouseIdentifierQuote(alias) || isOracleReservedKeyword(alias) || isDamengReservedKeyword(alias)) return "";
+  return alias;
+}
+
 export function isExplicitlyQuotedSqlIdentifier(value: string): boolean {
   if (value.length < 2) return false;
   return (value.startsWith('"') && value.endsWith('"')) || (value.startsWith("`") && value.endsWith("`")) || (value.startsWith("[") && value.endsWith("]"));

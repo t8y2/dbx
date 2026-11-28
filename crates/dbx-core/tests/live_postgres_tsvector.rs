@@ -16,6 +16,7 @@ fn grid_column(column: &dbx_core::types::ColumnInfo) -> DataGridColumnInfo {
         is_primary_key: column.is_primary_key,
         column_default: column.column_default.clone(),
         extra: column.extra.clone(),
+        collation: None,
     }
 }
 

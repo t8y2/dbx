@@ -243,6 +243,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
+            write_timeout_secs: 0,
             idle_timeout_secs: 60,
             manual_transaction_timeout_secs: 300,
             idle_disconnect_secs: 0,
@@ -283,6 +284,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         };
         cfg.redis_key_separator = ":".to_string();

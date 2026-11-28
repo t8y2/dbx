@@ -809,6 +809,67 @@ describe("EditorGroupTabBar group behavior", () => {
     }
   });
 
+  it("hides the horizontal strip scrollbar in two-row wrap mode and only renders it on real overflow in scroll mode", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    settings.editorSettings.tabGroupRows = "two-row";
+    settings.editorSettings.tabLayout = "wrap";
+    settings.editorSettings.tabPlacement = "top";
+    const mysqlTabId = store.createTab("mysql-1", "app", "MySQL 1", "query");
+    store.createTab("mysql-1", "app", "MySQL 2", "query");
+    store.createTab("mongo-1", "app", "Mongo 1", "query");
+    const { app, host, activeTab } = mountBar(store.groups[0]!.id, store.tabs.slice(), mysqlTabId, pinia, {
+      "onActivate-tab": (tabId: string) => {
+        activeTab.id = tabId;
+      },
+    });
+
+    try {
+      await settle();
+      const scrollEl = host.querySelector<HTMLElement>(".app-tab-scroll")!;
+      let clientWidth = 400;
+      let scrollWidth = 400;
+      Object.defineProperty(scrollEl, "clientWidth", { configurable: true, get: () => clientWidth });
+      Object.defineProperty(scrollEl, "scrollWidth", { configurable: true, get: () => scrollWidth });
+
+      // Two-row wrap mode keeps the tab-list control but must never render the horizontal scrollbar.
+      expect(host.querySelector(".tab-overflow-control")).not.toBeNull();
+      expect(host.querySelector(".app-tab-strip .app-tab-scrollbar")).toBeNull();
+
+      // Even if scroll geometry reports horizontal excess, wrap mode does not scroll horizontally.
+      scrollWidth = 900;
+      scrollEl.dispatchEvent(new Event("scroll"));
+      await settle();
+      expect(host.querySelector(".app-tab-strip .app-tab-scrollbar")).toBeNull();
+
+      // Switching to scroll mode with genuine overflow renders the horizontal scrollbar.
+      settings.editorSettings.tabLayout = "scroll";
+      await settle();
+      scrollEl.dispatchEvent(new Event("scroll"));
+      await settle();
+      expect(host.querySelector(".tab-overflow-control")).not.toBeNull();
+      expect(host.querySelector(".app-tab-strip .app-tab-scrollbar")).not.toBeNull();
+
+      // Switching back to wrap mode hides the horizontal scrollbar again.
+      settings.editorSettings.tabLayout = "wrap";
+      await settle();
+      expect(host.querySelector(".app-tab-strip .app-tab-scrollbar")).toBeNull();
+
+      // In scroll mode without overflow, the tab-list control stays while the scrollbar stays hidden.
+      settings.editorSettings.tabLayout = "scroll";
+      scrollWidth = 400;
+      const mongoHeader = Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-rail-scroll .tab-group-header")).find((header) => header.title === "mongo-1");
+      mongoHeader!.click();
+      await settle();
+      expect(host.querySelector(".tab-overflow-control")).not.toBeNull();
+      expect(host.querySelector(".app-tab-strip .app-tab-scrollbar")).toBeNull();
+    } finally {
+      app.unmount();
+      host.remove();
+    }
+  });
+
   it.each(["single", "two-row"] as const)("keeps database icons for database-bound plugin pages in %s groups", async (rows) => {
     const connectionStore = useConnectionStore();
     connectionStore.connections = [{ id: "pg-1", name: "Postgres", db_type: "postgres", driver_profile: "postgres" } as ConnectionConfig];

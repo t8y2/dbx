@@ -161,6 +161,26 @@ func TestLiveIoTDBAgentTreeTimeAggregates(t *testing.T) {
 	if !reflect.DeepEqual(result.ColumnTypes, wantTypes) {
 		t.Fatalf("tree time aggregate types = %#v, want %#v", result.ColumnTypes, wantTypes)
 	}
+
+	// https://github.com/t8y2/dbx/issues/15876: an alias replaces the column
+	// name the aggregate was recognised by, so the SELECT list decides the type.
+	aliased, err := server.executeQuery(queryOptions{
+		SQL:     "SELECT max_time(s1) AS latest, max_by(time,s1) AS \"at max\", min_by(time,s1) AS `at``min`, max_by(s1,time) AS value_at, count(s1) AS n FROM " + device,
+		MaxRows: 10,
+	})
+	if err != nil || len(aliased.Rows) != 1 {
+		t.Fatalf("aliased tree time aggregates = %#v, %v", aliased, err)
+	}
+	if want := []string{"latest", "at max", "at`min", "value_at", "n"}; !reflect.DeepEqual(aliased.Columns, want) {
+		t.Fatalf("aliased tree time aggregate columns = %#v, want %#v", aliased.Columns, want)
+	}
+	wantAliasedTypes := []string{"TIMESTAMP(ms)", "TIMESTAMP(ms)", "TIMESTAMP(ms)", "INT64", "INT64"}
+	if !reflect.DeepEqual(aliased.ColumnTypes, wantAliasedTypes) {
+		t.Fatalf("aliased tree time aggregate types = %#v, want %#v", aliased.ColumnTypes, wantAliasedTypes)
+	}
+	if want := []any{"2", "2", "1", int64(20), int64(2)}; !reflect.DeepEqual(aliased.Rows[0], want) {
+		t.Fatalf("aliased tree time aggregate row = %#v, want %#v", aliased.Rows[0], want)
+	}
 	wantRow := []any{"2", "2", int64(20)}
 	if !reflect.DeepEqual(result.Rows[0], wantRow) {
 		t.Fatalf("tree time aggregate row = %#v, want %#v", result.Rows[0], wantRow)

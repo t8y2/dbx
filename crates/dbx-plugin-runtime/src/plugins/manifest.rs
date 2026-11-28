@@ -40,6 +40,17 @@ pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &[
     "host.connections:read",
     "host.connections::read",
     "host.connections:edit",
+    // Host observation bus (host.observe:*): one permission per event
+    // category so an observability plugin only sees what it declares. The
+    // kind → permission mapping lives in
+    // dbx_types::models::observability::observation_permission_for_kind and
+    // must stay in sync with the frontend
+    // apps/desktop/src/lib/plugins/pluginObservation.ts.
+    "host.observe:queries",
+    "host.observe:connections",
+    "host.observe:ai",
+    "host.observe:transfers",
+    "host.observe:plugins",
 ];
 
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat

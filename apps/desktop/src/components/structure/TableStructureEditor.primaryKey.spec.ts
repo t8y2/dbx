@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   executeQuery: vi.fn(),
   listDataTypes: vi.fn(),
   buildTableStructureChangeSql: vi.fn(),
+  buildCreateTableSql: vi.fn(),
   previewSqliteTableStructureChange: vi.fn(),
   buildMysqlAutoIncrementSql: vi.fn(),
   updateEditorSettings: vi.fn(),
@@ -243,6 +244,7 @@ vi.mock("@/lib/backend/api", () => ({
   executeQuery: mocks.executeQuery,
   listDataTypes: mocks.listDataTypes,
   buildTableStructureChangeSql: mocks.buildTableStructureChangeSql,
+  buildCreateTableSql: mocks.buildCreateTableSql,
   previewSqliteTableStructureChange: mocks.previewSqliteTableStructureChange,
   buildMysqlAutoIncrementSql: mocks.buildMysqlAutoIncrementSql,
   buildTableOwnerChangeSql: mocks.buildTableOwnerChangeSql,
@@ -489,6 +491,40 @@ describe("TableStructureEditor primary key editing", () => {
         }),
       ),
     );
+  });
+
+  it("adds a column in HANA create mode", async () => {
+    mocks.buildCreateTableSql.mockResolvedValue({ statements: [], warnings: [] });
+    const root = await mountEditor("saphana", false, { tableName: "", draftOverride: { ...draft(), newTableName: "new_table", columns: [] } });
+    const addColumn = buttonWithText(root, "structureEditor.addColumn");
+    expect(addColumn.disabled).toBe(false);
+
+    addColumn.click();
+    await nextTick();
+    const nameInput = root.querySelector<HTMLInputElement>('[data-column-row-index="0"] [data-column-name-input]')!;
+    nameInput.value = "new_col";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ databaseType: "saphana", schema: "SYSDBA", tableName: "new_table", columns: [expect.objectContaining({ name: "new_col" })] }), undefined, undefined));
+  });
+
+  it("submits a primary key for an existing HANA table without one", async () => {
+    const root = await mountEditor("saphana");
+    const primaryKey = columnCheckbox(root, "structureEditor.primaryKey");
+    expect(primaryKey.disabled).toBe(false);
+
+    primaryKey.checked = true;
+    primaryKey.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await vi.waitFor(() =>
+      expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          databaseType: "saphana",
+          columns: [expect.objectContaining({ isPrimaryKey: true, isNullable: false })],
+        }),
+      ),
+    );
+    expect(root.querySelector("[data-primary-key-name-input]")).toBeNull();
   });
 
   it("allows enabling identity on an existing Dameng integer column", async () => {

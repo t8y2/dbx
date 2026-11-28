@@ -86,6 +86,20 @@ Commit the result and let CI fail on unreviewed schema drift:
 - run: git diff --exit-code docs/schema.dbml
 ```
 
+## HTML Export
+
+**Export HTML** in the documentation viewer writes the current snapshot to one self-contained `.html` file: the styles and viewer script are embedded, so it opens in a browser without DBX or a database connection. The file is written in the app language when that language is supported, and in English otherwise.
+
+The CLI produces the same file headlessly:
+
+```bash
+dbx docs <connection> [--out path] [--notes path] [--lang code] [--schema name] [--database name] [--tables a,b]
+```
+
+Without `--out` the HTML goes to stdout. `--lang` defaults to `en`; the supported values are `en`, `es`, `it`, `ja`, `ko`, `pt-BR`, `zh-CN`, and `zh-TW`. Notes are merged only when `--notes` names a file, and snapshot warnings are printed to stderr.
+
+An exported file is a point-in-time copy: re-export after changing the schema or notes.
+
 ## Support and Boundaries
 
 - Relational engines only. Document databases and key-value stores have no DBML vocabulary and are not covered.

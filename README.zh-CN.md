@@ -104,23 +104,13 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-zh" target="_blank">
-        <img src="docs/public/sponsors/hiapi-card.png" alt="HiAPI" width="175" />
-      </a>
-    </td>
-    <td>
-      HiAPI 是面向开发者的图片、视频、音频及文本模型 API 平台——GPT Image 2.5（Flare 与 Sunburst）、OpenAI 兼容文本接口，并可通过 Remote MCP/Agent Skills 接入 Claude Code、Cursor 等编程工具。按量付费、无最低消费；新用户注册赠送 200 Credits，充值送 10% 积分。
-      <a href="https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=readme-zh" target="_blank">访问 HiAPI</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
         <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
       </a>
     </td>
     <td>
       UCloud 优刻得是国内首家公有云科创板上市公司，覆盖国内、亚洲、欧洲、北美等 28 个地域的云主机、数据库、CDN 等服务，注册享新客优惠 0.9 折起；星图 AstraFlow 大模型平台支持主流 200+ 大模型一键调用。
+      <br />企业接入｜完成企业认证后，如有前沿模型接入需求，可联系平台咨询具体事项。
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">访问 UCloud 优刻得</a>
     </td>
   </tr>

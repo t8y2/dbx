@@ -23,11 +23,14 @@ import {
   type DataGridValueFormat,
 } from "@/lib/dataGrid/dataGridCopyExtractor";
 
+import type { DatabaseType } from "@/types/database";
+
 const props = defineProps<{
   open: boolean;
   preference: DataGridCopyPreference;
   singleColumnFormat?: DataGridSmartSingleColumnFormat;
   sourceTableName?: string;
+  databaseType?: DatabaseType;
   visibleCopyExtractors: DataGridCopyExtractorId[];
   options: DataGridExtractorOptions;
   mode?: "configure" | "copy";
@@ -464,6 +467,10 @@ function handleFormatKeydown(event: KeyboardEvent, itemIndex: number) {
               <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.skipComputedColumns" @change="updateSql('skipComputedColumns', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorSkipComputed") }}</label>
               <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.skipGeneratedColumns" @change="updateSql('skipGeneratedColumns', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorSkipGenerated") }}</label>
               <div v-if="draftExtractor === 'sql-inserts' || draftExtractor === 'sql-deletes-inserts'" class="space-y-1.5">
+                <label v-if="databaseType === 'mysql' && draftExtractor === 'sql-inserts'" class="flex items-center gap-2 text-sm">
+                  <input type="checkbox" :checked="draftOptions.sql.replaceInto" @change="updateSql('replaceInto', ($event.target as HTMLInputElement).checked)" />
+                  {{ t("grid.copyExtractorReplaceInto") }}
+                </label>
                 <Label>{{ t("grid.copyExtractorExcludePrimaryKeys") }}</Label>
                 <Select :model-value="draftOptions.sql.primaryKeyMode" @update:model-value="updateSql('primaryKeyMode', $event as DataGridExtractorOptions['sql']['primaryKeyMode'])">
                   <SelectTrigger><SelectValue /></SelectTrigger>

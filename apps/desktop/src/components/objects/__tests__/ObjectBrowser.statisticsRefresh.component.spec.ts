@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   listObjects: vi.fn(),
   listSchemas: vi.fn(),
   listObjectStatistics: vi.fn(),
+  executeQuery: vi.fn(),
   ensureConnected: vi.fn(),
 }));
 
@@ -18,6 +19,7 @@ vi.mock("@/lib/backend/api", () => ({
   listObjects: (...args: unknown[]) => mocks.listObjects(...args),
   listSchemas: (...args: unknown[]) => mocks.listSchemas(...args),
   listObjectStatistics: (...args: unknown[]) => mocks.listObjectStatistics(...args),
+  executeQuery: (...args: unknown[]) => mocks.executeQuery(...args),
 }));
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
@@ -25,6 +27,7 @@ vi.mock("@/stores/connectionStore", () => ({
     ensureConnected: mocks.ensureConnected,
     tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,
+    refreshObjectListTreeNode: vi.fn(),
   }),
 }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
@@ -66,7 +69,25 @@ vi.mock("@/components/ui/CustomContextMenu.vue", () => ({
   }),
 }));
 vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
-vi.mock("@/components/editor/DangerConfirmDialog.vue", () => ({ default: { render: () => null } }));
+vi.mock("@/components/editor/DangerConfirmDialog.vue", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    default: defineComponent({
+      props: { open: Boolean, loading: Boolean, sql: String, message: String },
+      emits: ["confirm"],
+      setup(props, { emit }) {
+        return () =>
+          props.open
+            ? h("div", { "data-test-danger-dialog": "" }, [
+                h("div", { "data-test-danger-message": "" }, props.message),
+                h("div", { "data-test-danger-sql": "" }, props.sql),
+                h("button", { type: "button", "data-test-danger-confirm": "", disabled: props.loading, onClick: () => emit("confirm") }, "confirm"),
+              ])
+            : null;
+      },
+    }),
+  };
+});
 vi.mock("@/components/objects/ProcedureExecutionDialog.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/objects/CustomTypeInfoPanel.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/export/XlsxHeaderDialog.vue", () => ({ default: { render: () => null } }));
@@ -400,8 +421,8 @@ describe("MySQL table charset and collation columns", () => {
       { name: "v_orders", object_type: "VIEW", schema: "pgdemo" },
     ]);
     mocks.listObjectStatistics.mockResolvedValue([
-      { name: "a_utf8", schema: "pgdemo", collation: "utf8mb4_0900_ai_ci" },
-      { name: "z_latin", schema: "pgdemo", collation: "latin1_swedish_ci" },
+      { name: "a_utf8", schema: "pgdemo", collation: "utf8mb4_0900_ai_ci", engine: "InnoDB" },
+      { name: "z_latin", schema: "pgdemo", collation: "latin1_swedish_ci", engine: "MyISAM" },
       { name: "v_orders", schema: "pgdemo", collation: "utf8mb4_bin" },
     ]);
   });
@@ -427,6 +448,35 @@ describe("MySQL table charset and collation columns", () => {
     expect(host.querySelector('[data-object-column-resize="characterSet"]')).not.toBeNull();
     // The final visible column has no resize separator.
     expect(host.querySelector('[data-object-column-resize="collation"]')).toBeNull();
+  });
+
+  it("merges statistics into the object list using the exact space-padded MySQL table identifier", async () => {
+    mocks.listObjects.mockResolvedValue([{ name: " orders ", object_type: "TABLE", schema: "pgdemo" }]);
+    mocks.listObjectStatistics.mockResolvedValue([
+      {
+        name: " orders ",
+        schema: "pgdemo",
+        estimated_rows: 7,
+        total_bytes: 4096,
+        engine: "InnoDB",
+        collation: "utf8mb4_bin",
+      },
+    ]);
+
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+
+    await vi.waitFor(() =>
+      expect(getCachedObjectBrowserRows(mysqlScope)?.[0]).toMatchObject({
+        name: " orders ",
+        displayName: "orders",
+        estimatedRows: 7,
+        totalBytes: 4096,
+        engine: "InnoDB",
+        characterSet: "utf8mb4",
+        collation: "utf8mb4_bin",
+      }),
+    );
+    expect(host.textContent).toContain("utf8mb4_bin");
   });
 
   it("sorts tables by charset in both directions while keeping missing values last", async () => {
@@ -500,6 +550,231 @@ describe("MySQL table charset and collation columns", () => {
     await vi.waitFor(() => expect(host.textContent).toContain("a_utf8"));
     expect(host.textContent).not.toContain("structureEditor.characterSet");
     expect(host.textContent).not.toContain("structureEditor.collation");
+    expect(host.textContent).not.toContain("grid.tableInfoEngine");
+  });
+});
+
+describe("MySQL storage engine column", () => {
+  beforeEach(() => {
+    connection.db_type = "mysql";
+    localStorage.clear();
+    mocks.listSchemas.mockResolvedValue(["pgdemo"]);
+    mocks.listObjects.mockResolvedValue([
+      { name: "a_innodb", object_type: "TABLE", schema: "pgdemo" },
+      { name: "z_myisam", object_type: "TABLE", schema: "pgdemo" },
+    ]);
+    mocks.listObjectStatistics.mockResolvedValue([
+      { name: "a_innodb", schema: "pgdemo", engine: "InnoDB" },
+      { name: "z_myisam", schema: "pgdemo", engine: "MyISAM" },
+    ]);
+    mocks.executeQuery.mockImplementation((_id: unknown, _database: unknown, sql: string) =>
+      sql === "SHOW ENGINES"
+        ? Promise.resolve({
+            columns: ["Engine", "Support"],
+            rows: [
+              ["InnoDB", "DEFAULT"],
+              ["MyISAM", "YES"],
+              ["MEMORY", "YES"],
+            ],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          })
+        : Promise.resolve({ columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 }),
+    );
+  });
+
+  afterEach(() => {
+    connection.db_type = "postgres";
+    localStorage.clear();
+  });
+
+  function tableRow(host: HTMLElement, name: string) {
+    return Array.from(host.querySelectorAll<HTMLElement>(".object-browser-scroller .grid")).find((row) => row.textContent?.includes(name));
+  }
+
+  it("shows each table's storage engine next to its type", async () => {
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+
+    await vi.waitFor(() => expect(host.textContent).toContain("MyISAM"));
+    expect(host.textContent).toContain("grid.tableInfoEngine");
+    expect(host.querySelector('[data-object-column-resize="engine"]')).not.toBeNull();
+    expect(tableRow(host, "a_innodb")?.querySelector("[data-object-engine-trigger]")).not.toBeNull();
+    expect(getCachedObjectBrowserRows(mysqlScope)).toEqual(expect.arrayContaining([expect.objectContaining({ name: "a_innodb", engine: "InnoDB" })]));
+  });
+
+  it("changes the engine through the dropdown and runs ALTER TABLE", async () => {
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("MyISAM"));
+
+    tableRow(host, "a_innodb")!.querySelector<HTMLButtonElement>("[data-object-engine-trigger]")!.click();
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledWith(connection.id, "pgdemo", "SHOW ENGINES", undefined, undefined, { maxRows: 100 }));
+
+    let option: HTMLElement | undefined;
+    await vi.waitFor(() => {
+      option = document.querySelector<HTMLElement>('[data-object-engine-option="MyISAM"]') ?? undefined;
+      expect(option).toBeTruthy();
+    });
+    option!.click();
+
+    await vi.waitFor(() => expect(document.querySelector("[data-test-danger-sql]")?.textContent).toBe("ALTER TABLE `pgdemo`.`a_innodb` ENGINE = MyISAM"));
+    document.querySelector<HTMLButtonElement>("[data-test-danger-confirm]")!.click();
+
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledWith(connection.id, "pgdemo", "ALTER TABLE `pgdemo`.`a_innodb` ENGINE = MyISAM", "pgdemo"));
+  });
+
+  it("does not open the engine picker for the already selected engine", async () => {
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("MyISAM"));
+
+    tableRow(host, "a_innodb")!.querySelector<HTMLButtonElement>("[data-object-engine-trigger]")!.click();
+    let option: HTMLElement | undefined;
+    await vi.waitFor(() => {
+      option = document.querySelector<HTMLElement>('[data-object-engine-option="InnoDB"]') ?? undefined;
+      expect(option).toBeTruthy();
+    });
+    option!.click();
+
+    expect(document.querySelector("[data-test-danger-dialog]")).toBeNull();
+    expect(mocks.executeQuery).not.toHaveBeenCalledWith(connection.id, "pgdemo", expect.stringContaining("ALTER TABLE"), expect.anything());
+  });
+
+  it("keeps case-sensitive table statistics and engine edits separate when names differ only by case", async () => {
+    mocks.listObjects.mockResolvedValue([
+      { name: "Orders", object_type: "TABLE", schema: "pgdemo" },
+      { name: "orders", object_type: "TABLE", schema: "pgdemo" },
+    ]);
+    mocks.listObjectStatistics.mockResolvedValue([
+      { name: "Orders", schema: "pgdemo", engine: "InnoDB", collation: "utf8mb4_bin" },
+      { name: "orders", schema: "pgdemo", engine: "MyISAM", collation: "latin1_swedish_ci" },
+    ]);
+
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(tableRow(host, "Orders")?.textContent).toContain("utf8mb4_bin"));
+
+    expect(tableRow(host, "Orders")?.textContent).toContain("InnoDB");
+    expect(tableRow(host, "orders")?.textContent).toContain("MyISAM");
+    expect(tableRow(host, "orders")?.textContent).toContain("latin1_swedish_ci");
+    expect(tableRow(host, "Orders")?.textContent).not.toContain("latin1_swedish_ci");
+
+    tableRow(host, "Orders")!.querySelector<HTMLButtonElement>("[data-object-engine-trigger]")!.click();
+    let option: HTMLElement | undefined;
+    await vi.waitFor(() => {
+      option = document.querySelector<HTMLElement>('[data-object-engine-option="MyISAM"]') ?? undefined;
+      expect(option).toBeTruthy();
+    });
+    option!.click();
+
+    await vi.waitFor(() => expect(document.querySelector("[data-test-danger-sql]")?.textContent).toBe("ALTER TABLE `pgdemo`.`Orders` ENGINE = MyISAM"));
+  });
+});
+
+describe("MySQL table charset and collation pickers", () => {
+  beforeEach(() => {
+    connection.db_type = "mysql";
+    localStorage.clear();
+    mocks.listSchemas.mockResolvedValue(["pgdemo"]);
+    mocks.listObjects.mockResolvedValue([
+      { name: "a_utf8", object_type: "TABLE", schema: "pgdemo" },
+      { name: "z_latin", object_type: "TABLE", schema: "pgdemo" },
+    ]);
+    mocks.listObjectStatistics.mockResolvedValue([
+      { name: "a_utf8", schema: "pgdemo", collation: "utf8mb4_0900_ai_ci", engine: "InnoDB" },
+      { name: "z_latin", schema: "pgdemo", collation: "latin1_swedish_ci", engine: "InnoDB" },
+    ]);
+    mocks.executeQuery.mockImplementation((_id: unknown, _database: unknown, sql: string) => {
+      if (sql === "SHOW CHARACTER SET") {
+        return Promise.resolve({
+          columns: ["Charset", "Description", "Default collation", "Maxlen"],
+          rows: [
+            ["latin1", "cp1252 West European", "latin1_swedish_ci", 1],
+            ["utf8mb4", "UTF-8 Unicode", "utf8mb4_0900_ai_ci", 4],
+          ],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        });
+      }
+      if (sql === "SHOW COLLATION") {
+        return Promise.resolve({
+          columns: ["Collation", "Charset", "Id", "Default", "Compiled", "Sortlen"],
+          rows: [
+            ["utf8mb4_bin", "utf8mb4", 46, "", "Yes", 1],
+            ["utf8mb4_0900_ai_ci", "utf8mb4", 255, "Yes", "Yes", 0],
+            ["latin1_swedish_ci", "latin1", 8, "Yes", "Yes", 1],
+          ],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        });
+      }
+      return Promise.resolve({ columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 });
+    });
+  });
+
+  afterEach(() => {
+    connection.db_type = "postgres";
+    localStorage.clear();
+  });
+
+  function tableRow(host: HTMLElement, name: string) {
+    return Array.from(host.querySelectorAll<HTMLElement>(".object-browser-scroller .grid")).find((row) => row.textContent?.includes(name));
+  }
+
+  async function openPicker(host: HTMLElement, name: string, kind: "charset" | "collation") {
+    tableRow(host, name)!.querySelector<HTMLButtonElement>(`[data-object-${kind}-trigger]`)!.click();
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledWith(connection.id, "pgdemo", kind === "charset" ? "SHOW CHARACTER SET" : "SHOW COLLATION", undefined, undefined, expect.anything()));
+  }
+
+  it("changes the table charset and falls back to that charset's default collation", async () => {
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+
+    await openPicker(host, "a_utf8", "charset");
+    let option: HTMLElement | undefined;
+    await vi.waitFor(() => {
+      option = document.querySelector<HTMLElement>('[data-object-charset-option="latin1"]') ?? undefined;
+      expect(option).toBeTruthy();
+    });
+    option!.click();
+
+    await vi.waitFor(() => expect(document.querySelector("[data-test-danger-sql]")?.textContent).toBe("ALTER TABLE `pgdemo`.`a_utf8` DEFAULT CHARACTER SET latin1 COLLATE latin1_swedish_ci"));
+    document.querySelector<HTMLButtonElement>("[data-test-danger-confirm]")!.click();
+
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledWith(connection.id, "pgdemo", "ALTER TABLE `pgdemo`.`a_utf8` DEFAULT CHARACTER SET latin1 COLLATE latin1_swedish_ci", "pgdemo"));
+  });
+
+  it("changes the table collation while keeping the charset", async () => {
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+
+    await openPicker(host, "a_utf8", "collation");
+    // Only the collations reported for utf8mb4 are offered.
+    expect(document.querySelector('[data-object-collation-option="latin1_swedish_ci"]')).toBeNull();
+    let option: HTMLElement | undefined;
+    await vi.waitFor(() => {
+      option = document.querySelector<HTMLElement>('[data-object-collation-option="utf8mb4_bin"]') ?? undefined;
+      expect(option).toBeTruthy();
+    });
+    option!.click();
+
+    await vi.waitFor(() => expect(document.querySelector("[data-test-danger-sql]")?.textContent).toBe("ALTER TABLE `pgdemo`.`a_utf8` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"));
+    document.querySelector<HTMLButtonElement>("[data-test-danger-confirm]")!.click();
+
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledWith(connection.id, "pgdemo", "ALTER TABLE `pgdemo`.`a_utf8` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin", "pgdemo"));
+  });
+
+  it("does not confirm when the picker returns the current charset", async () => {
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+
+    await openPicker(host, "a_utf8", "charset");
+    let option: HTMLElement | undefined;
+    await vi.waitFor(() => {
+      option = document.querySelector<HTMLElement>('[data-object-charset-option="utf8mb4"]') ?? undefined;
+      expect(option).toBeTruthy();
+    });
+    option!.click();
+
+    expect(document.querySelector("[data-test-danger-dialog]")).toBeNull();
+    expect(mocks.executeQuery).not.toHaveBeenCalledWith(connection.id, "pgdemo", expect.stringContaining("ALTER TABLE"), expect.anything());
   });
 });
 
@@ -577,6 +852,7 @@ describe("ObjectBrowser common columns and timestamps (#14944)", () => {
   const updatedAt = "2026-11-14 09:30:00";
   const commonColumnLabels = ["objects.name", "objects.type", "objects.rows", "objects.comment", "objects.size", "objects.updatedAt", "objects.createdAt"];
   const mysqlColumnLabels = ["grid.tableInfoAutoIncrement", "structureEditor.characterSet", "structureEditor.collation"];
+  const mysqlColumnLabelsWithEngine = ["objects.name", "objects.type", "grid.tableInfoEngine", "objects.rows", "objects.comment", "objects.size", "objects.updatedAt", "objects.createdAt", ...mysqlColumnLabels];
 
   beforeEach(() => {
     connection.db_type = "postgres";
@@ -593,7 +869,7 @@ describe("ObjectBrowser common columns and timestamps (#14944)", () => {
   }
 
   function cacheTable(target = scope, timestamps: Partial<ObjectBrowserRow> = { created_at: createdAt, updated_at: updatedAt }) {
-    cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(target), [{ ...cachedRows[0]!, schema: target.schema, comment: "Order history", collation: "utf8mb4_bin", characterSet: "utf8mb4", autoIncrement: "12", ...timestamps }], { cachedAt: Date.now() });
+    cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(target), [{ ...cachedRows[0]!, schema: target.schema, comment: "Order history", collation: "utf8mb4_bin", characterSet: "utf8mb4", engine: "InnoDB", autoIncrement: "12", ...timestamps }], { cachedAt: Date.now() });
   }
 
   it.each(["postgres", "mysql"] as const)("prioritizes common fields over engine-specific columns for %s", async (databaseType) => {
@@ -601,7 +877,7 @@ describe("ObjectBrowser common columns and timestamps (#14944)", () => {
     cacheTable(databaseType === "mysql" ? mysqlScope : scope);
     const host = await mountBrowser(ref("public"), ref("pgdemo"), "all");
     await vi.waitFor(() => expect(host.textContent).toContain("Order history"));
-    expect(columnLabels(host)).toEqual([...commonColumnLabels, ...(databaseType === "mysql" ? mysqlColumnLabels : [])]);
+    expect(columnLabels(host)).toEqual(databaseType === "mysql" ? mysqlColumnLabelsWithEngine : commonColumnLabels);
     expect(mocks.listObjects).not.toHaveBeenCalled();
     expect(mocks.listObjectStatistics).not.toHaveBeenCalled();
   });

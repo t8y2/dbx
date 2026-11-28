@@ -2165,6 +2165,7 @@ for line in sys.stdin:
             transport_layers: Vec::new(),
             connect_timeout_secs: 10,
             query_timeout_secs: 30,
+            write_timeout_secs: 0,
             idle_timeout_secs: 60,
             manual_transaction_timeout_secs: 300,
             idle_disconnect_secs: 0,
@@ -2205,6 +2206,7 @@ for line in sys.stdin:
             is_production: false,
             production_databases: vec![],
             production_badge_scope: None,
+            watermark: None,
             database_info: None,
         }
     }

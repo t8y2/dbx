@@ -57,7 +57,7 @@ pub(crate) struct PacketHeader {
 
 impl PacketHeader {
     pub fn new(length: usize, id: u8) -> PacketHeader {
-        assert!(length <= u16::max_value() as usize);
+        assert!(length <= u16::MAX as usize);
         PacketHeader {
             ty: PacketType::TDSv7Login,
             status: PacketStatus::ResetConnection,

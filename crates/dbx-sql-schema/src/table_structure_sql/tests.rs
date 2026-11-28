@@ -484,6 +484,33 @@ fn saphana_table_structure_uses_add_drop_and_alter_syntax() {
 }
 
 #[test]
+fn saphana_creates_table_with_columns() {
+    let result = build_create_table_sql(structure_change_options(
+        DatabaseType::SapHana,
+        Some("APP"),
+        "users",
+        vec![column("new_col")],
+    ));
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.statements, vec!["CREATE TABLE \"APP\".\"users\" (\n  \"new_col\" varchar(255)\n);"]);
+}
+
+#[test]
+fn saphana_adds_primary_key_without_separately_changing_nullability() {
+    let mut id = existing_pk_column("id", "INTEGER", false, true);
+    id.original.as_mut().unwrap().is_nullable = true;
+    let code = existing_pk_column("code", "INTEGER", false, true);
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::SapHana,
+        Some("APP"),
+        "users",
+        vec![id, code],
+    ));
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.statements, vec!["ALTER TABLE \"APP\".\"users\" ADD PRIMARY KEY (\"id\", \"code\");"]);
+}
+
+#[test]
 fn transwarp_table_comments_use_inceptor_syntax() {
     let mut options =
         structure_change_options(DatabaseType::Transwarp, Some("analytics"), "users", vec![column("name")]);

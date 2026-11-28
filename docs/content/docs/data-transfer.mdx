@@ -21,6 +21,8 @@ After copying one or more tables in the object tree, paste them at a target loca
 - Pasting into another connection, database, or schema opens the Data Transfer wizard with the source tables and target prefilled
 - Whole-row copy excludes generated or computed columns and applies path-specific handling for PostgreSQL identity and SQL Server identity columns
 
+Views use a separate copy entry: right-click a view and choose **Copy View**, then choose **Paste View** on a database, schema, or views group in another connection or schema. The target must support views, use the same database type as the source, and not be read-only; the same location as the source is not offered. Pasting opens the Data Transfer wizard with the view preselected and **Structure only** as the content mode, so the view definition is recreated in the target rather than its rows copied.
+
 ### Export Query Results to a Database
 
 Choose **Export to Database** from the query result grid's export or context menu, then select the target connection, database, schema where applicable, and table name.

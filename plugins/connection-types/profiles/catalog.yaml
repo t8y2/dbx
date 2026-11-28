@@ -244,6 +244,7 @@ profiles:
   - id: polardb
     dbType: mysql
     label: PolarDB
+    pickerLabel: PolarDB (MySQL)
     icon: polardb
     port: 3306
     user: root

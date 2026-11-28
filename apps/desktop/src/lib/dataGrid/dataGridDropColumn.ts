@@ -1,3 +1,5 @@
+import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
+
 export interface DataGridDropColumnCandidate {
   name: string;
   primaryKey: boolean;
@@ -73,6 +75,65 @@ export function dataGridSqlTextReferencesColumn(sql: string | undefined, column:
 /** True when a query fragment references any of the columns being dropped. */
 export function dataGridSqlTextReferencesAnyColumn(sql: string | undefined, columns: readonly string[], caseSensitive = false): boolean {
   return columns.some((column) => dataGridSqlTextReferencesColumn(sql, column, caseSensitive));
+}
+
+/** Prune the generated predicates in a legacy applied WHERE whose rules were not recorded. */
+export function removeDroppedColumnsFromStructuredWhere(where: string, droppedColumns: readonly string[], caseSensitive: boolean, dialectId = "mysql"): string {
+  if (!where || !droppedColumns.length) return where;
+  const dropped = new Set(droppedColumns.map((name) => dataGridColumnNameKey(name, caseSensitive)));
+  const mysqlBackslashEscape = dialectId === "mysql" || dialectId === "doris";
+  const tokens = tokenizeSqlSemantic(where, dialectId, { mysqlBackslashEscape }).filter((token) => token.kind !== "comment");
+  if (!tokens.length) return where;
+
+  const source = (from: number, to: number) => (from < to ? where.slice(tokens[from].span.start, tokens[to - 1].span.end) : "");
+  function prune(from: number, to: number): string {
+    if (from >= to) return "";
+    const first = tokens[from];
+    const original = source(from, to);
+    const ands: number[] = [];
+    const ors: number[] = [];
+    let firstClosing = -1;
+    let between = false;
+    for (let index = from; index < to; index++) {
+      const token = tokens[index];
+      if (token.depth !== first.depth) continue;
+      if (token.text === ")" && firstClosing < 0) firstClosing = index;
+      if (token.kind !== "word") continue;
+      if (token.normalized === "between") between = true;
+      if (token.normalized === "and") {
+        if (!between) ands.push(index);
+        between = false;
+      }
+      if (token.normalized === "or") ors.push(index);
+    }
+    if (first.text === "(" && firstClosing === to - 1) {
+      const inner = prune(from + 1, to - 1);
+      return inner === source(from + 1, to - 1) ? original : inner;
+    }
+
+    // Split OR before AND to retain SQL precedence. A BETWEEN's AND belongs to
+    // its predicate. The generated predicates start with the filtered column.
+    const separators = ors.length ? ors : ands;
+    if (!separators.length) {
+      return tokenIsIdentifier(first) && dropped.has(dataGridColumnNameKey(unquoteSqlSemanticIdentifier(first), caseSensitive)) ? "" : original;
+    }
+
+    let changed = false;
+    const retained: string[] = [];
+    let start = from;
+    for (const end of [...separators, to]) {
+      const part = prune(start, end);
+      if (part !== source(start, end)) changed = true;
+      if (part) retained.push(part);
+      start = end + 1;
+    }
+    if (!changed) return original;
+    if (retained.length < 2) return retained[0] ?? "";
+    return retained.map((part) => `(${part})`).join(ors.length ? " OR " : " AND ");
+  }
+
+  const pruned = prune(0, tokens.length);
+  return pruned === source(0, tokens.length) ? where : pruned;
 }
 
 export interface DataGridDropTarget {

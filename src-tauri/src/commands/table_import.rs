@@ -19,7 +19,8 @@ fn cancelled_imports() -> &'static RwLock<HashSet<String>> {
     CANCELLED_IMPORTS.get_or_init(|| RwLock::new(HashSet::new()))
 }
 
-fn emit_progress(app: &AppHandle, progress: TableImportProgress) {
+fn emit_progress(app: &AppHandle, state: &AppState, progress: TableImportProgress) {
+    crate::commands::observability::publish_transfer_progress(state, "table-import", &progress.import_id, &progress);
     let _ = app.emit("table-import-progress", progress);
 }
 
@@ -85,7 +86,7 @@ pub async fn import_table_file(
         |progress| {
             let (immediate, terminal) = split_command_progress(progress);
             if let Some(progress) = immediate {
-                emit_progress(&app, progress);
+                emit_progress(&app, &state, progress);
             }
             if terminal.is_some() {
                 deferred_terminal = terminal;
@@ -108,7 +109,7 @@ pub async fn import_table_file(
     let command_ms = command_started_at.elapsed().as_millis();
     if let Some(mut terminal) = deferred_terminal {
         terminal.elapsed_ms = terminal.elapsed_ms.max(command_ms);
-        emit_progress(&app, terminal);
+        emit_progress(&app, &state, terminal);
     }
     if let Ok(summary) = &mut result {
         summary.elapsed_ms = summary.elapsed_ms.max(command_ms);

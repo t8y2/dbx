@@ -76,6 +76,10 @@ TTL values count down automatically, and the detail view can periodically refres
 
 <Callout type="info">Preserving TTL while changing a value prevents a temporary cache entry from becoming permanent accidentally. Review expiration behavior before saving.</Callout>
 
+## Stream Entries and Order
+
+The Stream Data tab loads entries oldest first by default. Switch the order control to **Newest first** to reload the newest page; **Load more** then continues toward older entries in that direction, using `XREVRANGE` instead of `XRANGE` on the server. The switch reloads from the server rather than reversing what is already loaded, and it does not affect consumer groups.
+
 ## Stream Consumer Groups
 
 Stream details can also show:

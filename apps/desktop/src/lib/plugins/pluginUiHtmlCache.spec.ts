@@ -14,7 +14,7 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 
 import { COMPONENT_PLUGINS_UPDATED_EVENT } from "@/lib/updates/componentUpdateEvents";
-import { clearPluginUiHtmlCache, getCachedPluginUiHtml, getOrLoadPluginUiHtml, setCachedPluginUiHtml } from "./pluginUiHtmlCache";
+import { clearPluginUiHtmlCache, getCachedPluginUiHtml, getOrLoadPluginUiHtml, getSandboxDocument, invalidatePluginUiHtml, setCachedPluginUiHtml, type PluginUiHtml } from "./pluginUiHtmlCache";
 
 function uiEntryPayload(html: string): { dataBase64: string } {
   return { dataBase64: btoa(html) };
@@ -202,5 +202,52 @@ describe("pluginUiHtmlCache", () => {
     mocks.readPluginUiEntry.mockResolvedValueOnce(uiEntryPayload("<html>retry</html>"));
     await expect(getOrLoadPluginUiHtml("io.dbx.ssh@0.4.88", "io.dbx.ssh")).resolves.toEqual({ html: "<html>retry</html>", entryDirectory: "" });
     expect(mocks.readPluginUiEntry).toHaveBeenCalledTimes(2);
+  });
+
+  describe("getSandboxDocument", () => {
+    it("builds the document once and releases the inlined html", () => {
+      const entry: PluginUiHtml = { html: "<html>big</html>", entryDirectory: "" };
+      const build = vi.fn((html: string) => `doc(${html})`);
+
+      expect(getSandboxDocument(entry, false, build)).toBe("doc(<html>big</html>)");
+      expect(entry.html).toBe("");
+      expect(entry.htmlReleased).toBe(true);
+      // The second boot reuses the document without rebuilding.
+      expect(getSandboxDocument(entry, false, build)).toBe("doc(<html>big</html>)");
+      expect(build).toHaveBeenCalledTimes(1);
+    });
+
+    it("cannot serve a changed unsafe-eval grant once the html is released", () => {
+      const entry: PluginUiHtml = { html: "<html>big</html>", entryDirectory: "" };
+      const build = vi.fn((html: string) => `doc(${html})`);
+      getSandboxDocument(entry, false, build);
+
+      // The CSP differs between grants, so the stale document must not be served.
+      expect(getSandboxDocument(entry, true, build)).toBeUndefined();
+      expect(build).toHaveBeenCalledTimes(1);
+      expect(entry.sandboxDoc).toEqual({ allowUnsafeEval: false, doc: "doc(<html>big</html>)" });
+    });
+
+    it("rebuilds from a freshly loaded entry after the stale one is invalidated", async () => {
+      setCachedPluginUiHtml("io.dbx.ssh@0.4.88", { html: "<html>v1</html>", entryDirectory: "" });
+      const stale = getCachedPluginUiHtml("io.dbx.ssh@0.4.88");
+      if (!stale) throw new Error("entry missing");
+      getSandboxDocument(stale, false, (html) => `doc(${html})`);
+      expect(getSandboxDocument(stale, true, (html) => `doc(${html})`)).toBeUndefined();
+
+      invalidatePluginUiHtml("io.dbx.ssh@0.4.88");
+      expect(getCachedPluginUiHtml("io.dbx.ssh@0.4.88")).toBeUndefined();
+      mocks.readPluginUiEntry.mockResolvedValueOnce(uiEntryPayload("<html>v1</html>"));
+      const fresh = await getOrLoadPluginUiHtml("io.dbx.ssh@0.4.88", "io.dbx.ssh");
+      expect(getSandboxDocument(fresh, true, (html) => `doc-eval(${html})`)).toBe("doc-eval(<html>v1</html>)");
+    });
+
+    it("invalidatePluginUiHtml only drops the requested key", () => {
+      setCachedPluginUiHtml("a", { html: "a", entryDirectory: "" });
+      setCachedPluginUiHtml("b", { html: "b", entryDirectory: "" });
+      invalidatePluginUiHtml("a");
+      expect(getCachedPluginUiHtml("a")).toBeUndefined();
+      expect(getCachedPluginUiHtml("b")?.html).toBe("b");
+    });
   });
 });

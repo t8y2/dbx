@@ -383,3 +383,41 @@ describe("SqlParameterDialog enter-to-execute", () => {
     expect(document.activeElement).toBe(second);
   });
 });
+
+describe("SqlParameterDialog modeless behavior", () => {
+  it("stays open when clicking outside the dialog so the editor behind stays usable", async () => {
+    const { state, onExecute } = await mountDialog();
+
+    document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(state.open).toBe(true);
+    expect(onExecute).not.toHaveBeenCalled();
+  });
+
+  it("renders no modal overlay so pointer clicks reach the editor", async () => {
+    await mountDialog();
+
+    expect(document.body.querySelector('[data-slot="dialog-positioner"]')).not.toBeNull();
+    expect(document.body.querySelector('[data-slot="dialog-overlay"]')).toBeNull();
+  });
+
+  it("still closes on Escape while focus is inside the dialog", async () => {
+    const { state } = await mountDialog();
+
+    // The auto-focused first input opens its history popover; the first Escape
+    // dismisses that popover (topmost dismissable layer, closed via the
+    // deferred 120ms timer), the second closes the dialog itself.
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(state.open).toBe(true);
+
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(state.open).toBe(false);
+  });
+});

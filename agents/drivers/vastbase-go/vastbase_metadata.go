@@ -38,6 +38,11 @@ type vastbaseMode struct {
 
 type databaseInfo struct {
 	Name string `json:"name"`
+	// CompatibilityMode lets the desktop decide which object groups exist in
+	// this database: Oracle-compatible databases expose packages, the other
+	// modes do not. Agent connections never reach the native openGauss probe,
+	// so without this field the A-mode package entry stays unreachable.
+	CompatibilityMode string `json:"compatibility_mode,omitempty"`
 }
 
 type tableInfo struct {
@@ -176,6 +181,31 @@ func (s *server) connectionInfo() (map[string]any, error) {
 }
 
 func (s *server) listDatabases() ([]databaseInfo, error) {
+	// datcompatibility exists on every openGauss-derived kernel and is what the
+	// desktop compares against "A"; older or pruned catalogs fall back to a
+	// name-only listing so the database picker keeps working.
+	for _, catalogs := range [][2]string{{"sys_catalog", "sys"}, {"pg_catalog", "pg"}} {
+		query := fmt.Sprintf(
+			"SELECT datname, datcompatibility FROM %s.%s_database WHERE NOT datistemplate AND datallowconn ORDER BY datname",
+			catalogs[0], catalogs[1])
+		rows, err := s.metadataQuery(query)
+		if err != nil {
+			continue
+		}
+		result := []databaseInfo{}
+		for rows.Next() {
+			var name string
+			var mode sql.NullString
+			if rows.Scan(&name, &mode) == nil {
+				result = append(result, databaseInfo{Name: name, CompatibilityMode: strings.TrimSpace(mode.String)})
+			}
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err == nil && len(result) > 0 {
+			return result, nil
+		}
+	}
 	queries := []string{
 		"SELECT datname FROM sys_catalog.sys_database WHERE NOT datistemplate AND datallowconn ORDER BY datname",
 		"SELECT datname FROM pg_catalog.pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname",
@@ -199,7 +229,7 @@ func (s *server) listDatabases() ([]databaseInfo, error) {
 			return result, nil
 		}
 	}
-	return []databaseInfo{{Name: s.params.Database}}, nil
+	return []databaseInfo{{Name: s.params.Database, CompatibilityMode: s.mode.compatibilityModeRaw}}, nil
 }
 
 func vastbaseListSchemasSQL(mode vastbaseMode, showSystemSchemas bool) string {
@@ -1042,26 +1072,23 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		}
 	}
 	if !s.mode.mysqlCompat && constraintsAllowRoutines(constraints) {
-		catalog := "sys_catalog"
-		function := "sys"
-		if s.mode.postgresCatalog {
-			catalog, function = "pg_catalog", "pg"
+		// Routine catalog failures stay tolerated: they must not hide the table
+		// group, which is what the tree opens with.
+		routines, _ := s.listRoutines(effective)
+		result = append(result, routines...)
+	}
+	if s.mode.compatibilityMode == "oracle" && constraintsAllowPackages(constraints) {
+		// A-mode packages are not routines: gs_package stores the package and
+		// pg_proc only stores its members, so without this scan the package
+		// itself never reaches the object tree (#15359).
+		packages, packagesErr := s.listPackages(effective)
+		if packagesErr != nil {
+			// Packages are the whole point of asking for them here, so a real
+			// catalog failure is reported instead of pretending the schema has
+			// none.
+			return nil, fmt.Errorf("list packages in schema %q: %w", effective, packagesErr)
 		}
-		query := fmt.Sprintf(`SELECT p.proname, CASE WHEN p.prorettype = 2278 THEN 'PROCEDURE' ELSE 'FUNCTION' END, d.description
-FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid = p.pronamespace
-LEFT JOIN %s.%s_description d ON d.objoid = p.oid AND d.objsubid = 0
-WHERE n.nspname = %s ORDER BY p.proname`, catalog, function, catalog, function, catalog, function, quoteLiteral(effective))
-		rows, queryErr := s.metadataQuery(query)
-		if queryErr == nil {
-			for rows.Next() {
-				var name, kind string
-				var comment sql.NullString
-				if rows.Scan(&name, &kind, &comment) == nil {
-					result = append(result, objectInfo{Name: name, ObjectType: kind, Schema: effective, Comment: nullStringPtr(comment)})
-				}
-			}
-			_ = rows.Close()
-		}
+		result = append(result, packages...)
 	}
 	if constraintsAllowTypes(constraints) {
 		types, typesErr := s.listCustomTypes(effective)
@@ -1852,6 +1879,8 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 		query := fmt.Sprintf("SELECT %s(p.oid) FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s AND p.proname=%s ORDER BY CASE WHEN p.prorettype=2278 THEN 0 ELSE 1 END LIMIT 1", function, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(name))
 		err = s.requireDBQueryRow(query, &source)
+	} else if kind == "PACKAGE" || kind == "PACKAGE_BODY" {
+		source, err = s.packageSource(effective, name, kind)
 	}
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
@@ -2251,6 +2280,8 @@ func normalizeTableType(value string) string {
 		return "TABLE"
 	case "MATERIALIZED_VIEW", "FOREIGN_TABLE", "VIEW", "TABLE", "TYPE", "TYPE_BODY":
 		return normalized
+	case "PACKAGE", "PACKAGE_BODY":
+		return normalized
 	default:
 		return "TABLE"
 	}
@@ -2325,6 +2356,244 @@ func constraintsAllowRoutines(constraints metadataListConstraints) bool {
 	return false
 }
 
+func constraintsAllowPackages(constraints metadataListConstraints) bool {
+	if len(constraints.ObjectTypes) == 0 {
+		return true
+	}
+	for _, kind := range constraints.ObjectTypes {
+		switch normalizeTableType(kind) {
+		case "PACKAGE", "PACKAGE_BODY":
+			return true
+		}
+	}
+	return false
+}
+
+// vastbaseRoutineListQuery builds the function/procedure listing. Oracle
+// compatibility stores package members in the same catalog, so those rows are
+// filtered out to keep them from showing up twice (once under their PACKAGE
+// node, once as a top-level routine); kernels without pg_proc.propackage fall
+// back to the unfiltered variant.
+func vastbaseRoutineListQuery(mode vastbaseMode, schema string, excludePackageMembers bool) string {
+	catalog := "sys_catalog"
+	function := "sys"
+	if mode.postgresCatalog {
+		catalog, function = "pg_catalog", "pg"
+	}
+	packageFilter := ""
+	if excludePackageMembers {
+		packageFilter = " AND COALESCE(p.propackage, false) = false"
+	}
+	return fmt.Sprintf(`SELECT p.proname, CASE WHEN p.prorettype = 2278 THEN 'PROCEDURE' ELSE 'FUNCTION' END, d.description
+FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid = p.pronamespace
+LEFT JOIN %s.%s_description d ON d.objoid = p.oid AND d.objsubid = 0
+WHERE n.nspname = %s%s ORDER BY p.proname`, catalog, function, catalog, function, catalog, function, quoteLiteral(schema), packageFilter)
+}
+
+// listRoutines reads the functions and procedures of a schema, excluding
+// package members when the kernel exposes pg_proc.propackage.
+func (s *server) listRoutines(schema string) ([]objectInfo, error) {
+	queries := make([]string, 0, 2)
+	if s.mode.compatibilityMode == "oracle" {
+		queries = append(queries, vastbaseRoutineListQuery(s.mode, schema, true))
+	}
+	queries = append(queries, vastbaseRoutineListQuery(s.mode, schema, false))
+	var firstErr error
+	for _, query := range queries {
+		rows, queryErr := s.metadataQuery(query)
+		if queryErr != nil {
+			if firstErr == nil {
+				firstErr = queryErr
+			}
+			continue
+		}
+		routines := []objectInfo{}
+		for rows.Next() {
+			var name, kind string
+			var comment sql.NullString
+			if rows.Scan(&name, &kind, &comment) == nil {
+				routines = append(routines, objectInfo{Name: name, ObjectType: kind, Schema: schema, Comment: nullStringPtr(comment)})
+			}
+		}
+		readErr := rows.Err()
+		_ = rows.Close()
+		if readErr == nil {
+			return routines, nil
+		}
+		if firstErr == nil {
+			firstErr = readErr
+		}
+	}
+	return nil, firstErr
+}
+
+// listPackages reads the A-mode packages of a schema. Package members are
+// ordinary routines, so the routine catalog lists them; the package itself is
+// only recorded in gs_package, which is why it never appeared in the object
+// tree before (#15359).
+func (s *server) listPackages(schema string) ([]objectInfo, error) {
+	var firstErr error
+	for _, query := range vastbasePackageListQueries(schema) {
+		rows, queryErr := s.metadataQuery(query)
+		if queryErr != nil {
+			if firstErr == nil {
+				firstErr = queryErr
+			}
+			continue
+		}
+		packages, readErr := readVastbasePackages(rows, schema)
+		if readErr != nil {
+			if firstErr == nil {
+				firstErr = readErr
+			}
+			continue
+		}
+		return packages, nil
+	}
+	return nil, firstErr
+}
+
+// vastbasePackageListQueries prefers pg_catalog, which every openGauss-derived
+// kernel exposes directly, and falls back to the sys_catalog mirror used by
+// instances that only publish the system catalogs there. The mirror renames the
+// table as well (sys_package), not just the catalog schema.
+func vastbasePackageListQueries(schema string) []string {
+	queries := make([]string, 0, 2)
+	for _, catalogs := range [][2]string{{"pg_catalog", "gs"}, {"sys_catalog", "sys"}} {
+		catalog, prefix := catalogs[0], catalogs[1]
+		queries = append(queries, fmt.Sprintf(
+			"SELECT p.pkgname, d.description, (COALESCE(p.pkgbodydeclsrc, '') <> '' OR COALESCE(p.pkgbodyinitsrc, '') <> '') FROM %s.%s_package p JOIN %s.%s_namespace n ON n.oid = p.pkgnamespace LEFT JOIN %s.%s_description d ON d.objoid = p.oid AND d.objsubid = 0 WHERE n.nspname = %s ORDER BY p.pkgname",
+			catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema)))
+	}
+	return queries
+}
+
+// readVastbasePackages turns gs_package rows into tree nodes. A package and its
+// body are separate objects everywhere else in the object browser (openGauss,
+// Oracle, Dameng), so a package that has a body reports both; one without a body
+// would otherwise get an empty body group of its own.
+func readVastbasePackages(rows *sql.Rows, schema string) ([]objectInfo, error) {
+	defer func() { _ = rows.Close() }()
+	packages := []objectInfo{}
+	for rows.Next() {
+		var name string
+		var comment sql.NullString
+		var hasBody bool
+		if err := rows.Scan(&name, &comment, &hasBody); err != nil {
+			return nil, err
+		}
+		packages = append(packages, objectInfo{Name: name, ObjectType: "PACKAGE", Schema: schema, Comment: nullStringPtr(comment)})
+		if hasBody {
+			packages = append(packages, objectInfo{Name: name, ObjectType: "PACKAGE_BODY", Schema: schema, Comment: nullStringPtr(comment)})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return packages, nil
+}
+
+// packageSource returns the full DDL of a package spec or body. gs_package keeps
+// both halves on one row, so a single lookup serves either kind.
+func (s *server) packageSource(schema, name, kind string) (string, error) {
+	var firstErr error
+	for _, query := range vastbasePackageSourceQueries(schema, name) {
+		var spec, bodyDecl, bodyInit sql.NullString
+		var secdef sql.NullBool
+		err := s.requireDBQueryRow(query, &spec, &bodyDecl, &bodyInit, &secdef)
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if kind == "PACKAGE_BODY" {
+			return vastbasePackageBodySource(schema, name, bodyDecl.String, bodyInit.String), nil
+		}
+		return vastbasePackageSpecSource(schema, name, spec.String, secdef.Valid && secdef.Bool), nil
+	}
+	return "", firstErr
+}
+
+func vastbasePackageSourceQueries(schema, name string) []string {
+	queries := make([]string, 0, 2)
+	for _, catalogs := range [][2]string{{"pg_catalog", "gs"}, {"sys_catalog", "sys"}} {
+		catalog, prefix := catalogs[0], catalogs[1]
+		queries = append(queries, fmt.Sprintf(
+			"SELECT p.pkgspecsrc, p.pkgbodydeclsrc, p.pkgbodyinitsrc, p.pkgsecdef FROM %s.%s_package p JOIN %s.%s_namespace n ON n.oid = p.pkgnamespace WHERE n.nspname = %s AND p.pkgname = %s LIMIT 1",
+			catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(name)))
+	}
+	return queries
+}
+
+// gs_package stores kernel-rewritten fragments, not the DDL the user typed:
+// the declaration starts with "PACKAGE  DECLARE" (the AS keyword is rewritten)
+// and the initialization section is wrapped in "INSTANTIATION".
+const (
+	vastbasePackageDeclMarker = "PACKAGE  DECLARE"
+	vastbasePackageInitMarker = "INSTANTIATION"
+)
+
+// trimVastbasePackageFragment strips the stored wrapper together with the bare
+// trailing END that closes the fragment. Member terminators are always "END;",
+// so they survive the trim.
+func trimVastbasePackageFragment(fragment, marker string) (string, bool) {
+	body, ok := strings.CutPrefix(strings.TrimSpace(fragment), marker)
+	if !ok {
+		return "", false
+	}
+	// Drop the wrapper's own line break but keep the indentation of the first
+	// member so the rebuilt DDL stays readable.
+	body = strings.TrimPrefix(strings.TrimLeft(body, " \t"), "\n")
+	body = strings.TrimRight(body, " \t")
+	body = strings.TrimSuffix(body, "END")
+	return strings.TrimRight(body, " \t\n"), true
+}
+
+// vastbasePackageSpecSource rebuilds a complete CREATE OR REPLACE PACKAGE from
+// the declaration fragment so the source panel and the export path emit SQL the
+// user can run. Kernels that already store complete DDL (no fragment marker) are
+// returned verbatim instead of being rewritten into an invalid statement.
+func vastbasePackageSpecSource(schema, name, spec string, secdef bool) string {
+	decl, ok := trimVastbasePackageFragment(spec, vastbasePackageDeclMarker)
+	if !ok {
+		return strings.TrimSpace(spec)
+	}
+	authid := " AUTHID CURRENT_USER"
+	if secdef {
+		authid = " AUTHID DEFINER"
+	}
+	return fmt.Sprintf("CREATE OR REPLACE PACKAGE %s.%s%s AS\n%s\nEND %s;",
+		quoteIdentifier(schema), quoteIdentifier(name), authid, decl, quoteIdentifier(name))
+}
+
+// vastbasePackageBodySource rebuilds a complete CREATE OR REPLACE PACKAGE BODY.
+// The declaration fragment carries the member declarations and the
+// initialization fragment carries the BEGIN...END block, which openGauss keeps
+// in a separate column.
+func vastbasePackageBodySource(schema, name, declFragment, initFragment string) string {
+	decl, hasDecl := trimVastbasePackageFragment(declFragment, vastbasePackageDeclMarker)
+	init, hasInit := trimVastbasePackageFragment(initFragment, vastbasePackageInitMarker)
+	if !hasDecl && !hasInit {
+		return strings.TrimSpace(strings.Join([]string{declFragment, initFragment}, "\n"))
+	}
+	var source strings.Builder
+	fmt.Fprintf(&source, "CREATE OR REPLACE PACKAGE BODY %s.%s AS\n", quoteIdentifier(schema), quoteIdentifier(name))
+	if decl != "" {
+		source.WriteString(decl)
+		source.WriteString("\n")
+	}
+	if hasInit && init != "" {
+		source.WriteString(init)
+		source.WriteString("\n")
+	}
+	fmt.Fprintf(&source, "END %s;", quoteIdentifier(name))
+	return source.String()
+}
+
 func constraintsMatch(constraints metadataListConstraints, name, kind string) bool {
 	if filter := strings.TrimSpace(constraints.Filter); filter != "" && !strings.Contains(strings.ToLower(name), strings.ToLower(filter)) {
 		return false
@@ -2380,6 +2649,10 @@ func objectOrder(kind string) int {
 		return 5
 	case "TYPE":
 		return 6
+	case "PACKAGE":
+		return 7
+	case "PACKAGE_BODY":
+		return 8
 	default:
 		return 9
 	}

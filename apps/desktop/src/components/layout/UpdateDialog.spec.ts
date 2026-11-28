@@ -140,7 +140,7 @@ function downloadButton(): HTMLButtonElement | undefined {
 }
 
 function cancelDownloadButton(): HTMLButtonElement | undefined {
-  return buttonWithText("Cancel Download");
+  return document.body.querySelector<HTMLButtonElement>("[data-download-cancel]") ?? undefined;
 }
 
 function installDownloadedButton(): HTMLButtonElement | undefined {
@@ -364,26 +364,59 @@ describe("UpdateDialog prepared package without a remote update (#13562)", () =>
 });
 
 describe("UpdateDialog download progress", () => {
-  it("shows a progress bar at a fixed width as progress changes", async () => {
+  it("shows just the version and percentage while the download progresses", async () => {
     const { state } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 9 });
 
-    const filler = document.body.querySelector<HTMLElement>("[data-download-progress-fill]");
-    expect(filler?.style.width).toBe("9%");
-    expect(filler?.closest(".w-52")).not.toBeNull();
+    const group = document.body.querySelector("[data-download-progress-group]");
+    const progress = group?.querySelector('[role="progressbar"]');
+    const fill = progress?.querySelector<HTMLElement>("[data-download-progress-fill]");
+    expect(fill?.style.width).toBe("9%");
+    expect(progress?.getAttribute("aria-valuenow")).toBe("9");
+    expect(group?.querySelector("[data-download-progress-label]")?.textContent).toBe("0.5.61");
+    expect(group?.querySelector("[data-download-progress-value]")?.textContent).toBe("9%");
+    expect(cancelDownloadButton()?.getAttribute("aria-label")).toBe("Cancel Download");
 
     state.downloadProgress = 100;
     await flushDialog();
 
-    expect(document.body.querySelector<HTMLElement>("[data-download-progress-fill]")?.style.width).toBe("100%");
+    expect(fill?.style.width).toBe("100%");
+    expect(progress?.getAttribute("aria-valuenow")).toBe("100");
+  });
+
+  it("shows the actual shared download version when the offered version differs", async () => {
+    await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 42 }, undefined, { downloadVersion: "0.5.62" });
+
+    expect(document.body.querySelector("[data-download-progress-label]")?.textContent).toBe("0.5.62");
+  });
+
+  it("shows shared progress and cancel on the client tab without release information", async () => {
+    const { state, cancelDownload } = await mountDialog(0, {}, undefined, {
+      updateInfo: null,
+      downloadVersion: "0.5.62",
+      driverUpdates: [{ db_type: "mysql", label: "MySQL", version: "9.0.0", installed_version: "8.0.0", update_available: true }],
+    });
+    expect(document.body.querySelector('[data-update-tab="drivers"]')?.getAttribute("aria-selected")).toBe("true");
+
+    state.isDownloadingUpdate = true;
+    state.downloadProgress = 42;
+    await flushDialog();
+
+    expect(document.body.querySelector('[data-update-tab="app"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(document.body.querySelector("[data-download-progress-label]")?.textContent).toBe("0.5.62");
+    expect(document.body.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("42");
+    expect(document.body.textContent).not.toContain("DBX is up to date");
+    cancelDownloadButton()?.click();
+    expect(cancelDownload).toHaveBeenCalledOnce();
   });
 
   it("falls back to an indeterminate bar while the download size is unknown", async () => {
     await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: null });
 
-    // A 0% bar looks stuck; the unknown-total case gets motion instead.
-    expect(document.body.querySelector("[data-download-progress-fill]")).toBeNull();
-    expect(document.body.querySelector("[data-download-progress-indeterminate]")).not.toBeNull();
-    expect(document.body.textContent).not.toContain("Downloading 0%");
+    const progress = document.body.querySelector('[data-download-progress-group] [role="progressbar"]');
+    expect(progress?.querySelector("[data-download-progress-fill]")).toBeNull();
+    expect(progress?.querySelector("[data-download-progress-indeterminate]")).not.toBeNull();
+    expect(progress?.hasAttribute("aria-valuenow")).toBe(false);
+    expect(document.body.querySelector("[data-download-progress-value]")?.textContent).toBe("—");
   });
 });
 
@@ -578,15 +611,18 @@ describe("UpdateDialog changelog", () => {
     expect(checkUpdates).toHaveBeenCalledOnce();
   });
 
-  it("keeps client update actions available after returning from the changelog", async () => {
-    const { downloadInBackground } = await mountDialog(0);
+  it("keeps the update center open when starting a download after returning from the changelog", async () => {
+    const { state, downloadInBackground } = await mountDialog(0);
     document.body.querySelector<HTMLButtonElement>('[data-update-tab="changelog"]')?.click();
     await flushDialog();
     expect(downloadButton()).toBeUndefined();
     document.body.querySelector<HTMLButtonElement>('[data-update-tab="app"]')?.click();
     await flushDialog();
     downloadButton()?.click();
+    await flushDialog();
+
     expect(downloadInBackground).toHaveBeenCalledOnce();
+    expect(state.open).toBe(true);
   });
 });
 

@@ -369,6 +369,7 @@ const {
   showUpdateDialog,
   isDownloadingUpdate,
   downloadProgress,
+  downloadVersion,
   updateDownloaded,
   updateDownloadedVersion,
   isInstallingUpdate,
@@ -6316,6 +6317,7 @@ onUnmounted(() => {
           :update-download-source="settingsStore.editorSettings.updateDownloadSource"
           :is-downloading-update="isDownloadingUpdate"
           :download-progress="downloadProgress"
+          :download-version="downloadVersion"
           :update-downloaded="updateDownloaded"
           :update-downloaded-version="updateDownloadedVersion"
           :is-preparing-update="isPreparingUpdate"

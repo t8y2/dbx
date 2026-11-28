@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, CheckCircle2, ChevronDown, Loader2, RefreshCw } from "@lucide/vue";
+import { AlertTriangle, CheckCircle2, ChevronDown, Download, Loader2, RefreshCw, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -31,6 +31,7 @@ const props = withDefaults(
     updateCheckMessage: string;
     isDownloadingUpdate: boolean;
     downloadProgress: number | null;
+    downloadVersion?: string;
     updateDownloaded: boolean;
     updateDownloadedVersion?: string;
     /** Version the user ignored that is currently suppressing an available release. */
@@ -93,14 +94,8 @@ const isDesktop = isTauriRuntime() || isUpdatePreviewMockEnabled();
 const selectedTab = ref<UpdateTab>("app");
 const renderedNotes = ref("");
 
-const hasAppUpdate = computed(() => props.updateDownloaded || props.updateReady || props.updateInfo?.update_available === true);
-/**
- * A prepared package must stay actionable even when the remote no longer
- * reports that release as newest (yanked/rolled-back latest, mirror lag): the
- * download already happened, so hiding the install button would strand the
- * user with a permanent "downloaded" badge and no way to install it (#13562).
- */
-const appUpdateActionsVisible = computed(() => props.updateInfo?.update_available === true || props.updateDownloaded || props.updateReady);
+// Native download and install actions stay available without a remote offer (#13562).
+const hasAppUpdate = computed(() => props.isDownloadingUpdate || props.updateDownloaded || props.updateReady || props.updateInfo?.update_available === true);
 const mcpAvailable = computed(() => (props.mcpUpdate ? mcpUpdateAvailability(props.mcpUpdate) === true : false));
 
 /** 历史版本每页条数（与更新日志一致，避免一次性铺开所有版本） */
@@ -219,8 +214,12 @@ function pickDefaultTab(nextTabs: Array<{ id: UpdateTab; count: number }>): Upda
 }
 
 watch(
-  tabs,
-  (nextTabs) => {
+  [tabs, () => props.isDownloadingUpdate],
+  ([nextTabs, isDownloading]) => {
+    if (!userSelectedTab.value && isDownloading) {
+      selectedTab.value = "app";
+      return;
+    }
     if (!nextTabs.some((tab) => tab.id === selectedTab.value)) {
       selectedTab.value = pickDefaultTab(nextTabs);
       return;
@@ -435,7 +434,7 @@ watch(
                   })
                 }}
               </p>
-              <p v-else-if="!checkingUpdates && !updateDownloaded && !updateReady" class="text-muted-foreground">
+              <p v-else-if="!checkingUpdates && !isDownloadingUpdate && !updateDownloaded && !updateReady" class="text-muted-foreground">
                 <template v-if="ignoredReleaseVersion">
                   {{ t("updates.versionIgnored", { version: ignoredReleaseVersion }) }}
                   <button type="button" data-update-restore-ignored class="text-primary underline underline-offset-2 hover:text-primary/80" :disabled="isIgnoringUpdate" @click="emit('restore-ignored-version')">
@@ -575,7 +574,7 @@ watch(
           </template>
         </div>
 
-        <DialogFooter v-if="selectedTab === 'app'" data-update-footer class="mx-0 mb-0 min-w-0 shrink-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end sm:gap-1">
+        <DialogFooter v-if="selectedTab === 'app'" data-update-footer class="mx-0 mb-0 flex-row flex-wrap items-center gap-x-2 gap-y-1.5 min-w-0 shrink-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 justify-end sm:gap-1">
           <div v-if="!updateReady && !isInstallingUpdate && !updateDownloaded && (updateInfo?.update_available || updateCheckFailed)" class="flex flex-none items-center gap-1.5 whitespace-nowrap self-start sm:mr-auto sm:self-center">
             <span class="text-xs text-muted-foreground">{{ t("updates.source") }}</span>
             <Select :model-value="updateDownloadSource" :disabled="checkingUpdates || isIgnoringUpdate" @update:model-value="(value) => value && emit('change-download-source', value as UpdateDownloadSource)">
@@ -588,7 +587,7 @@ watch(
               </SelectContent>
             </Select>
           </div>
-          <template v-if="appUpdateActionsVisible">
+          <template v-if="hasAppUpdate">
             <div v-if="updateInfo?.update_available" class="flex min-w-0 flex-wrap items-center gap-1 sm:justify-end">
               <Button v-if="canIgnoreVersion" variant="ghost" class="shrink-0 px-2" :disabled="isIgnoringUpdate" @click="emit('ignore-version')">
                 <Loader2 v-if="isIgnoringUpdate" class="h-4 w-4 animate-spin" />
@@ -596,22 +595,33 @@ watch(
               </Button>
               <Button variant="outline" class="shrink-0 px-2" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
             </div>
-            <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop) || updateDownloaded || updateReady">
+            <template v-if="isDownloadingUpdate || canDownloadAndInstallUpdate(updateInfo, isDesktop) || updateDownloaded || updateReady">
               <Button v-if="updateReady" class="shrink-0" :disabled="activeTaskCount > 0 || isIgnoringUpdate || isUpdatingAll" @click="emit('restart')">{{ t("updates.restart") }}</Button>
               <Button v-else-if="isInstallingUpdate" class="shrink-0" disabled>
                 <Loader2 class="h-4 w-4 animate-spin" />
                 {{ t(isPreparingUpdate ? "updates.preparing" : "updates.installing") }}
               </Button>
-              <template v-else-if="isDownloadingUpdate">
-                <Button variant="ghost" class="shrink-0" @click="emit('cancel-download')">{{ t("updates.cancelDownload") }}</Button>
-                <div class="flex w-52 shrink-0 flex-col gap-1">
-                  <span class="self-end text-xs tabular-nums text-muted-foreground">{{ downloadProgress === null ? t("updates.updating") : t("updates.downloading", { progress: downloadProgress }) }}</span>
-                  <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted" data-download-progress-track>
-                    <div v-if="downloadProgressWidth !== null" data-download-progress-fill class="h-full rounded-full bg-primary transition-[width] duration-200" :style="{ width: `${downloadProgressWidth}%` }" />
-                    <div v-else data-download-progress-indeterminate class="h-full w-1/2 animate-pulse rounded-full bg-primary/70" />
-                  </div>
+              <div v-else-if="isDownloadingUpdate" data-download-progress-group class="flex h-8 min-w-0 max-w-md grow basis-56 items-center gap-2 rounded-md border border-border bg-transparent pl-2.5 pr-1 dark:border-input">
+                <Download class="size-4 shrink-0 text-primary" aria-hidden="true" />
+                <span data-download-progress-label class="min-w-0 truncate text-xs font-medium" :title="downloadVersion ?? updateInfo?.latest_version">{{ downloadVersion ?? updateInfo?.latest_version }}</span>
+                <div class="h-1.5 min-w-8 flex-1 overflow-hidden rounded-full bg-muted" role="progressbar" :aria-label="t('updates.downloadInBackground')" :aria-valuenow="downloadProgress ?? undefined">
+                  <div v-if="downloadProgressWidth !== null" data-download-progress-fill class="h-full rounded-full bg-primary motion-safe:transition-[width] motion-safe:duration-200" :style="{ width: `${downloadProgressWidth}%` }" />
+                  <div v-else data-download-progress-indeterminate class="h-full w-1/2 rounded-full bg-primary/70 motion-safe:animate-pulse" />
                 </div>
-              </template>
+                <span data-download-progress-value class="w-8 shrink-0 text-right text-xs font-medium tabular-nums" aria-hidden="true">{{ downloadProgress === null ? "—" : `${downloadProgress}%` }}</span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  data-download-cancel
+                  class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive dark:hover:bg-destructive/10"
+                  :aria-label="t('updates.cancelDownload')"
+                  :title="t('updates.cancelDownload')"
+                  @click="emit('cancel-download')"
+                >
+                  <X class="size-4" aria-hidden="true" />
+                </Button>
+              </div>
               <Button v-else-if="updateDownloaded" class="shrink-0" :disabled="activeTaskCount > 0 || isIgnoringUpdate || isUpdatingAll" @click="emit('install-downloaded')">{{ t("updates.restartAndUpdate") }}</Button>
               <Button v-else-if="!checkingUpdates" class="shrink-0 px-2" :disabled="isIgnoringUpdate" @click="emit('download-in-background')">{{ t(updateCheckFailed ? "updates.retryDownload" : "updates.downloadInBackground") }}</Button>
             </template>

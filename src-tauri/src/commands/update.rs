@@ -30,6 +30,7 @@ const CNB_RELEASE_DOWNLOAD_PREFIX: &str = "https://cnb.cool/dbxio.com/dbx/-/rele
 const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/t8y2/dbx/releases/download/";
 const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "update-download-progress";
 const DOWNLOAD_CANCELED_ERROR: &str = "Download canceled by user.";
+const UPDATE_BUSY_ERROR: &str = "UPDATE_BUSY";
 const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PORTABLE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_PORTABLE_SIGNATURE_BYTES: usize = 64 * 1024;
@@ -63,6 +64,15 @@ pub struct UpdateDownloadProgress {
     pub total: Option<u64>,
     pub attempt_id: String,
     pub version: String,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UpdateDownloadState {
+    Idle,
+    Downloading { attempt_id: String, version: String, progress: Option<UpdateDownloadProgress> },
+    Ready { update: DownloadedUpdate },
+    Installing,
 }
 
 #[derive(Default)]
@@ -133,16 +143,37 @@ struct PortableAssetCandidate {
 #[derive(Debug)]
 struct DownloadCancellation {
     canceled: tokio::sync::watch::Sender<bool>,
+    attempt_id: String,
+    version: String,
+    progress: Mutex<Option<UpdateDownloadProgress>>,
 }
 
+#[cfg(test)]
 impl Default for DownloadCancellation {
     fn default() -> Self {
-        let (canceled, _) = tokio::sync::watch::channel(false);
-        Self { canceled }
+        Self::new(String::new(), String::new())
     }
 }
 
 impl DownloadCancellation {
+    fn new(attempt_id: String, version: String) -> Self {
+        let (canceled, _) = tokio::sync::watch::channel(false);
+        Self { canceled, attempt_id, version, progress: Mutex::new(None) }
+    }
+
+    fn emit_progress(&self, app: &AppHandle, downloaded: u64, total: Option<u64>) {
+        let progress = UpdateDownloadProgress {
+            downloaded,
+            total,
+            attempt_id: self.attempt_id.clone(),
+            version: self.version.clone(),
+        };
+        if let Ok(mut current) = self.progress.lock() {
+            *current = Some(progress.clone());
+        }
+        let _ = app.emit(UPDATE_DOWNLOAD_PROGRESS_EVENT, progress);
+    }
+
     fn cancel(&self) {
         self.canceled.send_replace(true);
     }
@@ -167,17 +198,51 @@ impl DownloadCancellation {
 #[derive(Default)]
 pub struct PendingUpdateState {
     pending: Mutex<Option<PendingUpdate>>,
+    canceled_attempts: Mutex<Vec<String>>,
 }
 
 impl PendingUpdateState {
-    fn begin_download(&self) -> Result<Arc<DownloadCancellation>, String> {
+    fn begin_download(&self, attempt_id: String, version: String) -> Result<Arc<DownloadCancellation>, String> {
         let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
         if pending.is_some() {
-            return Err("An update is already downloading or ready to install.".to_string());
+            return Err(UPDATE_BUSY_ERROR.into());
         }
-        let cancellation = Arc::new(DownloadCancellation::default());
+        let mut canceled_attempts =
+            self.canceled_attempts.lock().map_err(|_| "Update state is unavailable.".to_string())?;
+        if let Some(index) = canceled_attempts.iter().position(|canceled| canceled == &attempt_id) {
+            canceled_attempts.remove(index);
+            return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+        }
+        let cancellation = Arc::new(DownloadCancellation::new(attempt_id, version));
         *pending = Some(PendingUpdate::Downloading(Arc::clone(&cancellation)));
         Ok(cancellation)
+    }
+
+    fn remember_canceled_attempt(&self, attempt_id: String) {
+        let Ok(mut canceled_attempts) = self.canceled_attempts.lock() else { return };
+        if canceled_attempts.iter().any(|canceled| canceled == &attempt_id) {
+            return;
+        }
+        if canceled_attempts.len() >= 16 {
+            canceled_attempts.remove(0);
+        }
+        canceled_attempts.push(attempt_id);
+    }
+
+    fn download_state(&self) -> Result<UpdateDownloadState, String> {
+        let pending = self.pending.lock().map_err(|_| "Update state is unavailable.")?;
+        Ok(match pending.as_ref() {
+            None => UpdateDownloadState::Idle,
+            Some(PendingUpdate::Downloading(attempt) | PendingUpdate::Committing(attempt)) => {
+                UpdateDownloadState::Downloading {
+                    attempt_id: attempt.attempt_id.clone(),
+                    version: attempt.version.clone(),
+                    progress: attempt.progress.lock().map_err(|_| "Update progress is unavailable.")?.clone(),
+                }
+            }
+            Some(PendingUpdate::Ready(cached)) => UpdateDownloadState::Ready { update: cached.record.info.clone() },
+            Some(PendingUpdate::Installing) => UpdateDownloadState::Installing,
+        })
     }
 
     fn finish_download(
@@ -279,22 +344,28 @@ impl PendingUpdateState {
         Ok(())
     }
 
-    pub fn cancel_download(&self) {
-        let Ok(mut pending) = self.pending.lock() else { return };
-        let action = Self::cancel_target(pending.as_ref());
-        let Some((cancellation, clear_slot)) = action else { return };
-        cancellation.cancel();
-        if clear_slot {
-            *pending = None;
+    fn cancel_download(&self, attempt_id: &str) {
+        let Ok(pending) = self.pending.lock() else { return };
+        let Some(cancellation) = Self::cancel_target(pending.as_ref()) else {
+            if pending.is_none() {
+                self.remember_canceled_attempt(attempt_id.to_string());
+            }
+            return;
+        };
+        if cancellation.attempt_id != attempt_id {
+            return;
         }
+        // Keep the slot occupied until the download task has unwound. The task may
+        // still be about to clear or replace the on-disk cache after cancellation.
+        cancellation.cancel();
     }
 
-    /// Downloading can be dropped immediately. A commit in progress keeps the slot until
-    /// `finish_commit` has either published the package or discarded it.
-    fn cancel_target(pending: Option<&PendingUpdate>) -> Option<(Arc<DownloadCancellation>, bool)> {
+    /// Keep the slot until the canceled task has either failed or finished committing.
+    fn cancel_target(pending: Option<&PendingUpdate>) -> Option<Arc<DownloadCancellation>> {
         match pending {
-            Some(PendingUpdate::Downloading(cancellation)) => Some((Arc::clone(cancellation), true)),
-            Some(PendingUpdate::Committing(cancellation)) => Some((Arc::clone(cancellation), false)),
+            Some(PendingUpdate::Downloading(cancellation) | PendingUpdate::Committing(cancellation)) => {
+                Some(Arc::clone(cancellation))
+            }
             _ => None,
         }
     }
@@ -559,8 +630,13 @@ pub async fn get_system_proxy_url() -> Option<String> {
 }
 
 #[tauri::command]
-pub fn cancel_update_download(state: tauri::State<'_, PendingUpdateState>) {
-    state.cancel_download();
+pub fn cancel_update_download(state: tauri::State<'_, PendingUpdateState>, attempt_id: String) {
+    state.cancel_download(&attempt_id);
+}
+
+#[tauri::command(async)]
+pub fn get_update_download_state(state: tauri::State<'_, PendingUpdateState>) -> Result<UpdateDownloadState, String> {
+    state.download_state()
 }
 
 fn package_kind(app: &AppHandle) -> Result<String, String> {
@@ -676,34 +752,19 @@ pub async fn download_update(
     if attempt_id.is_empty() || attempt_id.len() > 128 {
         return Err("Invalid download attempt identifier.".into());
     }
-    let cancellation = state.begin_download()?;
+    let cancellation = state.begin_download(attempt_id, latest_version.clone())?;
     let result = async {
         let cache_root = update_cache::root(&app)?;
         update_cache::discard(&cache_root)?;
         update_cache::ensure_writable(&cache_root)?;
         let (ready, manifest, signature, notes) = if portable_mode {
-            let (archive, signature) = download_portable_update_inner(
-                &app,
-                &source,
-                channel,
-                &version,
-                &release_tag,
-                &attempt_id,
-                &cancellation,
-            )
-            .await?;
+            let (archive, signature) =
+                download_portable_update_inner(&app, &source, channel, &version, &release_tag, &cancellation).await?;
             (ReadyUpdate::Portable { archive, version: version.clone() }, None, Some(signature), String::new())
         } else {
-            let (update, bytes) = download_update_inner(
-                &app,
-                &source,
-                channel,
-                Some(&latest_version),
-                Some(&release_tag),
-                &attempt_id,
-                &cancellation,
-            )
-            .await?;
+            let (update, bytes) =
+                download_update_inner(&app, &source, channel, Some(&latest_version), Some(&release_tag), &cancellation)
+                    .await?;
             let manifest = Some(update.raw_json.clone());
             let notes = update.body.clone().unwrap_or_default();
             (ReadyUpdate::Installer { update: Box::new(update), bytes }, manifest, None, notes)
@@ -768,7 +829,6 @@ async fn download_update_inner(
     channel: UpdateChannel,
     latest_version: Option<&str>,
     release_tag: Option<&str>,
-    attempt_id: &str,
     cancellation: &Arc<DownloadCancellation>,
 ) -> Result<(Update, Vec<u8>), String> {
     let endpoint_urls = source.endpoints(latest_version, channel)?;
@@ -829,10 +889,8 @@ async fn download_update_inner(
 
         let (progress_tx, progress_rx) = tokio::sync::mpsc::channel::<()>(16);
 
-        let attempt_id = attempt_id.to_string();
-        let version = update.version.clone();
-        let finish_attempt_id = attempt_id.clone();
-        let finish_version = version.clone();
+        let chunk_attempt = Arc::clone(cancellation);
+        let finish_attempt = Arc::clone(cancellation);
         let download_result = {
             let mut candidate_update = update.clone();
             candidate_update.download_url = parsed_url.clone();
@@ -845,29 +903,13 @@ async fn download_update_inner(
                                 .fetch_add(chunk_len as u64, Ordering::Relaxed)
                                 .saturating_add(chunk_len as u64);
                             if progress_gate.should_emit(downloaded, total) {
-                                let _ = progress_app_chunk.emit(
-                                    UPDATE_DOWNLOAD_PROGRESS_EVENT,
-                                    UpdateDownloadProgress {
-                                        downloaded,
-                                        total,
-                                        attempt_id: attempt_id.clone(),
-                                        version: version.clone(),
-                                    },
-                                );
+                                chunk_attempt.emit_progress(&progress_app_chunk, downloaded, total);
                             }
                             let _ = progress_tx.try_send(());
                         },
                         move || {
                             let downloaded = finished_downloaded.load(Ordering::Relaxed);
-                            let _ = progress_app_finish.emit(
-                                UPDATE_DOWNLOAD_PROGRESS_EVENT,
-                                UpdateDownloadProgress {
-                                    downloaded,
-                                    total: Some(downloaded),
-                                    attempt_id: finish_attempt_id,
-                                    version: finish_version,
-                                },
-                            );
+                            finish_attempt.emit_progress(&progress_app_finish, downloaded, Some(downloaded));
                         },
                     )
                     .await
@@ -902,7 +944,6 @@ async fn download_portable_update_inner(
     channel: UpdateChannel,
     latest_version: &Version,
     release_tag: &str,
-    attempt_id: &str,
     cancellation: &Arc<DownloadCancellation>,
 ) -> Result<(Vec<u8>, String), String> {
     let latest_version_text = latest_version.to_string();
@@ -922,8 +963,6 @@ async fn download_portable_update_inner(
                 &candidate.signature_url,
                 MAX_PORTABLE_SIGNATURE_BYTES,
                 None,
-                attempt_id,
-                &latest_version_text,
                 cancellation,
             )
             .await?;
@@ -934,8 +973,6 @@ async fn download_portable_update_inner(
                 &candidate.archive_url,
                 MAX_PORTABLE_ARCHIVE_BYTES,
                 Some(app),
-                attempt_id,
-                &latest_version_text,
                 cancellation,
             )
             .await?;
@@ -976,8 +1013,6 @@ async fn download_bounded_bytes(
     url: &str,
     max_bytes: usize,
     progress_app: Option<&AppHandle>,
-    attempt_id: &str,
-    version: &str,
     cancellation: &DownloadCancellation,
 ) -> Result<Vec<u8>, String> {
     if cancellation.is_canceled() {
@@ -1004,10 +1039,7 @@ async fn download_bounded_bytes(
     }
 
     if let Some(app) = progress_app {
-        let _ = app.emit(
-            UPDATE_DOWNLOAD_PROGRESS_EVENT,
-            UpdateDownloadProgress { downloaded: 0, total, attempt_id: attempt_id.into(), version: version.into() },
-        );
+        cancellation.emit_progress(app, 0, total);
     }
     let mut progress_gate = UpdateDownloadProgressGate::default();
     progress_gate.should_emit(0, total);
@@ -1039,15 +1071,7 @@ async fn download_bounded_bytes(
         bytes.extend_from_slice(&chunk);
         if progress_gate.should_emit(bytes.len() as u64, total) {
             if let Some(app) = progress_app {
-                let _ = app.emit(
-                    UPDATE_DOWNLOAD_PROGRESS_EVENT,
-                    UpdateDownloadProgress {
-                        downloaded: bytes.len() as u64,
-                        total,
-                        attempt_id: attempt_id.into(),
-                        version: version.into(),
-                    },
-                );
+                cancellation.emit_progress(app, bytes.len() as u64, total);
             }
         }
     }
@@ -1245,36 +1269,51 @@ mod tests {
     #[test]
     fn canceled_attempt_cannot_commit_or_publish_cache() {
         let state = PendingUpdateState::default();
-        let attempt = state.begin_download().unwrap();
-        state.cancel_download();
+        let attempt = state.begin_download("test-attempt".into(), "99.0.0".into()).unwrap();
+        state.cancel_download("test-attempt");
         let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         assert!(state.finish_download(&attempt, cached_fixture(), &root).is_err());
         assert!(!root.exists());
-        assert!(state.begin_download().is_ok());
+        assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_err());
+        state.finish_failed_download(&attempt).unwrap();
+        assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_ok());
+    }
+
+    #[test]
+    fn cancellation_before_download_registration_is_consumed_by_that_attempt() {
+        let state = PendingUpdateState::default();
+        state.cancel_download("not-yet-registered");
+
+        assert_eq!(
+            state.begin_download("not-yet-registered".into(), "99.0.0".into()).unwrap_err(),
+            super::DOWNLOAD_CANCELED_ERROR
+        );
+        assert!(matches!(state.download_state().unwrap(), super::UpdateDownloadState::Idle));
+        assert!(state.begin_download("later-attempt".into(), "99.0.0".into()).is_ok());
     }
 
     #[test]
     fn cancel_during_commit_discards_the_package_without_freeing_the_slot_early() {
         let state = PendingUpdateState::default();
-        let attempt = state.begin_download().unwrap();
+        let attempt = state.begin_download("test-attempt".into(), "99.0.0".into()).unwrap();
         let guard = state.begin_commit(&attempt).unwrap();
-        assert!(state.begin_download().is_err());
+        assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_err());
 
-        state.cancel_download();
+        state.cancel_download("test-attempt");
         assert!(attempt.is_canceled());
-        assert!(state.begin_download().is_err());
+        assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_err());
 
         let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         let error = state.finish_commit(guard, cached_fixture(), &root, Ok(())).unwrap_err();
         assert_eq!(error, DOWNLOAD_CANCELED_ERROR);
         assert!(state.take_ready("cached-id", "99.0.0").is_err());
-        assert!(state.begin_download().is_ok());
+        assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_ok());
     }
 
     #[test]
     fn successful_commit_publishes_the_downloaded_package() {
         let state = PendingUpdateState::default();
-        let attempt = state.begin_download().unwrap();
+        let attempt = state.begin_download("test-attempt".into(), "99.0.0".into()).unwrap();
         let guard = state.begin_commit(&attempt).unwrap();
         let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         state.finish_commit(guard, cached_fixture(), &root, Ok(())).unwrap();
@@ -1284,21 +1323,21 @@ mod tests {
     #[test]
     fn failed_commit_releases_the_slot_without_publishing() {
         let state = PendingUpdateState::default();
-        let attempt = state.begin_download().unwrap();
+        let attempt = state.begin_download("test-attempt".into(), "99.0.0".into()).unwrap();
         let guard = state.begin_commit(&attempt).unwrap();
         let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         let error = state.finish_commit(guard, cached_fixture(), &root, Err("disk full".into())).unwrap_err();
         assert_eq!(error, "disk full");
         assert!(state.take_ready("cached-id", "99.0.0").is_err());
-        assert!(state.begin_download().is_ok());
+        assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_ok());
     }
 
     #[test]
     fn dropping_an_unfinished_commit_releases_the_slot() {
         let state = PendingUpdateState::default();
-        let attempt = state.begin_download().unwrap();
+        let attempt = state.begin_download("test-attempt".into(), "99.0.0".into()).unwrap();
         drop(state.begin_commit(&attempt).unwrap());
-        assert!(state.begin_download().is_ok());
+        assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_ok());
     }
 
     #[test]
@@ -1310,7 +1349,7 @@ mod tests {
         std::fs::write(&root, b"not a directory").unwrap();
         assert!(state.discard_ready("cached-id", &root).is_err());
         assert!(state.take_ready("cached-id", "99.0.0").is_err());
-        assert!(state.begin_download().is_ok());
+        assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_ok());
         std::fs::remove_file(root).unwrap();
     }
 
@@ -1531,25 +1570,56 @@ mod tests {
     #[test]
     fn retry_uses_an_independent_cancellation_token() {
         let state = PendingUpdateState::default();
-        let first = state.begin_download().unwrap();
+        let first = state.begin_download("first".into(), "99.0.0".into()).unwrap();
 
-        state.cancel_download();
-        let second = state.begin_download().unwrap();
+        state.cancel_download("first");
+        assert!(state.begin_download("second".into(), "99.0.0".into()).is_err());
+        state.finish_failed_download(&first).unwrap();
+        let second = state.begin_download("second".into(), "99.0.0".into()).unwrap();
+        state.cancel_download("first");
 
         assert!(first.is_canceled());
         assert!(!second.is_canceled());
     }
 
     #[test]
+    fn shared_state_reports_latest_progress_until_the_package_is_ready() {
+        let state = PendingUpdateState::default();
+        assert!(matches!(state.download_state().unwrap(), super::UpdateDownloadState::Idle));
+        let attempt = state.begin_download("original".into(), "99.0.0".into()).unwrap();
+        let progress = super::UpdateDownloadProgress {
+            downloaded: 70,
+            total: Some(100),
+            attempt_id: attempt.attempt_id.clone(),
+            version: attempt.version.clone(),
+        };
+        *attempt.progress.lock().unwrap() = Some(progress);
+        let commit = state.begin_commit(&attempt).unwrap();
+        assert!(matches!(
+            state.download_state().unwrap(),
+            super::UpdateDownloadState::Downloading { attempt_id, version, progress: Some(progress) }
+                if attempt_id == "original" && version == "99.0.0" && progress.downloaded == 70
+        ));
+        assert_eq!(state.begin_download("other".into(), "99.0.0".into()).unwrap_err(), super::UPDATE_BUSY_ERROR);
+        state.finish_commit(commit, cached_fixture(), std::path::Path::new(""), Ok(())).unwrap();
+        assert!(
+            matches!(state.download_state().unwrap(), super::UpdateDownloadState::Ready { update } if update.version == "99.0.0")
+        );
+    }
+
+    #[test]
     fn stale_attempt_cannot_clear_an_active_retry() {
         let state = PendingUpdateState::default();
-        let first = state.begin_download().unwrap();
-        state.cancel_download();
-        let second = state.begin_download().unwrap();
+        let first = state.begin_download("test-attempt".into(), "99.0.0".into()).unwrap();
+        state.cancel_download("test-attempt");
+        assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_err());
+
+        state.finish_failed_download(&first).unwrap();
+        let second = state.begin_download("test-attempt".into(), "99.0.0".into()).unwrap();
 
         state.finish_failed_download(&first).unwrap();
 
-        assert!(state.begin_download().is_err());
+        assert!(state.begin_download("test-attempt".into(), "99.0.0".into()).is_err());
         assert!(!second.is_canceled());
     }
 

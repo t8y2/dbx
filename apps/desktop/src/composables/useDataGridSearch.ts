@@ -270,6 +270,10 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
   }
 
   function onKeydown(event: KeyboardEvent) {
+    // Tab/Enter/arrows belong to the IME while a composition is active: the
+    // composed text is not in `searchText` yet, so acting on it would resolve
+    // suggestions or navigate matches for the *previous* query.
+    if (event.isComposing || event.key === "Process" || event.keyCode === 229) return;
     const pair = SEARCH_PAIRS[event.key];
     const input = event.target as HTMLInputElement;
     if (pair && !event.ctrlKey && !event.metaKey && input?.setSelectionRange) {

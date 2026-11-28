@@ -936,6 +936,13 @@ pub fn build_rename_database_preflight_sql(
 }
 
 #[tauri::command]
+pub fn build_mysql_rename_database_sql(
+    options: dbx_core::db_admin_sql::MysqlRenameDatabaseSqlOptions,
+) -> Result<dbx_core::db_admin_sql::MysqlRenameDatabaseStatements, String> {
+    dbx_core::db_admin_sql::build_mysql_rename_database_sql(options)
+}
+
+#[tauri::command]
 pub fn build_create_database_sql(options: dbx_core::db_admin_sql::CreateDatabaseSqlOptions) -> Result<String, String> {
     dbx_core::db_admin_sql::build_create_database_sql(options)
 }

@@ -9,7 +9,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 
-const connection = { id: "test-kingbase", name: "Kingbase", db_type: "kingbase", database: "test-db", username: "test", host: "127.0.0.1", port: 54321, transport_layers: [] };
+const kingbase = { id: "test-kingbase", name: "Kingbase", db_type: "kingbase", database: "test-db", username: "test", host: "127.0.0.1", port: 54321, transport_layers: [] };
 const schema = "public";
 const name = "test_procedure";
 let app: App | undefined;
@@ -38,7 +38,9 @@ afterEach(async () => {
 });
 
 describe("stored procedure source tab titles", () => {
-  it.each(["editor object navigation", "Quick Open"])("shows, hides and restores signatures from %s", async (entry) => {
+  it.each(["editor object navigation", "Quick Open", "Oracle Quick Open"])("shows, hides and restores signatures from %s", async (entry) => {
+    const connection = entry === "Oracle Quick Open" ? { ...kingbase, id: "test-oracle", name: "Oracle", db_type: "oracle", port: 1521 } : kingbase;
+    const signatures = entry === "Oracle Quick Open" ? ["p_region NUMBER"] : ["region integer", "region varchar"];
     vi.stubGlobal(
       "EventSource",
       class extends EventTarget {
@@ -81,7 +83,6 @@ describe("stored procedure source tab titles", () => {
     const findEntry = () => findComponent(app?._instance?.subTree ?? null, componentName);
     await vi.waitFor(() => expect(findEntry()).toBeDefined(), { timeout: 5000 });
     const sourceEntry = findEntry()!;
-    const signatures = ["region integer", "region varchar"];
     for (const signature of signatures) {
       if (fromEditor) {
         sourceEntry.emit("openObjectSource", origin, { name, type: "procedure", schema, signature }, true);
@@ -98,7 +99,7 @@ describe("stored procedure source tab titles", () => {
     const fullTitles = signatures.map((signature) => `${title}(${signature})`);
     expect(displayed()).toEqual(fullTitles);
     settings.editorSettings.hideProcedureTabSignatures = true;
-    expect(displayed()).toEqual([title, title]);
+    expect(displayed()).toEqual(signatures.map(() => title));
     expect(sourceTabs.map((tab) => tabTooltipLines(tab, translate).find((line) => line.label === "tabs.tooltipTitle")?.value)).toEqual(fullTitles);
     settings.editorSettings.hideProcedureTabSignatures = false;
     expect(displayed()).toEqual(fullTitles);

@@ -116,6 +116,10 @@ pub struct DataGridColumnInfo {
     pub column_default: Option<String>,
     #[serde(default)]
     pub extra: Option<String>,
+    /// Column collation as reported by the catalog (MySQL `COLLATION_NAME`). Lets the
+    /// predicate builder skip `BINARY` when the column already compares byte-exactly.
+    #[serde(default)]
+    pub collation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2760,6 +2764,7 @@ fn copy_column_info(
         is_primary_key: false,
         column_default: None,
         extra: None,
+        collation: None,
     })
 }
 
@@ -4386,6 +4391,7 @@ pub fn format_oracle_lob_export_literal(
         is_primary_key: false,
         column_default: None,
         extra: None,
+        collation: None,
     };
     Ok(Some(format_grid_assignment_sql_literal(value, database_type, Some(&column), None)))
 }
@@ -4534,7 +4540,21 @@ fn uses_mysql_binary_text_predicate(
 ) -> bool {
     database_type == Some(DatabaseType::Mysql)
         && value.is_string()
-        && column_info.map(|column| is_textual_column_type(&column.data_type)).unwrap_or(false)
+        && column_info
+            .map(|column| {
+                is_textual_column_type(&column.data_type) && !collation_compares_byte_exact(column.collation.as_deref())
+            })
+            .unwrap_or(false)
+}
+
+/// True when `col = 'x'` under this collation already equals `BINARY col = 'x'`, so the
+/// wrapper (which also defeats index use) can be dropped. Only NO PAD binary collations
+/// qualify: MySQL 8 `*_0900_bin` and MariaDB `*_nopad_bin`. Legacy `*_bin` collations are
+/// PAD SPACE and ignore trailing spaces, whereas BINARY strings do not.
+fn collation_compares_byte_exact(collation: Option<&str>) -> bool {
+    collation
+        .map(|name| name.trim().to_ascii_lowercase())
+        .is_some_and(|name| name.ends_with("_0900_bin") || name.ends_with("_nopad_bin"))
 }
 
 fn is_textual_column_type(data_type: &str) -> bool {
@@ -5276,6 +5296,7 @@ mod tests {
             is_primary_key: false,
             column_default: None,
             extra: extra.map(ToString::to_string),
+            collation: None,
         }
     }
 
@@ -6252,6 +6273,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: None,
                         extra: Some("auto_increment".to_string()),
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "login_name".to_string(),
@@ -6260,6 +6282,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "display_name".to_string(),
@@ -6268,6 +6291,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                 ]),
             }),
@@ -6314,6 +6338,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: Some("nextval('public.users_id_seq'::regclass)".to_string()),
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "name".to_string(),
@@ -6322,6 +6347,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                 ]),
             }),
@@ -6359,6 +6385,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "NAME".to_string(),
@@ -6367,6 +6394,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                 ]),
             }),
@@ -6410,6 +6438,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: None,
                         extra: Some("auto_increment".to_string()),
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "display_name".to_string(),
@@ -6418,6 +6447,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "display_name_upper".to_string(),
@@ -6426,6 +6456,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: Some("virtual generated".to_string()),
+                        collation: None,
                     },
                 ]),
             }),
@@ -6489,6 +6520,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: None,
                         extra: Some("auto_increment".to_string()),
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "stat_date".to_string(),
@@ -6497,6 +6529,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "product_name".to_string(),
@@ -6505,6 +6538,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: Some("".to_string()),
                         extra: None,
+                        collation: None,
                     },
                 ]),
             }),
@@ -6544,6 +6578,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "label".to_string(),
@@ -6552,6 +6587,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                 ]),
             }),
@@ -6587,6 +6623,7 @@ mod tests {
                     is_primary_key: false,
                     column_default: None,
                     extra: None,
+                    collation: None,
                 }]),
             }),
             columns: vec!["id".to_string()],
@@ -6623,6 +6660,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "id".to_string(),
@@ -6631,6 +6669,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "name".to_string(),
@@ -6639,6 +6678,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                 ]),
             }),
@@ -6706,6 +6746,7 @@ mod tests {
                     is_primary_key: true,
                     column_default: None,
                     extra: Some("identity".to_string()),
+                    collation: None,
                 }]),
             }),
             columns: vec!["id".to_string()],
@@ -13541,6 +13582,23 @@ mod tests {
     }
 
     #[test]
+    fn mysql_row_text_predicates_skip_binary_only_for_no_pad_binary_collations() {
+        let predicate = |collation: Option<&str>| {
+            let mut info = column("code", "varchar(32)", true, None);
+            info.collation = collation.map(str::to_string);
+            build_column_predicate(Some(DatabaseType::Mysql), "code", &json!("A b"), Some(&info), true, None)
+        };
+
+        // NO PAD binary collations already compare byte-exactly, so BINARY is redundant.
+        assert_eq!(predicate(Some("utf8mb4_0900_bin")), "`code` = 'A b'");
+        assert_eq!(predicate(Some("UTF8MB4_NOPAD_BIN")), "`code` = 'A b'");
+        // Legacy *_bin collations are PAD SPACE (trailing spaces ignored), BINARY is not.
+        assert_eq!(predicate(Some("utf8mb4_bin")), "BINARY `code` = 'A b'");
+        assert_eq!(predicate(Some("utf8mb4_general_ci")), "BINARY `code` = 'A b'");
+        assert_eq!(predicate(None), "BINARY `code` = 'A b'");
+    }
+
+    #[test]
     fn prepares_manticore_save_statements_without_trailing_semicolons() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::ManticoreSearch),
@@ -13612,6 +13670,7 @@ mod tests {
             is_primary_key: true,
             column_default: None,
             extra: extra.map(ToString::to_string),
+            collation: None,
         }
     }
 

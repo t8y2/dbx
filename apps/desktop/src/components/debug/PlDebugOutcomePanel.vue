@@ -5,7 +5,7 @@ import { Check, Copy } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { usePlDebugStore } from "@/stores/plDebugStore";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import type { PlDebugResultReference } from "@/lib/backend/pl-debug-tauri";
+import type { PlDebugCursorPreview, PlDebugResultReference } from "@/lib/backend/pl-debug-tauri";
 import PlDebugResultValue from "./PlDebugResultValue.vue";
 
 /**
@@ -36,6 +36,8 @@ interface OutcomeRow {
   value: string | null;
   state?: string;
   resultRef?: PlDebugResultReference;
+  cursorPreview?: PlDebugCursorPreview;
+  error?: string;
 }
 
 const rows = computed<OutcomeRow[]>(() => {
@@ -47,6 +49,8 @@ const rows = computed<OutcomeRow[]>(() => {
     value: param.value,
     state: param.state,
     resultRef: param.resultRef,
+    cursorPreview: param.cursorPreview,
+    error: param.error,
   }));
   const returned = returnValue.value;
   if (returned) {
@@ -71,7 +75,10 @@ function rowText(row: OutcomeRow): string {
 }
 
 function valueText(row: OutcomeRow): string {
+  if (row.cursorPreview) return JSON.stringify(row.cursorPreview);
   if (row.state === "error") return t("plDebug.variables.readError");
+  if (row.state === "not_open") return t("plDebug.outcome.cursorNotOpen");
+  if (row.state === "partial") return t("plDebug.results.partial");
   if (["pending", "unavailable", "unknown"].includes(row.state ?? "")) return t("plDebug.variables.unread");
   if (row.value === null) return "SQL NULL";
   return row.value === "" ? t("plDebug.variables.emptyString") : row.value;
@@ -115,7 +122,26 @@ async function copy(key: string, text: string) {
             <td class="px-2 py-1 align-top font-mono text-muted-foreground">{{ row.type || "—" }}</td>
             <td class="whitespace-pre-wrap break-all px-2 py-1 align-top font-mono">
               <PlDebugResultValue v-if="row.resultRef && store.sessionRef && store.publicSnapshot" :result="row.resultRef" :session="store.sessionRef" :generation="store.publicSnapshot.generation" :name="row.name" />
-              <span v-else>{{ valueText(row) }}</span>
+              <div v-else-if="row.cursorPreview" class="space-y-1 whitespace-normal break-normal">
+                <p v-if="row.error" class="text-destructive" :title="row.error">{{ t("plDebug.variables.readError") }}</p>
+                <p v-else-if="!row.cursorPreview.complete" class="text-amber-600 dark:text-amber-400">{{ t("plDebug.results.partial") }}</p>
+                <div v-if="row.cursorPreview.rows.length" class="max-h-48 max-w-[65vw] overflow-auto rounded border">
+                  <table class="w-full whitespace-nowrap text-left text-xs" :aria-label="row.name">
+                    <thead class="sticky top-0 bg-muted">
+                      <tr>
+                        <th v-for="(column, index) in row.cursorPreview.columns" :key="index" scope="col" class="border-r px-2 py-1 font-medium last:border-r-0">{{ column }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(cells, index) in row.cursorPreview.rows" :key="index" class="border-t">
+                        <td v-for="(cell, column) in cells" :key="column" class="max-w-72 truncate border-r px-2 py-1 last:border-r-0" :class="cell === null ? 'text-muted-foreground' : ''" :title="cell ?? undefined">{{ cell ?? "NULL" }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p v-else-if="row.cursorPreview.complete" class="text-muted-foreground">{{ t("plDebug.outcome.cursorEmpty") }}</p>
+              </div>
+              <span v-else :title="row.error">{{ valueText(row) }}</span>
             </td>
             <td class="px-2 py-1 align-top">
               <Button variant="ghost" size="sm" class="h-6 w-6 p-0" :disabled="!!row.resultRef" :title="t('plDebug.outcome.copy')" @click="copy(row.key, rowText(row))">

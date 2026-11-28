@@ -1679,6 +1679,13 @@ html:root.dbx-tab-dragging iframe {
   background: var(--dbx-window-top-border);
 }
 
+/* The app root is `absolute isolate`, not `position: fixed`. Measured in WKWebView
+ * (macOS 15.5): a fixed root added a second window-sized backing store, which cost
+ * 21 MB of graphics memory at 1440x900 @2x and 56 MB at 2560x1440 @2x. `isolate`
+ * keeps the stacking context `fixed` used to provide, so the -z-10 app background
+ * and the root's z-index children stay inside it, below the body-level dialog
+ * portals. Geometry is unchanged: the root still fills the viewport (or, in the
+ * Linux floating frame below, #root, which is position:fixed itself). */
 /* Linux floating frame: the transparent margin, rounded corners and shadow are drawn on
  * #root from index.html so they exist before the bundle loads. Here: the app root fills
  * that frame instead of the viewport. */

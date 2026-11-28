@@ -381,3 +381,86 @@ fn tdengine_websocket_live_paged_table_list_matches_the_full_list() {
     );
     agent.shutdown();
 }
+
+/// Sidebar loads TDengine lazily: the table group lists only roots (stables and
+/// ordinary tables), and a stable's child tables are paged on demand.
+#[test]
+fn tdengine_websocket_live_roots_and_child_tables_load_separately() {
+    let Some(connect_params) = integration_params() else {
+        return;
+    };
+    let database = format!("dbx_rust_tree_{}", std::process::id());
+    let session_id = "tdengine-live-tree";
+    let mut agent = AgentProcess::spawn();
+
+    let mut open_params = connect_params.clone();
+    open_params["agentSessionId"] = json!(session_id);
+    assert_eq!(agent.call("open_session", open_params), json!({"ok": true}));
+
+    create_database(&mut agent, session_id, &database);
+    let mut statements = vec![
+        format!("CREATE STABLE IF NOT EXISTS {database}.st_a (ts TIMESTAMP, v INT) TAGS (gid INT)"),
+        format!("CREATE STABLE IF NOT EXISTS {database}.st_b (ts TIMESTAMP, v INT) TAGS (gid INT)"),
+        format!("CREATE TABLE IF NOT EXISTS {database}.normal_tbl (ts TIMESTAMP, v INT)"),
+    ];
+    for index in 0..25 {
+        statements
+            .push(format!("CREATE TABLE IF NOT EXISTS {database}.a_{index:03} USING {database}.st_a TAGS ({index})"));
+    }
+    statements.push(format!("CREATE TABLE IF NOT EXISTS {database}.b_000 USING {database}.st_b TAGS (0)"));
+    agent.call("execute_batch", json!({"agentSessionId": session_id, "statements": statements}));
+
+    let list = |agent: &mut AgentProcess, extra: Value| -> Vec<(String, String, Option<String>)> {
+        let mut params = json!({
+            "agentSessionId": session_id,
+            "schema": database,
+            "filter": "",
+            "limit": 0,
+            "offset": 0,
+            "object_types": []
+        });
+        for (key, value) in extra.as_object().expect("extra params") {
+            params[key] = value.clone();
+        }
+        agent
+            .call("list_tables", params)
+            .as_array()
+            .expect("table list")
+            .iter()
+            .map(|table| {
+                (
+                    table["name"].as_str().unwrap_or_default().to_string(),
+                    table["table_type"].as_str().unwrap_or_default().to_string(),
+                    table["parent_name"].as_str().map(str::to_string),
+                )
+            })
+            .collect()
+    };
+
+    let roots = list(&mut agent, json!({"page_table_roots": true}));
+    assert_eq!(
+        roots.iter().map(|(name, kind, parent)| (name.as_str(), kind.as_str(), parent.is_some())).collect::<Vec<_>>(),
+        vec![("normal_tbl", "TABLE", false), ("st_a", "STABLE", false), ("st_b", "STABLE", false)],
+        "roots must hold only stables and ordinary tables: {roots:?}"
+    );
+
+    let first = list(&mut agent, json!({"parent_name": "st_a", "limit": 10, "offset": 0}));
+    let second = list(&mut agent, json!({"parent_name": "st_a", "limit": 10, "offset": 10}));
+    let third = list(&mut agent, json!({"parent_name": "st_a", "limit": 10, "offset": 20}));
+    assert_eq!((first.len(), second.len(), third.len()), (10, 10, 5));
+    let all: Vec<&(String, String, Option<String>)> = first.iter().chain(&second).chain(&third).collect();
+    assert!(all.iter().all(|(_, kind, parent)| kind == "TABLE" && parent.as_deref() == Some("st_a")));
+    let mut names: Vec<String> = all.iter().map(|(name, _, _)| name.clone()).collect();
+    names.sort();
+    let expected: Vec<String> = (0..25).map(|index| format!("a_{index:03}")).collect();
+    assert_eq!(names, expected, "child paging dropped, repeated or leaked rows");
+
+    let only_b = list(&mut agent, json!({"parent_name": "st_b"}));
+    assert_eq!(only_b.iter().map(|(name, _, _)| name.as_str()).collect::<Vec<_>>(), vec!["b_000"]);
+
+    agent.call(
+        "execute_batch",
+        json!({"agentSessionId": session_id, "statements": [format!("DROP DATABASE IF EXISTS {database}")]}),
+    );
+    agent.shutdown();
+}

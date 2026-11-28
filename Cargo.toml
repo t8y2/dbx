@@ -37,9 +37,9 @@ pageant = { path = "vendor/pageant" }
 # (MicrosoftEdge/WebView2Feedback#5650, see
 # vendor/wry/src/webview2/clipboard_history.rs).
 wry = { path = "vendor/wry" }
-tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89" }
-postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89" }
-postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89" }
+tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "5aee0b0e8d211057fca72932e612efdf5aa2c125" }
+postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "5aee0b0e8d211057fca72932e612efdf5aa2c125" }
+postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "5aee0b0e8d211057fca72932e612efdf5aa2c125" }
 # Temporary compatibility patches for deprecated sha256_password accounts and
 # rustls dangerous-mode connections to legacy certificates. Remove after upstream support lands.
 mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "4cd84d86bb86b060320ce3459561e8093e4422fa" }

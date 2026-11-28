@@ -21,6 +21,7 @@ export interface DataGridColumnInfo {
   column_default?: string | null;
   extra?: string | null;
   comment?: string | null;
+  collation?: string | null;
 }
 
 export interface DataGridSaveStatementOptions {

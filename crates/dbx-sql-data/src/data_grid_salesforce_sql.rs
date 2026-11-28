@@ -230,6 +230,7 @@ mod tests {
                 is_primary_key: false,
                 column_default: None,
                 extra: extra.map(|s| s.to_string()),
+                collation: None,
             })
             .collect();
         DataGridSaveStatementOptions {

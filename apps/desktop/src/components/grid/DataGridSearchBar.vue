@@ -116,7 +116,53 @@ function canReplaceAll(): boolean {
   return !!props.replaceAvailable && !props.replaceBusy && !!props.replaceMatchCount;
 }
 
+/**
+ * WebKit (Tauri's WKWebView on macOS) ends a composition right before it
+ * dispatches the Enter that committed it: that keydown arrives with
+ * `isComposing === false` and `keyCode === 13`, so the live-composition checks
+ * alone let it through to "navigate match" / "replace current". The same grace
+ * window QuickOpenDialog and the grid filter / sort builders use keeps the
+ * committing Enter out of the grid.
+ */
+const IME_COMPOSITION_END_GRACE_MS = 100;
+let compositionActive = false;
+let compositionEndedAt: number | undefined;
+
+function startComposition(): void {
+  compositionActive = true;
+  compositionEndedAt = undefined;
+}
+
+function endComposition(): void {
+  compositionActive = false;
+  compositionEndedAt = performance.now();
+}
+
+function clearCompositionEnd(): void {
+  compositionEndedAt = undefined;
+}
+
+/**
+ * Whether an input method still owns this keydown. Only Enter is held back
+ * after `compositionend`: the committing key is swallowed once, and a later
+ * Enter (after its keyup, or outside the grace window) behaves as usual.
+ */
+function imeOwnsKeydown(event: KeyboardEvent): boolean {
+  if (compositionActive || event.isComposing || event.key === "Process" || event.keyCode === 229) return true;
+  if (event.key !== "Enter") return false;
+  const commitsComposition = compositionEndedAt !== undefined && performance.now() - compositionEndedAt < IME_COMPOSITION_END_GRACE_MS;
+  compositionEndedAt = undefined;
+  return commitsComposition;
+}
+
 function onSearchInputKeydown(event: KeyboardEvent) {
+  // An IME composition (Chinese/Japanese pinyin, still uncommitted) owns Tab,
+  // Enter and the arrow keys: committing a candidate must not fall through to
+  // "accept suggestion" / "navigate match", which would also fight the input
+  // method for the key. The composed text is not in `searchText` yet — Vue's
+  // v-model drops input events while `composing` — so acting on it would
+  // search the *previous* query.
+  if (imeOwnsKeydown(event)) return;
   if (isReplaceAllShortcut(event)) {
     // Handled here: the forwarded keydown would run Enter = navigate-next in
     // the grid host. A closed replace row must not fire with hidden (possibly
@@ -129,6 +175,9 @@ function onSearchInputKeydown(event: KeyboardEvent) {
 }
 
 function onReplacementKeydown(event: KeyboardEvent) {
+  // Same IME gate as the search input: the Enter that commits a composition
+  // must not trigger Replace Current.
+  if (imeOwnsKeydown(event)) return;
   if (isReplaceAllShortcut(event)) {
     event.preventDefault();
     event.stopPropagation();
@@ -142,6 +191,13 @@ function onReplacementKeydown(event: KeyboardEvent) {
   }
 }
 
+function onEscapeKeydown(event: KeyboardEvent): void {
+  // Esc while an input method owns the keys dismisses its candidate list, not
+  // the search bar (Vue's `.esc` modifier does not consult `isComposing`).
+  if (imeOwnsKeydown(event)) return;
+  emit("close");
+}
+
 defineExpose({
   focus: (select = false) => {
     searchInput.value?.focus();
@@ -152,7 +208,7 @@ defineExpose({
 
 <template>
   <Transition enter-active-class="transition-opacity duration-150" leave-active-class="transition-opacity duration-100" enter-from-class="opacity-0" leave-to-class="opacity-0">
-    <div v-if="props.open" ref="overlay" data-grid-search-bar class="absolute top-1 right-2 z-20 w-max max-w-[calc(100%-1rem)] px-2 py-1 bg-background focus-within:bg-background-solid border rounded-md shadow-md" :style="overlayStyle" @keydown.esc.stop.prevent="emit('close')">
+    <div v-if="props.open" ref="overlay" data-grid-search-bar class="absolute top-1 right-2 z-20 w-max max-w-[calc(100%-1rem)] px-2 py-1 bg-background focus-within:bg-background-solid border rounded-md shadow-md" :style="overlayStyle" @keydown.esc.stop.prevent="onEscapeKeydown">
       <div class="flex items-center gap-1 min-w-0">
         <button
           type="button"
@@ -198,6 +254,9 @@ defineExpose({
           class="w-48 h-5 min-w-0 flex-1 text-xs bg-transparent outline-none placeholder:text-muted-foreground"
           :placeholder="t('grid.search')"
           @keydown="onSearchInputKeydown"
+          @compositionstart="startComposition"
+          @compositionend="endComposition"
+          @keyup="clearCompositionEnd"
         />
         <button
           v-if="replaceOpen"
@@ -264,6 +323,9 @@ defineExpose({
           :placeholder="t('grid.replaceText')"
           :aria-label="t('grid.replaceText')"
           @keydown="onReplacementKeydown"
+          @compositionstart="startComposition"
+          @compositionend="endComposition"
+          @keyup="clearCompositionEnd"
         />
         <button data-grid-replace-current type="button" class="h-6 border rounded px-2 text-xs disabled:opacity-40" :disabled="!props.replaceAvailable || props.replaceBusy || !props.canReplaceCurrent" :title="t('grid.replaceCurrentCell')" @click="emit('replaceCurrent')">
           {{ t("editor.search.replace") }}

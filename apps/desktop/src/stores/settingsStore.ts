@@ -55,6 +55,7 @@ import { normalizeSqlVariableSyntaxOverrides, type SqlVariableSyntaxOverrides } 
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { type DataTabReuseMode, DEFAULT_DATA_TAB_REUSE_MODE, normalizeDataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
 import { normalizeTableHoverLookupMode, type TableHoverLookupMode } from "@/lib/editor/hoverTableLookup";
+import { normalizePreferredTableAlias } from "@/lib/sql/sqlIdentifier";
 import { normalizeCompletionTriggerMode, type SqlCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import { DEFAULT_SQL_COMPLETION_MATCH_MODE, normalizeCompletionMatchMode, type SqlCompletionMatchMode } from "@/lib/sql/sqlCompletionMatchMode";
 import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletions";
@@ -999,6 +1000,7 @@ export interface EditorSettings {
   /** Whether the query toolbar connection picker shows the full group path. */
   showConnectionGroupPath: boolean;
   autoAliasTables: boolean;
+  preferredTableAlias: string;
   qualifyColumnCompletions: boolean;
   batchColumnSelectionIncludeComments: boolean;
   tableCompletionSchemaQualification: SqlTableCompletionSchemaQualification;
@@ -1010,6 +1012,7 @@ export interface EditorSettings {
   selectFirstCompletionOnOpen: boolean;
   /** Delay before the completion popup opens after typing, in milliseconds (#15340). */
   completionAutoActivationDelayMs: number;
+  completionAutoActivationDelayDefaultVersion: number;
   wordWrap: boolean;
   showWhitespace: boolean;
   tableDdlWordWrap: boolean;
@@ -1051,7 +1054,7 @@ export interface EditorSettings {
   tabSortMode: TabSortMode;
   /** 水平标签页最大显示宽度（像素，0 表示不限制）。 */
   tabMaxWidth: number;
-  tabDoubleClickAction: "default" | "close";
+  tabDoubleClickAction: "default" | "close" | "none";
   /** 分组标签在水平标签栏中的行数：single 为分组与标签混排一行，two-row 为分组独占一行。 */
   tabGroupRows: TabGroupRowMode;
   appLayout: "separated" | "classic";
@@ -1162,6 +1165,7 @@ export interface EditorSettings {
   dataGridHideNullColumns: boolean;
   dataGridHideEmptyColumns: boolean;
   dataGridFreezeFirstColumn: boolean;
+  dataGridConfirmColumnHeaderReorder: boolean;
   dataGridBooleanDisplayMode: "dropdown" | "checkbox";
   dataGridBooleanValueStyle: BooleanCellValueStyle;
   numericColumnRightAlign: boolean;
@@ -1425,6 +1429,14 @@ export const WELCOME_PAGE_DEFAULT_VERSION = 1;
 // default, while an explicit toggle afterwards stamps the marker and wins.
 export const COMPACT_TAB_TITLE_DEFAULT_VERSION = 1;
 
+// v1: the completion auto-activation delay default dropped from 500ms to 50ms.
+// Every blob written while 500 was the default carries that value, so a stored
+// 500 without this marker is the old default rather than a choice and migrates
+// to the new default; any other stored value was set deliberately and is kept.
+// Saving the setting afterwards stamps the marker, so an explicit 500 sticks.
+export const COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION = 1;
+const LEGACY_DEFAULT_COMPLETION_AUTO_ACTIVATION_DELAY_MS = 500;
+
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   fontFamily: DEFAULT_MONO_FONT_FAMILY,
   fontSize: 13,
@@ -1455,6 +1467,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showInsertValueHints: true,
   showConnectionGroupPath: false,
   autoAliasTables: true,
+  preferredTableAlias: "",
   qualifyColumnCompletions: true,
   batchColumnSelectionIncludeComments: true,
   tableCompletionSchemaQualification: DEFAULT_SQL_TABLE_COMPLETION_SCHEMA_QUALIFICATION,
@@ -1465,7 +1478,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   snippetTriggerKey: "tab",
   sortCompletionColumnsAlphabetically: true,
   selectFirstCompletionOnOpen: true,
-  completionAutoActivationDelayMs: 500,
+  completionAutoActivationDelayMs: 50,
+  completionAutoActivationDelayDefaultVersion: COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION,
   wordWrap: false,
   showWhitespace: false,
   tableDdlWordWrap: true,
@@ -1583,6 +1597,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridHideNullColumns: false,
   dataGridHideEmptyColumns: false,
   dataGridFreezeFirstColumn: false,
+  dataGridConfirmColumnHeaderReorder: false,
   dataGridBooleanDisplayMode: "dropdown",
   dataGridBooleanValueStyle: "true-false",
   numericColumnRightAlign: true,
@@ -1797,6 +1812,10 @@ export function normalizeTabGroupCustomizations(value: unknown): Record<string, 
 
 function normalizeTabSortMode(value: unknown): TabSortMode {
   return TAB_SORT_MODES.includes(value as TabSortMode) ? (value as TabSortMode) : DEFAULT_EDITOR_SETTINGS.tabSortMode;
+}
+
+export function normalizeTabDoubleClickAction(value: unknown): EditorSettings["tabDoubleClickAction"] {
+  return value === "close" || value === "none" ? value : DEFAULT_EDITOR_SETTINGS.tabDoubleClickAction;
 }
 
 export function normalizeTabMaxWidth(value: unknown): number {
@@ -2142,6 +2161,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const savedCompactTabTitleDefaultVersion = settings.compactTabTitleDefaultVersion;
   const compactTabTitleDefaultVersion = typeof savedCompactTabTitleDefaultVersion === "number" && savedCompactTabTitleDefaultVersion >= COMPACT_TAB_TITLE_DEFAULT_VERSION ? savedCompactTabTitleDefaultVersion : COMPACT_TAB_TITLE_DEFAULT_VERSION;
   const hasCurrentCompactTabTitleDefault = compactTabTitleDefaultVersion === savedCompactTabTitleDefaultVersion;
+  const savedCompletionDelayDefaultVersion = settings.completionAutoActivationDelayDefaultVersion;
+  const completionAutoActivationDelayDefaultVersion = typeof savedCompletionDelayDefaultVersion === "number" && savedCompletionDelayDefaultVersion >= COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION ? savedCompletionDelayDefaultVersion : COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION;
+  const hasCurrentCompletionDelayDefault = completionAutoActivationDelayDefaultVersion === savedCompletionDelayDefaultVersion;
   // The active id can only be validated once the scheme list it points into is known.
   const dataGridTypeColorSchemes = normalizeDataGridTypeColorSchemes(settings.dataGridTypeColorSchemes);
   const savedExtractorMigrationVersion = settings.dataGridExtractorOptionsMigrationVersion;
@@ -2238,6 +2260,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showInsertValueHints: typeof settings.showInsertValueHints === "boolean" ? settings.showInsertValueHints : DEFAULT_EDITOR_SETTINGS.showInsertValueHints,
     showConnectionGroupPath: typeof settings.showConnectionGroupPath === "boolean" ? settings.showConnectionGroupPath : DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
+    preferredTableAlias: normalizePreferredTableAlias(settings.preferredTableAlias),
     qualifyColumnCompletions: typeof settings.qualifyColumnCompletions === "boolean" ? settings.qualifyColumnCompletions : DEFAULT_EDITOR_SETTINGS.qualifyColumnCompletions,
     batchColumnSelectionIncludeComments: typeof settings.batchColumnSelectionIncludeComments === "boolean" ? settings.batchColumnSelectionIncludeComments : DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments,
     tableCompletionSchemaQualification: normalizeSqlTableCompletionSchemaQualification(settings.tableCompletionSchemaQualification),
@@ -2248,7 +2271,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     snippetTriggerKey: settings.snippetTriggerKey === "space" || settings.snippetTriggerKey === "both" ? settings.snippetTriggerKey : DEFAULT_EDITOR_SETTINGS.snippetTriggerKey,
     sortCompletionColumnsAlphabetically: typeof settings.sortCompletionColumnsAlphabetically === "boolean" ? settings.sortCompletionColumnsAlphabetically : DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically,
     selectFirstCompletionOnOpen: typeof settings.selectFirstCompletionOnOpen === "boolean" ? settings.selectFirstCompletionOnOpen : DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen,
-    completionAutoActivationDelayMs: normalizeCompletionAutoActivationDelay(settings.completionAutoActivationDelayMs),
+    completionAutoActivationDelayMs:
+      !hasCurrentCompletionDelayDefault && settings.completionAutoActivationDelayMs === LEGACY_DEFAULT_COMPLETION_AUTO_ACTIVATION_DELAY_MS ? DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs : normalizeCompletionAutoActivationDelay(settings.completionAutoActivationDelayMs),
+    completionAutoActivationDelayDefaultVersion,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
     showWhitespace: typeof settings.showWhitespace === "boolean" ? settings.showWhitespace : DEFAULT_EDITOR_SETTINGS.showWhitespace,
     tableDdlWordWrap: typeof settings.tableDdlWordWrap === "boolean" ? settings.tableDdlWordWrap : DEFAULT_EDITOR_SETTINGS.tableDdlWordWrap,
@@ -2284,7 +2309,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tabGroupCustomizations: normalizeTabGroupCustomizations(settings.tabGroupCustomizations),
     tabSortMode: normalizeTabSortMode(settings.tabSortMode),
     tabMaxWidth: normalizeTabMaxWidth(settings.tabMaxWidth),
-    tabDoubleClickAction: settings.tabDoubleClickAction === "close" ? "close" : "default",
+    tabDoubleClickAction: normalizeTabDoubleClickAction(settings.tabDoubleClickAction),
     tabGroupRows: normalizeTabGroupRows(settings.tabGroupRows),
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     webLogoPosition: normalizeWebLogoPosition(settings.webLogoPosition),
@@ -2365,6 +2390,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridHideNullColumns: settings.dataGridHideNullColumns === true,
     dataGridHideEmptyColumns: settings.dataGridHideEmptyColumns === true,
     dataGridFreezeFirstColumn: settings.dataGridFreezeFirstColumn === true,
+    dataGridConfirmColumnHeaderReorder: settings.dataGridConfirmColumnHeaderReorder === true,
     dataGridBooleanDisplayMode: settings.dataGridBooleanDisplayMode === "checkbox" ? "checkbox" : "dropdown",
     dataGridBooleanValueStyle: normalizeDataGridBooleanValueStyle(settings.dataGridBooleanValueStyle),
     numericColumnRightAlign: typeof settings.numericColumnRightAlign === "boolean" ? settings.numericColumnRightAlign : DEFAULT_EDITOR_SETTINGS.numericColumnRightAlign,
@@ -2784,6 +2810,7 @@ export const useSettingsStore = defineStore("settings", () => {
           const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
           const needsWelcomePageDefaultMigration = typeof savedSettings.welcomePageModeDefaultVersion !== "number" || savedSettings.welcomePageModeDefaultVersion < WELCOME_PAGE_DEFAULT_VERSION;
           const needsCompactTabTitleDefaultMigration = typeof savedSettings.compactTabTitleDefaultVersion !== "number" || savedSettings.compactTabTitleDefaultVersion < COMPACT_TAB_TITLE_DEFAULT_VERSION;
+          const needsCompletionDelayDefaultMigration = typeof savedSettings.completionAutoActivationDelayDefaultVersion !== "number" || savedSettings.completionAutoActivationDelayDefaultVersion < COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION;
           const needsTabNavigationShortcutMigration = needsTabNavigationHistoryShortcutMigration(savedSettings.shortcuts);
           const savedNullText = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.dsv?.nullText;
           // v3 also resets a historically persisted includeDatabaseName=false (from v2), so
@@ -2804,6 +2831,7 @@ export const useSettingsStore = defineStore("settings", () => {
             needsExecuteModeDefaultMigration ||
             needsWelcomePageDefaultMigration ||
             needsCompactTabTitleDefaultMigration ||
+            needsCompletionDelayDefaultMigration ||
             needsTabNavigationShortcutMigration ||
             needsSidebarBrowseObjectsMigration ||
             needsDataGridExtractorOptionsMigration ||
@@ -3263,6 +3291,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showInsertValueHints !== undefined) editorSettings.value.showInsertValueHints = partial.showInsertValueHints === true;
     if (partial.showConnectionGroupPath !== undefined) editorSettings.value.showConnectionGroupPath = partial.showConnectionGroupPath === true;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
+    if (partial.preferredTableAlias !== undefined) editorSettings.value.preferredTableAlias = normalizePreferredTableAlias(partial.preferredTableAlias);
     if (partial.qualifyColumnCompletions !== undefined) editorSettings.value.qualifyColumnCompletions = partial.qualifyColumnCompletions === true;
     if (partial.batchColumnSelectionIncludeComments !== undefined) editorSettings.value.batchColumnSelectionIncludeComments = partial.batchColumnSelectionIncludeComments === true;
     if (partial.tableCompletionSchemaQualification !== undefined) editorSettings.value.tableCompletionSchemaQualification = normalizeSqlTableCompletionSchemaQualification(partial.tableCompletionSchemaQualification);
@@ -3273,7 +3302,12 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.snippetTriggerKey !== undefined) editorSettings.value.snippetTriggerKey = partial.snippetTriggerKey === "space" || partial.snippetTriggerKey === "both" ? partial.snippetTriggerKey : "tab";
     if (partial.sortCompletionColumnsAlphabetically !== undefined) editorSettings.value.sortCompletionColumnsAlphabetically = partial.sortCompletionColumnsAlphabetically === true;
     if (partial.selectFirstCompletionOnOpen !== undefined) editorSettings.value.selectFirstCompletionOnOpen = partial.selectFirstCompletionOnOpen === true;
-    if (partial.completionAutoActivationDelayMs !== undefined) editorSettings.value.completionAutoActivationDelayMs = normalizeCompletionAutoActivationDelay(partial.completionAutoActivationDelayMs);
+    if (partial.completionAutoActivationDelayMs !== undefined) {
+      editorSettings.value.completionAutoActivationDelayMs = normalizeCompletionAutoActivationDelay(partial.completionAutoActivationDelayMs);
+      // Stamping the current version marks this as a deliberate choice (see
+      // COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION).
+      editorSettings.value.completionAutoActivationDelayDefaultVersion = COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION;
+    }
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
     if (partial.showWhitespace !== undefined) editorSettings.value.showWhitespace = partial.showWhitespace === true;
     if (partial.tableDdlWordWrap !== undefined) editorSettings.value.tableDdlWordWrap = partial.tableDdlWordWrap === true;
@@ -3315,7 +3349,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tabGroupCustomizations !== undefined) editorSettings.value.tabGroupCustomizations = normalizeTabGroupCustomizations(partial.tabGroupCustomizations);
     if (partial.tabSortMode !== undefined) editorSettings.value.tabSortMode = normalizeTabSortMode(partial.tabSortMode);
     if (partial.tabMaxWidth !== undefined) editorSettings.value.tabMaxWidth = normalizeTabMaxWidth(partial.tabMaxWidth);
-    if (partial.tabDoubleClickAction !== undefined) editorSettings.value.tabDoubleClickAction = partial.tabDoubleClickAction === "close" ? "close" : "default";
+    if (partial.tabDoubleClickAction !== undefined) editorSettings.value.tabDoubleClickAction = normalizeTabDoubleClickAction(partial.tabDoubleClickAction);
     if (partial.tabGroupRows !== undefined) editorSettings.value.tabGroupRows = normalizeTabGroupRows(partial.tabGroupRows);
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.webLogoPosition !== undefined) editorSettings.value.webLogoPosition = normalizeWebLogoPosition(partial.webLogoPosition);
@@ -3404,6 +3438,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridHideNullColumns !== undefined) editorSettings.value.dataGridHideNullColumns = partial.dataGridHideNullColumns === true;
     if (partial.dataGridHideEmptyColumns !== undefined) editorSettings.value.dataGridHideEmptyColumns = partial.dataGridHideEmptyColumns === true;
     if (partial.dataGridFreezeFirstColumn !== undefined) editorSettings.value.dataGridFreezeFirstColumn = partial.dataGridFreezeFirstColumn === true;
+    if (partial.dataGridConfirmColumnHeaderReorder !== undefined) editorSettings.value.dataGridConfirmColumnHeaderReorder = partial.dataGridConfirmColumnHeaderReorder === true;
     if (partial.dataGridBooleanValueStyle !== undefined) editorSettings.value.dataGridBooleanValueStyle = normalizeDataGridBooleanValueStyle(partial.dataGridBooleanValueStyle);
     if (partial.dataGridBooleanDisplayMode !== undefined) editorSettings.value.dataGridBooleanDisplayMode = partial.dataGridBooleanDisplayMode === "dropdown" ? "dropdown" : "checkbox";
     if (partial.numericColumnRightAlign !== undefined) editorSettings.value.numericColumnRightAlign = partial.numericColumnRightAlign === true;

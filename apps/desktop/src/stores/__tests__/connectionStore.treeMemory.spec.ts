@@ -351,7 +351,7 @@ describe("connectionStore schema tree memory", () => {
     cache.set(legacyKey, encodeSchemaTreeCache(legacyChildren));
     await store.loadObjectGroupChildren(group);
     expect(loadSchemaCache).not.toHaveBeenCalledWith(legacyKey);
-    expect(loadSchemaCache).toHaveBeenCalledWith("pg-1:app::group-tables:objects-tdengine-v1");
+    expect(loadSchemaCache).toHaveBeenCalledWith("pg-1:app::group-tables:objects-tdengine-v2");
     expect(listTables.mock.calls.map((call) => call[5])).toEqual([0, 420]);
     expect(group.children![0].children![0].objectCount).toBe(450);
     expect(cache.has(legacyKey)).toBe(true);

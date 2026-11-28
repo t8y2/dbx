@@ -227,6 +227,7 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         is_production: false,
         production_databases: Vec::new(),
         production_badge_scope: None,
+        watermark: None,
         database_info: None,
     })
 }

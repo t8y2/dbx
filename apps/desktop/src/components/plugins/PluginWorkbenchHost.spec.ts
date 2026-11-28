@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => ({
   readPluginUiEntry: vi.fn(),
   readPluginUiAsset: vi.fn(),
   subscribePluginEvents: vi.fn(),
+  subscribeHostObservations: vi.fn(),
+  setPluginObservationInterest: vi.fn(),
+  clearPluginObservationInterest: vi.fn(),
   repushPluginConnection: vi.fn(),
   reopenPluginConnection: vi.fn(),
   openDroppedPluginLocalFiles: vi.fn(),
@@ -16,6 +19,9 @@ const mocks = vi.hoisted(() => ({
   closePluginLocalFile: vi.fn(),
   openPluginWorkbench: vi.fn(),
   isTauriRuntime: vi.fn(),
+  // Made reactive by the settingsStore mock so a test can flip the per-plugin
+  // unsafe-eval grant after mount.
+  editorSettings: { uiFontFamily: "", fontFamily: "", fontSize: 14, pluginGraphicsEngineIds: [] as string[] },
 }));
 
 vi.mock("@/lib/backend/tauri", () => ({
@@ -32,11 +38,18 @@ vi.mock("@/lib/backend/api", () => ({
   readPluginUiEntry: mocks.readPluginUiEntry,
   readPluginUiAsset: mocks.readPluginUiAsset,
   subscribePluginEvents: mocks.subscribePluginEvents,
+  subscribeHostObservations: mocks.subscribeHostObservations,
+  setPluginObservationInterest: mocks.setPluginObservationInterest,
+  clearPluginObservationInterest: mocks.clearPluginObservationInterest,
 }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: vi.fn() }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: ref(false), themeRevision: ref(0) }) }));
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { uiFontFamily: "", fontFamily: "", fontSize: 14 } }) }));
+vi.mock("@/stores/settingsStore", async () => {
+  const { reactive } = await import("vue");
+  mocks.editorSettings = reactive(mocks.editorSettings);
+  return { useSettingsStore: () => ({ editorSettings: mocks.editorSettings }) };
+});
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     repushPluginConnection: mocks.repushPluginConnection,
@@ -87,6 +100,7 @@ describe("PluginWorkbenchHost initialization", () => {
   beforeEach(() => {
     clearPluginUiHtmlCache();
     vi.clearAllMocks();
+    mocks.editorSettings.pluginGraphicsEngineIds = [];
     mocks.isTauriRuntime.mockReturnValue(false);
     const settings = (window as unknown as { happyDOM: { settings: Record<string, boolean> } }).happyDOM.settings;
     settings.disableJavaScriptFileLoading = true;
@@ -96,6 +110,9 @@ describe("PluginWorkbenchHost initialization", () => {
     vi.stubGlobal("getComputedStyle", () => Object.assign([], { getPropertyValue: () => "" }));
     mocks.readPluginUiEntry.mockResolvedValue({ dataBase64: btoa("<!doctype html><html><body></body></html>"), contentType: "text/html" });
     mocks.subscribePluginEvents.mockResolvedValue(vi.fn());
+    mocks.subscribeHostObservations.mockResolvedValue(vi.fn());
+    mocks.setPluginObservationInterest.mockResolvedValue(undefined);
+    mocks.clearPluginObservationInterest.mockResolvedValue(undefined);
     mocks.closePluginLocalFile.mockResolvedValue(undefined);
     mocks.repushPluginConnection.mockReset().mockResolvedValue(undefined);
     mocks.reopenPluginConnection.mockResolvedValue(undefined);
@@ -126,6 +143,36 @@ describe("PluginWorkbenchHost initialization", () => {
     return { frame: frame!, postMessage, ready };
   }
 
+  it("registers observation interest only for plugins that declare host.observe", async () => {
+    mocks.isTauriRuntime.mockReturnValue(true);
+
+    const observer: InstalledPlugin = {
+      manifest: { ...plugin.manifest, permissions: ["host.observe:queries"] },
+      compatibility: { compatible: true },
+    };
+    app = createApp(PluginWorkbenchHost, { plugin: observer, contribution, context: { connectionId: "connection" } });
+    app.mount(root);
+    await flushWorkbenchLoad();
+
+    expect(mocks.setPluginObservationInterest).toHaveBeenCalledTimes(1);
+    const [ownerId, pluginId] = mocks.setPluginObservationInterest.mock.calls[0] as [string, string];
+    expect(ownerId.startsWith("plugin-workbench:sample:")).toBe(true);
+    expect(pluginId).toBe("sample");
+    expect(mocks.subscribeHostObservations).toHaveBeenCalledTimes(1);
+
+    app.unmount();
+    app = undefined;
+    // The bus may not keep building payloads for a closed workbench.
+    expect(mocks.clearPluginObservationInterest).toHaveBeenCalledWith(ownerId);
+  });
+
+  it("skips observation wiring for plugins without host.observe", async () => {
+    mocks.isTauriRuntime.mockReturnValue(true);
+    await mountHost();
+    expect(mocks.setPluginObservationInterest).not.toHaveBeenCalled();
+    expect(mocks.subscribeHostObservations).not.toHaveBeenCalled();
+  });
+
   it("passes the packaged module URL and existing asset CSP into srcdoc", async () => {
     mocks.isTauriRuntime.mockReturnValue(true);
     vi.stubEnv("PROD", true);
@@ -141,6 +188,35 @@ describe("PluginWorkbenchHost initialization", () => {
     expect(srcdoc).toContain('<base href="dbx-plugin://localhost/sample/entry/">');
     expect(srcdoc).toContain("script-src 'unsafe-inline' blob: dbx-plugin:;");
     expect(mocks.readPluginUiAsset).not.toHaveBeenCalled();
+  });
+
+  it("reuses the cached sandbox document across boots without re-reading the ui build", async () => {
+    const first = await mountHost();
+    const firstSrcdoc = first.frame.getAttribute("srcdoc") ?? "";
+    expect(firstSrcdoc).toContain("<body>");
+    expect(mocks.readPluginUiEntry).toHaveBeenCalledTimes(1);
+
+    app!.unmount();
+    const second = await mountHost();
+
+    // The inlined html was released after the document was built; a second
+    // panel still boots from the cached document alone.
+    expect(mocks.readPluginUiEntry).toHaveBeenCalledTimes(1);
+    expect(second.frame.getAttribute("srcdoc")).toBe(firstSrcdoc);
+  });
+
+  it("re-reads the ui build when the unsafe-eval grant flips after the html was released", async () => {
+    const { frame } = await mountHost();
+    expect(frame.getAttribute("srcdoc")).not.toContain("'unsafe-eval'");
+    expect(mocks.readPluginUiEntry).toHaveBeenCalledTimes(1);
+
+    // The cached document carries the CSP it was built with, and the html it was
+    // built from is gone, so the grant change must trigger a fresh read.
+    mocks.editorSettings.pluginGraphicsEngineIds = ["sample"];
+    await vi.waitFor(() => expect(mocks.readPluginUiEntry).toHaveBeenCalledTimes(2));
+    await flushWorkbenchLoad();
+
+    expect(root.querySelector("iframe")?.getAttribute("srcdoc")).toContain("'unsafe-eval'");
   });
 
   it("runs reinit before one init when load precedes ready", async () => {

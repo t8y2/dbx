@@ -856,3 +856,302 @@ func (rows *vastbaseIndexMetadataTestRows) Next(destination []driver.Value) erro
 	rows.index++
 	return nil
 }
+
+// vastbaseListObjectsState answers the object-listing queries and records every
+// statement so a test can prove which catalogs were scanned.
+type vastbaseListObjectsState struct {
+	queries []string
+	rows    map[string][][]driver.Value
+	columns map[string][]string
+}
+
+func (state *vastbaseListObjectsState) query(statement string) (driver.Rows, error) {
+	state.queries = append(state.queries, statement)
+	for _, marker := range state.markerOrder() {
+		if strings.Contains(statement, marker) {
+			return &valueRows{columns: state.columns[marker], rows: state.rows[marker]}, nil
+		}
+	}
+	// Unmatched statements are a test bug, not a production path: name the
+	// statement instead of silently answering it with an empty result set.
+	return nil, fmt.Errorf("unexpected metadata query: %s", statement)
+}
+
+// markerOrder keeps marker matching deterministic; a map range would let a
+// generic marker win over a specific one between runs.
+func (state *vastbaseListObjectsState) markerOrder() []string {
+	return []string{"pkgspecsrc", "gs_package", "datcompatibility", "_database", "_class c", "_proc p", "pg_type t", "sys_type t"}
+}
+
+func (state *vastbaseListObjectsState) scanned(marker string) bool {
+	for _, statement := range state.queries {
+		if strings.Contains(statement, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func newVastbaseListObjectsState() *vastbaseListObjectsState {
+	return &vastbaseListObjectsState{
+		columns: map[string][]string{
+			"gs_package": {"pkgname", "description", "has_body"},
+			"pkgspecsrc": {"pkgspecsrc", "pkgbodydeclsrc", "pkgbodyinitsrc", "pkgsecdef"},
+			"_proc p":    {"proname", "kind", "comment"},
+			"_class c":   {"relname", "relkind", "comment"},
+			"sys_type t": {"typname", "description", "typtype", "has_members"},
+			"pg_type t":  {"typname", "description", "typtype", "has_members"},
+		},
+		rows: map[string][][]driver.Value{
+			// Packages live in gs_package only; the routine scan (pg_proc /
+			// sys_proc) never returns them, which is the #15359 gap.
+			"gs_package": {
+				{"pkg_order", "order helpers", true},
+				{"pkg_util", nil, false},
+			},
+			// openGauss stores kernel-rewritten fragments: the declaration starts
+			// with the "PACKAGE  DECLARE" marker and the initialization section
+			// is wrapped in "INSTANTIATION".
+			"pkgspecsrc": {
+				{
+					" PACKAGE  DECLARE\n  PROCEDURE touch(order_id INTEGER);\nEND ",
+					" PACKAGE  DECLARE\n  PROCEDURE touch(order_id INTEGER) IS\n  BEGIN\n    NULL;\n  END;\nEND ",
+					" INSTANTIATION \nBEGIN\n  NULL;\nEND",
+					true,
+				},
+			},
+			"_proc p": {
+				{"generic_proc", "PROCEDURE", nil},
+			},
+			"_class c": {
+				{"orders", "TABLE", nil},
+			},
+			"sys_type t": {},
+			"pg_type t":  {},
+		},
+	}
+}
+
+func openVastbaseListObjectsDB(t *testing.T, state *vastbaseListObjectsState) *sql.DB {
+	t.Helper()
+	return openVastbaseCustomTypesDB(t, &vastbaseCustomTypesTestState{query: state.query})
+}
+
+func TestVastbaseListObjectsIncludesPackages(t *testing.T) {
+	state := newVastbaseListObjectsState()
+	server := newServer()
+	server.mode = vastbaseMode{compatibilityMode: "oracle", compatibilityModeRaw: "A", postgresCatalog: true}
+	server.db = openVastbaseListObjectsDB(t, state)
+
+	// Ask for the groups the sidebar loads together. Types are excluded on
+	// purpose: the custom-type scan is unrelated to packages and has its own
+	// tests, so keeping it out here keeps this test focused.
+	objects, err := server.listObjects("app", metadataListConstraints{
+		ObjectTypes: []string{"TABLE", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var packages, bodies []objectInfo
+	for _, item := range objects {
+		switch item.ObjectType {
+		case "PACKAGE":
+			packages = append(packages, item)
+		case "PACKAGE_BODY":
+			bodies = append(bodies, item)
+		}
+	}
+	if len(packages) != 2 {
+		t.Fatalf("expected two packages in the object list, got %#v (objects=%#v)", packages, objects)
+	}
+	if packages[0].Name != "pkg_order" || packages[1].Name != "pkg_util" {
+		t.Fatalf("unexpected package names/order: %#v", packages)
+	}
+	if packages[0].Schema != "app" || packages[0].Comment == nil || *packages[0].Comment != "order helpers" {
+		t.Fatalf("package row lost its schema or comment: %#v", packages[0])
+	}
+	if packages[1].Comment != nil {
+		t.Fatalf("NULL package comment must stay nil, got %q", *packages[1].Comment)
+	}
+	// Only the package that actually stores a body reports a PACKAGE_BODY node,
+	// so the body group never carries empty entries.
+	if len(bodies) != 1 || bodies[0].Name != "pkg_order" {
+		t.Fatalf("expected one package body for pkg_order, got %#v", bodies)
+	}
+}
+
+// A package-only request must not fall back to scanning relations or routines;
+// the sidebar asks for PACKAGE/PACKAGE_BODY as its own group.
+func TestVastbasePackageRequestSkipsTablesAndRoutines(t *testing.T) {
+	state := newVastbaseListObjectsState()
+	server := newServer()
+	server.mode = vastbaseMode{compatibilityMode: "oracle", compatibilityModeRaw: "A", postgresCatalog: true}
+	server.db = openVastbaseListObjectsDB(t, state)
+
+	objects, err := server.listObjects("app", metadataListConstraints{ObjectTypes: []string{"PACKAGE", "PACKAGE_BODY"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.scanned("_class c") || state.scanned("_proc p") {
+		t.Fatalf("package request must not scan relations or routines: %#v", state.queries)
+	}
+	if len(objects) != 3 {
+		t.Fatalf("expected two packages plus the stored body, got %#v", objects)
+	}
+	var seenBody bool
+	for _, item := range objects {
+		switch item.ObjectType {
+		case "PACKAGE":
+		case "PACKAGE_BODY":
+			seenBody = true
+		default:
+			t.Fatalf("package request returned a non-package object: %#v", item)
+		}
+	}
+	if !seenBody {
+		t.Fatalf("package request dropped the stored body: %#v", objects)
+	}
+}
+
+// A table-only request must not leak packages into the table group.
+func TestVastbaseTableRequestSkipsPackages(t *testing.T) {
+	state := newVastbaseListObjectsState()
+	server := newServer()
+	server.db = openVastbaseListObjectsDB(t, state)
+
+	objects, err := server.listObjects("app", metadataListConstraints{ObjectTypes: []string{"TABLE"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.scanned("gs_package") {
+		t.Fatalf("table request must not scan packages: %#v", state.queries)
+	}
+	for _, item := range objects {
+		if item.ObjectType == "PACKAGE" || item.ObjectType == "PACKAGE_BODY" {
+			t.Fatalf("table request returned a package object: %#v", item)
+		}
+	}
+}
+
+func TestVastbaseObjectSourceReturnsPackageText(t *testing.T) {
+	// openGauss keeps kernel-rewritten fragments, so the returned source has to
+	// be rebuilt into runnable DDL rather than echoed back.
+	const declFragment = " PACKAGE  DECLARE\n  PROCEDURE touch(order_id INTEGER);\nEND "
+	const bodyFragment = " PACKAGE  DECLARE\n  PROCEDURE touch(order_id INTEGER) IS\n  BEGIN\n    NULL;\n  END;\nEND "
+	const initFragment = " INSTANTIATION \nBEGIN\n  NULL;\nEND"
+	state := &vastbaseListObjectsState{
+		columns: map[string][]string{"pkgspecsrc": {"pkgspecsrc", "pkgbodydeclsrc", "pkgbodyinitsrc", "pkgsecdef"}},
+		rows:    map[string][][]driver.Value{"pkgspecsrc": {{declFragment, bodyFragment, initFragment, false}}},
+	}
+	server := newServer()
+	server.mode = vastbaseMode{compatibilityMode: "oracle", compatibilityModeRaw: "A", postgresCatalog: true}
+	server.db = openVastbaseListObjectsDB(t, state)
+
+	want := map[string]string{
+		"PACKAGE": `CREATE OR REPLACE PACKAGE "app"."pkg_order" AUTHID CURRENT_USER AS
+  PROCEDURE touch(order_id INTEGER);
+END "pkg_order";`,
+		// The body keeps the member declarations and the initialization block.
+		"PACKAGE_BODY": `CREATE OR REPLACE PACKAGE BODY "app"."pkg_order" AS
+  PROCEDURE touch(order_id INTEGER) IS
+  BEGIN
+    NULL;
+  END;
+BEGIN
+  NULL;
+END "pkg_order";`,
+	}
+	for objectType, expected := range want {
+		source, err := server.getObjectSource("app", "pkg_order", objectType)
+		if err != nil {
+			t.Fatalf("getObjectSource(%q) failed: %v", objectType, err)
+		}
+		if got, _ := source["source"].(string); got != expected {
+			t.Fatalf("getObjectSource(%q) source = %q, want %q", objectType, got, expected)
+		}
+		if got, _ := source["object_type"].(string); got != objectType {
+			t.Fatalf("getObjectSource(%q) echoed object_type %q", objectType, got)
+		}
+	}
+}
+
+// Kernels that already store complete DDL must not be rewritten into invalid
+// statements: without the fragment marker the text is returned as stored.
+func TestVastbaseObjectSourceKeepsCompleteDdl(t *testing.T) {
+	const spec = "CREATE OR REPLACE PACKAGE pkg_order AS\n  PROCEDURE touch;\nEND pkg_order;"
+	state := &vastbaseListObjectsState{
+		columns: map[string][]string{"pkgspecsrc": {"pkgspecsrc", "pkgbodydeclsrc", "pkgbodyinitsrc", "pkgsecdef"}},
+		rows:    map[string][][]driver.Value{"pkgspecsrc": {{spec, "", "", true}}},
+	}
+	server := newServer()
+	server.mode = vastbaseMode{compatibilityMode: "oracle", compatibilityModeRaw: "A", postgresCatalog: true}
+	server.db = openVastbaseListObjectsDB(t, state)
+
+	source, err := server.getObjectSource("app", "pkg_order", "PACKAGE")
+	if err != nil {
+		t.Fatalf("getObjectSource failed: %v", err)
+	}
+	if got, _ := source["source"].(string); got != spec {
+		t.Fatalf("source = %q, want the stored DDL %q", got, spec)
+	}
+}
+
+// Packages only exist in Oracle-compatible databases, so the other modes must
+// not pay for (or break on) a gs_package scan.
+func TestVastbaseListObjectsSkipsPackagesOutsideOracleMode(t *testing.T) {
+	state := newVastbaseListObjectsState()
+	server := newServer()
+	server.mode = vastbaseMode{compatibilityMode: "postgres", compatibilityModeRaw: "PG", postgresCatalog: true}
+	server.db = openVastbaseListObjectsDB(t, state)
+
+	if _, err := server.listObjects("app", metadataListConstraints{ObjectTypes: []string{"PACKAGE", "PACKAGE_BODY"}}); err != nil {
+		t.Fatal(err)
+	}
+	if state.scanned("gs_package") {
+		t.Fatalf("postgres-compatible database scanned packages: %#v", state.queries)
+	}
+}
+
+// The object tree keys its A-mode package entry off the compatibility mode that
+// list_databases reports, so agent connections have to publish it.
+func TestVastbaseListDatabasesReportsCompatibilityMode(t *testing.T) {
+	state := &vastbaseListObjectsState{
+		columns: map[string][]string{"datcompatibility": {"datname", "datcompatibility"}},
+		rows:    map[string][][]driver.Value{"datcompatibility": {{"vastbase_a", "A"}, {"vastbase_pg", "PG"}}},
+	}
+	server := newServer()
+	server.db = openVastbaseListObjectsDB(t, state)
+
+	databases, err := server.listDatabases()
+	if err != nil {
+		t.Fatalf("listDatabases failed: %v", err)
+	}
+	if len(databases) != 2 {
+		t.Fatalf("expected two databases, got %#v", databases)
+	}
+	if databases[0].Name != "vastbase_a" || databases[0].CompatibilityMode != "A" {
+		t.Fatalf("A-mode database lost its compatibility mode: %#v", databases[0])
+	}
+	if databases[1].CompatibilityMode != "PG" {
+		t.Fatalf("unexpected compatibility mode: %#v", databases[1])
+	}
+}
+
+// Older catalogs without datcompatibility still have to produce a database
+// picker; the name-only listing is the fallback.
+func TestVastbaseListDatabasesFallsBackWithoutCompatibilityColumn(t *testing.T) {
+	state := &vastbaseListObjectsState{
+		columns: map[string][]string{"_database": {"datname"}},
+		rows:    map[string][][]driver.Value{"_database": {{"vastbase_a"}}},
+	}
+	server := newServer()
+	server.db = openVastbaseListObjectsDB(t, state)
+
+	databases, err := server.listDatabases()
+	if err != nil {
+		t.Fatalf("listDatabases failed: %v", err)
+	}
+	if len(databases) != 1 || databases[0].Name != "vastbase_a" || databases[0].CompatibilityMode != "" {
+		t.Fatalf("unexpected fallback databases: %#v", databases)
+	}
+}

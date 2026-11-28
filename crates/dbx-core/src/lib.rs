@@ -5,6 +5,7 @@ pub mod ai;
 pub mod cc_switch;
 pub mod data;
 pub mod host;
+pub mod observability;
 pub mod persistence;
 pub mod safety;
 

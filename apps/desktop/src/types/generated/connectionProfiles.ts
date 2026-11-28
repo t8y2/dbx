@@ -278,7 +278,7 @@ export const CONNECTION_PICKER_OPTIONS = [
   { value: "goldendb", label: "金篆 GoldenDB", category: "domestic" },
   { value: "databend", label: "Databend", category: "analytics" },
   { value: "tdsql", label: "TDSQL", category: "domestic" },
-  { value: "polardb", label: "PolarDB", category: "domestic" },
+  { value: "polardb", label: "PolarDB (MySQL)", category: "domestic" },
   { value: "greatsql", label: "GreatSQL", category: "domestic" },
   { value: "databricks", label: "Databricks SQL", category: "analytics" },
   { value: "saphana", label: "SAP HANA", category: "analytics" },

@@ -32,6 +32,7 @@ type plDebugNativeNamedCall struct {
 	oci          bool
 	ociValues    []string
 	lobs         map[int]*plDebugLobOutput
+	cursors      map[int]*plDebugCursorOutput
 	lengths      []sql.NullInt64
 	timezones    map[int]*[4]sql.NullString
 	ociTimezones map[int]*[4]string
@@ -200,6 +201,11 @@ func (p *plDebugNativePlan) render(prefix string) plDebugNativeBody {
 		}
 		if recordTypes[a.Position] != "" {
 			kind = recordTypes[a.Position]
+		}
+		if a.cursorOutput() {
+			// The outer block can still close an exported cursor after an exception.
+			declarations += "  " + name + " SYS_REFCURSOR;\n"
+			return
 		}
 		if p.typedSignature != nil {
 			scoped += "  " + name + " " + kind + ";\n"
@@ -373,7 +379,7 @@ func (p *plDebugNativePlan) render(prefix string) plDebugNativeBody {
 	after := fmt.Sprintf("  :%d := %s;\n", index, phase)
 	completion := ""
 	if p.typedSignature != nil {
-		completion, after = fmt.Sprintf("  :%d := %s;\n", p.prefixCount(), phase), ""
+		after = ""
 		index--
 	}
 	lobLeft := ""
@@ -392,6 +398,9 @@ func (p *plDebugNativePlan) render(prefix string) plDebugNativeBody {
 		names = append(names, encoder.privateNames()...)
 	}
 	for field, a := range p.outputs() {
+		if a.cursorOutput() {
+			continue
+		}
 		done := fmt.Sprintf("%sDONE_%d", prefix, field)
 		declarations += "  " + done + " INTEGER := 0;\n"
 		names = append(names, done)
@@ -508,11 +517,34 @@ func (p *plDebugNativePlan) render(prefix string) plDebugNativeBody {
 			names = append(names, prefix+suffix)
 		}
 	}
+	if p.typedSignature != nil {
+		index++
+		completion = fmt.Sprintf("  :%d := %s;\n", index, phase)
+	}
+	var cursors strings.Builder
+	for field, a := range p.outputs() {
+		if !a.cursorOutput() {
+			continue
+		}
+		done := fmt.Sprintf("%sDONE_%d", prefix, field)
+		declarations += "  " + done + " INTEGER := 0;\n"
+		names = append(names, done)
+		value := locals[a.Position]
+		// go-ora requires a live cursor for every cursor OUT bind. A closed or
+		// unopened cursor gets an empty placeholder, with its own receipt.
+		fmt.Fprintf(&cursors, "  IF %s%%ISOPEN THEN\n    IF %s >= 2 THEN %s := 1; END IF;\n  ELSE\n    OPEN %s FOR SELECT 1 FROM SYS.DUAL WHERE 1 = 0;\n  END IF;\n  :%d := %s;\n  :%d := %s;\n", value, phase, done, value, index+1, value, index+2, done)
+		index += 2
+	}
+	if p.typedSignature != nil {
+		completion += cursors.String()
+	} else {
+		after += cursors.String()
+	}
 	result := plDebugNativeBody{Declarations: declarations, Source: body, After: after, RollbackCondition: phase + " < 2", CallLine: callLine, CallLastLine: callLastLine, PrivateNames: names}
 	if p.typedSignature != nil {
 		result.ScopedDeclarations = scoped
 		result.Initialization = "    " + phase + " := -1;\n"
-		result.After += "  " + phase + " := 3;\n"
+		result.After += fmt.Sprintf("  IF %s >= 2 THEN %s := 3; END IF;\n", phase, phase)
 		result.Completion = completion
 	}
 	return result
@@ -523,7 +555,7 @@ func (p *plDebugNativePlan) bind(oci bool) (*plDebugNativeNamedCall, error) {
 		return nil, errors.New("typed debugger bind count budget exceeded")
 	}
 	outputs := p.outputs()
-	call := &plDebugNativeNamedCall{plan: p, values: make([]sql.NullString, len(outputs)), copied: make([]sql.NullInt64, len(outputs)), oci: oci, lobs: map[int]*plDebugLobOutput{}, lengths: make([]sql.NullInt64, len(outputs)), timezones: map[int]*[4]sql.NullString{}, ociTimezones: map[int]*[4]string{}}
+	call := &plDebugNativeNamedCall{plan: p, values: make([]sql.NullString, len(outputs)), copied: make([]sql.NullInt64, len(outputs)), oci: oci, lobs: map[int]*plDebugLobOutput{}, cursors: map[int]*plDebugCursorOutput{}, lengths: make([]sql.NullInt64, len(outputs)), timezones: map[int]*[4]sql.NullString{}, ociTimezones: map[int]*[4]string{}}
 	if oci {
 		call.ociValues = make([]string, len(p.outputs()))
 	}
@@ -604,6 +636,9 @@ func (p *plDebugNativePlan) bind(oci bool) (*plDebugNativeNamedCall, error) {
 	}
 	for i := range call.values {
 		a := outputs[i]
+		if a.cursorOutput() {
+			continue
+		}
 		if a.timezone() {
 			parts, ociParts := new([4]sql.NullString), new([4]string)
 			call.timezones[i], call.ociTimezones[i] = parts, ociParts
@@ -645,7 +680,24 @@ func (p *plDebugNativePlan) bind(oci bool) (*plDebugNativeNamedCall, error) {
 		}
 		call.arguments = append(call.arguments, plDebugOutArg(oci, &call.phase))
 	}
+	for i, output := range outputs {
+		if output.cursorOutput() {
+			cursor := newPLDebugCursorOutput(oci, &call.copied[i])
+			call.cursors[i] = cursor
+			call.arguments = append(call.arguments, cursor.bind, plDebugOutArg(oci, &call.copied[i]))
+		}
+	}
 	return call, nil
+}
+
+func (c *plDebugNativeNamedCall) cursorOutputs() []*plDebugCursorOutput {
+	outputs := make([]*plDebugCursorOutput, 0, len(c.cursors))
+	for i := range c.values {
+		if cursor := c.cursors[i]; cursor != nil {
+			outputs = append(outputs, cursor)
+		}
+	}
+	return outputs
 }
 
 func (c *plDebugNativeNamedCall) lobOutputs() []*plDebugLobOutput {
@@ -766,7 +818,7 @@ func (c *plDebugNativeNamedCall) result(capture plDebugNativeCapture, executionE
 	result["executionOutcome"], result["executionStage"] = "succeeded", "returned"
 	params := []map[string]interface{}{}
 	var returned interface{}
-	partial := false
+	partial, pending := false, false
 	if c.plan.timezoneTypes() {
 		zone := c.inputZone
 		if c.oci {
@@ -780,6 +832,19 @@ func (c *plDebugNativeNamedCall) result(capture plDebugNativeCapture, executionE
 		}
 	}
 	for i, a := range c.plan.outputs() {
+		if cursor := c.cursors[i]; cursor != nil {
+			item := plDebugNativeResultField(a, nil, cursor.state)
+			if cursor.preview != nil {
+				item["cursorPreview"] = cursor.preview
+			}
+			if cursor.err != nil {
+				item["error"] = cursor.err.Error()
+			}
+			partial = partial || cursor.state == "error" || cursor.state == "partial"
+			pending = pending || cursor.state == "pending"
+			params = append(params, item)
+			continue
+		}
 		if a.timezone() {
 			parts := [4]sql.NullString{}
 			if saved := c.timezones[i]; saved != nil {
@@ -903,6 +968,8 @@ func (c *plDebugNativeNamedCall) result(capture plDebugNativeCapture, executionE
 	result["outParams"], result["returnValue"], result["outParamsState"] = params, returned, "available"
 	if partial {
 		result["outParamsState"], result["resultError"] = "partial", "Some returned result fields could not be verified"
+	} else if pending {
+		result["outParamsState"] = "pending"
 	}
 	if executionErr != nil {
 		result["resultError"] = "The target returned, but its result or output transfer failed"

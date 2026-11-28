@@ -113,7 +113,7 @@ import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { applyDdlDatabaseQualifier, formatDdlForDisplay, formatGeneratedDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard, eventTargetUsesNativeClipboard, isPlainClipboardShortcut } from "@/lib/common/clipboard";
-import { structureRowClickTargetOwnsFocus } from "@/lib/table/structureRowClickFocus";
+import { structureRowClickTargetOwnsFocus, structureRowClosestControl } from "@/lib/table/structureRowClickFocus";
 import { formatTsv } from "@/lib/export/exportFormats";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
@@ -397,7 +397,12 @@ function formatStructureDdl(ddl: string): Promise<string> {
       databaseType: databaseType.value,
       database: props.database,
       catalog: props.catalog,
-      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      // Kingbase can resolve an unqualified DDL target to a system table with
+      // the same name (#15579), so the editable DDL tab must keep the backend's
+      // schema qualifier. `ddlQualifiedPartCount` has no kingbase entry, so
+      // forcing the flag on only skips the stripping pass — no database segment
+      // is ever inserted.
+      includeDatabaseName: databaseType.value === "kingbase" ? true : settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
     },
     settingsStore.editorSettings.sqlFormatter,
@@ -555,9 +560,10 @@ function scheduleDdlEditorInit() {
  * quoted names are uppercased before their quotes are removed.
  */
 function applyDdlGenerationPreferences(sql: string, dialect: SqlFormatDialect): string {
-  const unqualified = applyDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
-  if (settingsStore.editorSettings.generateSqlQuoteIdentifiers) return unqualified;
-  return formatGeneratedDdlIdentifierQuotes(unqualified, dialect, false, { preserveCaseSensitiveIdentifiers: tableStoresCaseSensitiveIdentifiers.value });
+  // Kingbase can resolve an unqualified DDL target to a system table with the same name.
+  const targetSql = databaseType.value === "kingbase" ? sql : applyDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
+  if (settingsStore.editorSettings.generateSqlQuoteIdentifiers) return targetSql;
+  return formatGeneratedDdlIdentifierQuotes(targetSql, dialect, false, { preserveCaseSensitiveIdentifiers: tableStoresCaseSensitiveIdentifiers.value });
 }
 
 type StructureDdlRequest = {
@@ -2600,6 +2606,7 @@ function addExistingPrimaryKeyColumn() {
 // Mirrors Rust `supports_named_primary_key`: engines that persist a user-supplied
 // PK constraint name. Other dialects ignore the symbol, so the field is hidden.
 const canNamePrimaryKey = computed(() => {
+  if (databaseType.value === "saphana") return false;
   if (connection.value?.driver_profile?.toLowerCase() === "gaussdb-m") return true;
   const dialect = structureCapabilities.value.dialect;
   return dialect === "mysql" || dialect === "postgres" || dialect === "sqlserver" || dialect === "oracle";
@@ -4733,6 +4740,12 @@ function onColumnRowMouseDown(event: MouseEvent) {
   if (event.button === 0) {
     columnContextMenuButton = null;
     columnContextMenuCtrlKey = false;
+    // On macOS WebKit, <button> is not mouse-focusable, so mousedown on a popup
+    // trigger inside a focusable scroller moves focus to the scroller instead
+    // and triggers Reka DismissableLayer focusOutside on popovers/menus (#15596).
+    if (!event.ctrlKey && structureRowClosestControl(event.target, "[aria-haspopup]")) {
+      event.preventDefault();
+    }
   } else {
     columnContextMenuButton = event.button;
     columnContextMenuCtrlKey = event.ctrlKey;
@@ -4757,7 +4770,7 @@ function onColumnRowClick(column: EditableStructureColumn, event: MouseEvent) {
   // Focus the scroller only for inert cell content, so the row clipboard shortcuts keep
   // acting on the table. A control under the pointer must keep focus: moving it to the
   // scroller dismissed the dropdown/popover that the same click had just opened, because
-  // reka's popover and dropdown layers close on focus-outside (#15585).
+  // reka's popover and dropdown layers close on focus-outside (#15585, #15596).
   if (!eventTargetUsesNativeClipboard(event) && !structureRowClickTargetOwnsFocus(event.target)) structureScrollerElement(columnsScrollerRef.value)?.focus({ preventScroll: true });
   if (event.shiftKey) {
     selectColumnRangeFromAnchor(column);
@@ -8814,7 +8827,7 @@ watch(
             <CustomContextMenu :items="activeColumnContextMenuItems" @close="clearColumnContextMenuTarget" v-slot="columnContextMenuSlot">
               <RecycleScroller
                 ref="columnsScrollerRef"
-                class="structure-column-virtual-scroller structure-table-scroller h-full overflow-auto"
+                class="structure-column-virtual-scroller structure-table-scroller h-full overflow-auto outline-none"
                 :style="{
                   '--structure-column-table-width': columnTableWidth + 'px',
                   '--structure-column-row-height': structureColumnRowHeight + 'px',
@@ -8831,7 +8844,7 @@ watch(
                 key-field="id"
                 item-class="structure-column-virtual-row"
                 list-class="structure-column-virtual-list"
-                tabindex="0"
+                tabindex="-1"
                 @keydown="onColumnGridKeydown"
                 @paste="onColumnGridPaste"
                 @scroll.passive="onStructureContentScroll('columns', $event)"

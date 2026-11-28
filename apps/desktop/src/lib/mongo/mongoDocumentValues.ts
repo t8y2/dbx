@@ -81,7 +81,7 @@ function mongoExtendedJsonDateValue(value: unknown): string | number | undefined
   return Object.keys(canonical).length === 1 && typeof canonical.$numberLong === "string" ? canonical.$numberLong : undefined;
 }
 
-export function mongoDocumentGridColumnTypes(documents: readonly Record<string, unknown>[], columns: readonly string[]): string[] {
+export function mongoDocumentGridColumnTypes(documents: readonly Record<string, unknown>[], columns: readonly string[], mode: "all" | "datesOnly" = "all"): string[] {
   return columns.map((column) => {
     let inferredType: string | undefined;
     for (const document of documents) {
@@ -92,6 +92,7 @@ export function mongoDocumentGridColumnTypes(documents: readonly Record<string, 
         inferredType = "datetime";
         continue;
       }
+      if (mode === "datesOnly") return "";
       const numericType = mongoDocumentNumericValueType(value);
       if (!numericType || inferredType === "datetime") return "";
       inferredType = inferredType && inferredType !== numericType ? "number" : numericType;

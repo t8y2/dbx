@@ -116,6 +116,10 @@ pub struct DataGridColumnInfo {
     pub column_default: Option<String>,
     #[serde(default)]
     pub extra: Option<String>,
+    /// Column collation as reported by the catalog (MySQL `COLLATION_NAME`). Lets the
+    /// predicate builder skip `BINARY` when the column already compares byte-exactly.
+    #[serde(default)]
+    pub collation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +246,8 @@ pub enum DataGridContextFilterMode {
     IsNotBlank,
     Like,
     NotLike,
+    Ilike,
+    NotIlike,
     BeginsWith,
     EndsWith,
     NotBeginsWith,
@@ -261,6 +267,11 @@ fn supports_data_grid_context_filter_mode(
     mode: DataGridContextFilterMode,
 ) -> bool {
     if database_type == Some(DatabaseType::VictoriaMetrics) {
+        return false;
+    }
+    if matches!(mode, DataGridContextFilterMode::Ilike | DataGridContextFilterMode::NotIlike)
+        && !is_postgres_like_pattern_database(database_type)
+    {
         return false;
     }
     !matches!(
@@ -629,6 +640,7 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
 
 pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatementOptions) -> Option<String> {
     build_data_grid_copy_insert_statement_with_formatters(
+        "INSERT",
         options,
         |reference| reference,
         format_grid_copy_insert_sql_literal_with_spatial,
@@ -636,15 +648,17 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
 }
 
 pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
+    insert_keyword: &str,
     options: DataGridCopyInsertStatementOptions,
     format_reference: impl Fn(String) -> String,
     format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>, Option<u32>) -> String,
 ) -> Option<String> {
-    build_data_grid_copy_insert_statements_with_formatters(options, format_reference, format_literal)
+    build_data_grid_copy_insert_statements_with_formatters(insert_keyword, options, format_reference, format_literal)
         .map(|statements| statements.join("\n"))
 }
 
 pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
+    insert_keyword: &str,
     options: DataGridCopyInsertStatementOptions,
     format_reference: impl Fn(String) -> String,
     format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>, Option<u32>) -> String,
@@ -826,7 +840,7 @@ pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
         value_rows
             .iter()
             .map(|values| {
-                let sql = format!("INSERT INTO {table} ({columns}) VALUES {values}");
+                let sql = format!("{insert_keyword} INTO {table} ({columns}) VALUES {values}");
                 if options.database_type == Some(DatabaseType::OceanbaseOracle) {
                     data_grid_statement(options.database_type, sql)
                 } else {
@@ -836,7 +850,7 @@ pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
             .collect::<Vec<_>>()
     } else {
         vec![format!(
-            "INSERT INTO {table} ({columns}) VALUES{}{};",
+            "{insert_keyword} INTO {table} ({columns}) VALUES{}{};",
             if value_rows.len() == 1 { " " } else { "\n" },
             value_rows.join(",\n")
         )]
@@ -918,6 +932,18 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
         DataGridContextFilterMode::NotLike => Some(data_grid_like_condition(
             &like_column,
             "NOT LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::Contains, options.database_type),
+            options.database_type,
+        )),
+        DataGridContextFilterMode::Ilike => Some(data_grid_like_condition(
+            &like_column,
+            "ILIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::Contains, options.database_type),
+            options.database_type,
+        )),
+        DataGridContextFilterMode::NotIlike => Some(data_grid_like_condition(
+            &like_column,
+            "NOT ILIKE",
             data_grid_like_pattern(value, DataGridLikeTemplate::Contains, options.database_type),
             options.database_type,
         )),
@@ -2738,6 +2764,7 @@ fn copy_column_info(
         is_primary_key: false,
         column_default: None,
         extra: None,
+        collation: None,
     })
 }
 
@@ -3096,7 +3123,7 @@ pub fn format_grid_sql_literal_with_spatial(
     } else {
         let escaped_text = literal_text.replace('\\', "\\\\").replace('\'', "''");
         match grid_sub_control_escape(database_type) {
-            Some(escape) => escape_grid_sub_control(&escaped_text, escape),
+            Some(escape) => escape_grid_control_chars(&escaped_text, escape),
             None => escaped_text,
         }
     };
@@ -3131,15 +3158,23 @@ fn grid_sub_control_escape(database_type: Option<DatabaseType>) -> Option<GridSu
     }
 }
 
-fn escape_grid_sub_control(text: &str, escape: GridSubControlEscape) -> String {
-    if !text.contains(['\u{1a}', '\0']) {
+fn escape_grid_control_chars(text: &str, escape: GridSubControlEscape) -> String {
+    let escape_line_endings = escape == GridSubControlEscape::BackslashZ;
+    if !text.contains(['\u{1a}', '\0']) && !(escape_line_endings && text.contains(['\r', '\n'])) {
         return text.to_string();
     }
     let sub_control = match escape {
         GridSubControlEscape::BackslashZ => "\\Z",
         GridSubControlEscape::Hex => "\\x1a",
     };
-    text.replace('\0', "\\0").replace('\u{1a}', sub_control)
+    let escaped = text.replace('\0', "\\0").replace('\u{1a}', sub_control);
+    if escape_line_endings {
+        // MySQL SQL literals may be copied through an editor that normalizes
+        // CR/LF. Escape data line endings just like the database export path.
+        escaped.replace('\r', "\\r").replace('\n', "\\n")
+    } else {
+        escaped
+    }
 }
 
 fn postgres_json_array_element_type(
@@ -4356,6 +4391,7 @@ pub fn format_oracle_lob_export_literal(
         is_primary_key: false,
         column_default: None,
         extra: None,
+        collation: None,
     };
     Ok(Some(format_grid_assignment_sql_literal(value, database_type, Some(&column), None)))
 }
@@ -4504,7 +4540,21 @@ fn uses_mysql_binary_text_predicate(
 ) -> bool {
     database_type == Some(DatabaseType::Mysql)
         && value.is_string()
-        && column_info.map(|column| is_textual_column_type(&column.data_type)).unwrap_or(false)
+        && column_info
+            .map(|column| {
+                is_textual_column_type(&column.data_type) && !collation_compares_byte_exact(column.collation.as_deref())
+            })
+            .unwrap_or(false)
+}
+
+/// True when `col = 'x'` under this collation already equals `BINARY col = 'x'`, so the
+/// wrapper (which also defeats index use) can be dropped. Only NO PAD binary collations
+/// qualify: MySQL 8 `*_0900_bin` and MariaDB `*_nopad_bin`. Legacy `*_bin` collations are
+/// PAD SPACE and ignore trailing spaces, whereas BINARY strings do not.
+fn collation_compares_byte_exact(collation: Option<&str>) -> bool {
+    collation
+        .map(|name| name.trim().to_ascii_lowercase())
+        .is_some_and(|name| name.ends_with("_0900_bin") || name.ends_with("_nopad_bin"))
 }
 
 fn is_textual_column_type(data_type: &str) -> bool {
@@ -5246,6 +5296,7 @@ mod tests {
             is_primary_key: false,
             column_default: None,
             extra: extra.map(ToString::to_string),
+            collation: None,
         }
     }
 
@@ -6222,6 +6273,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: None,
                         extra: Some("auto_increment".to_string()),
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "login_name".to_string(),
@@ -6230,6 +6282,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "display_name".to_string(),
@@ -6238,6 +6291,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                 ]),
             }),
@@ -6284,6 +6338,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: Some("nextval('public.users_id_seq'::regclass)".to_string()),
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "name".to_string(),
@@ -6292,6 +6347,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                 ]),
             }),
@@ -6329,6 +6385,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "NAME".to_string(),
@@ -6337,6 +6394,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                 ]),
             }),
@@ -6380,6 +6438,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: None,
                         extra: Some("auto_increment".to_string()),
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "display_name".to_string(),
@@ -6388,6 +6447,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "display_name_upper".to_string(),
@@ -6396,6 +6456,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: Some("virtual generated".to_string()),
+                        collation: None,
                     },
                 ]),
             }),
@@ -6459,6 +6520,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: None,
                         extra: Some("auto_increment".to_string()),
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "stat_date".to_string(),
@@ -6467,6 +6529,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "product_name".to_string(),
@@ -6475,6 +6538,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: Some("".to_string()),
                         extra: None,
+                        collation: None,
                     },
                 ]),
             }),
@@ -6514,6 +6578,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "label".to_string(),
@@ -6522,6 +6587,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                 ]),
             }),
@@ -6557,6 +6623,7 @@ mod tests {
                     is_primary_key: false,
                     column_default: None,
                     extra: None,
+                    collation: None,
                 }]),
             }),
             columns: vec!["id".to_string()],
@@ -6593,6 +6660,7 @@ mod tests {
                         is_primary_key: true,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "id".to_string(),
@@ -6601,6 +6669,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                     DataGridColumnInfo {
                         name: "name".to_string(),
@@ -6609,6 +6678,7 @@ mod tests {
                         is_primary_key: false,
                         column_default: None,
                         extra: None,
+                        collation: None,
                     },
                 ]),
             }),
@@ -6676,6 +6746,7 @@ mod tests {
                     is_primary_key: true,
                     column_default: None,
                     extra: Some("identity".to_string()),
+                    collation: None,
                 }]),
             }),
             columns: vec!["id".to_string()],
@@ -7163,6 +7234,63 @@ mod tests {
     }
 
     #[test]
+    fn mysql_copy_statements_escape_text_line_endings() {
+        let table_meta = DataGridTableMeta {
+            catalog: None,
+            database: None,
+            schema: None,
+            table_name: "notes".to_string(),
+            primary_keys: vec!["id".to_string()],
+            columns: Some(vec![column("id", "int", false, None), column("text", "TEXT", true, None)]),
+        };
+        let columns = vec!["id".to_string(), "text".to_string()];
+        let rows = vec![vec![json!(1), json!("a\rb\nc\r\nd\0e\u{1a}f\\r'")], vec![json!(2), json!("plain text")]];
+        let insert = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(table_meta.clone()),
+            columns: columns.clone(),
+            column_types: None,
+            source_columns: None,
+            rows: rows.clone(),
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
+            include_computed_columns: false,
+            include_database_name: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
+        });
+        assert_eq!(
+            insert.as_deref(),
+            Some(concat!(
+                "INSERT INTO `notes` (`id`, `text`) VALUES\n",
+                r"(1, 'a\rb\nc\r\nd\0e\Zf\\r'''),",
+                "\n",
+                "(2, 'plain text');"
+            ))
+        );
+
+        let updates = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta,
+            columns,
+            source_columns: None,
+            rows,
+            include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
+        });
+        assert_eq!(
+            updates,
+            vec![
+                r"UPDATE `notes` SET `text` = 'a\rb\nc\r\nd\0e\Zf\\r''' WHERE `id` = 1;",
+                "UPDATE `notes` SET `text` = 'plain text' WHERE `id` = 2;",
+            ]
+        );
+    }
+
+    #[test]
     fn mysql_text_columns_keep_prefixed_hex_strings_quoted() {
         assert_eq!(
             format_grid_sql_literal(
@@ -7620,6 +7748,45 @@ mod tests {
             .as_deref(),
             Some("\"update_date\"::text NOT LIKE '12~_8%' ESCAPE '~'")
         );
+    }
+
+    #[test]
+    fn builds_case_insensitive_contains_filters_for_postgres_like_databases() {
+        let condition = |database_type: Option<DatabaseType>, mode: DataGridContextFilterMode, data_type: &str| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type,
+                identifier_quote: None,
+                column_name: "status".to_string(),
+                mode,
+                value: json!("Act_ve"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("status", data_type, true, None)),
+            })
+        };
+
+        assert_eq!(
+            condition(Some(DatabaseType::Postgres), DataGridContextFilterMode::Ilike, "varchar").as_deref(),
+            Some("\"status\" ILIKE '%Act~_ve%' ESCAPE '~'")
+        );
+        assert_eq!(
+            condition(Some(DatabaseType::Postgres), DataGridContextFilterMode::NotIlike, "varchar").as_deref(),
+            Some("\"status\" NOT ILIKE '%Act~_ve%' ESCAPE '~'")
+        );
+        // Non-textual columns are cast, as they are for LIKE.
+        assert_eq!(
+            condition(Some(DatabaseType::Postgres), DataGridContextFilterMode::Ilike, "uuid").as_deref(),
+            Some("\"status\"::text ILIKE '%Act~_ve%' ESCAPE '~'")
+        );
+        // Targets without ILIKE get no condition instead of invalid SQL.
+        for database_type in [None, Some(DatabaseType::Mysql), Some(DatabaseType::Sqlite)] {
+            for mode in [DataGridContextFilterMode::Ilike, DataGridContextFilterMode::NotIlike] {
+                assert_eq!(condition(database_type, mode, "varchar"), None);
+            }
+        }
+        // The frontend sends and receives these exact mode names.
+        assert_eq!(serde_json::to_value(DataGridContextFilterMode::Ilike).unwrap(), json!("ilike"));
+        assert_eq!(serde_json::to_value(DataGridContextFilterMode::NotIlike).unwrap(), json!("not-ilike"));
     }
 
     /// TDengine rejects `LIKE ... ESCAPE`, and ClickHouse only added the clause in
@@ -12415,17 +12582,22 @@ mod tests {
             columns: vec!["id".to_string(), "name".to_string()],
             source_columns: None,
             rows: vec![vec![json!(2), json!("Ada")]],
-            dirty_rows: vec![(0, vec![(1, json!("111\n222"))])],
+            dirty_rows: vec![(0, vec![(1, json!("111\r\n222\r333\n444"))])],
             deleted_rows: vec![],
             new_rows: vec![],
             include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
-        assert_eq!(result.statements, vec!["UPDATE `employees` SET `name` = '111\n222' WHERE `id` = 2;"]);
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE `employees` SET `name` = '111\\r\\n222\\r333\\n444' WHERE `id` = 2;"]
+        );
         assert_eq!(
             result.rollback_statements,
-            vec!["UPDATE `employees` SET `name` = 'Ada' WHERE `id` = 2 AND BINARY `name` = '111\n222';"]
+            vec![
+                "UPDATE `employees` SET `name` = 'Ada' WHERE `id` = 2 AND BINARY `name` = '111\\r\\n222\\r333\\n444';"
+            ]
         );
     }
 
@@ -13410,6 +13582,23 @@ mod tests {
     }
 
     #[test]
+    fn mysql_row_text_predicates_skip_binary_only_for_no_pad_binary_collations() {
+        let predicate = |collation: Option<&str>| {
+            let mut info = column("code", "varchar(32)", true, None);
+            info.collation = collation.map(str::to_string);
+            build_column_predicate(Some(DatabaseType::Mysql), "code", &json!("A b"), Some(&info), true, None)
+        };
+
+        // NO PAD binary collations already compare byte-exactly, so BINARY is redundant.
+        assert_eq!(predicate(Some("utf8mb4_0900_bin")), "`code` = 'A b'");
+        assert_eq!(predicate(Some("UTF8MB4_NOPAD_BIN")), "`code` = 'A b'");
+        // Legacy *_bin collations are PAD SPACE (trailing spaces ignored), BINARY is not.
+        assert_eq!(predicate(Some("utf8mb4_bin")), "BINARY `code` = 'A b'");
+        assert_eq!(predicate(Some("utf8mb4_general_ci")), "BINARY `code` = 'A b'");
+        assert_eq!(predicate(None), "BINARY `code` = 'A b'");
+    }
+
+    #[test]
     fn prepares_manticore_save_statements_without_trailing_semicolons() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::ManticoreSearch),
@@ -13481,6 +13670,7 @@ mod tests {
             is_primary_key: true,
             column_default: None,
             extra: extra.map(ToString::to_string),
+            collation: None,
         }
     }
 

@@ -37,7 +37,7 @@ describe("table structure editor row click focus (#15585)", () => {
   });
 
   it("treats every overlay trigger shape as a focus-owning control", () => {
-    expect(editorSource).toContain('import { structureRowClickTargetOwnsFocus } from "@/lib/table/structureRowClickFocus";');
+    expect(editorSource).toMatch(/import \{[^}]*\bstructureRowClickTargetOwnsFocus\b[^}]*\} from "@\/lib\/table\/structureRowClickFocus";/);
     for (const shape of ["button", "[aria-haspopup]", "[role='combobox']"]) {
       expect(STRUCTURE_ROW_FOCUS_OWNING_CONTROL_SELECTOR).toContain(shape);
     }

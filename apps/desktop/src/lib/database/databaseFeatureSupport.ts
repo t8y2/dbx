@@ -318,6 +318,15 @@ export function pagesTablePartitionsWithRootPage(connection?: Pick<ConnectionCon
   return !(connection.db_type === "gaussdb" && connection.driver_profile?.toLowerCase() === "gaussdb-m");
 }
 
+/**
+ * TDengine's sidebar table group lists only super tables and ordinary tables. A
+ * super table can own a huge number of child tables, so those are paged in when
+ * the super table is expanded instead of being part of the database-level list.
+ */
+export function loadsChildTablesOnDemand(connection?: Pick<ConnectionConfig, "db_type"> | null): boolean {
+  return connection?.db_type === "tdengine";
+}
+
 const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "gaussdb", "opengauss", "mysql", "oracle", "jdbc", "oceanbase-oracle", "dameng", "sqlserver", "kingbase"];
 
 /** Oracle-family databases, kept ONLY for the Oracle-specific ALTER SESSION SET

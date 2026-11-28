@@ -82,7 +82,6 @@ export const redisGroupingZhTW = {
   emptyKey: "（空 Key）",
   selectLoaded: "選擇已載入匹配項",
 };
-
 export const redisGroupingEs = {
   preparingLegacy: "Preparando la vista anterior; los grupos personalizados siguen disponibles…",
   fuzzyTreeUnavailable: "Esta búsqueda supera el límite de recursos de la vista de árbol existente. Elige Lista para explorar las coincidencias cargadas o acota la búsqueda para usar Árbol.",
@@ -112,6 +111,35 @@ export const redisGroupingEs = {
   selectLoaded: "Seleccionar coincidencias cargadas",
 };
 
+export const redisGroupingPtBR = {
+  preparingLegacy: "Preparando a visualização anterior; os grupos personalizados continuam disponíveis…",
+  fuzzyTreeUnavailable: "Esta pesquisa excede o limite de recursos da árvore atual. Escolha Lista para navegar pelas correspondências carregadas ou refine a pesquisa para usar a Árvore.",
+  useList: "Usar lista",
+  settings: "Regras de agrupamento",
+  toggle: "Grupos personalizados",
+  list: "Lista",
+  tree: "Árvore",
+  help: "Regras válidas para toda a conexão; vale a primeira correspondência. Um glob do Redis por linha, diferenciando maiúsculas de minúsculas (*, ?, [a-z], barra invertida para escapar). As inclusões são combinadas com OU; as exclusões têm prioridade. Sem inclusões, tudo corresponde. As contagens consideram apenas as chaves carregadas. Os grupos não delimitam exclusões.",
+  enabled: "Ativar regra",
+  name: "Nome do grupo",
+  up: "Mover para cima",
+  down: "Mover para baixo",
+  remove: "Remover",
+  includes: "Padrões de inclusão",
+  excludes: "Padrões de exclusão",
+  add: "Adicionar regra",
+  example: "Adicionar exemplo do Redisson",
+  invalid: "Informe IDs de regra únicos, um nome e pelo menos um padrão por regra (máximo de 64 regras, 64 padrões por lista e 1024 bytes por padrão).",
+  cancel: "Cancelar",
+  save: "Salvar",
+  unmatched: "Sem correspondência",
+  preparing: "Atualizando os grupos carregados…",
+  loadedOnly: "Os grupos mostram apenas as correspondências carregadas; expandir não faz varredura no Redis.",
+  count: "({count} carregadas)",
+  emptyKey: "(chave vazia)",
+  selectLoaded: "Selecionar correspondências carregadas",
+};
+
 // Polish interface overrides; retains all keys from the canonical English object.
 export const redisGroupingPl = {
   ...redisGroupingEn,
@@ -122,4 +150,33 @@ export const redisGroupingPl = {
   tree: "Drzewo",
   preparingLegacy: "Przygotowywanie poprzedniego widoku; grupy niestandardowe pozostają dostępne…",
   fuzzyTreeUnavailable: "To wyszukiwanie przekracza limit zasobów drzewa. Wybierz listę, aby przeglądać wczytane wyniki, albo zawęź wyszukiwanie, aby użyć widoku drzewa.",
+};
+
+export const redisGroupingJa = {
+  preparingLegacy: "以前のビューを準備中…カスタムグループは引き続き利用できます",
+  fuzzyTreeUnavailable: "この検索結果はツリー表示のリソース上限を超えています。読み込み済みの結果を確認するには「リスト」を選択するか、検索条件を絞り込んで「ツリー」を使用してください。",
+  useList: "リストを使用",
+  settings: "グループ化ルール",
+  toggle: "カスタムグループ",
+  list: "リスト",
+  tree: "ツリー",
+  help: "接続ごとに保存されるルールで、先に一致したものが優先されます。1行に1つ、大文字と小文字を区別する Redis glob パターン（*、?、[a-z]、バックスラッシュによるエスケープ）を入力してください。包含パターンのいずれかに一致したキーが対象になります。除外パターンは包含パターンより優先されます。包含パターンが空の場合はすべてのキーが対象です。件数には読み込み済みのキーだけが含まれます。グループ単位でキーを削除する機能ではありません。",
+  enabled: "ルールを有効化",
+  name: "グループ名",
+  up: "上に移動",
+  down: "下に移動",
+  remove: "削除",
+  includes: "包含パターン",
+  excludes: "除外パターン",
+  add: "ルールを追加",
+  example: "Redisson の例を追加",
+  invalid: "一意なルール ID、名前、およびルールごとに少なくとも1つのパターンを入力してください（最大 64 ルール、各リスト 64 パターン、パターンあたり 1024 バイト）。",
+  cancel: "キャンセル",
+  save: "保存",
+  unmatched: "未分類",
+  preparing: "読み込み済みのグループを更新中…",
+  loadedOnly: "グループには読み込み済みの結果だけが表示されます。展開しても Redis の再スキャンは行われません。",
+  count: "（{count} 件読み込み済み）",
+  emptyKey: "（空のキー）",
+  selectLoaded: "読み込み済みの一致項目を選択",
 };

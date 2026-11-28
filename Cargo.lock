@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.74"
+version = "0.6.75"
 dependencies = [
  "anyhow",
  "axum",
@@ -2254,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.145"
+version = "0.4.146"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.145"
+version = "0.4.146"
 dependencies = [
  "async-trait",
  "axum",
@@ -2783,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.74"
+version = "0.6.75"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -7202,7 +7202,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.12"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89#5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5aee0b0e8d211057fca72932e612efdf5aa2c125#5aee0b0e8d211057fca72932e612efdf5aa2c125"
 dependencies = [
  "base64 0.23.0",
  "byteorder",
@@ -7215,13 +7215,14 @@ dependencies = [
  "rand 0.10.2",
  "sha1 0.10.7",
  "sha2 0.11.0",
+ "sm3",
  "stringprep",
 ]
 
 [[package]]
 name = "postgres-types"
 version = "0.2.14"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89#5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5aee0b0e8d211057fca72932e612efdf5aa2c125#5aee0b0e8d211057fca72932e612efdf5aa2c125"
 dependencies = [
  "bytes",
  "chrono",
@@ -9142,6 +9143,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "sm3"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da6a89ba31723d185fd7413b98c576a575f356d9b84729d8ecb6ead60000a5b6"
+dependencies = [
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10291,7 +10301,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.18"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89#5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5aee0b0e8d211057fca72932e612efdf5aa2c125#5aee0b0e8d211057fca72932e612efdf5aa2c125"
 dependencies = [
  "async-trait",
  "byteorder",

@@ -80,6 +80,7 @@ fn mysql_config(username: &str, password: &str, database: Option<&str>) -> Conne
         is_production: false,
         production_databases: vec![],
         production_badge_scope: None,
+        watermark: None,
         database_info: None,
     }
 }

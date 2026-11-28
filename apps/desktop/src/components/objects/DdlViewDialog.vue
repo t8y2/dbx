@@ -5,7 +5,7 @@ import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import { computed, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Clipboard, ExternalLink, Loader2, Maximize2, Minimize2, RefreshCw } from "@lucide/vue";
+import { ChevronDown, Clipboard, ExternalLink, Loader2, Maximize2, Minimize2, RefreshCw } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -19,11 +19,12 @@ import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboar
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
-import { ddlFormatDialectFor, formatDdlForDisplay } from "@/lib/sql/ddlDisplay";
+import { ddlFormatDialectFor, formatDdlForDisplay, mysqlDdlWithoutAutoIncrementValue } from "@/lib/sql/ddlDisplay";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { useQueryStore } from "@/stores/queryStore";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { HelpTooltip } from "@/components/ui/tooltip";
@@ -66,6 +67,10 @@ const ddlDisplayMode = ref<"formatted" | "original">("formatted");
 const formatDdlOnDemand = computed(() => props.databaseType === "doris");
 const ddlFormatting = ref(false);
 const ddlContent = computed(() => applyDdlTextPreferences(ddlDisplayMode.value === "formatted" ? formattedDdlContent.value : originalDdlContent.value, props.databaseType, settingsStore.editorSettings));
+const ddlWithoutAutoIncrement = computed(() => {
+  const databaseType = props.databaseType ?? connectionStore.getConfig(props.connectionId)?.db_type;
+  if (databaseType === "mysql" && !props.objectType) return mysqlDdlWithoutAutoIncrementValue(ddlContent.value);
+});
 const ddlLoading = ref(false);
 const ddlError = ref("");
 let ddlRequestId = 0;
@@ -506,9 +511,9 @@ function destroyDdlEditor() {
 }
 
 /** Copies the DDL text to clipboard. */
-function copyDdlContent() {
-  if (!ddlLoading.value && !ddlError.value && ddlContent.value) {
-    copyToClipboard(ddlContent.value);
+function copyDdlContent(content = ddlContent.value) {
+  if (!ddlLoading.value && !ddlError.value && content) {
+    copyToClipboard(content);
     toast(t("contextMenu.ddlCopied"), 2000);
   }
 }
@@ -675,10 +680,24 @@ function onClose() {
           <RefreshCw class="h-4 w-4" />
           {{ t("structureEditor.refresh") }}
         </Button>
-        <Button variant="outline" :disabled="ddlLoading || !!ddlError || !ddlContent" @click="copyDdlContent">
-          <Clipboard class="h-4 w-4" />
-          {{ t("grid.copyDdl") }}
-        </Button>
+        <div class="flex shrink-0">
+          <Button variant="outline" class="flex-1" :class="{ 'rounded-r-none': ddlWithoutAutoIncrement }" :disabled="ddlLoading || !!ddlError || !ddlContent" @click="copyDdlContent()">
+            <Clipboard class="h-4 w-4" />
+            {{ t("grid.copyDdl") }}
+          </Button>
+          <DropdownMenu v-if="ddlWithoutAutoIncrement">
+            <DropdownMenuTrigger as-child>
+              <Button variant="outline" size="icon" class="-ml-px rounded-l-none" :aria-label="t('contextMenu.ddlCopyOptions')" :disabled="ddlLoading || !!ddlError">
+                <ChevronDown class="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" class="w-max max-w-[calc(100vw-1rem)]">
+              <DropdownMenuItem @select="copyDdlContent(ddlWithoutAutoIncrement)">
+                {{ t("contextMenu.copyDdlWithoutAutoIncrement") }}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </DialogFooter>
       <button
         v-for="handle in resizeHandles"

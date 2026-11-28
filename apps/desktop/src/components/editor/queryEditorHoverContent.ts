@@ -2,8 +2,9 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { normalizeAlignedSqlWhitespace } from "@/lib/editor/hoverTableSql";
 import { constrainSqlHoverLayout } from "@/lib/editor/sqlHoverLayout";
 import { createHoverSearch, type HoverSearchController } from "@/lib/editor/sqlHoverSearch";
+import { clampEditorFontSize } from "@/lib/editor/editorZoom";
 import type { SqlHighlighter } from "@/lib/sql/sqlHighlighter";
-import type { Ref } from "vue";
+import { watch, type Ref } from "vue";
 import type { Composer } from "vue-i18n";
 import type { useToast } from "@/composables/useToast";
 
@@ -11,10 +12,11 @@ interface QueryEditorHoverContentOptions {
   isDark: Readonly<Ref<boolean>>;
   t: Composer["t"];
   toast: ReturnType<typeof useToast>["toast"];
+  editorFontSize?: Readonly<Ref<number>>;
 }
 
 export function createQueryEditorHoverContent(options: QueryEditorHoverContentOptions) {
-  const { isDark, t, toast } = options;
+  const { isDark, t, toast, editorFontSize } = options;
   let hoverSqlHighlighter: SqlHighlighter | null = null;
 
   function createHoverDom(title: string, detail: string, sqlContent?: string, rows: string[] = []): { dom: HTMLElement; mount?: () => void; destroy?: () => void } {
@@ -34,6 +36,7 @@ export function createQueryEditorHoverContent(options: QueryEditorHoverContentOp
     let layoutController: ReturnType<typeof constrainSqlHoverLayout> | null = null;
     let handleCopy: ((event: ClipboardEvent) => void) | null = null;
     let searchController: HoverSearchController | null = null;
+    let stopWatchingFontSize: (() => void) | undefined;
 
     if (sqlContent) {
       heading.className = "flex items-center justify-between gap-3 font-medium";
@@ -69,7 +72,17 @@ export function createQueryEditorHoverContent(options: QueryEditorHoverContentOp
       dom.appendChild(separator);
 
       const sqlContainer = document.createElement("div");
-      sqlContainer.className = "mt-1.5 text-[11px] leading-5 whitespace-pre font-mono";
+      sqlContainer.className = "mt-1.5 text-[11px] leading-normal whitespace-pre font-mono";
+      if (editorFontSize) {
+        stopWatchingFontSize = watch(
+          editorFontSize,
+          (size) => {
+            sqlContainer.style.fontSize = `${clampEditorFontSize(size)}px`;
+            layoutController?.refresh();
+          },
+          { immediate: true },
+        );
+      }
 
       if (hoverSqlHighlighter) {
         sqlContainer.innerHTML = hoverSqlHighlighter(sqlContent, isDark.value ? "dark" : "light");
@@ -134,6 +147,7 @@ export function createQueryEditorHoverContent(options: QueryEditorHoverContentOp
       destroy:
         layoutController || handleCopy || searchController
           ? () => {
+              stopWatchingFontSize?.();
               layoutController?.destroy();
               searchController?.destroy();
               if (handleCopy) document.removeEventListener("copy", handleCopy);

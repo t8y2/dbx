@@ -11,6 +11,7 @@ export function sqlHoverScrollbarMetrics(clientWidth: number, scrollWidth: numbe
 export interface SqlHoverLayoutController {
   /** Called after the tooltip dom is added to the document. */
   mount(): void;
+  refresh(): void;
   /** Called when the tooltip is removed or the editor is destroyed. */
   destroy(): void;
 }
@@ -30,8 +31,10 @@ function appendSqlHoverHorizontalScrollbar(root: HTMLElement, sqlContent: HTMLEl
   let resizeObserver: ResizeObserver | null = null;
 
   const update = () => {
-    const metrics = sqlHoverScrollbarMetrics(sqlContent.clientWidth, sqlContent.scrollWidth, sqlContent.scrollLeft, track.clientWidth);
-    track.hidden = metrics.maxScroll <= 1;
+    const { clientWidth, scrollWidth, scrollLeft } = sqlContent;
+    track.hidden = scrollWidth - clientWidth <= 1;
+    if (track.hidden) return;
+    const metrics = sqlHoverScrollbarMetrics(clientWidth, scrollWidth, scrollLeft, track.clientWidth);
     thumb.style.width = `${metrics.thumbWidth}px`;
     thumb.style.transform = `translateX(${metrics.thumbLeft}px)`;
   };
@@ -98,6 +101,7 @@ function appendSqlHoverHorizontalScrollbar(root: HTMLElement, sqlContent: HTMLEl
       resizeObserver.observe(sqlContent);
       resizeObserver.observe(track);
     },
+    refresh: update,
     destroy() {
       resizeObserver?.disconnect();
       resizeObserver = null;

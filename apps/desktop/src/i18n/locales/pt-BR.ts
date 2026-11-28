@@ -12325,6 +12325,8 @@ export default withEnglishFallback({
     actionSuccess: '{action} concluído para "{name}".',
   },
   sqlFileTree: {
+    moveDockLeft: "Mover painel de arquivos SQL para a esquerda",
+    moveDockRight: "Mover painel de arquivos SQL para a direita",
     changeConnectionForFiles: "Definir fonte de dados ({count} arquivos)",
     changeConnectionForFilesDescription: "Escolha a conexão e o banco de dados padrão a usar na próxima abertura dos arquivos SQL locais selecionados.",
     changeConnectionCloseFiles: "Feche os arquivos selecionados que já estão abertos.",

@@ -7928,6 +7928,8 @@ export default withEnglishFallback({
     totalFiles: "Pliki: {count}",
   },
   sqlFileTree: {
+    moveDockLeft: "Przenieś panel plików SQL w lewo",
+    moveDockRight: "Przenieś panel plików SQL w prawo",
     changeConnectionForFiles: "Ustaw źródło danych (pliki: {count})",
     changeConnectionForFilesDescription: "Wybierz połączenie i jego domyślną bazę danych na potrzeby następnego otwarcia wybranych lokalnych plików SQL.",
     changeConnectionCloseFiles: "Zamknij wybrane pliki, które są już otwarte.",

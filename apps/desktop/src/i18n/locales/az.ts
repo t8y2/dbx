@@ -7197,6 +7197,8 @@ export default withEnglishFallback({
     completedWithErrors: "İcra tamamlandı: {succeeded} uğurlu, {failed} uğursuz",
   },
   sqlFileTree: {
+    moveDockLeft: "SQL faylları panelini sola köçür",
+    moveDockRight: "SQL faylları panelini sağa köçür",
     changeConnectionForFiles: "Məlumat mənbəyini təyin et ({count} fayl)",
     changeConnectionForFilesDescription: "Seçilmiş yerli SQL faylları növbəti dəfə açılanda istifadə olunacaq bağlantını və standart verilənlər bazasını seçin.",
     changeConnectionCloseFiles: "Seçilmiş açıq faylları əvvəlcə bağlayın.",

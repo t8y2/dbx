@@ -12356,6 +12356,8 @@ export default withEnglishFallback({
     actionSuccess: "「{name}」の{action}が完了しました。",
   },
   sqlFileTree: {
+    moveDockLeft: "SQL ファイルパネルを左に移動",
+    moveDockRight: "SQL ファイルパネルを右に移動",
     changeConnectionForFiles: "データソースを設定（{count} ファイル）",
     changeConnectionForFilesDescription: "選択したローカル SQL ファイルを次回開くときに使用する接続とその既定のデータベースを設定します。",
     changeConnectionCloseFiles: "選択したファイルのうち、開いているものを先に閉じてください。",

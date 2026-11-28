@@ -19,6 +19,10 @@ export type DataGridStructuredFilterCacheState = {
   };
   appliedRules?: DataGridStructuredFilterRule[];
   appliedWhereInput: string;
+  /** How the rules join when rebuilt: "legacy" (left-associative, the
+   * previous panel) or "sql" (SQL precedence). Absent on caches written
+   * before this was recorded — those were built by the previous panel. */
+  whereGrouping?: "legacy" | "sql";
   serverColumnFilters: Record<number, DataGridCachedServerColumnFilter>;
 };
 
@@ -135,6 +139,7 @@ function sanitizeState(value: unknown): DataGridStructuredFilterCacheState | und
     ...(groups ? { groups } : {}),
     ...(Array.isArray(state.appliedRules) ? { appliedRules: sanitizeRules(state.appliedRules) } : {}),
     appliedWhereInput: state.appliedWhereInput,
+    whereGrouping: state.whereGrouping === "legacy" || state.whereGrouping === "sql" ? state.whereGrouping : undefined,
     serverColumnFilters,
   };
 }
@@ -278,6 +283,7 @@ export async function removeDataGridStructuredFilterColumnsForTab(
     ...(groups ? { groups } : {}),
     ...applied,
     manualWhereInput,
+    whereGrouping: state.whereGrouping,
     serverColumnFilters,
   };
   structuredFilterStateCache.set(tabId, cloneState(next));

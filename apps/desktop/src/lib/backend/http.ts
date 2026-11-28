@@ -332,7 +332,8 @@ import type {
   VacuumTableSqlOptions,
 } from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions } from "@/lib/export/databaseExport";
-import { loadBrowserAppState, saveBrowserAppState } from "@/lib/backend/browserAppStateStorage";
+import { loadBrowserAppState, loadUpdatedBrowserAppState, saveBrowserAppState, updateBrowserAppState } from "@/lib/backend/browserAppStateStorage";
+import { applySavedSqlEditorPositionsUpdate, type SavedSqlEditorPositionsUpdate } from "@/lib/app/savedSqlEditorPosition";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
 import { apiUrl, apiWebSocketUrl } from "@/lib/common/webPath";
 import type {
@@ -2890,12 +2891,12 @@ export async function deleteDetachedTabHandoff(_tabId: string): Promise<void> {}
 export async function approveDetachedWindowClose(): Promise<void> {}
 
 export async function loadSavedSqlEditorPositions(): Promise<unknown[] | null> {
-  const value = await loadBrowserAppState("saved_sql_editor_positions");
+  const value = await loadUpdatedBrowserAppState("saved_sql_editor_positions");
   return Array.isArray(value) ? value : null;
 }
 
-export async function saveSavedSqlEditorPositions(positions: unknown[]): Promise<void> {
-  await saveBrowserAppState("saved_sql_editor_positions", positions);
+export async function saveSavedSqlEditorPositions(update: SavedSqlEditorPositionsUpdate): Promise<void> {
+  await updateBrowserAppState("saved_sql_editor_positions", (current) => applySavedSqlEditorPositionsUpdate(current, update));
 }
 
 export async function loadTransferTaskLibrary(): Promise<unknown | null> {

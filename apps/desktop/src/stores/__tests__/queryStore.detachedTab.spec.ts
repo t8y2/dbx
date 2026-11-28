@@ -83,6 +83,32 @@ describe("queryStore adoptDetachedTab", () => {
     expect(queryStore.isTabDirty(tab)).toBe(true);
   });
 
+  it.each(["clean", "dirty", "empty", "changed on disk"])("checks the %s document before restoring folds on both legs of a detached handoff", async (scenario) => {
+    const sql = scenario === "empty" ? "" : "SELECT\n  1;";
+    const file = { id: "saved-1", name: "query_1.sql", connectionId: "conn-1", database: "main", sql, createdAt: "", updatedAt: "" };
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const source = useQueryStore();
+    const id = source.openSavedSql(file);
+    const draft = scenario === "dirty" ? "SELECT\n  2;" : sql;
+    source.updateSql(id, draft);
+    const ranges = draft ? [{ from: 6, to: 10 }] : [];
+    source.updateEditorFolds(id, ranges, draft);
+    const currentDisk = scenario === "changed on disk" ? "SELECT\n  3;" : sql;
+    mocks.loadSavedSqlFile.mockResolvedValue({ ...file, sql: currentDisk });
+    const handoff = await source.prepareDetachedTab(id);
+
+    setActivePinia(createPinia());
+    const detached = useQueryStore();
+    await detached.adoptDetachedTab(handoff);
+    const detachedTab = detached.tabs.find((tab) => tab.id === id)!;
+    const expected = scenario === "changed on disk" ? [] : ranges;
+    expect(detachedTab.sql).toBe(scenario === "dirty" ? draft : currentDisk);
+    expect(detachedTab.editorFolds?.ranges ?? []).toEqual(expected);
+
+    await source.adoptDetachedTab(await detached.prepareDetachedTab(id));
+    expect(source.tabs.find((tab) => tab.id === id)?.editorFolds?.ranges ?? []).toEqual(expected);
+  });
+
   it("leaves an unsaved (never-linked-to-library) tab's empty content as-is", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();

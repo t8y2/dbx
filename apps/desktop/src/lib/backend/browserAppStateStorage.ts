@@ -73,6 +73,10 @@ export async function loadBrowserAppState(key: string): Promise<unknown | null> 
   const value = await withStore("readonly", (store) => store.get(key));
   if (value !== null && value !== undefined) return value;
 
+  return loadFallback(key);
+}
+
+function loadFallback(key: string): unknown | null {
   const fallback = safeLocalStorageGet(fallbackKey(key));
   if (!fallback) return null;
   try {
@@ -109,4 +113,57 @@ export async function saveBrowserAppState(key: string, value: unknown): Promise<
   }
   if (safeLocalStorageSet(fallbackKey(key), JSON.stringify(stored))) return;
   throw new Error(`Failed to persist browser app state: ${key}`);
+}
+
+// A fallback written by an update contains that key's newest snapshot, even
+// when the older IndexedDB value is still readable after a failed write.
+export async function loadUpdatedBrowserAppState(key: string): Promise<unknown | null> {
+  return loadFallback(key) ?? (await withStore("readonly", (store) => store.get(key))) ?? null;
+}
+
+export async function updateBrowserAppState(key: string, update: (current: unknown) => unknown): Promise<void> {
+  async function updateState() {
+    const fallback = loadFallback(key);
+    let stored: unknown;
+    let updateFailure: { error: unknown } | undefined;
+    try {
+      const db = await openDb();
+      if (db) {
+        const transaction = db.transaction(STORE_NAME, "readwrite");
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.get(key);
+        const complete = transactionToPromise(transaction);
+        request.onsuccess = () => {
+          try {
+            stored = toStorableValue(update(fallback ?? request.result ?? null));
+          } catch (error) {
+            updateFailure = { error };
+            transaction.abort();
+            return;
+          }
+          try {
+            store.put(stored, key);
+          } catch {
+            transaction.abort();
+          }
+        };
+        await complete;
+        safeLocalStorageRemove(fallbackKey(key));
+        return;
+      }
+    } catch (error) {
+      if (updateFailure) throw updateFailure.error;
+      console.warn("[DBX][browserAppStateStorage] IndexedDB operation failed; falling back to localStorage", error);
+    }
+
+    // An abort may happen before the read callback. Recover the existing
+    // snapshot so updating one file does not drop other windows' positions.
+    if (stored === undefined) stored = toStorableValue(update(await loadUpdatedBrowserAppState(key)));
+    if (!safeLocalStorageSet(fallbackKey(key), JSON.stringify(stored))) {
+      throw new Error(`Failed to persist browser app state: ${key}`);
+    }
+  }
+
+  if (globalThis.navigator?.locks) await navigator.locks.request(fallbackKey(key), updateState);
+  else await updateState();
 }

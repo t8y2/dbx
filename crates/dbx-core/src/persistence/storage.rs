@@ -69,6 +69,15 @@ static DATA_MIGRATION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
+const MAX_SAVED_SQL_EDITOR_POSITIONS: usize = 200;
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum SavedSqlEditorPositionsUpdate {
+    Initialize { positions: Vec<serde_json::Value> },
+    Save { position: serde_json::Value },
+    Remove { saved_sql_id: String },
+}
 const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
 /// Beta build version the app was told is the promoted stable release. Kept in
 /// app_state (not renderer localStorage) because the native About panel is
@@ -6232,8 +6241,58 @@ impl Storage {
             .filter(|value| !value.is_empty()))
     }
 
-    pub async fn save_saved_sql_editor_positions(&self, positions: &serde_json::Value) -> Result<(), String> {
-        self.save_app_state_value(APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY, positions).await
+    pub async fn save_saved_sql_editor_positions(&self, update: SavedSqlEditorPositionsUpdate) -> Result<(), String> {
+        self.with_conn(move |conn| {
+            // Take the write lock before reading the latest state. An earlier
+            // snapshot from another window must never replace this array.
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            let stored: Option<String> = tx
+                .query_row(
+                    "SELECT value_json FROM app_state WHERE key = ?1",
+                    [APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let mut positions = stored
+                .map(|json| serde_json::from_str::<serde_json::Value>(&json))
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .and_then(|value| match value {
+                    serde_json::Value::Array(positions) => Some(positions),
+                    _ => None,
+                });
+            match update {
+                SavedSqlEditorPositionsUpdate::Initialize { positions: initial } => {
+                    if positions.is_some() {
+                        return Ok(());
+                    }
+                    positions = Some(initial);
+                }
+                SavedSqlEditorPositionsUpdate::Save { position } => {
+                    let id = position["savedSqlId"].as_str().ok_or("Missing saved SQL file ID")?;
+                    let positions = positions.get_or_insert_with(Vec::new);
+                    positions.retain(|item| item["savedSqlId"].as_str() != Some(id));
+                    positions.insert(0, position);
+                }
+                SavedSqlEditorPositionsUpdate::Remove { saved_sql_id } => {
+                    positions
+                        .get_or_insert_with(Vec::new)
+                        .retain(|item| item["savedSqlId"].as_str() != Some(saved_sql_id.as_str()));
+                }
+            }
+            let mut positions = positions.unwrap_or_default();
+            positions.sort_by_key(|item| std::cmp::Reverse(item["updatedAt"].as_u64().unwrap_or(0)));
+            positions.truncate(MAX_SAVED_SQL_EDITOR_POSITIONS);
+            let json = serde_json::to_string(&positions).map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT OR REPLACE INTO app_state (key, value_json) VALUES (?1, ?2)",
+                params![APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY, json],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn load_saved_sql_editor_positions(&self) -> Result<Option<serde_json::Value>, String> {
@@ -15730,7 +15789,9 @@ mod tests {
             .await
             .unwrap();
         storage
-            .save_saved_sql_editor_positions(&serde_json::json!([{ "savedSqlId": "file-1", "updatedAt": 1 }]))
+            .save_saved_sql_editor_positions(super::SavedSqlEditorPositionsUpdate::Save {
+                position: serde_json::json!({ "savedSqlId": "file-1", "updatedAt": 1 }),
+            })
             .await
             .unwrap();
         let transfer_task_library = serde_json::json!({ "version": 1, "folders": [], "tasks": [] });
@@ -15885,6 +15946,35 @@ mod tests {
         drop(storage);
         let reopened = crate::persistence::test_storage::open(&path).await.unwrap();
         assert_eq!(reopened.load_open_tabs_state().await.unwrap(), Some(state));
+    }
+
+    #[tokio::test]
+    async fn saved_sql_editor_positions_keep_updates_from_independent_windows() {
+        use super::SavedSqlEditorPositionsUpdate::{Initialize, Remove, Save};
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dbx.db");
+        let first = crate::persistence::test_storage::open(&path).await.unwrap();
+        let second = crate::persistence::test_storage::open(&path).await.unwrap();
+        assert_eq!(first.load_saved_sql_editor_positions().await.unwrap(), None);
+        assert_eq!(second.load_saved_sql_editor_positions().await.unwrap(), None);
+        let legacy = json!({"savedSqlId": "legacy", "updatedAt": 1});
+        first.save_saved_sql_editor_positions(Initialize { positions: vec![legacy.clone()] }).await.unwrap();
+
+        let a = json!({"savedSqlId": "a", "updatedAt": 2, "folds": {"documentFingerprint": "a", "ranges": [{"from": 6, "to": 9}]}});
+        let b = json!({"savedSqlId": "b", "updatedAt": 3, "selection": {"anchor": 4, "head": 4}});
+        let (saved_a, saved_b) = tokio::join!(
+            first.save_saved_sql_editor_positions(Save { position: a.clone() }),
+            second.save_saved_sql_editor_positions(Save { position: b.clone() })
+        );
+        saved_a.unwrap();
+        saved_b.unwrap();
+        second.save_saved_sql_editor_positions(Initialize { positions: vec![] }).await.unwrap();
+        assert_eq!(first.load_saved_sql_editor_positions().await.unwrap(), Some(json!([b, a, legacy])));
+
+        second.save_saved_sql_editor_positions(Remove { saved_sql_id: "b".to_owned() }).await.unwrap();
+        assert_eq!(first.load_saved_sql_editor_positions().await.unwrap(), Some(json!([a, legacy])));
     }
 
     // Selection JSON written before per-db-type prompt template defaults existed

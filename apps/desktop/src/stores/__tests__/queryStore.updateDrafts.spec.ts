@@ -69,6 +69,36 @@ describe("update draft recovery", () => {
     expect(restored.isTabDirty(tab)).toBe(false);
   });
 
+  it.each([
+    { name: "an unchanged file", draft: "SELECT\n  1;", disk: "SELECT\n  1;", folds: [{ from: 6, to: 10 }] },
+    { name: "a draft with unsaved edits", draft: "SELECT\n  2;", disk: "SELECT\n  1;", folds: [{ from: 6, to: 10 }] },
+    { name: "an empty file", draft: "", disk: "", folds: [] },
+  ])("restores matching fold ranges and content for $name", async ({ draft, disk, folds }) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const { useSavedSqlStore } = await import("@/stores/savedSqlStore");
+    const { UPDATE_RESTORE_KEY } = await import("@/lib/app/updatePreparation");
+    const file = { ...savedFile, sql: disk };
+    const store = useQueryStore();
+    const id = store.openSavedSql(file);
+    store.updateSql(id, draft);
+    store.updateEditorFolds(id, [{ from: 0, to: 2 }], "a different document");
+    expect(store.tabs.find((tab) => tab.id === id)?.editorFolds).toBeUndefined();
+    store.updateEditorFolds(id, folds, draft);
+    await store.flushPendingPersist();
+
+    localStorage.setItem(UPDATE_RESTORE_KEY, "1");
+    setActivePinia(createPinia());
+    vi.spyOn(useSavedSqlStore(), "getFile").mockReturnValue(file);
+    vi.spyOn(useSavedSqlStore(), "ensureFileContent").mockResolvedValue(file);
+    const restored = useQueryStore();
+    await restored.initOpenTabs({ validConnectionIds: ["conn"] });
+    await restored.hydrateSavedSqlTabs();
+    const tab = restored.tabs.find((tab) => tab.id === id)!;
+    expect(tab.sql).toBe(draft);
+    expect(tab.originalSql).toBe(disk);
+    expect(tab.editorFolds?.ranges ?? []).toEqual(folds);
+  });
+
   it("recovers SQL and structure drafts once even when normal restore and close protection are disabled", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const { useSettingsStore } = await import("@/stores/settingsStore");

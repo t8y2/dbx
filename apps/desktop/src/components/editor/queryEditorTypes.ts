@@ -4,6 +4,7 @@ import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import type { MongoQueryLanguage } from "@/lib/mongo/mongoSql";
+import type { SavedSqlEditorFoldSnapshot } from "@/lib/app/savedSqlEditorPosition";
 import type { OraclePackageSourceContext } from "@/lib/sql/oraclePackageMemberNavigation";
 
 export interface QueryEditorProps {
@@ -49,6 +50,8 @@ export interface QueryEditorProps {
   isExecuting?: boolean;
   initialViewport?: { scrollTop: number; scrollLeft: number };
   initialSelection?: { anchor: number; head: number };
+  rememberFolds?: boolean;
+  initialFolds?: SavedSqlEditorFoldSnapshot;
   revealRequest?: { id: number; line: number; column?: number };
   statementExecutionMarkers?: StatementExecutionMarker[];
   /** MongoDB query tabs: SQL mode uses the SQL statement splitter and formatter. */

@@ -133,6 +133,8 @@ import type { ShortcutActionId } from "@/lib/editor/shortcutRegistry";
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
 
 import { createInsertValueHintsExtension, requestInsertValueHintsRefresh, supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
+import { foldedRanges } from "@codemirror/language";
+import type { SavedSqlEditorFold } from "@/lib/app/savedSqlEditorPosition";
 import { createSqlBlockFoldService, sqlBeginEndMatching } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
 import { createSqlUnknownObjectHighlights, refreshSqlUnknownObjectHighlights } from "@/lib/editor/codemirrorSqlUnknownObjectHighlights";
@@ -229,6 +231,7 @@ const emit = defineEmits<{
   viewportChange: [viewport: { scrollTop: number; scrollLeft: number }, tabId?: string];
   selectionStateChange: [selection: { anchor: number; head: number }];
   bookmarksChange: [lines: number[], tabId?: string];
+  foldsChange: [ranges: SavedSqlEditorFold[], tabId: string, document: string];
   editorStateFlushed: [];
   editorRevealConsumed: [];
   sendSelectionToAi: [sql: string];
@@ -1130,6 +1133,7 @@ function emitModelValue(currentView: EditorViewType): string {
   const sql = currentEditorDocText(currentView);
   emit("update:modelValue", sql);
   documentState.recordBookmarks(currentView);
+  documentState.recordFolds(currentView);
   return sql;
 }
 
@@ -2516,6 +2520,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         }),
         EditorView.updateListener.of((update) => {
           if (!update.docChanged && bookmarkShortcuts?.changed(update)) documentState.recordBookmarks(update.view);
+          if (!update.docChanged && props.rememberFolds && foldedRanges(update.startState) !== foldedRanges(update.state)) documentState.recordFolds(update.view);
           if (update.focusChanged && update.view.hasFocus) {
             rememberFocusedQueryEditorView(update.view);
           }
@@ -2648,6 +2653,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       parent: editorElement,
       onReady() {
         if (!view.value) return;
+        documentState.initializeDocument();
         if (initialSettings.vimModeEnabled) applyVimConfigToCurrentEditor(vimCommands);
         syncQueryEditorInsertContext(view.value);
         batchSelection.attach(view.value, tooltipParent);
@@ -2680,6 +2686,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         };
         documentState.restoreBookmarks();
         restoreEditorSelection(props.initialSelection, !props.initialViewport);
+        documentState.restoreFolds();
         restoreEditorViewport();
         performEditorReveal();
         if (boundedEditorAnalysisEnabled()) {

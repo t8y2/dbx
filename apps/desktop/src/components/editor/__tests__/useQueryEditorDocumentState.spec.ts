@@ -4,6 +4,7 @@ import { createApp, h, nextTick, onBeforeUnmount, reactive, ref, shallowRef } fr
 import { Compartment, EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { history, undo } from "@codemirror/commands";
+import { codeFolding, foldEffect, foldedRanges } from "@codemirror/language";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useQueryEditorDocumentState } from "../useQueryEditorDocumentState";
 import type { QueryEditorProps } from "../queryEditorTypes";
@@ -22,13 +23,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function createHarness(overrides: Partial<QueryEditorProps> = {}) {
+function createHarness(overrides: Partial<QueryEditorProps> = {}, delayed = false) {
   const props = reactive<QueryEditorProps>({ modelValue: "SELECT 1;", tabId: "tab-a", autoFocus: false, ...overrides });
   const historyResetComp = new Compartment();
   const parent = document.createElement("div");
   document.body.append(parent);
-  const currentView = new EditorView({ parent, state: EditorState.create({ doc: props.modelValue, extensions: [historyResetComp.of(history())] }) });
-  const view = shallowRef<EditorView | null>(currentView);
+  const currentView = new EditorView({ parent, state: EditorState.create({ doc: props.modelValue, extensions: [historyResetComp.of(history()), codeFolding()] }) });
+  const view = shallowRef<EditorView | null>(delayed ? null : currentView);
   const runtime = { historyResetComp, codeMirrorHistory: history, codeMirrorEditorSelection: EditorSelection, editorIsActive: true };
   const emit = vi.fn();
   const callbacks = {
@@ -78,10 +79,32 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
     props.modelValue = currentView.state.doc.toString();
     await nextTick();
   }
-  return { state, props, runtime, emit, callbacks, currentView, activate, append, unmount };
+  return { state, props, runtime, emit, callbacks, currentView, view, activate, append, unmount };
 }
 
 describe("QueryEditor document and viewport ownership", () => {
+  it("reports folds for the document active when delayed initialization finishes", async () => {
+    const { state, view, currentView, activate, emit } = createHarness({ rememberFolds: true }, true);
+    const sqlB = "SELECT\n  2;";
+    await activate("tab-b", sqlB);
+    view.value = currentView;
+    state.initializeDocument();
+    expect(currentView.state.doc.toString()).toBe(sqlB);
+
+    const range = { from: 6, to: sqlB.length };
+    currentView.dispatch({ effects: foldEffect.of(range) });
+    state.recordFolds(currentView);
+    expect(emit.mock.calls.filter(([event]) => event === "foldsChange")).toEqual([["foldsChange", [range], "tab-b", sqlB]]);
+  });
+
+  it("clears the outgoing fold when an unrelated new tab has identical SQL", async () => {
+    const sql = "SELECT\n  1;";
+    const { currentView, activate } = createHarness({ modelValue: sql, rememberFolds: true });
+    currentView.dispatch({ effects: foldEffect.of({ from: 6, to: sql.length }) });
+    await activate("scratch", sql, { rememberFolds: false });
+    expect(foldedRanges(currentView.state).size).toBe(0);
+  });
+
   it("does not let delayed viewport restoration override a bookmark reveal", async () => {
     const { state, props, currentView, emit } = createHarness({ modelValue: "one\ntwo\nthree" });
     state.restoreEditorViewport({ scrollTop: 500, scrollLeft: 10 });

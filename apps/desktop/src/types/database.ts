@@ -4,6 +4,7 @@ import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { MysqlDelimiterCommand } from "@/lib/sql/sqlStatementRanges";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
+import type { SavedSqlEditorFoldSnapshot } from "@/lib/app/savedSqlEditorPosition";
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 import type { GraphResult } from "@/lib/graph/graphResult";
 import type { OracleRoutinePlanDraft } from "@/types/schemaDiff";
@@ -2762,6 +2763,7 @@ export interface QueryTab {
     anchor: number;
     head: number;
   };
+  editorFolds?: SavedSqlEditorFoldSnapshot;
   /** Ephemeral request to move the cursor/scrolling to a specific line/column (e.g. global content search jump). */
   editorRevealRequest?: {
     id: number;

@@ -6,6 +6,7 @@ use std::{
 
 use dbx_core::storage::{
     AppAppearanceSettings, AppAppearanceSettingsPatch, DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState,
+    SavedSqlEditorPositionsUpdate,
 };
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
@@ -574,9 +575,9 @@ pub async fn load_saved_sql_editor_positions(
 #[tauri::command]
 pub async fn save_saved_sql_editor_positions(
     state: State<'_, Arc<AppState>>,
-    positions: serde_json::Value,
+    update: SavedSqlEditorPositionsUpdate,
 ) -> Result<(), String> {
-    state.storage.save_saved_sql_editor_positions(&positions).await
+    state.storage.save_saved_sql_editor_positions(update).await
 }
 
 #[tauri::command]

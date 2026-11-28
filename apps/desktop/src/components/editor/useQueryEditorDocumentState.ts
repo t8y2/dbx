@@ -1,5 +1,6 @@
 import { watch, nextTick } from "vue";
-import { Transaction } from "@codemirror/state";
+import { foldEffect, foldedRanges, unfoldEffect } from "@codemirror/language";
+import { Transaction, type StateEffect } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { createDeferredEditorTask } from "@/lib/editor/deferredEditorTask";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
@@ -7,6 +8,7 @@ import { restoreQueryEditorBookmarks, queryEditorBookmarkLines } from "@/lib/edi
 import { bookmarkDocumentChange } from "@/lib/editor/workspaceBookmarks";
 import type { ShallowRef, Ref } from "vue";
 import type { QueryEditorProps } from "./queryEditorTypes";
+import { restoreSavedSqlEditorFoldSnapshot, savedSqlFoldDocument, type SavedSqlEditorFold } from "@/lib/app/savedSqlEditorPosition";
 
 const BEFORE_TAB_SWITCH_EVENT = "dbx:before-tab-switch";
 
@@ -25,6 +27,7 @@ interface QueryEditorDocumentStateOptions {
   emit: {
     (event: "selectionStateChange", selection: { anchor: number; head: number }): void;
     (event: "bookmarksChange", lines: number[], tabId?: string): void;
+    (event: "foldsChange", folds: SavedSqlEditorFold[], tabId: string, document: string): void;
     (event: "viewportChange", viewport: { scrollTop: number; scrollLeft: number }, tabId?: string): void;
     (event: "editorStateFlushed"): void;
     (event: "editorRevealConsumed"): void;
@@ -69,6 +72,37 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
   function recordBookmarks(currentView: EditorViewType) {
     if (changingDocument || isEditorComposing(currentView)) return;
     emit("bookmarksChange", queryEditorBookmarkLines(currentView), viewportOwnerTabId);
+  }
+
+  function recordFolds(currentView: EditorViewType) {
+    if (!props.rememberFolds || !viewportOwnerTabId || viewportOwnerTabId !== props.tabId || changingDocument || isEditorComposing(currentView)) return;
+    const ranges: SavedSqlEditorFold[] = [];
+    foldedRanges(currentView.state).between(0, currentView.state.doc.length, (from, to) => {
+      ranges.push({ from, to });
+    });
+    emit("foldsChange", ranges, viewportOwnerTabId, currentEditorDocText(currentView));
+  }
+
+  function restoreFolds() {
+    const currentView = view.value;
+    if (!currentView) return;
+    const length = currentView.state.doc.length;
+    const effects: StateEffect<SavedSqlEditorFold>[] = [];
+    foldedRanges(currentView.state).between(0, length, (from, to) => {
+      effects.push(unfoldEffect.of({ from, to }));
+    });
+    const snapshot = props.rememberFolds ? restoreSavedSqlEditorFoldSnapshot(props.initialFolds, currentEditorDocText(currentView)) : undefined;
+    for (const range of snapshot?.ranges ?? []) {
+      effects.push(foldEffect.of(range));
+    }
+    if (!effects.length) return;
+    const previous = changingDocument;
+    changingDocument = true;
+    try {
+      currentView.dispatch({ effects });
+    } finally {
+      changingDocument = previous;
+    }
   }
 
   function restoreBookmarks(lines = props.bookmarkLines ?? []) {
@@ -134,6 +168,23 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     scheduleSemanticDiagnostics();
   }
 
+  function initializeDocument() {
+    // The loader may finish after the shared editor's active tab has changed.
+    viewportOwnerTabId = props.tabId;
+    latestSelection = props.initialSelection;
+    latestViewport = props.initialViewport;
+    lastEmittedViewport = props.initialViewport;
+    const currentView = view.value;
+    if (currentView && currentEditorDocText(currentView) !== savedSqlFoldDocument(props.modelValue)) {
+      changingDocument = true;
+      try {
+        swapEditorDocument(props.modelValue);
+      } finally {
+        changingDocument = false;
+      }
+    }
+  }
+
   function activateTabDocument(prevTabId: string | undefined, tabId: string | undefined, doc: string) {
     const currentView = view.value;
     if (!currentView) return;
@@ -173,6 +224,7 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
       latestSelection = initialSel;
       latestViewport = initialVp;
       restoreEditorSelection(initialSel, !props.initialViewport);
+      restoreFolds();
       restoreEditorViewport(initialVp);
       clearScheduledPreviewContextRefresh();
       syncContextMenuState(currentView);
@@ -207,6 +259,7 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     if (props.initialSelection !== undefined) {
       restoreEditorSelection(props.initialSelection, !props.initialViewport);
     }
+    if (!previousDoc.length && props.initialFolds) restoreFolds();
     latestSelection = readEditorSelection(currentView);
     const targetViewport = props.initialViewport ?? cached.viewport;
     latestViewport = targetViewport;
@@ -221,28 +274,34 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
   watch([() => props.tabId, () => props.modelValue], ([tabId, val], [prevTabId]) => {
     if (!view.value) return;
     if (tabId !== prevTabId) {
-      let bookmarksMapped = false;
+      let documentChanged = false;
       changingDocument = true;
       try {
-        bookmarksMapped = activateTabDocument(prevTabId, tabId, val) === true;
+        documentChanged = activateTabDocument(prevTabId, tabId, val) === true;
       } finally {
         changingDocument = false;
       }
-      if (bookmarksMapped) recordBookmarks(view.value);
+      if (documentChanged) {
+        recordBookmarks(view.value);
+        recordFolds(view.value);
+      }
       if (props.autoFocus) restoreEditorFocus();
       return;
     }
     if (val !== currentEditorDocText(view.value)) {
       if (isEditorComposing(view.value)) return;
-      const hydrating = !view.value.state.doc.length && !!props.bookmarkLines?.length;
+      const wasEmpty = !view.value.state.doc.length;
+      const hydrating = wasEmpty && !!props.bookmarkLines?.length;
       changingDocument = true;
       try {
         view.value.dispatch({ changes: bookmarkDocumentChange(currentEditorDocText(view.value), val) });
         if (hydrating || props.bookmarkDocument === val) restoreBookmarks();
+        if (wasEmpty && props.initialFolds) restoreFolds();
       } finally {
         changingDocument = false;
       }
       recordBookmarks(view.value);
+      recordFolds(view.value);
       scheduleSemanticDiagnostics();
     }
   });
@@ -457,5 +516,23 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     window.removeEventListener(BEFORE_TAB_SWITCH_EVENT, captureEditorStateBeforeTabSwitch);
   }
 
-  return { normalizedEditorSelection, restoreEditorSelection, performEditorReveal, restoreEditorFocus, scheduleEditorViewportEmit, restoreEditorViewport, cancelEditorViewportRestore, recordSelection, commitSelection, recordBookmarks, restoreBookmarks, flushBeforeDeactivation, attach, dispose };
+  return {
+    initializeDocument,
+    normalizedEditorSelection,
+    restoreEditorSelection,
+    performEditorReveal,
+    restoreEditorFocus,
+    scheduleEditorViewportEmit,
+    restoreEditorViewport,
+    cancelEditorViewportRestore,
+    recordSelection,
+    commitSelection,
+    recordBookmarks,
+    restoreBookmarks,
+    recordFolds,
+    restoreFolds,
+    flushBeforeDeactivation,
+    attach,
+    dispose,
+  };
 }

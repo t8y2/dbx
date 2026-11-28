@@ -934,6 +934,49 @@ async function refreshLazyParent(parentPath: string) {
   }
 }
 
+async function refreshVisibleLazyTree(signal: AbortSignal) {
+  const context = currentLazyLoadContext();
+  const isCurrent = () => !signal.aborted && !document.hidden && lazyLoadContextValid(context) && connectionStore.connectedIds.has(context.connectionId) && !loading.value && !loadingMore.value && !showEditDialog.value && !showDeleteConfirm.value && !showRenameDialog.value;
+  if (!props.lazyHierarchy || props.lazyPathStyle !== "absolute" || !isCurrent()) return;
+
+  const rootPath = lazyTreeState.rootPath;
+  const focusedRoot = rootPath !== lazyKvRootPath(props.lazyPathStyle);
+  const branches = visibleRows.value.flatMap((row) => (row.type === "node" && row.node.kind === "lazy" && expandedGroupIds.value.has(row.node.id) && row.node.key !== rootPath ? [row.node.key] : []));
+  const previousSelection = selectedKey.value && lazyTreeState.nodeByKey.has(selectedKey.value) ? selectedKey.value : null;
+
+  // Refresh ancestors first. An external deletion can remove a branch before
+  // its turn, while retaining the pages already loaded beneath surviving nodes.
+  for (const path of [rootPath, ...branches]) {
+    if (!isCurrent()) return;
+    const parent = lazyTreeState.nodeByKey.get(path);
+    if (parent?.loading || (path !== rootPath && (!parent || !expandedGroupIds.value.has(parent.id)))) continue;
+    const children = parent?.children ?? lazyTreeState.roots;
+    const unchanged = () => {
+      const latest = lazyTreeState.nodeByKey.get(path);
+      return isCurrent() && latest === parent && !latest?.loading && (latest?.children ?? lazyTreeState.roots) === children;
+    };
+
+    const result = await props.api.listPrefix(context.connectionId, path, Math.max(pageSize, children.length), null, { recursive: false });
+    if (!unchanged()) continue;
+    if (path !== rootPath && parent && !expandedGroupIds.value.has(parent.id)) continue;
+    if (path === rootPath && focusedRoot && (!parent || result.keys.length === 0)) {
+      const value = await props.api.get(context.connectionId, path);
+      if (!unchanged()) continue;
+      if (!value.found) {
+        resetLazyKvKeyTree(lazyTreeState, rootPath);
+        continue;
+      }
+      if (!parent) {
+        replaceLazyKvFocusedRoot(lazyTreeState, { ...value.metadata, key: path, hasValue: true }, result.keys, result.continuation);
+        expandFocusedRoot(rootPath);
+        continue;
+      }
+    }
+    replaceLazyKvChildren(lazyTreeState, parent?.key ?? null, result.keys, result.continuation);
+  }
+  if (isCurrent() && previousSelection && selectedKey.value === previousSelection && !lazyTreeState.nodeByKey.has(previousSelection)) clearSelectedKey();
+}
+
 async function loadSelectedKey(input: string | KvKeyRoute): Promise<boolean> {
   const route = routeFromKey(input);
   const key = route.key;
@@ -1891,6 +1934,7 @@ onBeforeUnmount(() => {
 defineExpose({
   focusSearch,
   refresh,
+  refreshVisibleLazyTree,
   selectKey: selectKeyFromNavigation,
   openCreate: (parentPath?: string) => openCreateDialog(parentPath),
   selection: () => ({ key: selectedKey.value, value: selectedValue.value }),

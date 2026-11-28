@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
+import { RefreshCw } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import KvKeyBrowser from "@/components/kv/KvKeyBrowser.vue";
+import { Button } from "@/components/ui/button";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import * as api from "@/lib/backend/api";
 import type { KvCreateMode } from "@/lib/backend/api";
 
@@ -9,6 +12,34 @@ const props = defineProps<{ connectionId: string }>();
 
 const { t } = useI18n();
 const browserRef = ref<InstanceType<typeof KvKeyBrowser> | null>(null);
+const { initialState, track } = useTabUiState<{ autoRefresh: boolean }>({ autoRefresh: false }, "ZooKeeperKeyBrowser");
+const autoRefresh = ref(initialState.autoRefresh);
+track(() => ({ autoRefresh: autoRefresh.value }));
+
+const AUTO_REFRESH_INTERVAL_MS = 5_000;
+watch(
+  [autoRefresh, () => props.connectionId],
+  ([enabled], _, onCleanup) => {
+    if (!enabled) return;
+    const controller = new AbortController();
+    let timer = setTimeout(tick, AUTO_REFRESH_INTERVAL_MS);
+    onCleanup(() => {
+      controller.abort();
+      clearTimeout(timer);
+    });
+
+    async function tick() {
+      try {
+        await browserRef.value?.refreshVisibleLazyTree(controller.signal);
+      } catch {
+        // Leave the displayed tree in place after a transient read failure.
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(tick, AUTO_REFRESH_INTERVAL_MS);
+      }
+    }
+  },
+  { immediate: true },
+);
 
 const zookeeperApi = {
   listPrefix: api.zookeeperListPrefix,
@@ -72,5 +103,12 @@ defineExpose({ focusSearch, refresh });
 </script>
 
 <template>
-  <KvKeyBrowser ref="browserRef" :connection-id="props.connectionId" :api="zookeeperApi" :labels="labels" supports-create-modes enable-node-actions enable-base64-utf8-preview metadata-style="zookeeper" lazy-hierarchy :create-mode-options="createModeOptions" />
+  <KvKeyBrowser ref="browserRef" :connection-id="props.connectionId" :api="zookeeperApi" :labels="labels" supports-create-modes enable-node-actions enable-base64-utf8-preview metadata-style="zookeeper" lazy-hierarchy :create-mode-options="createModeOptions">
+    <template #toolbar-trailing>
+      <Button size="sm" :variant="autoRefresh ? 'default' : 'outline'" class="h-8 gap-1.5" :aria-pressed="autoRefresh" @click="autoRefresh = !autoRefresh">
+        <RefreshCw class="h-3.5 w-3.5" />
+        {{ t("processList.autoRefresh") }}
+      </Button>
+    </template>
+  </KvKeyBrowser>
 </template>

@@ -146,10 +146,13 @@ pub struct NacosListConfigsRequest {
 pub struct NacosConfigKeyRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+    #[schemars(
+        description = "Nacos namespace ID; omit to use the connection's configured namespace, or the Nacos public namespace when none is configured."
+    )]
     pub namespace: Option<String>,
-    #[schemars(description = "Configuration dataId")]
+    #[schemars(description = "Configuration dataId that identifies the Nacos configuration.")]
     pub data_id: String,
-    #[schemars(description = "Configuration group, e.g. DEFAULT_GROUP")]
+    #[schemars(description = "Nacos configuration group, usually DEFAULT_GROUP.")]
     pub group: String,
 }
 
@@ -167,8 +170,13 @@ pub struct NacosConfigHistoryRequest {
 pub struct NacosPublishConfigRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+    #[schemars(
+        description = "Nacos namespace ID; omit to use the connection's configured namespace, or the Nacos public namespace when none is configured."
+    )]
     pub namespace: Option<String>,
+    #[schemars(description = "Configuration dataId to publish.")]
     pub data_id: String,
+    #[schemars(description = "Nacos configuration group, usually DEFAULT_GROUP.")]
     pub group: String,
     #[schemars(description = "Full configuration content")]
     pub content: String,
@@ -182,13 +190,28 @@ pub struct NacosPublishConfigRequest {
 pub struct NacosSearchConfigsRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
-    pub operation_id: String,
+    #[schemars(
+        description = "Optional client-chosen ID for progress and cancellation; DBX generates one when omitted. Example: probe-1."
+    )]
+    pub operation_id: Option<String>,
+    #[schemars(
+        description = "Nacos namespace ID; omit to use the connection's configured namespace, or the Nacos public namespace when none is configured."
+    )]
     pub namespace: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Search scope: currentNamespace (default) searches one namespace; allNamespaces searches every namespace allowed by MCP policy."
+    )]
     pub scope: Option<String>,
+    #[schemars(description = "Required text to find in Nacos configuration content.")]
     pub query: String,
+    #[schemars(description = "Optional exact Nacos configuration group filter.")]
     pub group: Option<String>,
+    #[schemars(
+        description = "Optional dataId substring filter; matches configurations whose dataId contains this text."
+    )]
     pub data_id: Option<String>,
+    #[schemars(description = "Maximum number of matching configurations to return; omit to use the server limit.")]
     pub max_results: Option<usize>,
 }
 
@@ -196,10 +219,19 @@ pub struct NacosSearchConfigsRequest {
 pub struct NacosRollbackConfigRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+    #[schemars(
+        description = "Nacos namespace ID; omit to use the connection's configured namespace, or the Nacos public namespace when none is configured."
+    )]
     pub namespace: Option<String>,
+    #[schemars(description = "Configuration dataId whose selected history entry should be restored.")]
     pub data_id: String,
+    #[schemars(description = "Nacos configuration group, usually DEFAULT_GROUP.")]
     pub group: String,
+    #[schemars(description = "History entry ID returned by the Nacos configuration history listing.")]
     pub history_id: String,
+    #[schemars(
+        description = "Optional numeric Nacos history identifier (nid); use the value returned by the history listing when available."
+    )]
     pub nid: Option<i64>,
 }
 
@@ -207,11 +239,23 @@ pub struct NacosRollbackConfigRequest {
 pub struct NacosServicesRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+    #[schemars(
+        description = "Nacos namespace ID; omit to use the connection's configured namespace, or the Nacos public namespace when none is configured."
+    )]
     pub namespace: Option<String>,
+    #[schemars(description = "Optional exact service group filter.")]
     pub group_name: Option<String>,
-    #[schemars(description = "Service name filter")]
+    #[schemars(
+        description = "Service name; optional filter for dbx_nacos_list_services and required by dbx_nacos_get_service."
+    )]
     pub service_name: Option<String>,
+    #[schemars(
+        description = "Page number for dbx_nacos_list_services, starting at 1; ignored by dbx_nacos_get_service."
+    )]
     pub page_no: Option<u32>,
+    #[schemars(
+        description = "Page size for dbx_nacos_list_services, clamped to the supported range; ignored by dbx_nacos_get_service."
+    )]
     pub page_size: Option<u32>,
 }
 
@@ -219,10 +263,15 @@ pub struct NacosServicesRequest {
 pub struct NacosInstancesRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+    #[schemars(
+        description = "Nacos namespace ID; omit to use the connection's configured namespace, or the Nacos public namespace when none is configured."
+    )]
     pub namespace: Option<String>,
+    #[schemars(description = "Name of the Nacos service whose instances should be listed.")]
     pub service_name: String,
+    #[schemars(description = "Optional exact service group filter.")]
     pub group_name: Option<String>,
-    #[schemars(description = "Comma-separated cluster names")]
+    #[schemars(description = "Comma-separated cluster names to include.")]
     pub clusters: Option<String>,
 }
 
@@ -230,11 +279,19 @@ pub struct NacosInstancesRequest {
 pub struct NacosUpdateInstanceRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+    #[schemars(
+        description = "Nacos namespace ID; omit to use the connection's configured namespace, or the Nacos public namespace when none is configured."
+    )]
     pub namespace: Option<String>,
+    #[schemars(description = "Name of the Nacos service containing the instance.")]
     pub service_name: String,
+    #[schemars(description = "Optional service group containing the instance.")]
     pub group_name: Option<String>,
+    #[schemars(description = "Optional cluster containing the instance.")]
     pub cluster_name: Option<String>,
+    #[schemars(description = "Instance IP address.")]
     pub ip: String,
+    #[schemars(description = "Instance port.")]
     pub port: u16,
     #[schemars(description = "Bring the instance online (true) or take it offline (false)")]
     pub enabled: Option<bool>,
@@ -246,14 +303,23 @@ pub struct NacosUpdateInstanceRequest {
 pub struct NacosRegisterInstanceRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+    #[schemars(
+        description = "Nacos namespace ID; omit to use the connection's configured namespace, or the Nacos public namespace when none is configured."
+    )]
     pub namespace: Option<String>,
+    #[schemars(description = "Name of the Nacos service to register the instance under.")]
     pub service_name: String,
+    #[schemars(description = "Instance IP address.")]
     pub ip: String,
+    #[schemars(description = "Instance port.")]
     pub port: u16,
+    #[schemars(description = "Optional Nacos service group.")]
     pub group_name: Option<String>,
+    #[schemars(description = "Optional Nacos cluster name.")]
     pub cluster_name: Option<String>,
+    #[schemars(description = "Optional load-balancing weight for the instance.")]
     pub weight: Option<f64>,
-    #[schemars(extend("type" = "object"))]
+    #[schemars(description = "Optional Nacos instance metadata object.", extend("type" = "object"))]
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -261,12 +327,21 @@ pub struct NacosRegisterInstanceRequest {
 pub struct NacosDeregisterInstanceRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+    #[schemars(
+        description = "Nacos namespace ID; omit to use the connection's configured namespace, or the Nacos public namespace when none is configured."
+    )]
     pub namespace: Option<String>,
+    #[schemars(description = "Name of the Nacos service containing the instance.")]
     pub service_name: String,
+    #[schemars(description = "Instance IP address.")]
     pub ip: String,
+    #[schemars(description = "Instance port.")]
     pub port: u16,
+    #[schemars(description = "Optional Nacos service group.")]
     pub group_name: Option<String>,
+    #[schemars(description = "Optional Nacos cluster name.")]
     pub cluster_name: Option<String>,
+    #[schemars(description = "Whether the target instance is ephemeral; omit for the persistent-instance default.")]
     pub ephemeral: Option<bool>,
 }
 
@@ -423,7 +498,7 @@ pub struct ExecuteQueryRequest {
     #[schemars(extend("type" = "integer"))]
     pub cell_char_offset: Option<u64>,
     #[schemars(
-        description = "Maximum characters returned per string cell (default 200, max 4000). Increase only for an explicit long-value expansion."
+        description = "Maximum characters shown in the text content for each string cell (default 200, max 4000). This controls text rendering; structuredContent retains the raw query result. Increase for an explicit long-value expansion."
     )]
     #[schemars(extend("type" = "integer"))]
     pub cell_char_limit: Option<u64>,
@@ -460,20 +535,26 @@ pub struct TransactionSessionRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AddConnectionRequest {
+    #[schemars(description = "Display name for the new DBX connection.")]
     pub name: String,
+    #[schemars(description = "Database type identifier, such as mysql, postgres, nacos, or redis.")]
     pub db_type: String,
+    #[schemars(description = "Database server hostname or address.")]
     pub host: String,
-    #[schemars(extend("type" = "integer"))]
+    #[schemars(description = "Database server port; omit to use the database-type default.", extend("type" = "integer"))]
     pub port: Option<u16>,
     #[serde(default)]
+    #[schemars(description = "Database username; omit for connections that do not require authentication.")]
     pub username: String,
     #[serde(default)]
+    #[schemars(description = "Database password or secret used for authentication.")]
     pub password: String,
-    #[schemars(extend("type" = "string"))]
+    #[schemars(description = "Default database, schema, or namespace selected for the connection when applicable.", extend("type" = "string"))]
     pub database: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Use TLS/SSL when connecting to the database.")]
     pub ssl: bool,
-    #[schemars(extend("type" = "string"))]
+    #[schemars(description = "Optional DBX driver profile used instead of the built-in driver.", extend("type" = "string"))]
     pub driver_profile: Option<String>,
     /// Dialect-specific external configuration. Nacos: camelCase admin config
     /// (`implementation`, `versionMode`, `contextPath`, `serverAddr`,
@@ -582,9 +663,9 @@ pub struct SendMessageRequest {
 pub struct SchemaContextRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
-    #[schemars(extend("type" = "string"))]
+    #[schemars(description = "Database to inspect; omit to use the connection's default database.", extend("type" = "string"))]
     pub database: Option<String>,
-    #[schemars(extend("type" = "string"))]
+    #[schemars(description = "Schema to inspect within the database; omit to use the database's default schema.", extend("type" = "string"))]
     pub schema: Option<String>,
     #[schemars(description = "Specific table names to include")]
     #[schemars(extend("type" = "array"))]
@@ -598,10 +679,11 @@ pub struct SchemaContextRequest {
 pub struct OpenTableRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+    #[schemars(description = "Table to open in the DBX desktop application.")]
     pub table: String,
-    #[schemars(extend("type" = "string"))]
+    #[schemars(description = "Database containing the table; omit to use the connection's default database.", extend("type" = "string"))]
     pub database: Option<String>,
-    #[schemars(extend("type" = "string"))]
+    #[schemars(description = "Schema containing the table; omit to use the database's default schema.", extend("type" = "string"))]
     pub schema: Option<String>,
 }
 
@@ -609,20 +691,21 @@ pub struct OpenTableRequest {
 pub struct ExecuteAndShowRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+    #[schemars(description = "SQL query to execute and display in the DBX desktop application UI.")]
     pub sql: String,
-    #[schemars(extend("type" = "string"))]
+    #[schemars(description = "Database in which to execute the query; omit to use the connection's default database.", extend("type" = "string"))]
     pub database: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct CellWindowArgs {
     #[schemars(
-        description = "Start character offset for every string cell (default 0, max 1000000). Use the next offset reported by a truncated result to slide through a long value; narrow the query to the target row and column first."
+        description = "Start character offset for every string cell in the text content (default 0, max 1000000). Use the next offset reported by a truncated text result to slide through a long value; narrow the query to the target row and column first."
     )]
     #[schemars(extend("type" = "integer"))]
     pub cell_char_offset: Option<u64>,
     #[schemars(
-        description = "Maximum characters returned per string cell (default 200, max 4000). Increase only for an explicit long-value expansion."
+        description = "Maximum characters shown in the text content for each string cell (default 200, max 4000). This controls text rendering; structuredContent retains the raw query result. Increase for an explicit long-value expansion."
     )]
     #[schemars(extend("type" = "integer"))]
     pub cell_char_limit: Option<u64>,
@@ -1835,8 +1918,9 @@ impl DbxMcpServer {
     async fn nacos_search_configs(&self, Parameters(request): Parameters<NacosSearchConfigsRequest>) -> CallToolResult {
         use crate::products::Product::Nacos;
         use dbx_core::mcp_access::McpAccessLevel::Read;
+        let operation_id = request.operation_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let args = json!({
-            "operationId": request.operation_id, "namespace": request.namespace,
+            "operationId": operation_id, "namespace": request.namespace,
             "scope": request.scope.unwrap_or_else(|| "currentNamespace".into()),
             "query": request.query, "group": request.group, "dataId": request.data_id, "maxResults": request.max_results,
         });
@@ -10412,7 +10496,7 @@ mod tests {
         let result = server
             .nacos_search_configs(Parameters(NacosSearchConfigsRequest {
                 selector: ConnectionSelector { connection_id: Some("nacos".into()), connection_name: None },
-                operation_id: "all-namespaces".into(),
+                operation_id: Some("all-namespaces".into()),
                 namespace: None,
                 scope: Some("allNamespaces".into()),
                 query: "host".into(),
@@ -10423,6 +10507,34 @@ mod tests {
             .await;
         assert!(result_text(&result).contains("SCOPE_OUT_OF_POLICY"), "{}", result_text(&result));
         assert!(backend.product_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn nacos_search_generates_operation_id_and_default_namespace_when_omitted() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("nacos", "Nacos", "nacos", "public")],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let result = server
+            .nacos_search_configs(Parameters(NacosSearchConfigsRequest {
+                selector: ConnectionSelector { connection_id: Some("nacos".into()), connection_name: None },
+                operation_id: None,
+                namespace: None,
+                scope: None,
+                query: "host".into(),
+                group: None,
+                data_id: None,
+                max_results: None,
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(false), "{}", result_text(&result));
+        let calls = backend.product_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].args["operationId"].as_str().is_some_and(|id| !id.is_empty()));
+        assert_eq!(calls[0].args["namespace"], "public");
+        assert_eq!(calls[0].args["scope"], "currentNamespace");
     }
 
     #[tokio::test]
@@ -10950,7 +11062,7 @@ mod tests {
         let _ = server
             .nacos_search_configs(Parameters(NacosSearchConfigsRequest {
                 selector: selector(),
-                operation_id: "op-1".into(),
+                operation_id: Some("op-1".into()),
                 namespace: Some("public".into()),
                 scope: Some("currentNamespace".into()),
                 query: "host".into(),

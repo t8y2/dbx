@@ -357,8 +357,8 @@ impl DumpParser {
 
     fn push_table(&mut self, info: TableInfo, detail: TableSchemaDetail) {
         let key = normalized_name(&info.name);
-        if self.details.contains_key(&key) {
-            self.details.insert(key, detail);
+        if let std::collections::hash_map::Entry::Occupied(mut entry) = self.details.entry(key.clone()) {
+            entry.insert(detail);
             return;
         }
         self.order.push(key.clone());
@@ -885,7 +885,7 @@ fn read_parenthesized_text(cursor: &mut Cursor) -> Option<String> {
         end = token.end;
         cursor.advance();
     }
-    cursor.source.get(start..end).map(|text| normalize_sql_fragment(text))
+    cursor.source.get(start..end).map(normalize_sql_fragment)
 }
 
 fn is_expression_keyword(upper: &str) -> bool {
@@ -1247,9 +1247,9 @@ fn tokenize(text: &str) -> Vec<Token> {
             let mut end = index;
             while end < bytes.len() {
                 let byte = bytes[end];
-                if byte.is_ascii_digit() {
-                    end += 1;
-                } else if byte == b'.' && bytes.get(end + 1).is_some_and(|next| next.is_ascii_digit()) {
+                if byte.is_ascii_digit()
+                    || (byte == b'.' && bytes.get(end + 1).is_some_and(|next| next.is_ascii_digit()))
+                {
                     end += 1;
                 } else {
                     break;

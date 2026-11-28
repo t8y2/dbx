@@ -31,6 +31,8 @@ MongoDB 查询编辑器使用单独的 Mongo Shell 格式化器，不使用本�
 
 默认的 `dbx` 排版采用 DBX 布局：显式 `AS` 别名对齐，`FROM` 与表名同行。短查询仍会保持紧凑，`CREATE TABLE` 定义按列对齐。`classic` 使用 sql-formatter 上游的排版。点击**恢复默认值**会回到当前默认风格。
 
+可选的 `datagrip` 排版为 PostgreSQL、MySQL 和 SQLite 提供 DataGrip 兼容布局。它会先构建方言语法树，再构建独立的格式化 Block 树，应用相应的空白、换行、缩进与对齐规则。解析、布局、打印和选区映射均在专用 Web Worker 中执行，避免大文档在编辑器主线程重复计算。不支持的方言会报错并保留原始 SQL。
+
 `classic` 使用 sql-formatter 自身的排版，也是 v0.6.16 之前 DBX 的默认风格。如需精确还原此前输出，可把**表达式宽度**设为 `50`、**FROM 子句布局**设为换行；JSON 中对应为 `"expressionWidth": 50`、`"fromClauseLayout": "newLine"`，与 `"layoutStyle": "classic"` 并列。除 Oracle 外结果与 v0.6.15 一致：Oracle 的字节/多字节函数变体（`SUBSTRB`、`INSTR2`、`LENGTHB` 等同族函数）保留较新的修复，会被规范为函数形式。
 
 未启用自定义规则时，切换排版风格不会顺带改写其它选项，两种表格式缩进（`tabularLeft`、`tabularRight`）都使用 sql-formatter 自身的排版。
@@ -41,7 +43,7 @@ MongoDB 查询编辑器使用单独的 Mongo Shell 格式化器，不使用本�
 
 | 选项 | 可用值或作用 |
 | --- | --- |
-| 排版风格 | `dbx`（DBX 排版，默认）或 `classic`（sql-formatter 上游排版） |
+| 排版风格 | `dbx`（DBX 排版，默认）、`classic`（sql-formatter 上游排版）或 `datagrip`（兼容 DataGrip 的 PostgreSQL/MySQL/SQLite 排版） |
 | 关键字、数据类型、函数、标识符大小写 | `upper`、`lower`、`preserve` |
 | 缩进样式 | `standard`、`tabularLeft`、`tabularRight` |
 | 缩进字符 | 空格或 Tab |

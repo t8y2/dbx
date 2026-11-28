@@ -1,0 +1,260 @@
+[
+  {
+    "dialect": "postgres",
+    "name": "case",
+    "input": "select id,case when total>100 then 'high' when total>0 then 'normal' else 'zero' end as bucket from orders;\n",
+    "expected": "select id, case when total > 100 then 'high' when total > 0 then 'normal' else 'zero' end as bucket\nfrom orders;\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "comments",
+    "input": "-- heading\nselect id, /* inline */ name from users -- trailing\nwhere id=1;\n",
+    "expected": "-- heading\nselect id, /* inline */ name\nfrom users -- trailing\nwhere id = 1;\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "create_table",
+    "input": "create table account (id bigint primary key,email varchar(255) not null unique,created_at timestamp default current_timestamp,constraint fk_user foreign key (id) references users(id));\n",
+    "expected": "create table account\n(\n    id         bigint primary key,\n    email      varchar(255) not null unique,\n    created_at timestamp default current_timestamp,\n    constraint fk_user foreign key (id) references users (id)\n);\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "cte",
+    "input": "with recent as (select id,user_id,total from orders where created_at>current_date) select u.id,r.total from users u join recent r on r.user_id=u.id;\n",
+    "expected": "with recent as (select id, user_id, total from orders where created_at > current_date)\nselect u.id, r.total\nfrom users u\n         join recent r on r.user_id = u.id;\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "delete",
+    "input": "delete from orders where user_id=1 and total<0;\n",
+    "expected": "delete\nfrom orders\nwhere user_id = 1\n  and total < 0;\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "insert_values",
+    "input": "insert into users (id,name,email) values (1,'A','a@example.com'),(2,'B','b@example.com');\n",
+    "expected": "insert into users (id, name, email)\nvalues (1, 'A', 'a@example.com'),\n       (2, 'B', 'b@example.com');\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "join_where",
+    "input": "select u.id,u.name,o.total from users u left join orders o on o.user_id=u.id where u.active=true and o.total>10 order by o.total desc;\n",
+    "expected": "select u.id, u.name, o.total\nfrom users u\n         left join orders o on o.user_id = u.id\nwhere u.active = true\n  and o.total > 10\norder by o.total desc;\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "multi_statement",
+    "input": "select id from users;\n\nselect id from orders;\n",
+    "expected": "select id\nfrom users;\n\nselect id\nfrom orders;\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "pg_create_table",
+    "input": "create table if not exists public.account (id bigint generated always as identity primary key,email text not null unique,created_at timestamptz default now());\n",
+    "expected": "create table if not exists public.account\n(\n    id\n    bigint\n    generated\n    always as\n    identity\n    primary\n    key,\n    email\n    text\n    not\n    null\n    unique,\n    created_at\n    timestamptz\n    default\n    now\n(\n));\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "pg_dollar_cast",
+    "input": "select payload::jsonb->>'name' from events where tags @> array['sql'];\nselect $$BEGIN NULL; END$$;\n",
+    "expected": "select payload::jsonb->>'name'\nfrom events\nwhere tags @> array['sql'];\nselect $$BEGIN NULL;\nEND$$;\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "pg_returning",
+    "input": "with moved as (delete from orders where total<0 returning id,user_id) insert into order_archive select * from moved returning id;\n",
+    "expected": "with moved as (\ndelete\nfrom orders\nwhere total<0 returning id, user_id)\ninsert\ninto order_archive\nselect *\nfrom moved returning id;\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "select_list",
+    "input": "select id,name,email from users;\n",
+    "expected": "select id, name, email\nfrom users;\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "subquery",
+    "input": "select id,(select max(total) from orders o where o.user_id=u.id) as max_total from users u;\n",
+    "expected": "select id, (select max(total) from orders o where o.user_id = u.id) as max_total\nfrom users u;\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "update_set",
+    "input": "update users set name='A',email='a@example.com',updated_at=current_timestamp where id=1 and active=true;\n",
+    "expected": "update users\nset name='A',\n    email='a@example.com',\n    updated_at=current_timestamp\nwhere id = 1\n  and active = true;\n"
+  },
+  {
+    "dialect": "postgres",
+    "name": "window",
+    "input": "select id,total,row_number() over (partition by user_id order by created_at desc) as rn from orders;\n",
+    "expected": "select id, total, row_number() over (partition by user_id order by created_at desc) as rn\nfrom orders;\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "case",
+    "input": "select id,case when total>100 then 'high' when total>0 then 'normal' else 'zero' end as bucket from orders;\n",
+    "expected": "select id, case when total > 100 then 'high' when total > 0 then 'normal' else 'zero' end as bucket\nfrom orders;\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "comments",
+    "input": "-- heading\nselect id, /* inline */ name from users -- trailing\nwhere id=1;\n",
+    "expected": "-- heading\nselect id, /* inline */ name\nfrom users -- trailing\nwhere id = 1;\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "create_table",
+    "input": "create table account (id bigint primary key,email varchar(255) not null unique,created_at timestamp default current_timestamp,constraint fk_user foreign key (id) references users(id));\n",
+    "expected": "create table account\n(\n    id         bigint primary key,\n    email      varchar(255) not null unique,\n    created_at timestamp default current_timestamp,\n    constraint fk_user foreign key (id) references users (id)\n);\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "cte",
+    "input": "with recent as (select id,user_id,total from orders where created_at>current_date) select u.id,r.total from users u join recent r on r.user_id=u.id;\n",
+    "expected": "with recent as (select id, user_id, total from orders where created_at > current_date)\nselect u.id, r.total\nfrom users u\n         join recent r on r.user_id = u.id;\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "delete",
+    "input": "delete from orders where user_id=1 and total<0;\n",
+    "expected": "delete\nfrom orders\nwhere user_id = 1\n  and total < 0;\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "insert_values",
+    "input": "insert into users (id,name,email) values (1,'A','a@example.com'),(2,'B','b@example.com');\n",
+    "expected": "insert into users (id, name, email)\nvalues (1, 'A', 'a@example.com'),\n       (2, 'B', 'b@example.com');\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "join_where",
+    "input": "select u.id,u.name,o.total from users u left join orders o on o.user_id=u.id where u.active=true and o.total>10 order by o.total desc;\n",
+    "expected": "select u.id, u.name, o.total\nfrom users u\n         left join orders o on o.user_id = u.id\nwhere u.active = true\n  and o.total > 10\norder by o.total desc;\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "multi_statement",
+    "input": "select id from users;\n\nselect id from orders;\n",
+    "expected": "select id\nfrom users;\n\nselect id\nfrom orders;\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "mysql_create_table",
+    "input": "create table if not exists `app`.`Account` (`id` bigint unsigned auto_increment primary key,`email` varchar(255) not null unique,`created_at` timestamp default current_timestamp) engine=InnoDB;\n",
+    "expected": "create table if not exists `app`.`Account`\n(\n    `id`\n    bigint\n    unsigned\n    auto_increment\n    primary\n    key,\n    `email`\n    varchar\n(\n    255\n) not null unique,`created_at` timestamp default current_timestamp) engine=InnoDB;\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "mysql_replace_limit",
+    "input": "replace into users (id,name) values (1,'A');\nselect id from users limit 10 offset 20;\n",
+    "expected": "replace\ninto users (id,name) values (1,'A');\nselect id\nfrom users limit 10\noffset 20;\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "select_list",
+    "input": "select id,name,email from users;\n",
+    "expected": "select id, name, email\nfrom users;\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "subquery",
+    "input": "select id,(select max(total) from orders o where o.user_id=u.id) as max_total from users u;\n",
+    "expected": "select id, (select max(total) from orders o where o.user_id = u.id) as max_total\nfrom users u;\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "update_set",
+    "input": "update users set name='A',email='a@example.com',updated_at=current_timestamp where id=1 and active=true;\n",
+    "expected": "update users\nset name='A',\n    email='a@example.com',\n    updated_at=current_timestamp\nwhere id = 1\n  and active = true;\n"
+  },
+  {
+    "dialect": "mysql",
+    "name": "window",
+    "input": "select id,total,row_number() over (partition by user_id order by created_at desc) as rn from orders;\n",
+    "expected": "select id, total, row_number() over (partition by user_id order by created_at desc) as rn\nfrom orders;\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "case",
+    "input": "select id,case when total>100 then 'high' when total>0 then 'normal' else 'zero' end as bucket from orders;\n",
+    "expected": "select id, case when total > 100 then 'high' when total > 0 then 'normal' else 'zero' end as bucket\nfrom orders;\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "comments",
+    "input": "-- heading\nselect id, /* inline */ name from users -- trailing\nwhere id=1;\n",
+    "expected": "-- heading\nselect id, /* inline */ name\nfrom users -- trailing\nwhere id = 1;\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "create_table",
+    "input": "create table account (id bigint primary key,email varchar(255) not null unique,created_at timestamp default current_timestamp,constraint fk_user foreign key (id) references users(id));\n",
+    "expected": "create table account\n(\n    id         bigint primary key,\n    email      varchar(255) not null unique,\n    created_at timestamp default current_timestamp,\n    constraint fk_user foreign key (id) references users (id)\n);\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "cte",
+    "input": "with recent as (select id,user_id,total from orders where created_at>current_date) select u.id,r.total from users u join recent r on r.user_id=u.id;\n",
+    "expected": "with recent as (select id, user_id, total from orders where created_at > current_date)\nselect u.id, r.total\nfrom users u\n         join recent r on r.user_id = u.id;\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "delete",
+    "input": "delete from orders where user_id=1 and total<0;\n",
+    "expected": "delete\nfrom orders\nwhere user_id = 1\n  and total < 0;\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "insert_values",
+    "input": "insert into users (id,name,email) values (1,'A','a@example.com'),(2,'B','b@example.com');\n",
+    "expected": "insert into users (id, name, email)\nvalues (1, 'A', 'a@example.com'),\n       (2, 'B', 'b@example.com');\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "join_where",
+    "input": "select u.id,u.name,o.total from users u left join orders o on o.user_id=u.id where u.active=true and o.total>10 order by o.total desc;\n",
+    "expected": "select u.id, u.name, o.total\nfrom users u\n         left join orders o on o.user_id = u.id\nwhere u.active = true\n  and o.total > 10\norder by o.total desc;\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "multi_statement",
+    "input": "select id from users;\n\nselect id from orders;\n",
+    "expected": "select id\nfrom users;\n\nselect id\nfrom orders;\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "select_list",
+    "input": "select id,name,email from users;\n",
+    "expected": "select id, name, email\nfrom users;\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "sqlite_create_table",
+    "input": "create table if not exists main.account (id integer primary key autoincrement,email text not null unique,created_at text default current_timestamp);\n",
+    "expected": "create table if not exists main.account\n(\n    id\n    integer\n    primary\n    key\n    autoincrement,\n    email\n    text\n    not\n    null\n    unique,\n    created_at\n    text\n    default\n    current_timestamp\n);\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "sqlite_upsert",
+    "input": "insert into users (id,name) values (1,'A') on conflict(id) do update set name=excluded.name;\n",
+    "expected": "insert into users (id, name)\nvalues (1, 'A') on conflict(id) do\nupdate\nset name =excluded.name;\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "subquery",
+    "input": "select id,(select max(total) from orders o where o.user_id=u.id) as max_total from users u;\n",
+    "expected": "select id, (select max(total) from orders o where o.user_id = u.id) as max_total\nfrom users u;\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "update_set",
+    "input": "update users set name='A',email='a@example.com',updated_at=current_timestamp where id=1 and active=true;\n",
+    "expected": "update users\nset name='A',\n    email='a@example.com',\n    updated_at=current_timestamp\nwhere id = 1\n  and active = true;\n"
+  },
+  {
+    "dialect": "sqlite",
+    "name": "window",
+    "input": "select id,total,row_number() over (partition by user_id order by created_at desc) as rn from orders;\n",
+    "expected": "select id, total, row_number() over (partition by user_id order by created_at desc) as rn\nfrom orders;\n"
+  }
+]

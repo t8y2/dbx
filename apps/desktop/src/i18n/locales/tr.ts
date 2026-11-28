@@ -7605,6 +7605,7 @@ export default withEnglishFallback({
     sqlFormatterIndentStyleTabularRight: "Tablo biçiminde sağa",
     sqlFormatterLayoutStyle: "Düzen biçemi",
     sqlFormatterLayoutStyleDbx: "DBX",
+    sqlFormatterLayoutStyleDataGrip: "DataGrip",
     sqlFormatterLayoutStyleClassic: "Klasik",
     sqlFormatterLogicalOperatorNewline: "Mantıksal işleçte satır sonu",
     sqlFormatterLogicalBefore: "İşleçten önce",

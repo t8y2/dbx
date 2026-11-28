@@ -90,11 +90,20 @@ describe("SQL formatter layout style panel", () => {
     const styleSelect = root.querySelector('[data-model-value="dbx"]');
     expect(styleSelect).not.toBeNull();
     const layoutOptions = Array.from(styleSelect!.querySelectorAll('[data-stub="SelectItem"]')).map((node) => node.getAttribute("value"));
-    expect(layoutOptions).toEqual(["classic", "dbx"]);
+    expect(layoutOptions).toEqual(["classic", "dbx", "datagrip"]);
 
     styleSelect!.dispatchEvent(new CustomEvent("pick", { detail: { value: "classic" } }));
     await nextTick();
     expect(update).toHaveBeenLastCalledWith({ ...DEFAULT_SQL_FORMATTER_SETTINGS, layoutStyle: "classic" });
+  });
+
+  it("selects the DataGrip layout without rewriting other settings", async () => {
+    const update = vi.fn();
+    const root = mountPanel(DEFAULT_SQL_FORMATTER_SETTINGS, update);
+    const styleSelect = root.querySelector('[data-model-value="dbx"]');
+    styleSelect!.dispatchEvent(new CustomEvent("pick", { detail: { value: "datagrip" } }));
+    await nextTick();
+    expect(update).toHaveBeenLastCalledWith({ ...DEFAULT_SQL_FORMATTER_SETTINGS, layoutStyle: "datagrip" });
   });
 
   it("restores the current formatter defaults", async () => {

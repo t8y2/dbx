@@ -10498,6 +10498,7 @@ export default {
     sqlFormatterIndentStyleTabularRight: "Tabular right",
     sqlFormatterLayoutStyle: "Layout style",
     sqlFormatterLayoutStyleDbx: "DBX",
+    sqlFormatterLayoutStyleDataGrip: "DataGrip",
     sqlFormatterLayoutStyleClassic: "Classic",
     sqlFormatterLogicalOperatorNewline: "Logical operator newline",
     sqlFormatterLogicalBefore: "Before operator",

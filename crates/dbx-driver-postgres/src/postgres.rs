@@ -5422,10 +5422,11 @@ fn postgres_columns_for_relations_compat_sql() -> &'static str {
 // `pg_attribute` tiers — `column_info_from_row_offset` decodes the row by
 // position.
 //
-// The precision/scale/length casts use the `::int` shorthand instead of
-// `CAST(... AS int)`: GaussDB parses the shorthand but rejects the ANSI form
-// with `syntax error at or near "int"`, which made `getColumns` fail outright
-// there (#14613).
+// The precision/scale/length casts use `::text` rather than `CAST(... AS int)`
+// or `::int`: GaussDB rejects the ANSI form with `syntax error at or near "int"`
+// (#14613), and its B-compatibility mode exposes these information_schema
+// columns as `bigint unsigned`, which has no `::int` cast (#15845). The
+// decoder parses the text value.
 //
 // `full_type` is a plain `data_type` here: GaussDB's `information_schema.columns`
 // has no `udt_name` column at all (`Column c.udt_name does not exist`, SQLSTATE
@@ -5455,9 +5456,9 @@ macro_rules! postgres_columns_for_relations_information_schema_sql {
             $comment,
             " AS column_comment, \
              NULL::text AS column_extra, \
-             ic.numeric_precision::int AS numeric_precision, \
-             ic.numeric_scale::int AS numeric_scale, \
-             ic.character_maximum_length::int AS character_maximum_length, \
+             ic.numeric_precision::text AS numeric_precision, \
+             ic.numeric_scale::text AS numeric_scale, \
+             ic.character_maximum_length::text AS character_maximum_length, \
              NULL::text AS enum_values \
              FROM information_schema.columns ic \
              JOIN pg_catalog.pg_namespace n ON n.nspname = ic.table_schema \
@@ -5481,6 +5482,27 @@ fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
     postgres_columns_for_relations_information_schema_sql!("NULL::text")
 }
 
+/// Read an integer metadata field from a PostgreSQL row.
+///
+/// The information-schema tiers select precision/scale/length as `::text`
+/// because GaussDB B-compatibility mode exposes them as `bigint unsigned`,
+/// which cannot be cast to `int` (#15845); the pg_attribute tiers still select
+/// real integers. Accept both wire shapes (and i64 for servers that widen the
+/// field) and ignore values that do not fit `i32` instead of failing the whole
+/// column listing.
+fn pg_row_try_i32(row: &impl ValueRow, idx: usize) -> Option<i32> {
+    if let Ok(value) = row.try_get::<_, Option<i32>>(idx) {
+        return value;
+    }
+    if let Ok(value) = row.try_get::<_, Option<i64>>(idx) {
+        return value.and_then(|value| i32::try_from(value).ok());
+    }
+    if let Ok(value) = row.try_get::<_, Option<String>>(idx) {
+        return value.and_then(|value| value.trim().parse::<i32>().ok());
+    }
+    None
+}
+
 /// Same field layout as `column_info_from_row`, offset by one leading `relid`
 /// column.
 fn column_info_from_row_offset(row: &impl ValueRow, offset: usize) -> ColumnInfo {
@@ -5493,9 +5515,9 @@ fn column_info_from_row_offset(row: &impl ValueRow, offset: usize) -> ColumnInfo
         is_primary_key: pg_row_try_bool(row, offset + 4).unwrap_or(false),
         extra: row.try_get::<_, Option<String>>(offset + 6).ok().flatten(),
         comment: row.try_get::<_, Option<String>>(offset + 5).ok().flatten(),
-        numeric_precision: row.try_get::<_, Option<i32>>(offset + 7).ok().flatten(),
-        numeric_scale: row.try_get::<_, Option<i32>>(offset + 8).ok().flatten(),
-        character_maximum_length: row.try_get::<_, Option<i32>>(offset + 9).ok().flatten(),
+        numeric_precision: pg_row_try_i32(row, offset + 7),
+        numeric_scale: pg_row_try_i32(row, offset + 8),
+        character_maximum_length: pg_row_try_i32(row, offset + 9),
         enum_values: parse_enum_values_from_row(row, offset + 10),
         metadata_capabilities: Some(ColumnMetadataCapabilities::all_supported()),
         ..Default::default()
@@ -5578,14 +5600,16 @@ fn postgres_indexes_for_relations_query_tiers() -> [&'static str; 2] {
 // `COALESCE(a.attname::text, pg_get_indexdef(...))` keeps the cast: a bare
 // `COALESCE(name, text)` resolves to `name`, so PostgreSQL silently truncates an
 // expression key part to 63 bytes (NAMEDATALEN - 1) and the rebuilt CREATE INDEX
-// becomes invalid SQL (#9988).
+// becomes invalid SQL (#9988). The explicit `::text` on both sides also keeps
+// the array text-typed when a kernel (GaussDB B mode) exposes catalog string
+// columns as `longtext` (#15845).
 // `constraint_backed` must require the constraint to be owned by the index's own
 // relation: a FOREIGN KEY stores the referenced table's unique index in
 // `conindid`, so matching on `conindid` alone marked that standalone index as
 // constraint-backed and dropped it from generated DDL (#10484).
 fn postgres_indexes_for_relations_sql() -> &'static str {
     "SELECT t.oid::bigint AS relid, i.relname AS index_name, \
-             array_agg(COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
+             array_agg(COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, k.n::int, false)::text) ORDER BY k.n) AS columns, \
              array_agg(CASE WHEN oc.opcdefault THEN NULL ELSE quote_ident(opcns.nspname) || '.' || quote_ident(oc.opcname) END ORDER BY k.n) AS column_opclasses, \
              (ix.indisunique AND ix.indisvalid) AS is_unique, \
              ix.indisprimary AS is_primary, \
@@ -5613,10 +5637,13 @@ fn postgres_indexes_for_relations_sql() -> &'static str {
 
 // Compat-tier sibling of `POSTGRES_INDEXES_COMPAT_SQL` (~line 6063) — see the
 // note on `postgres_indexes_for_relations_sql` above.
+// `oc.opcname::text` keeps the opclass array text-typed: GaussDB's
+// B-compatibility mode exposes `pg_opclass.opcname` as `longtext`, which has no
+// array type (`could not find array type for data type longtext`, #15845).
 fn postgres_indexes_for_relations_compat_sql() -> &'static str {
     "SELECT t.oid::bigint AS relid, i.relname AS index_name, \
              ARRAY( \
-               SELECT COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
+               SELECT COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, pos.n, false)::text) \
                FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
                LEFT JOIN pg_attribute a \
                  ON a.attrelid = t.oid \
@@ -5627,7 +5654,7 @@ fn postgres_indexes_for_relations_compat_sql() -> &'static str {
              ) AS columns, \
              ARRAY( \
                SELECT CASE WHEN oc.opcdefault THEN NULL \
-                           ELSE oc.opcname \
+                           ELSE oc.opcname::text \
                       END \
                FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
                LEFT JOIN pg_attribute a \
@@ -8571,8 +8598,12 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              ORDER BY a.attnum";
 
 // Both information_schema queries must match column_info_from_row_offset.
-// Cast precision, scale and length with `::int` because GaussDB rejects
-// `CAST(... AS int)` with `syntax error at or near "int"` (#14613).
+// Cast precision, scale and length with `::text` rather than `::int`:
+// GaussDB rejects `CAST(... AS int)` with `syntax error at or near "int"`
+// (#14613), and its B-compatibility mode exposes these information_schema
+// columns as `bigint unsigned`, for which the `::int` cast is missing
+// (`cannot cast type bigint unsigned to integer`, #15845). Text is
+// always reachable through the type's output function; the decoder parses it.
 //
 // `full_type` is a plain `data_type` because GaussDB's `information_schema.columns`
 // has no `udt_name` column (`Column c.udt_name does not exist`, SQLSTATE 42703),
@@ -8601,9 +8632,9 @@ macro_rules! information_schema_columns_sql {
             $comment,
             " AS column_comment, \
              NULL::text AS column_extra, \
-             c.numeric_precision::int AS numeric_precision, \
-             c.numeric_scale::int AS numeric_scale, \
-             c.character_maximum_length::int AS character_maximum_length, \
+             c.numeric_precision::text AS numeric_precision, \
+             c.numeric_scale::text AS numeric_scale, \
+             c.character_maximum_length::text AS character_maximum_length, \
              NULL::text AS enum_values \
              FROM information_schema.columns c \
              WHERE c.table_schema = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN current_schema() ELSE $1 END) \
@@ -10256,7 +10287,9 @@ pub async fn execute_query_on_client_unnamed(
 // `COALESCE(a.attname::text, pg_get_indexdef(...))` keeps the cast: a bare
 // `COALESCE(name, text)` resolves to `name`, so PostgreSQL silently truncates an
 // expression key part to 63 bytes (NAMEDATALEN - 1) and the rebuilt CREATE INDEX
-// becomes invalid SQL (#9988).
+// becomes invalid SQL (#9988). The explicit `::text` on both sides also keeps
+// the array text-typed when a kernel (GaussDB B mode) exposes catalog string
+// columns as `longtext` (#15845).
 // `constraint_backed` must require the constraint to be owned by the index's own
 // relation: a FOREIGN KEY stores the referenced table's unique index in
 // `conindid`, so matching on `conindid` alone marked that standalone index as
@@ -10278,7 +10311,7 @@ pub async fn execute_query_on_client_unnamed(
 // a bogus `tableoid` column. Only non-negative attnums (0 = expression, positive =
 // user column) are real, displayable index key parts.
 const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
-             array_agg(COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
+             array_agg(COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, k.n::int, false)::text) ORDER BY k.n) AS columns, \
              array_agg(CASE WHEN oc.opcdefault THEN NULL ELSE quote_ident(opcns.nspname) || '.' || quote_ident(oc.opcname) END ORDER BY k.n) AS column_opclasses, \
              (ix.indisunique AND ix.indisvalid) AS is_unique, \
              ix.indisprimary AS is_primary, \
@@ -10311,9 +10344,13 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
 // WHERE is a syntax error, and this tier is the only one GaussDB / openGauss
 // ever run (`list_indexes_compat_first`), so the misordered join broke every
 // index listing there with `syntax error at or near "LEFT"` (#12650, #12675).
+//
+// `oc.opcname::text` keeps the opclass array text-typed: GaussDB's
+// B-compatibility mode exposes `pg_opclass.opcname` as `longtext`, which has no
+// array type (`could not find array type for data type longtext`, #15845).
 const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              ARRAY( \
-               SELECT COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
+               SELECT COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, pos.n, false)::text) \
                FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
                LEFT JOIN pg_attribute a \
                  ON a.attrelid = t.oid \
@@ -10324,7 +10361,7 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              ) AS columns, \
              ARRAY( \
                SELECT CASE WHEN oc.opcdefault THEN NULL \
-                           ELSE oc.opcname \
+                           ELSE oc.opcname::text \
                       END \
                FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
                LEFT JOIN pg_attribute a \
@@ -15522,6 +15559,7 @@ mod tests {
             postgres_indexes_for_relations_compat_sql(),
         ] {
             assert!(sql.contains("COALESCE(a.attname::text, pg_get_indexdef("), "{sql}");
+            assert!(sql.contains(")::text"), "the indexdef result must stay text-typed: {sql}");
             assert!(!sql.contains("COALESCE(a.attname, pg_get_indexdef("), "{sql}");
         }
     }
@@ -16356,6 +16394,80 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_information_schema_columns_sql_returns_text_typed_numbers() {
+        // The tier now selects precision/scale/length as ::text (#15845); make
+        // sure the SQL still executes and the shared decoder reads the values.
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let schema = format!("dbx_15845_{suffix}");
+        let schema_ident = pg_quote_ident(&schema);
+        let table_name = "text_typed_metadata";
+        let table_ident = pg_quote_ident(table_name);
+        let client = pool.get().await.expect("get postgres client");
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA {schema_ident}; \
+                 CREATE TABLE {schema_ident}.{table_ident} \
+                   (id bigint PRIMARY KEY, amount numeric(18,2), label varchar(64))"
+            ))
+            .await
+            .expect("create information_schema fixtures");
+
+        let columns = get_columns_with_sql(&client, POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL, &schema, table_name)
+            .await
+            .expect("load columns through information_schema");
+        let amount = columns.iter().find(|column| column.name == "amount").expect("amount column");
+        assert_eq!(amount.numeric_precision, Some(18));
+        assert_eq!(amount.numeric_scale, Some(2));
+        let label = columns.iter().find(|column| column.name == "label").expect("label column");
+        assert_eq!(label.character_maximum_length, Some(64));
+
+        drop(client);
+        execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await.expect("drop fixtures");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_column_metadata_parses_text_precision_fields() {
+        // The information-schema tiers select precision/scale/length as ::text
+        // (#15845). Real integers and text must decode the same, and a value
+        // that cannot fit i32 (GaussDB longtext length) becomes None instead of
+        // failing the listing.
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let (client, connection) =
+            tokio_postgres::connect(&url, tokio_postgres::NoTls).await.expect("connect postgres");
+        let connection_task = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let row = client
+            .query_one(
+                "SELECT \
+                   'id'::text AS column_name, \
+                   'bigint'::text AS full_type, \
+                   'NO'::text AS is_nullable, \
+                   NULL::text AS column_default, \
+                   false AS is_pk, \
+                   NULL::text AS column_comment, \
+                   NULL::text AS column_extra, \
+                   '20'::text AS numeric_precision, \
+                   '0'::text AS numeric_scale, \
+                   '4294967295'::text AS character_maximum_length",
+                &[],
+            )
+            .await
+            .expect("query text metadata row");
+
+        let info = column_info_from_row(&row);
+        assert_eq!(info.numeric_precision, Some(20));
+        assert_eq!(info.numeric_scale, Some(0));
+        assert_eq!(info.character_maximum_length, None, "4294967295 does not fit i32");
+        drop(client);
+        let _ = connection_task.await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
     async fn postgres_batched_column_metadata_returns_each_column_once() {
         let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
         let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
@@ -16701,8 +16813,10 @@ mod tests {
         // opclass schema-qualified (`quote_ident(nspname) || '.' || quote_ident(opcname)`)
         // and joins `pg_namespace` on `opcnamespace`, so DDL regeneration resolves
         // opclasses (e.g. `gin_trgm_ops` from `pg_trgm`) regardless of `search_path`.
-        // The compat (pre-LATERAL) fallback keeps bare `oc.opcname` — no regression,
+        // The compat (pre-LATERAL) fallback keeps the bare opclass name — no regression,
         // just no schema-qualification for the rare old-PG × non-default-schema case.
+        // It is cast to text so GaussDB B mode's longtext opcname still forms an array
+        // (#15845); that cast does not add schema qualification.
         for sql in [POSTGRES_INDEXES_SQL, postgres_indexes_for_relations_sql()] {
             assert!(
                 sql.contains("quote_ident(opcns.nspname) || '.' || quote_ident(oc.opcname)"),
@@ -17301,8 +17415,10 @@ mod tests {
     }
 
     /// GaussDB rejects `CAST(x AS int)` with `syntax error at or near "int"`
-    /// (#14613), while the `::int` shorthand is accepted. Keep both
-    /// information-schema column tiers on the shorthand so a server that only
+    /// (#14613), and its B-compatibility mode exposes the information-schema
+    /// precision/scale/length columns as `bigint unsigned`, which has no `::int`
+    /// cast (`cannot cast type bigint unsigned to integer`, #15845). Keep both
+    /// information-schema column tiers on a `::text` cast so a server that only
     /// has `information_schema` left can still list columns.
     ///
     /// The assertions below run on the SQL text itself (not the source file),
@@ -17314,20 +17430,41 @@ mod tests {
     /// `udt_name` is also asserted absent: GaussDB's `information_schema.columns`
     /// omits it, and selecting it failed the tier with SQLSTATE 42703 (#15130).
     #[test]
-    fn information_schema_columns_sql_avoids_cast_to_int_for_gaussdb() {
-        for sql in [POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL, postgres_columns_for_relations_information_schema_sql()] {
+    fn information_schema_columns_sql_avoids_int_casts_for_gaussdb() {
+        for sql in [
+            POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL,
+            GAUSS_COLUMNS_INFORMATION_SCHEMA_WITH_COMMENTS_SQL,
+            postgres_columns_for_relations_information_schema_sql(),
+        ] {
             let lowered = sql.to_lowercase();
             assert!(!lowered.contains("cast("), "ANSI CAST is a syntax error on GaussDB here: {sql}");
             assert!(!lowered.contains(" as int"), "CAST(... AS int) is a syntax error on GaussDB: {sql}");
+            assert!(!lowered.contains("::int "), "GaussDB B mode has no bigint-unsigned-to-int cast: {sql}");
             assert!(!lowered.contains("udt_name"), "udt_name is missing on GaussDB (SQLSTATE 42703): {sql}");
             assert!(lowered.contains("as full_type"), "full_type column must stay in place: {sql}");
             let precision = sql.find("AS numeric_precision").expect("numeric_precision column");
             let scale = sql.find("AS numeric_scale").expect("numeric_scale column");
             let length = sql.find("AS character_maximum_length").expect("character_maximum_length column");
             assert!(precision < scale && scale < length, "column order changed: {sql}");
-            assert!(sql.contains("numeric_precision::int"), "{sql}");
-            assert!(sql.contains("numeric_scale::int"), "{sql}");
-            assert!(sql.contains("character_maximum_length::int"), "{sql}");
+            assert!(sql.contains("numeric_precision::text"), "{sql}");
+            assert!(sql.contains("numeric_scale::text"), "{sql}");
+            assert!(sql.contains("character_maximum_length::text"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn compat_index_sql_casts_opclass_to_text_for_gaussdb_b_mode() {
+        // GaussDB B-compatibility mode exposes pg_opclass.opcname as `longtext`,
+        // which has no array type; selecting the raw name into an ARRAY failed
+        // every index listing there with `could not find array type for data type
+        // longtext` (#15845).
+        for sql in [POSTGRES_INDEXES_COMPAT_SQL, postgres_indexes_for_relations_compat_sql()] {
+            assert!(sql.contains("ELSE oc.opcname::text"), "opclass array must stay text-typed: {sql}");
+            assert!(!sql.contains("ELSE oc.opcname END"), "raw opcname is longtext on GaussDB B mode: {sql}");
+        }
+        // The modern tier already produces text through quote_ident.
+        for sql in [POSTGRES_INDEXES_SQL, postgres_indexes_for_relations_sql()] {
+            assert!(sql.contains("quote_ident(oc.opcname)"), "{sql}");
         }
     }
 

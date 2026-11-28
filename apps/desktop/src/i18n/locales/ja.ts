@@ -3011,6 +3011,7 @@ export default withEnglishFallback({
     pie: "円",
     noNumericData: "グラフ化できる数値データがありません",
     showLabels: "値を表示",
+    columnsAsXAxis: "列名を横軸に表示",
   },
   grid: {
     setTablePageSizeDefault: "このテーブルの既定値に設定",

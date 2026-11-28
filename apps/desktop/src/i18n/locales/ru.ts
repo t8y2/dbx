@@ -2832,6 +2832,7 @@ export default withEnglishFallback({
     pie: "Круговая",
     noNumericData: "Нет числовых данных для построения диаграммы",
     showLabels: "Показывать значения",
+    columnsAsXAxis: "Названия столбцов на оси X",
   },
   grid: {
     setTablePageSizeDefault: "Сохранить значение для этой таблицы",

@@ -2515,6 +2515,7 @@ export default withEnglishFallback({
       selectAll: "Выбрать всё",
       addSnippet: "Добавить сниппет",
       executeScriptFromHere: "Выполнить SQL-скрипт отсюда",
+      compareWithClipboard: "Сравнить с буфером обмена",
     },
     delimitedList: {
       title: "Преобразовать в список с разделителями",
@@ -2586,6 +2587,17 @@ export default withEnglishFallback({
     fullscreenResultsPane: "Показать результаты на весь экран",
     exitFullscreenResultsPane: "Выйти из полноэкранного режима результатов",
     executeScriptBoundaryMismatch: "Этот фрагмент зависит от предыдущего SQL-разделителя или границы пакета. Начните выполнение со строки с разделителем или выделите весь скрипт для выполнения.",
+    clipboardCompare: {
+      title: "Сравнить с буфером обмена",
+      editor: "Редактор",
+      selection: "Выделение",
+      clipboard: "Буфер обмена",
+      copyEditor: "Копировать содержимое редактора",
+      copySelection: "Копировать выделенное",
+      copyClipboard: "Копировать содержимое буфера обмена",
+      copied: "Скопировано",
+      clipboardEmpty: "Буфер обмена пуст.",
+    },
   },
   tabs: {
     sql: "SQL",

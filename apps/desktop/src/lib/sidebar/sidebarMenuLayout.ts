@@ -152,7 +152,7 @@ export function sidebarMenuActionGroup(item: ContextMenuItem): MenuGroup {
   const id = item.sidebarActionId;
   if (id?.startsWith("editor.object.") || id === "editor.contextMenu.expandSelectStar") return "structure";
   if (id === "plDebug.start.title" || id === "settings.shortcutExecuteSqlInNewResultTab" || id === "toolbar.explainPlan" || id === "editor.previewChanges" || id === "editor.contextMenu.export") return "data";
-  if (id === "editor.contextMenu.copySelectionAsRichText" || id === "editor.contextMenu.screenshotSelection" || id === "editor.contextMenu.pasteRestoringSourceSql") return "copy";
+  if (id === "editor.contextMenu.copySelectionAsRichText" || id === "editor.contextMenu.screenshotSelection" || id === "editor.contextMenu.pasteRestoringSourceSql" || id === "editor.contextMenu.compareWithClipboard") return "copy";
   if (id === "editor.contextMenu.folding" || id === "editor.contextMenu.addNextSelectionOccurrence" || id === "editor.contextMenu.selectAllSelectionOccurrences" || id === "editor.contextMenu.selectCurrentStatement" || id === "editor.contextMenu.selectAll") return "selection";
   if (id === "toolbar.executeAllSql" || id?.startsWith("editor.contextMenu.")) return "sql";
   for (const [group, ids] of Object.entries(groupActions)) if (id && ids.includes(id)) return group as MenuGroup;

@@ -2596,6 +2596,7 @@ export default withEnglishFallback({
       convertNamingStyle: "Cambiar estilo de nomenclatura",
       addSnippet: "Agregar fragmento",
       executeScriptFromHere: "Ejecutar script SQL desde aquí",
+      compareWithClipboard: "Comparar con el portapapeles",
     },
     bookmarks: {
       workspaceTitle: "Marcadores",
@@ -2674,6 +2675,17 @@ export default withEnglishFallback({
     fullscreenResultsPane: "Mostrar resultados en pantalla completa",
     exitFullscreenResultsPane: "Salir de resultados en pantalla completa",
     executeScriptBoundaryMismatch: "Esta ubicación depende del delimitador SQL anterior o del límite de lote. Ejecute desde la línea donde se encuentra el delimitador, o seleccione el script completo para ejecutarlo.",
+    clipboardCompare: {
+      title: "Comparar con el portapapeles",
+      editor: "Editor",
+      selection: "Selección",
+      clipboard: "Portapapeles",
+      copyEditor: "Copiar contenido del editor",
+      copySelection: "Copiar selección",
+      copyClipboard: "Copiar contenido del portapapeles",
+      copied: "Copiado",
+      clipboardEmpty: "El portapapeles está vacío.",
+    },
   },
   tabs: {
     sql: "SQL",

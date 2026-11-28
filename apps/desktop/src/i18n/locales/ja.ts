@@ -2766,6 +2766,7 @@ export default withEnglishFallback({
       convertNamingStyle: "命名スタイルの切り替え",
       addSnippet: "スニペットを追加",
       executeScriptFromHere: "ここから SQL スクリプトを実行",
+      compareWithClipboard: "クリップボードと比較",
     },
     bookmarks: {
       workspaceTitle: "ブックマーク",
@@ -2846,6 +2847,17 @@ export default withEnglishFallback({
     fullscreenResultsPane: "結果を全画面表示",
     exitFullscreenResultsPane: "結果の全画面表示を終了",
     executeScriptBoundaryMismatch: "この位置は前の SQL 区切り文字またはバッチ境界に依存しています。区切り文字のある行から実行するか、スクリプト全体を選択して実行してください。",
+    clipboardCompare: {
+      title: "クリップボードと比較",
+      editor: "エディター",
+      selection: "選択内容",
+      clipboard: "クリップボード",
+      copyEditor: "エディターの内容をコピー",
+      copySelection: "選択内容をコピー",
+      copyClipboard: "クリップボードの内容をコピー",
+      copied: "コピーしました",
+      clipboardEmpty: "クリップボードは空です。",
+    },
   },
   tabs: {
     sqlTruncatedOnRestore: "{count} 個のタブで SQL がセッション復元の上限を超えたため、先頭部分のみ保持されました。全文は以下に保存されました:\n{detail}",

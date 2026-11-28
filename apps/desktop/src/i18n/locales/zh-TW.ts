@@ -2487,6 +2487,7 @@ export default withEnglishFallback({
       pasteClipboardReadFailed: "讀取剪貼簿失敗：{message}",
       convertNamingStyle: "切換命名風格",
       addSnippet: "新增片段",
+      compareWithClipboard: "與剪貼簿比較",
     },
     bookmarks: {
       workspaceTitle: "書籤",
@@ -2565,6 +2566,17 @@ export default withEnglishFallback({
     },
     fullscreenResultsPane: "全螢幕顯示結果",
     exitFullscreenResultsPane: "退出結果全螢幕",
+    clipboardCompare: {
+      title: "與剪貼簿比較",
+      editor: "編輯器",
+      selection: "選取內容",
+      clipboard: "剪貼簿",
+      copyEditor: "複製編輯器內容",
+      copySelection: "複製選取內容",
+      copyClipboard: "複製剪貼簿內容",
+      copied: "已複製",
+      clipboardEmpty: "剪貼簿為空。",
+    },
   },
   tabs: {
     sql: "SQL",

@@ -63,6 +63,7 @@ import { structurePeekPanelId, structurePeekZIndexesByOrder } from "@/lib/editor
 import { createQueryEditorNativeSelectionGuard, parkEditorNativeSelection, type EditorNativeSelectionPark } from "@/lib/editor/queryEditorNativeSelection";
 import SnippetQuickAddDialog from "./SnippetQuickAddDialog.vue";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
+import ClipboardCompareDialog from "./ClipboardCompareDialog.vue";
 import QueryEditorContextMenu, { type QueryEditorContextMenuState, type QueryEditorContextMenuActions } from "./QueryEditorContextMenu.vue";
 
 import { clipboardLineEndings, copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
@@ -329,6 +330,9 @@ const {
   delimitedListSelectedText,
   codeSnapshotOpen,
   codeSnapshotSource,
+  clipboardCompareOpen,
+  clipboardCompareSnapshot,
+  openClipboardCompare,
   openCodeSnapshot,
   openDelimitedListDialog,
   applyDelimitedListResult,
@@ -1428,6 +1432,7 @@ const contextMenuActions: QueryEditorContextMenuActions = {
   selectAllSqlFromContextMenu,
   emitContextObjectAction,
   openCodeSnapshot,
+  openClipboardCompare,
   openSnippetQuickAddDialog,
   sendSelectionToAi: () => {
     if (selectedSql.value.trim()) emit("sendSelectionToAi", selectedSql.value);
@@ -3428,6 +3433,7 @@ defineExpose({
     />
     <SnippetQuickAddDialog v-model:open="snippetQuickAddOpen" :prefill-body="snippetQuickAddPrefillBody" />
     <CodeSnapshotDialog v-model:open="codeSnapshotOpen" :source="codeSnapshotSource" />
+    <ClipboardCompareDialog v-model:open="clipboardCompareOpen" :snapshot="clipboardCompareSnapshot" />
     <QueryEditorIntentionPopup :state="intentionPopup" @close="closeIntentionPopup" @confirm="executeIntentionAction" @select="intentionPopup && (intentionPopup.selectedIndex = $event)" />
   </div>
 </template>

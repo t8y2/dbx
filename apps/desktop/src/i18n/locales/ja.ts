@@ -1548,6 +1548,9 @@ export default withEnglishFallback({
     displayModeConnection: "接続別にグループ化",
   },
   connection: {
+    defaultSqlSaveDirectory: "SQL の既定の保存先",
+    chooseSqlSaveDirectory: "SQL の保存先を選択",
+    clearSqlSaveDirectory: "SQL の保存先をクリア",
     batchTestConnections: "接続をテスト（{count}）",
     batchTestTitle: "接続を一括テスト",
     batchTestProgress: "{total} 件中 {completed} 件をテストしました",

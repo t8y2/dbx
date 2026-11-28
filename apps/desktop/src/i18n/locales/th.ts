@@ -1449,6 +1449,9 @@ export default withEnglishFallback({
     displayModeConnection: "จัดกลุ่มตามการเชื่อมต่อ",
   },
   connection: {
+    defaultSqlSaveDirectory: "โฟลเดอร์เริ่มต้นสำหรับบันทึก SQL",
+    chooseSqlSaveDirectory: "เลือกโฟลเดอร์บันทึก SQL",
+    clearSqlSaveDirectory: "ล้างโฟลเดอร์บันทึก SQL",
     batchTestConnections: "ทดสอบการเชื่อมต่อ ({count})",
     batchTestTitle: "ทดสอบการเชื่อมต่อหลายรายการ",
     batchTestProgress: "ทดสอบแล้ว {completed} จาก {total} การเชื่อมต่อ",

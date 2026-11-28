@@ -864,6 +864,9 @@ export default withEnglishFallback({
   },
 
   connection: {
+    defaultSqlSaveDirectory: "Folder penyimpanan SQL bawaan",
+    chooseSqlSaveDirectory: "Pilih folder penyimpanan SQL",
+    clearSqlSaveDirectory: "Hapus folder penyimpanan SQL",
     batchTestConnections: "Uji koneksi ({count})",
     batchTestTitle: "Uji koneksi",
     batchTestProgress: "{completed} dari {total} koneksi telah diuji",

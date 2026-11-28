@@ -1353,6 +1353,9 @@ export default withEnglishFallback({
   },
 
   connection: {
+    defaultSqlSaveDirectory: "SQL 預設儲存目錄",
+    chooseSqlSaveDirectory: "選擇 SQL 儲存目錄",
+    clearSqlSaveDirectory: "清除 SQL 儲存目錄",
     batchTestConnections: "測試連線（{count}）",
     batchTestTitle: "批次測試連線",
     batchTestProgress: "已測試 {completed} / {total} 個連線",

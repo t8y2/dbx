@@ -668,6 +668,9 @@ export default withEnglishFallback({
   },
 
   connection: {
+    defaultSqlSaveDirectory: "Varsayılan SQL kayıt klasörü",
+    chooseSqlSaveDirectory: "SQL kayıt klasörünü seç",
+    clearSqlSaveDirectory: "SQL kayıt klasörünü temizle",
     batchTestConnections: "Bağlantıları test et ({count})",
     batchTestTitle: "Bağlantıları test et",
     batchTestProgress: "{total} bağlantının {completed} tanesi test edildi",

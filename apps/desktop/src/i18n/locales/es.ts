@@ -1376,6 +1376,9 @@ export default withEnglishFallback({
   },
 
   connection: {
+    defaultSqlSaveDirectory: "Carpeta predeterminada para guardar SQL",
+    chooseSqlSaveDirectory: "Elegir carpeta para guardar SQL",
+    clearSqlSaveDirectory: "Quitar carpeta para guardar SQL",
     batchTestConnections: "Probar conexiones ({count})",
     batchTestTitle: "Probar conexiones",
     batchTestProgress: "Conexiones probadas: {completed} de {total}",

@@ -1584,6 +1584,9 @@ export default {
   },
 
   connection: {
+    defaultSqlSaveDirectory: "Default SQL save directory",
+    chooseSqlSaveDirectory: "Choose SQL save directory",
+    clearSqlSaveDirectory: "Clear SQL save directory",
     batchTestConnections: "Test connections ({count})",
     batchTestTitle: "Test connections",
     batchTestProgress: "Tested {completed} of {total} connections",

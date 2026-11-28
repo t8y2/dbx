@@ -113,12 +113,21 @@ pub async fn save_external_sql_file(
     content: String,
     filter_extension: Option<String>,
     encoding: Option<String>,
+    default_directory: Option<String>,
 ) -> Result<Option<ExternalSqlFileSaveResult>, String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     // Non-SQL external tabs (custom-filtered text files) keep their own
     // extension when saving a copy; without a usable extension leave the
     // dialog unfiltered instead of forcing the SQL filter.
     let dialog = window.dialog().file().set_file_name(default_file_name);
+    let dialog = match default_directory
+        .as_deref()
+        .map(Path::new)
+        .filter(|directory| directory.is_absolute() && directory.is_dir())
+    {
+        Some(directory) => dialog.set_directory(directory),
+        None => dialog,
+    };
     let dialog = match filter_extension.as_deref().map(str::trim).filter(|extension| !extension.is_empty()) {
         Some("sql") => dialog.add_filter("SQL", &["sql"]),
         Some(extension) => dialog.add_filter(extension.to_uppercase(), &[extension]),

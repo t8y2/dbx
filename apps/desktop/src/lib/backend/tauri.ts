@@ -1484,8 +1484,8 @@ export async function writeExternalSqlFile(path: string, content: string, option
   });
 }
 
-export async function saveExternalSqlFile(defaultFileName: string, content: string, filterExtension?: string, encoding?: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
-  return invoke("save_external_sql_file", { defaultFileName, content, filterExtension, encoding: encoding ?? "utf8" });
+export async function saveExternalSqlFile(defaultFileName: string, content: string, filterExtension?: string, encoding?: string, defaultDirectory?: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
+  return invoke("save_external_sql_file", { defaultFileName, content, filterExtension, encoding: encoding ?? "utf8", defaultDirectory });
 }
 
 export interface SqlFileEntry {

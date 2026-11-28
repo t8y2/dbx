@@ -83,6 +83,7 @@ import {
 } from "@/lib/plugins/frontendPlugin";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { getSqlFileDefaultSaveDirectory, saveSqlFileDefaultSaveDirectory } from "@/lib/sqlFile/sqlFileUiState";
 import { isWindows } from "@/lib/backend/platform";
 import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, externalBasePath, normalizeBasePath, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { hasGbase8cConnectionDatabase } from "@/lib/connection/gbase8cDatabase";
@@ -356,6 +357,8 @@ const editGlobalQueryTimeoutSecs = ref(settingsStore.editorSettings.globalQueryT
 const editRedisValuePreviewLimitKiB = ref(settingsStore.editorSettings.redisValuePreviewLimitKiB);
 const open = defineModel<boolean>("open", { default: false });
 const isDesktop = isTauriRuntime();
+const sqlSaveDirectory = ref("");
+let initialSqlSaveDirectory = "";
 
 const props = defineProps<{
   editConfig?: ConnectionConfig;
@@ -3327,8 +3330,12 @@ function connectionUpdateExternalConfigPreserved(config: Pick<ConnectionConfig, 
 
 watch(
   [() => props.editConfig, open],
-  ([savedConfig, isOpen]) => {
+  ([savedConfig, isOpen], [, wasOpen]) => {
     const syncAction = connectionEditDraftSyncAction(savedConfig?.id ?? null, isOpen, editingId.value);
+    if (isDesktop && isOpen && (!wasOpen || syncAction !== "preserve")) {
+      initialSqlSaveDirectory = getSqlFileDefaultSaveDirectory(savedConfig?.id) ?? "";
+      sqlSaveDirectory.value = initialSqlSaveDirectory;
+    }
     if (syncAction === "preserve") return;
     // Hydrate a detached edit draft before form watchers observe it. Do not
     // mutate the saved record or apply create defaults to an ID update. Only
@@ -7191,6 +7198,7 @@ async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
     return false;
   }
   const wasEditing = !!editingId.value;
+  const changedSqlSaveDirectory = isDesktop && sqlSaveDirectory.value !== initialSqlSaveDirectory ? sqlSaveDirectory.value : undefined;
   const connectAfterSave = options.connectAfterSave ?? (!wasEditing && !isJdbcConnection.value);
   const closeOnSuccess = options.closeOnSuccess ?? true;
   const databaseInfoForSave = visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value;
@@ -7209,6 +7217,10 @@ async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
       await store.updateConnection(updated);
       savedConfig = updated;
       connectionSaved = true;
+      if (changedSqlSaveDirectory !== undefined) {
+        saveSqlFileDefaultSaveDirectory(updated.id, changedSqlSaveDirectory);
+        initialSqlSaveDirectory = changedSqlSaveDirectory;
+      }
       await persistConnectionNoteVisibilityDraft();
     } else {
       const config = withSavedDatabaseInfo(connectionConfigForSubmit(draftTestConnectionId.value), databaseInfoForSave);
@@ -7252,6 +7264,14 @@ const sshConfigHostAliases = computed(() => sshConfigHosts.value.map((entry) => 
 
 function applySshConfigHostAliasPrefill(target: SshTunnelConfig) {
   prefillSshConfigHostAlias(target, sshConfigHosts.value);
+}
+
+async function chooseSqlSaveDirectory() {
+  const connectionId = editingId.value;
+  if (!isDesktop || !connectionId) return;
+  const { open: selectDirectory } = await import("@tauri-apps/plugin-dialog");
+  const directory = await selectDirectory({ title: t("connection.chooseSqlSaveDirectory"), directory: true, multiple: false, defaultPath: sqlSaveDirectory.value || undefined });
+  if (typeof directory === "string" && open.value && editingId.value === connectionId) sqlSaveDirectory.value = directory;
 }
 
 async function browseSshKeyPath(target?: SshTunnelConfig | null) {
@@ -10735,6 +10755,16 @@ function openExternalUrl(url: string) {
 
             <TabsContent value="advanced" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6" :class="{ 'connection-form-body--nacos': form.db_type === 'nacos' }">
+                <div v-if="isDesktop && editingId" class="grid grid-cols-4 items-center gap-4">
+                  <Label for="connection-default-sql-save-directory" :class="connectionLabelSmallClass">{{ t("connection.defaultSqlSaveDirectory") }}</Label>
+                  <div class="col-span-3 flex min-w-0 items-center gap-2">
+                    <Input id="connection-default-sql-save-directory" :model-value="sqlSaveDirectory" class="min-w-0 flex-1" :title="sqlSaveDirectory" readonly />
+                    <Button variant="outline" type="button" @click="chooseSqlSaveDirectory">{{ t("connection.chooseSqlSaveDirectory") }}</Button>
+                    <Button v-if="sqlSaveDirectory" variant="ghost" type="button" size="icon" :aria-label="t('connection.clearSqlSaveDirectory')" :title="t('connection.clearSqlSaveDirectory')" @click="sqlSaveDirectory = ''">
+                      <X class="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
                 <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
                   <div class="flex items-center gap-1">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchConnectivityCheckDisabled") }}</Label>

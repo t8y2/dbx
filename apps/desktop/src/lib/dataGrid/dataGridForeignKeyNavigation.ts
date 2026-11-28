@@ -17,6 +17,14 @@ export interface ForeignKeyAssociationCell {
   value: CellValue;
 }
 
+export interface ForeignKeyDisplaySourceColumnRef {
+  sourceKey?: string;
+  sourceColumn: string;
+  database?: string;
+  schema?: string;
+  tableName?: string;
+}
+
 function foreignKeyAssociationKey(foreignKey: ForeignKeyInfo): string {
   return JSON.stringify([foreignKey.name, foreignKey.ref_schema ?? "", foreignKey.ref_table, foreignKey.on_update ?? "", foreignKey.on_delete ?? ""]);
 }
@@ -99,19 +107,57 @@ export function foreignKeyCellNavigable(value: CellValue | undefined): value is 
   return value !== null && value !== undefined;
 }
 
-export function foreignKeySourceColumnName(options: { context?: "results" | "table-data"; resultColumns: readonly string[]; sourceColumns?: readonly (string | undefined)[]; columnIndex: number }): string | undefined {
+export function foreignKeySourceColumnName(options: {
+  context?: "results" | "table-data";
+  resultColumns: readonly string[];
+  sourceColumns?: readonly (string | undefined)[];
+  displaySourceColumns?: readonly (ForeignKeyDisplaySourceColumnRef | undefined)[];
+  expectedSourceKey?: string;
+  expectedTableName?: string;
+  columnIndex: number;
+}): string | undefined {
+  const displaySource = options.displaySourceColumns?.[options.columnIndex];
+  if (options.expectedSourceKey) {
+    if (displaySource?.sourceColumn) {
+      if (displaySource.sourceKey && displaySource.sourceKey !== options.expectedSourceKey) return undefined;
+      return displaySource.sourceColumn;
+    }
+    if (options.context === "results") return undefined;
+  }
+
   const sourceColumn = options.sourceColumns?.[options.columnIndex] || undefined;
-  if (sourceColumn || options.context === "results") return sourceColumn;
+  if (sourceColumn) return sourceColumn;
+
+  if (displaySource?.sourceColumn) {
+    if (options.expectedTableName && displaySource.tableName && displaySource.tableName.trim().toLowerCase() !== options.expectedTableName.trim().toLowerCase()) {
+      return undefined;
+    }
+    return displaySource.sourceColumn;
+  }
+
+  if (options.context === "results") return undefined;
   return options.resultColumns[options.columnIndex] || undefined;
 }
 
-export function foreignKeyAssociationCells(options: { association: ForeignKeyAssociation; context?: "results" | "table-data"; resultColumns: readonly string[]; sourceColumns?: readonly (string | undefined)[]; row: readonly (CellValue | undefined)[] }): ForeignKeyAssociationCell[] | undefined {
+export function foreignKeyAssociationCells(options: {
+  association: ForeignKeyAssociation;
+  context?: "results" | "table-data";
+  resultColumns: readonly string[];
+  sourceColumns?: readonly (string | undefined)[];
+  displaySourceColumns?: readonly (ForeignKeyDisplaySourceColumnRef | undefined)[];
+  expectedSourceKey?: string;
+  expectedTableName?: string;
+  row: readonly (CellValue | undefined)[];
+}): ForeignKeyAssociationCell[] | undefined {
   const sourceColumnIndexes = new Map<string, number>();
   for (let columnIndex = 0; columnIndex < options.resultColumns.length; columnIndex += 1) {
     const sourceColumn = foreignKeySourceColumnName({
       context: options.context,
       resultColumns: options.resultColumns,
       sourceColumns: options.sourceColumns,
+      displaySourceColumns: options.displaySourceColumns,
+      expectedSourceKey: options.expectedSourceKey,
+      expectedTableName: options.expectedTableName,
       columnIndex,
     });
     if (sourceColumn && !sourceColumnIndexes.has(sourceColumn.toLowerCase())) sourceColumnIndexes.set(sourceColumn.toLowerCase(), columnIndex);

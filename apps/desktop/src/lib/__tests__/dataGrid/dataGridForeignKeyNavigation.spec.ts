@@ -58,6 +58,60 @@ describe("foreignKeySourceColumnName", () => {
     expect(foreignKeySourceColumnName({ context: "results", resultColumns: ["customer_id"], columnIndex: 0 })).toBeUndefined();
   });
 
+  it("resuelve columnas en resultados SQL SELECT * o no editables mediante displaySourceColumns", () => {
+    const displaySourceColumns = [
+      { sourceKey: "t0", sourceColumn: "ID", schema: "PUBLIC", tableName: "DS_CUSTOMER" },
+      { sourceKey: "t0", sourceColumn: "DISPLAY_NAME", schema: "PUBLIC", tableName: "DS_CUSTOMER" },
+    ];
+    expect(
+      foreignKeySourceColumnName({
+        context: "results",
+        resultColumns: ["ID", "DISPLAY_NAME"],
+        sourceColumns: undefined,
+        displaySourceColumns,
+        expectedTableName: "DS_CUSTOMER",
+        columnIndex: 0,
+      }),
+    ).toBe("ID");
+    // Unmapped expression / aggregate stays undefined
+    expect(
+      foreignKeySourceColumnName({
+        context: "results",
+        resultColumns: ["ID"],
+        sourceColumns: undefined,
+        displaySourceColumns: [undefined],
+        expectedTableName: "DS_CUSTOMER",
+        columnIndex: 0,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("aisla columnas por sourceKey en consultas JOIN multitabla", () => {
+    const displaySourceColumns = [
+      { sourceKey: "o", sourceColumn: "ID", schema: "PUBLIC", tableName: "ORDERS" },
+      { sourceKey: "o", sourceColumn: "CUSTOMER_ID", schema: "PUBLIC", tableName: "ORDERS" },
+      { sourceKey: "c", sourceColumn: "ID", schema: "PUBLIC", tableName: "CUSTOMERS" },
+    ];
+    expect(
+      foreignKeySourceColumnName({
+        context: "results",
+        resultColumns: ["ID", "CUSTOMER_ID", "CID"],
+        displaySourceColumns,
+        expectedSourceKey: "c",
+        columnIndex: 0,
+      }),
+    ).toBeUndefined();
+    expect(
+      foreignKeySourceColumnName({
+        context: "results",
+        resultColumns: ["ID", "CUSTOMER_ID", "CID"],
+        displaySourceColumns,
+        expectedSourceKey: "c",
+        columnIndex: 2,
+      }),
+    ).toBe("ID");
+  });
+
   it("en datos de tabla usa el nombre visible si no hay binding separado", () => {
     expect(foreignKeySourceColumnName({ context: "table-data", resultColumns: ["customer_id"], columnIndex: 0 })).toBe("customer_id");
   });
@@ -101,6 +155,24 @@ describe("foreignKeyAssociationCells", () => {
         row: [42, null],
       }),
     ).toBeUndefined();
+  });
+
+  it("toma el valor exacto del sourceKey en resultados JOIN con columnas homónimas", () => {
+    const customerIdFk = buildColumnForeignKeyMap([fk({ name: "dbx_vfk:r1:rev", column: "ID", ref_table: "ORDERS", ref_column: "CUSTOMER_ID" })]).get("id")!;
+    const cells = foreignKeyAssociationCells({
+      association: customerIdFk,
+      context: "results",
+      resultColumns: ["ID", "CUSTOMER_ID", "CUST_ID"],
+      sourceColumns: undefined,
+      displaySourceColumns: [
+        { sourceKey: "o", sourceColumn: "ID", schema: "PUBLIC", tableName: "ORDERS" },
+        { sourceKey: "o", sourceColumn: "CUSTOMER_ID", schema: "PUBLIC", tableName: "ORDERS" },
+        { sourceKey: "c", sourceColumn: "ID", schema: "PUBLIC", tableName: "CUSTOMERS" },
+      ],
+      expectedSourceKey: "c",
+      row: [101, 7, 7],
+    });
+    expect(cells).toEqual([{ foreignKey: customerIdFk.foreignKey, columnIndex: 2, value: 7 }]);
   });
 });
 

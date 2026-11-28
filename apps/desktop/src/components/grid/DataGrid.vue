@@ -1289,6 +1289,7 @@ const quickDownloadMenuCell = ref<{ rowIndex: number; col: number } | null>(null
 const foreignKeyMenuCell = ref<{ rowIndex: number; col: number } | null>(null);
 const virtualForeignKeyDialogOpen = ref(false);
 const virtualForeignKeyDialogColumn = ref("");
+const virtualForeignKeyDialogContext = ref<{ database: string; schema: string; catalog?: string; tableName: string; columns: string[] } | null>(null);
 const showCellDetail = ref(false);
 const showMongoJsonPreview = ref(false);
 const mongoJsonPreviewScope = ref<"selected" | "page">("selected");
@@ -14848,20 +14849,64 @@ const connectionVirtualForeignKeys = computed<VirtualForeignKeyRule[]>(() => (pr
 const tableVirtualForeignKeys = computed<ForeignKeyInfo[]>(() => (currentVirtualForeignKeyTableContext.value ? virtualForeignKeysForTable(settingsStore.editorSettings.virtualForeignKeys, currentVirtualForeignKeyTableContext.value) : []));
 const columnForeignKeyAssociationsMap = computed(() => buildColumnForeignKeyAssociationsMap(foreignKeys.value, tableVirtualForeignKeys.value));
 const physicalForeignKeyFetchEnabled = computed(() => !!props.connectionId && !!props.tableMeta?.tableName && tableMetadataCapabilities.value.foreignKeys);
-const foreignKeyNavigationEnabled = computed(() => !!props.connectionId && !!props.tableMeta?.tableName && (tableMetadataCapabilities.value.foreignKeys || tableVirtualForeignKeys.value.length > 0));
-const canConfigureVirtualForeignKeys = computed(() => !!props.connectionId && !!props.tableMeta?.tableName);
+const hasResolvedDisplaySourceTable = computed(() => props.context === "results" && !!props.queryDisplaySourceColumns?.some((ref) => !!ref?.tableName));
+const foreignKeyNavigationEnabled = computed(() => !!props.connectionId && ((!!props.tableMeta?.tableName && (tableMetadataCapabilities.value.foreignKeys || tableVirtualForeignKeys.value.length > 0)) || (hasResolvedDisplaySourceTable.value && connectionVirtualForeignKeys.value.length > 0)));
+const canConfigureVirtualForeignKeys = computed(() => !!props.connectionId && (!!props.tableMeta?.tableName || hasResolvedDisplaySourceTable.value));
 const virtualForeignKeySourceColumns = computed(() => {
   const fromMeta = props.tableMeta?.columns.map((column) => column.name).filter(Boolean) ?? [];
   if (fromMeta.length > 0) return fromMeta;
   return [...new Set(props.result.columns.filter(Boolean))];
 });
 
+function displaySourceMatchesTableMeta(ref: QueryResultSourceColumnRef | undefined): boolean {
+  if (!ref?.tableName || !props.tableMeta?.tableName) return false;
+  if (ref.tableName.trim().toLowerCase() !== props.tableMeta.tableName.trim().toLowerCase()) return false;
+  const refSchema = (ref.schema ?? "").trim().toLowerCase();
+  const metaSchema = (props.tableMeta.schema ?? props.schema ?? "").trim().toLowerCase();
+  if (refSchema && metaSchema && refSchema !== metaSchema) return false;
+  const refDb = (ref.database ?? "").trim().toLowerCase();
+  const metaDb = (props.tableMeta.database ?? props.database ?? "").trim().toLowerCase();
+  if (refDb && metaDb && refDb !== metaDb) return false;
+  return true;
+}
+
+function displaySourceForColumn(actualColIdx: number): QueryResultSourceColumnRef | undefined {
+  if (props.context !== "results" || actualColIdx < 0) return undefined;
+  return props.queryDisplaySourceColumns?.[actualColIdx];
+}
+
+function virtualForeignKeyContextForColumn(actualColIdx?: number) {
+  if (!props.connectionId) return null;
+  const displaySource = actualColIdx !== undefined ? displaySourceForColumn(actualColIdx) : undefined;
+  if (displaySource?.tableName) {
+    return {
+      connectionId: props.connectionId,
+      database: displaySource.database || props.database || props.tableMeta?.database || "",
+      schema: displaySource.schema || props.schema || props.tableMeta?.schema || "",
+      tableName: displaySource.tableName,
+      databaseTreeHierarchy: foreignKeyDatabaseTreeHierarchy.value,
+    };
+  }
+  return currentVirtualForeignKeyTableContext.value;
+}
+
 function cellForeignKeyAssociations(actualColIdx: number): ForeignKeyAssociation[] {
   if (!foreignKeyNavigationEnabled.value) return [];
+  const displaySource = displaySourceForColumn(actualColIdx);
+  if (displaySource?.tableName && !displaySourceMatchesTableMeta(displaySource)) {
+    const columnContext = virtualForeignKeyContextForColumn(actualColIdx);
+    if (!columnContext) return [];
+    const columnVirtualFks = virtualForeignKeysForTable(settingsStore.editorSettings.virtualForeignKeys, columnContext);
+    if (columnVirtualFks.length === 0) return [];
+    return buildColumnForeignKeyAssociationsMap([], columnVirtualFks).get(displaySource.sourceColumn.toLowerCase()) ?? [];
+  }
   const columnName = foreignKeySourceColumnName({
     context: props.context,
     resultColumns: props.result.columns,
     sourceColumns: props.sourceColumns,
+    displaySourceColumns: props.queryDisplaySourceColumns,
+    expectedSourceKey: displaySource?.sourceKey,
+    expectedTableName: props.tableMeta?.tableName,
     columnIndex: actualColIdx,
   });
   if (!columnName) return [];
@@ -15014,6 +15059,7 @@ function canvasCellForeignKeys(rowIndex: number, actualColIdx: number): ForeignK
   if (associations.length === 0) return [];
   const item = displayItems.value[rowIndex];
   if (!item) return [];
+  const displaySource = displaySourceForColumn(actualColIdx);
   return associations.filter(
     (association) =>
       !!foreignKeyAssociationCells({
@@ -15021,19 +15067,27 @@ function canvasCellForeignKeys(rowIndex: number, actualColIdx: number): ForeignK
         context: props.context,
         resultColumns: props.result.columns,
         sourceColumns: props.sourceColumns,
+        displaySourceColumns: props.queryDisplaySourceColumns,
+        expectedSourceKey: displaySource?.sourceKey,
+        expectedTableName: displaySource?.tableName ?? props.tableMeta?.tableName,
         row: item.data,
       }),
   );
 }
 
-function foreignKeyTargetMenuLabel(association: ForeignKeyAssociation): string {
-  const target = formatForeignKeyTargetLabel(association.foreignKey, props.tableMeta?.schema || props.schema);
+function canvasCellForeignKey(rowIndex: number, actualColIdx: number): ForeignKeyInfo | null {
+  return canvasCellForeignKeys(rowIndex, actualColIdx)[0]?.foreignKey ?? null;
+}
+
+function foreignKeyTargetMenuLabel(association: ForeignKeyAssociation, actualColIdx?: number): string {
+  const displaySource = actualColIdx !== undefined ? displaySourceForColumn(actualColIdx) : undefined;
+  const target = formatForeignKeyTargetLabel(association.foreignKey, displaySource?.schema || props.tableMeta?.schema || props.schema);
   return association.virtual ? `${target} (${t("grid.virtualForeignKeyBadge")})` : target;
 }
 
 function foreignKeyMenuItemsForCell(rowIndex: number, actualColIdx: number, associations: readonly ForeignKeyAssociation[]) {
   return associations.map((association, index) => ({
-    label: foreignKeyTargetMenuLabel(association),
+    label: foreignKeyTargetMenuLabel(association, actualColIdx),
     value: `${index}:${association.foreignKey.name}:${association.foreignKey.ref_table}:${association.foreignKey.ref_column}`,
     icon: association.virtual ? Link2 : ArrowUpRight,
     onSelect: () => {
@@ -15057,11 +15111,15 @@ async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number,
   const association = targetAssociation ?? cellForeignKeyAssociation(actualColIdx);
   const item = displayItems.value[rowIndex];
   if (!association || !item || !props.connectionId) return null;
+  const displaySource = displaySourceForColumn(actualColIdx);
   let cells = foreignKeyAssociationCells({
     association,
     context: props.context,
     resultColumns: props.result.columns,
     sourceColumns: props.sourceColumns,
+    displaySourceColumns: props.queryDisplaySourceColumns,
+    expectedSourceKey: displaySource?.sourceKey,
+    expectedTableName: displaySource?.tableName ?? props.tableMeta?.tableName,
     row: item.data,
   });
   if (!cells) return null;
@@ -15074,13 +15132,14 @@ async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number,
     cells = cells.map((cell) => (resolvedRow.has(cell.columnIndex) ? { ...cell, value: resolvedRow.get(cell.columnIndex) ?? null } : cell));
     if (cells.some((cell) => cell.value === null)) throw new Error(t("grid.largeValueRowUnavailable"));
   }
+  const matchesTableMeta = !displaySource?.tableName || displaySourceMatchesTableMeta(displaySource);
   const conditions = await Promise.all(
     cells.map(({ foreignKey, value }) =>
       buildColumnValueFilterCondition({
         databaseType: resolvedDatabaseType.value,
         identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
         columnName: foreignKey.ref_column,
-        columnInfo: props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase()),
+        columnInfo: matchesTableMeta ? props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase()) : undefined,
         rawValue: String(value),
       }),
     ),
@@ -15089,8 +15148,8 @@ async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number,
   if (!condition) return null;
   return foreignKeyNavigationTarget({
     connectionId: props.connectionId,
-    database: props.database || props.tableMeta?.database || "",
-    currentSchema: props.tableMeta?.schema || props.schema,
+    database: displaySource?.database || props.database || props.tableMeta?.database || "",
+    currentSchema: displaySource?.schema || props.tableMeta?.schema || props.schema,
     fk: association.foreignKey,
     whereInput: condition,
     connection: connectionStore.getConfig(props.connectionId),
@@ -15168,6 +15227,7 @@ function contextForeignKeyMenuItem(): ContextMenuItem | null {
   if (!cell || cell.col < 0) return null;
   const item = contextRowItem.value;
   if (!item) return null;
+  const displaySource = displaySourceForColumn(cell.col);
   const navigable = cellForeignKeyAssociations(cell.col).filter(
     (association) =>
       !!foreignKeyAssociationCells({
@@ -15175,6 +15235,9 @@ function contextForeignKeyMenuItem(): ContextMenuItem | null {
         context: props.context,
         resultColumns: props.result.columns,
         sourceColumns: props.sourceColumns,
+        displaySourceColumns: props.queryDisplaySourceColumns,
+        expectedSourceKey: displaySource?.sourceKey,
+        expectedTableName: displaySource?.tableName ?? props.tableMeta?.tableName,
         row: item.data,
       }),
   );
@@ -15193,7 +15256,7 @@ function contextForeignKeyMenuItem(): ContextMenuItem | null {
     label: t("grid.foreignKeyNavigateTargets"),
     icon: ArrowUpRight,
     children: navigable.map((association) => ({
-      label: foreignKeyTargetMenuLabel(association),
+      label: foreignKeyTargetMenuLabel(association, cell.col),
       icon: association.virtual ? Link2 : ArrowUpRight,
       action: () => {
         void navigateToForeignKeyCell(cell.rowIndex, cell.col, association);
@@ -15204,12 +15267,32 @@ function contextForeignKeyMenuItem(): ContextMenuItem | null {
 
 function openVirtualForeignKeyDialog(columnIndex?: number) {
   if (!canConfigureVirtualForeignKeys.value) return;
+  const displaySource = columnIndex !== undefined ? displaySourceForColumn(columnIndex) : undefined;
+  if (displaySource?.tableName && !displaySourceMatchesTableMeta(displaySource)) {
+    const sameSourceColumns = (props.queryDisplaySourceColumns ?? [])
+      .filter((ref): ref is QueryResultSourceColumnRef => !!ref?.sourceColumn && (displaySource.sourceKey ? ref.sourceKey === displaySource.sourceKey : ref.tableName?.trim().toLowerCase() === displaySource.tableName?.trim().toLowerCase()))
+      .map((ref) => ref.sourceColumn);
+    const uniqueColumns = [...new Set([displaySource.sourceColumn, ...sameSourceColumns])];
+    virtualForeignKeyDialogContext.value = {
+      database: displaySource.database || props.database || props.tableMeta?.database || "",
+      schema: displaySource.schema || props.schema || props.tableMeta?.schema || "",
+      tableName: displaySource.tableName,
+      columns: uniqueColumns,
+    };
+    virtualForeignKeyDialogColumn.value = displaySource.sourceColumn;
+    virtualForeignKeyDialogOpen.value = true;
+    return;
+  }
+  virtualForeignKeyDialogContext.value = null;
   const resolvedColumn =
     columnIndex !== undefined && columnIndex >= 0
       ? foreignKeySourceColumnName({
           context: props.context,
           resultColumns: props.result.columns,
           sourceColumns: props.sourceColumns,
+          displaySourceColumns: props.queryDisplaySourceColumns,
+          expectedSourceKey: displaySource?.sourceKey,
+          expectedTableName: props.tableMeta?.tableName,
           columnIndex,
         }) || ""
       : "";
@@ -15221,6 +15304,7 @@ function contextVirtualForeignKeyMenuItem(): ContextMenuItem | null {
   if (!canConfigureVirtualForeignKeys.value) return null;
   const colIdx = contextCell.value && contextCell.value.col >= 0 ? contextCell.value.col : (contextHeaderColumnIndex.value ?? undefined);
   if (colIdx === undefined || colIdx < 0) return null;
+  if (!virtualForeignKeyContextForColumn(colIdx)) return null;
   return {
     label: t("grid.virtualForeignKeyManage"),
     icon: Link2,
@@ -18883,11 +18967,11 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       v-if="canConfigureVirtualForeignKeys && virtualForeignKeyDialogOpen"
       v-model:open="virtualForeignKeyDialogOpen"
       :connection-id="props.connectionId || ''"
-      :database="props.tableMeta?.database || props.database || ''"
-      :schema="props.tableMeta?.schema || props.schema || ''"
-      :catalog="props.tableMeta?.catalog"
-      :table-name="props.tableMeta?.tableName || ''"
-      :columns="virtualForeignKeySourceColumns"
+      :database="virtualForeignKeyDialogContext?.database ?? (props.tableMeta?.database || props.database || '')"
+      :schema="virtualForeignKeyDialogContext?.schema ?? (props.tableMeta?.schema || props.schema || '')"
+      :catalog="virtualForeignKeyDialogContext ? virtualForeignKeyDialogContext.catalog : props.tableMeta?.catalog"
+      :table-name="virtualForeignKeyDialogContext?.tableName ?? (props.tableMeta?.tableName || '')"
+      :columns="virtualForeignKeyDialogContext?.columns ?? virtualForeignKeySourceColumns"
       :initial-column="virtualForeignKeyDialogColumn"
       :database-tree-hierarchy="foreignKeyDatabaseTreeHierarchy"
       :rules="connectionVirtualForeignKeys"

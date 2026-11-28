@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch, type CSSProperties } f
 import { Check, GripVertical, ListChecks, Search, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { DataGridColumnLayoutOption } from "@/composables/useDataGridColumnLayout";
 import { dragSortAutoScrollDelta } from "@/composables/useDragSort";
@@ -390,6 +391,15 @@ onBeforeUnmount(resetColumnDragState);
             </Button>
           </div>
         </div>
+      </div>
+      <div v-if="grid?.confirmColumnHeaderReorder !== undefined" class="flex items-center justify-between gap-2 border-t bg-muted/30 px-2 py-1.5">
+        <label class="flex items-center gap-2 text-xs">
+          <Switch size="sm" :model-value="grid.confirmColumnHeaderReorder" :aria-label="t('grid.confirmColumnHeaderReorder')" @update:model-value="grid.setConfirmColumnHeaderReorder?.($event)" />
+          {{ t("grid.confirmColumnHeaderReorder") }}
+        </label>
+        <Button variant="outline" size="sm" class="h-7 shrink-0 px-2 text-xs" :disabled="!grid.hasTemporaryColumnOrder" @click="grid.savePreviewColumnOrder?.()">
+          {{ t("grid.saveColumnOrder") }}
+        </Button>
       </div>
       <div class="flex flex-col gap-1 border-t bg-muted/30 px-2 py-1.5">
         <span class="text-[11px] leading-4 text-muted-foreground">

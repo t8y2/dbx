@@ -312,6 +312,29 @@ pub async fn list_tables(
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
+/// Child tables of the parent table named by `table`.
+pub async fn list_table_children(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let parent_name = q.table.as_deref().filter(|name| !name.trim().is_empty());
+    let Some(parent_name) = parent_name else {
+        return Err(AppError::from("table is required".to_string()));
+    };
+    let result = dbx_core::schema::list_table_children_core(
+        &state.app,
+        &q.connection_id,
+        q.database.as_deref().unwrap_or(""),
+        q.schema.as_deref().unwrap_or(""),
+        parent_name,
+        q.limit,
+        q.offset,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
 pub async fn list_objects(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,

@@ -50,6 +50,7 @@ import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
 import type { MqttConnectionConfig } from "@/types/mqtt";
 import type { NacosAdminConfig, NacosApiPlane, NacosAuthConfig, NacosImplementation, NacosMetricsMode, NacosNamespaceInfo, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
 import { insertSqliteRemoteTransportLayer, isSqliteRemoteTransportLayerType, sqliteRemoteTransportError } from "@/lib/connection/sqliteRemoteTransport";
@@ -7152,6 +7153,17 @@ function startSavedConnection(config: ConnectionConfig) {
     .connect(config)
     .then(() => {
       emit("connectSucceeded", config.name);
+      // Plugin connections have no default query tab: opening the workbench is
+      // the same path a sidebar activation would take (openConnectionQuery).
+      // Without it, "save and connect" only connects but never opens a window.
+      if (config.db_type === "plugin") {
+        const queryStore = useQueryStore();
+        void queryStore.openPluginConnection(config.id).catch((e: any) => {
+          const message = String(e?.message || e);
+          if (message.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
+          toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+        });
+      }
     })
     .catch((e: any) => {
       const message = String(e?.message || e);

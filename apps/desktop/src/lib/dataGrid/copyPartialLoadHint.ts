@@ -16,3 +16,16 @@ export function isPartiallyLoadedCopy(info: PartialLoadCopyInfo): boolean {
 export function partialLoadCopyHintKey(info: PartialLoadCopyInfo): string {
   return info.totalRows !== null ? "grid.copyPartialRowsHintWithTotal" : "grid.copyPartialRowsHint";
 }
+
+/**
+ * True when this copy took every loaded row of the result set, so the
+ * "copied the {loaded} loaded rows" hint describes it (#15602).
+ *
+ * `loadedRows` counts the rows the grid holds, which is not what a
+ * selection-scoped copy puts on the clipboard: copying two checked rows, a
+ * cell range, or one right-clicked cell out of a partially loaded 100-row
+ * result must not claim that 100 rows were copied.
+ */
+export function coversAllLoadedRows(info: PartialLoadCopyInfo, copiedRows: number): boolean {
+  return info.loadedRows > 0 && copiedRows >= info.loadedRows;
+}

@@ -1894,7 +1894,9 @@ function handleTabDoubleClick(tab: QueryTab, event: MouseEvent) {
   if (event.target instanceof Element && event.target.closest("button, input, [role='button']")) {
     return;
   }
-  if (settingsStore.editorSettings.tabDoubleClickAction === "close") {
+  const action = settingsStore.editorSettings.tabDoubleClickAction;
+  if (action === "none") return;
+  if (action === "close") {
     closeTab(tab);
     return;
   }

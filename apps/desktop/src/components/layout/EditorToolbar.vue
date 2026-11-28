@@ -34,6 +34,8 @@ import {
   UserRound,
   Copy,
   MessageSquareText,
+  Undo2,
+  Redo2,
 } from "@lucide/vue";
 import { supportsInsertValueHints } from "@/lib/sql/insertValueHints";
 import { Button } from "@/components/ui/button";
@@ -120,6 +122,8 @@ const emit = defineEmits<{
   compressSql: [];
   foldAll: [];
   toggleLineComment: [];
+  undo: [];
+  redo: [];
   unfoldAll: [];
   toggleSqlKeywordCase: [];
   saveSql: [tabId: string];
@@ -367,6 +371,8 @@ const saveTooltip = computed(() => {
 });
 const explainPlanTooltip = computed(() => formatShortcutTooltip(t("toolbar.explainPlan"), settingsStore.editorSettings.shortcuts.explainSql));
 const formatSqlTooltip = computed(() => formatShortcutTooltip(t("toolbar.formatSql"), settingsStore.editorSettings.shortcuts.formatSql));
+const undoTooltip = computed(() => formatShortcutTooltip(t("settings.shortcutUndo"), settingsStore.editorSettings.shortcuts.undo));
+const redoTooltip = computed(() => formatShortcutTooltip(t("settings.shortcutRedo"), settingsStore.editorSettings.shortcuts.redo));
 const lineCommentTooltip = computed(() => formatShortcutTooltip(t("settings.shortcutToggleLineComment"), settingsStore.editorSettings.shortcuts.toggleLineComment));
 const exPasteSqlInConditionTooltip = computed(() => formatShortcutTooltip(t("toolbar.exPasteSqlInCondition"), settingsStore.editorSettings.shortcuts.exPasteSqlInCondition));
 const isObjectSourceTab = computed(() => !!props.activeTab.objectSource || !!props.activeTab.sourceLoad);
@@ -559,6 +565,7 @@ const showFormatButton = computed(() => canFormatSql.value && toolbarTier.value 
 const showExplainAnalyzeToggle = computed(() => toolbarTier.value < 3);
 const showCompressButton = computed(() => toolbarTier.value < 1);
 const showFoldButtons = computed(() => toolbarTier.value < 1);
+const showUndoRedoButtons = computed(() => toolbarTier.value < 1);
 const foldAllTooltip = computed(() => {
   const shortcut = formatShortcutDisplay(settingsStore.editorSettings.shortcuts.foldAll);
   return shortcut ? `${t("toolbar.foldAll")} (${shortcut})` : t("toolbar.foldAll");
@@ -755,6 +762,22 @@ defineExpose({
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ explainAnalyzeTooltip }}</TooltipContent>
+      </Tooltip>
+      <Tooltip v-if="showUndoRedoButtons">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining" :aria-label="t('settings.shortcutUndo')" @mousedown.prevent @click="emit('undo')">
+            <Undo2 class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ undoTooltip }}</TooltipContent>
+      </Tooltip>
+      <Tooltip v-if="showUndoRedoButtons">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining" :aria-label="t('settings.shortcutRedo')" @mousedown.prevent @click="emit('redo')">
+            <Redo2 class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ redoTooltip }}</TooltipContent>
       </Tooltip>
       <Tooltip v-if="canFormatSql">
         <TooltipTrigger as-child>
@@ -958,6 +981,14 @@ defineExpose({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" class="w-max min-w-56 max-w-[calc(100vw-1rem)]">
+          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining" @select="emit('undo')">
+            <Undo2 class="h-3.5 w-3.5" />
+            {{ t("settings.shortcutUndo") }}
+          </DropdownMenuItem>
+          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining" @select="emit('redo')">
+            <Redo2 class="h-3.5 w-3.5" />
+            {{ t("settings.shortcutRedo") }}
+          </DropdownMenuItem>
           <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('compressSql')">
             <Minimize2 class="h-3.5 w-3.5" />
             {{ t("toolbar.compressSql") }}

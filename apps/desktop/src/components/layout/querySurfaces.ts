@@ -49,6 +49,8 @@ export interface QueryEditorSurfaceHandle {
   foldAll?(): boolean;
   toggleLineComment?(): boolean;
   unfoldAll?(): boolean;
+  undo?(): boolean;
+  redo?(): boolean;
 }
 
 export interface QueryResultSurfaceHandle {

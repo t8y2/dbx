@@ -67,9 +67,13 @@ function mountEditor(initial: {
   });
   const emits: string[] = [];
   const formatErrors: string[] = [];
+  let editorHandle: { undo: () => boolean; redo: () => boolean } | null = null;
   const root = defineComponent({
     setup: () => () =>
       h(QueryEditor, {
+        ref: (value: unknown) => {
+          editorHandle = value as typeof editorHandle;
+        },
         modelValue: state.modelValue,
         tabId: state.tabId,
         databaseType: initial.databaseType ?? "mysql",
@@ -101,7 +105,7 @@ function mountEditor(initial: {
     app.unmount();
     host.remove();
   });
-  return { state, emits, formatErrors, host, settings, unmount: () => app.unmount() };
+  return { state, emits, formatErrors, host, settings, editor: () => editorHandle!, unmount: () => app.unmount() };
 }
 
 async function waitForEditor(host: HTMLElement) {
@@ -205,6 +209,23 @@ describe("QueryEditor format/compress request replay", () => {
     expect(editorView.state.doc.toString()).toBe(COMPRESSED_SQL);
     expect(editorView.state.selection.main.head).toBe(caret);
     expect(undo(editorView)).toBe(false);
+  });
+
+  it("steps back and forward through a compress with the exposed undo and redo", async () => {
+    const { state, emits, host, editor } = mountEditor({ modelValue: ORIGINAL_SQL, tabId: "tab-a" });
+    await waitForEditor(host);
+    const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
+
+    expect(editor().undo()).toBe(false);
+
+    state.compressRequestId = 5;
+    await vi.waitFor(() => expect(emits.at(-1)).toBe(COMPRESSED_SQL), WAIT);
+
+    expect(editor().undo()).toBe(true);
+    expect(editorView.state.doc.toString()).toBe(ORIGINAL_SQL);
+    expect(editor().redo()).toBe(true);
+    expect(editorView.state.doc.toString()).toBe(COMPRESSED_SQL);
+    expect(editor().redo()).toBe(false);
   });
 
   it("reports the parse failure instead of silently formatting nothing", async () => {

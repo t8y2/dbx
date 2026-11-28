@@ -3301,6 +3301,22 @@ function toggleLineComment(): boolean {
   return handled;
 }
 
+function undo(): boolean {
+  const currentView = view.value;
+  if (!currentView || props.readOnly) return false;
+  const handled = codeMirrorRuntime.codeMirrorUndo?.(currentView) ?? false;
+  if (handled) currentView.focus();
+  return handled;
+}
+
+function redo(): boolean {
+  const currentView = view.value;
+  if (!currentView || props.readOnly) return false;
+  const handled = codeMirrorRuntime.codeMirrorRedo?.(currentView) ?? false;
+  if (handled) currentView.focus();
+  return handled;
+}
+
 function toggleLineCommentAndAdvance(currentView: EditorViewType): boolean {
   const { doc, selection } = currentView.state;
   if (!codeMirrorRuntime.codeMirrorToggleLineComment?.(currentView)) return false;
@@ -3371,6 +3387,8 @@ defineExpose({
   refreshCompletionCache,
   toggleFold,
   toggleLineComment,
+  undo,
+  redo,
   foldAll,
   unfoldAll,
 });

@@ -271,6 +271,8 @@ const groupExecutableSqlMayContainDml = computed(() => mayContainDmlStatement(gr
         @compress-sql="activeTab && toolbar.compressSql(activeTab.id)"
         @fold-all="activeSurfaceRef?.foldAll?.()"
         @toggle-line-comment="activeSurfaceRef?.toggleLineComment?.()"
+        @undo="activeSurfaceRef?.undo?.()"
+        @redo="activeSurfaceRef?.redo?.()"
         @unfold-all="activeSurfaceRef?.unfoldAll?.()"
         @toggle-sql-keyword-case="activeTab && toolbar.toggleSqlKeywordCase(activeTab.id)"
         @save-sql="(tabId: string) => toolbar.saveSql(tabId)"

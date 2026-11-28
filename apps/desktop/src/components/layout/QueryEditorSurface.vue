@@ -51,6 +51,8 @@ defineExpose<QueryEditorSurfaceHandle>({
   foldAll: () => contentAreaRef.value?.foldAll() ?? false,
   toggleLineComment: () => contentAreaRef.value?.toggleLineComment() ?? false,
   unfoldAll: () => contentAreaRef.value?.unfoldAll() ?? false,
+  undo: () => contentAreaRef.value?.undo() ?? false,
+  redo: () => contentAreaRef.value?.redo() ?? false,
 });
 </script>
 

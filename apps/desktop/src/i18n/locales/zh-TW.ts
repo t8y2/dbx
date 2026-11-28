@@ -4033,7 +4033,7 @@ export default withEnglishFallback({
     matchModeEnhanced: "增強匹配",
     matchModeHint: "增強模式也會匹配識別字首字母、拼音首字母與模糊片段。",
     showQuickFilters: "顯示快速篩選",
-    showQuickFiltersHint: "在搜尋框下方顯示可用的篩選語法提示。",
+    showQuickFiltersHint: "在搜尋範圍欄中顯示可用的篩選語法提示。",
     indexManagement: "資料庫搜尋索引",
     indexManagementHint: "為資料庫物件建立本機索引，加快全域搜尋回應。連線很多時可在清單內篩選。",
     indexBuildInfoTitle: "索引建立說明",

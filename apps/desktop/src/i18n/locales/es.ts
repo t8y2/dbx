@@ -4216,7 +4216,7 @@ export default withEnglishFallback({
     itemTypeContentHint: "Show file content search results.",
     itemTypeCommands: "Commands",
     itemTypeCommandsHint: "Show plugin commands and workbench entries.",
-    showQuickFiltersHint: "Show available filter syntax below the search field.",
+    showQuickFiltersHint: "Show available filter syntax in the search scope panel.",
     indexManagement: "Database search index",
     indexManagementHint: "Build local indexes for database objects to speed up global search. Filter the list when you have many connections.",
     indexBuildInfoTitle: "How indexing works",

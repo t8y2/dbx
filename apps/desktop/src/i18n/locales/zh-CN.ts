@@ -4453,7 +4453,7 @@ export default withEnglishFallback({
     matchModeEnhanced: "增强匹配",
     matchModeHint: "增强模式还会匹配标识符首字母、拼音首字母和模糊片段。",
     showQuickFilters: "显示快速筛选",
-    showQuickFiltersHint: "在搜索框下方显示可用的筛选语法提示。",
+    showQuickFiltersHint: "在搜索范围栏中显示可用的筛选语法提示。",
     indexManagement: "数据库搜索索引",
     indexManagementHint: "为数据库对象建立本地索引，加快全局检索响应。连接很多时可在列表内筛选。",
     indexBuildInfoTitle: "索引建立说明",

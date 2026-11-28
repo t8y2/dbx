@@ -461,6 +461,70 @@ describe("EditorGroupTabBar behavior", () => {
     host.remove();
   });
 
+  it("scrolls the strip while a tab is held near its edge, and stops after the drop", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const { app, host } = mountBar(store.groups[0].id, [firstId, secondId], firstId, pinia);
+    await settle();
+
+    const pill = tabPill(host, secondId);
+    const scrollBy = vi.fn();
+    // Whichever ancestor is the scroll container for this layout: a 600px wide strip.
+    for (let element = pill.parentElement; element && element !== host; element = element.parentElement) {
+      element.scrollBy = scrollBy as never;
+      vi.spyOn(element, "getBoundingClientRect").mockReturnValue({ left: 0, right: 600, top: 0, bottom: 30, width: 600, height: 30 } as DOMRect);
+    }
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(null);
+
+    pointerDownOn(pill);
+    pointerMoveTo(300, 10);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(scrollBy).not.toHaveBeenCalled();
+
+    pointerMoveTo(596, 10);
+    await vi.waitFor(() => expect(scrollBy).toHaveBeenCalled());
+    expect(scrollBy.mock.calls[0]![0].left).toBeGreaterThan(0);
+
+    pointerMoveTo(4, 10);
+    await vi.waitFor(() => expect(scrollBy.mock.calls.some(([options]) => options.left < 0)).toBe(true));
+
+    pointerUpAt(4, 10);
+    await settle();
+    scrollBy.mockClear();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(scrollBy).not.toHaveBeenCalled();
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("does not scroll the strip when the held tab is dragged away from it", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const { app, host } = mountBar(store.groups[0].id, [firstId, secondId], firstId, pinia);
+    await settle();
+
+    const pill = tabPill(host, secondId);
+    const scrollBy = vi.fn();
+    for (let element = pill.parentElement; element && element !== host; element = element.parentElement) {
+      element.scrollBy = scrollBy as never;
+      vi.spyOn(element, "getBoundingClientRect").mockReturnValue({ left: 0, right: 600, top: 0, bottom: 30, width: 600, height: 30 } as DOMRect);
+    }
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(null);
+
+    pointerDownOn(pill);
+    // Past the strip's right edge horizontally, but far below the strip.
+    pointerMoveTo(596, 300);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(scrollBy).not.toHaveBeenCalled();
+
+    pointerUpAt(596, 300);
+    app.unmount();
+    host.remove();
+  });
+
   it("does not arm a drag when the primary button is not held", async () => {
     const store = useQueryStore();
     const firstId = store.createTab("pg-1", "app", "Query 1", "query");

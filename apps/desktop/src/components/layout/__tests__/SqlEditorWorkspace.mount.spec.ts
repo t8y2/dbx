@@ -49,6 +49,9 @@ vi.mock("@/components/layout/EditorGroup.vue", () => ({
         groupHandleModRCalls.push(target);
         return true;
       },
+      toggleResultsPane() {
+        return false;
+      },
       focusWhere(this: { groupId: string }) {
         groupFocusWhereCalls.push(this.groupId);
         return true;
@@ -374,6 +377,31 @@ describe("SqlEditorWorkspace mount contract", () => {
     expect(host.querySelector(".pane-stub")?.getAttribute("size")).toBe("68");
     expect(host.querySelector('[class*="result-surface-enter"]')).toBeNull();
     cleanup();
+  });
+
+  it("toggles the other split's query result while the data tab is active", async () => {
+    const { store, host, vm, cleanup } = mountOutputWorkspace([tab("query-result"), dataTab("table-data")]);
+    try {
+      store.splitTabRight("table-data");
+      store.activateTab("table-data");
+      await nextTick();
+
+      const result = () => host.querySelector('[data-test="result-surface"]');
+      expect(result()?.textContent).toContain("query-result");
+
+      expect(vm.toggleResultsPane()).toBe(true);
+      await nextTick();
+      expect(result()).toBeNull();
+      expect(store.tabs[0]?.uiState?.resultPaneOpen).toBe(false);
+      expect(store.tabs[1]?.uiState?.resultPaneOpen).toBeUndefined();
+
+      expect(vm.toggleResultsPane()).toBe(true);
+      await nextTick();
+      expect(result()?.textContent).toContain("query-result");
+      expect(store.activeTabId).toBe("table-data");
+    } finally {
+      cleanup();
+    }
   });
 
   it.each(["isExecuting", "isExplaining"] as const)("opens and reopens output on %s and removes it after the last output is cleared", async (runningKey) => {

@@ -3090,6 +3090,7 @@ export const useQueryStore = defineStore("query", () => {
       savedSqlId: t.savedSqlId,
       isDefaultQuery: t.isDefaultQuery,
       externalSqlPath: t.externalSqlPath,
+      externalSqlCustomTitle: t.externalSqlCustomTitle,
       externalSqlEncoding: t.externalSqlEncoding,
       externalSqlFileVersion: t.externalSqlFileVersion,
       externalSqlIgnoredFileVersion: t.externalSqlIgnoredFileVersion,
@@ -4014,6 +4015,7 @@ export const useQueryStore = defineStore("query", () => {
     const externalTabs = tabs.value.filter((tab) => tab.mode === "query" && tab.externalSqlPath);
     const titles = externalSqlFileDisplayTitles(externalTabs.map((tab) => tab.externalSqlPath!));
     externalTabs.forEach((tab, index) => {
+      if (tab.externalSqlCustomTitle) return;
       tab.title = titles[index];
       tab.customTitle = true;
     });
@@ -6878,6 +6880,7 @@ export const useQueryStore = defineStore("query", () => {
     const previousTitle = tab.title;
     tab.title = trimmed;
     tab.customTitle = true;
+    if (tab.externalSqlPath) tab.externalSqlCustomTitle = true;
     if (tab.savedSqlId) {
       try {
         const saved = await useSavedSqlStore().renameFile(tab.savedSqlId, trimmed);
@@ -6912,6 +6915,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.savedSqlId = savedSqlId;
     tab.isDefaultQuery = useSavedSqlStore().getFile(savedSqlId)?.isDefaultQuery === true;
     tab.externalSqlPath = undefined;
+    tab.externalSqlCustomTitle = undefined;
     tab.externalSqlEncoding = undefined;
     tab.externalSqlFileVersion = undefined;
     tab.externalSqlIgnoredFileVersion = undefined;
@@ -6932,7 +6936,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.externalSqlFileMissing = undefined;
     tab.savedSqlId = undefined;
     tab.isDefaultQuery = false;
-    if (title) {
+    if (title && !tab.externalSqlCustomTitle) {
       tab.title = title;
       tab.customTitle = true;
     }

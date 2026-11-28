@@ -2018,6 +2018,11 @@ export async function listTables(
   });
 }
 
+/** Child tables of one parent table (TDengine super table), paged on demand. */
+export async function listTableChildren(connectionId: string, database: string, schema: string, parentName: string, limit?: number, offset?: number): Promise<TableInfo[]> {
+  return invoke("list_table_children", { connectionId, database, schema, parentName, limit, offset });
+}
+
 export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<string | null> {
   return invoke("get_table_comment", {
     connectionId,
@@ -3811,6 +3816,8 @@ export interface UpdateDownloadProgress {
   total: number | null;
 }
 
+export type UpdateDownloadState = { state: "idle" | "installing" } | { state: "downloading"; attempt_id: string; version: string; progress: UpdateDownloadProgress | null } | { state: "ready"; update: DownloadedUpdate };
+
 export interface McpServerStatus {
   installed: boolean;
   installation_source: "native" | "homebrew" | "npm" | null;
@@ -3885,8 +3892,12 @@ export async function downloadUpdate(source: UpdateDownloadSource, latestVersion
   return invoke("download_update", { source, channel, latestVersion, attemptId, releaseNotes, releaseTag });
 }
 
-export async function cancelUpdateDownload(): Promise<void> {
-  return invoke("cancel_update_download");
+export async function cancelUpdateDownload(attemptId: string): Promise<void> {
+  return invoke("cancel_update_download", { attemptId });
+}
+
+export async function getUpdateDownloadState(): Promise<UpdateDownloadState> {
+  return invoke("get_update_download_state");
 }
 
 export async function getDownloadedUpdate(): Promise<DownloadedUpdate | null> {

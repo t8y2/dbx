@@ -3394,7 +3394,7 @@ defineExpose({
         <div
           ref="editorRef"
           data-query-editor-root
-          class="h-full w-full overflow-hidden"
+          class="absolute inset-0 overflow-hidden"
           @contextmenu="
             (e: MouseEvent) => {
               if (view) {
@@ -3437,7 +3437,14 @@ defineExpose({
   /* The host supplies both dimensions. Keep viewport DOM changes from
      invalidating intrinsic sizes throughout the surrounding flex layout;
      WebKit otherwise spends a frame recomputing it on each viewport change.
-     Leave paint uncontained so editor overlays retain their overflow. */
+     Leave paint uncontained so editor overlays retain their overflow.
+
+     The host itself is out of flow (`absolute inset-0` in the template), which
+     `contain` alone does not achieve: while it was a percentage-sized flex
+     child, every selection change made Selection.collapse force a synchronous
+     layout of the whole app (about 10 ms in WKWebView, even for a 200-line
+     document). An out-of-flow host with definite insets is a layout boundary,
+     which brings that to about 1 ms. */
   contain: size layout style;
 }
 

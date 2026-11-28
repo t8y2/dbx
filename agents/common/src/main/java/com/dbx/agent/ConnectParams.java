@@ -24,6 +24,8 @@ public final class ConnectParams {
     private String informix_server;
     private String sessionRole;
     private String driver_profile;
+    /** Connection-level init script batches, pre-split by the host so every physical session runs them. */
+    private List<String> init_batches;
 
     public ConnectParams() {
         this("", 0, "", "", "", "", "", false, "", Collections.emptyList());
@@ -218,6 +220,14 @@ public final class ConnectParams {
         this.driver_profile = driver_profile;
     }
 
+    public List<String> getInit_batches() {
+        return init_batches == null ? Collections.emptyList() : init_batches;
+    }
+
+    public void setInit_batches(List<String> init_batches) {
+        this.init_batches = init_batches;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -241,13 +251,14 @@ public final class ConnectParams {
             && Objects.equals(gbase_server, that.gbase_server)
             && Objects.equals(informix_server, that.informix_server)
             && Objects.equals(sessionRole, that.sessionRole)
-            && Objects.equals(driver_profile, that.driver_profile);
+            && Objects.equals(driver_profile, that.driver_profile)
+            && Objects.equals(getInit_batches(), that.getInit_batches());
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(host, port, database, username, password, url_params, connection_string,
-            port_explicit, mysql_compat_mode, jdbc_driver_class, jdbc_driver_paths, ssl, ca_cert_path, client_cert_path, client_key_path, gbase_server, informix_server, sessionRole, driver_profile);
+            port_explicit, mysql_compat_mode, jdbc_driver_class, jdbc_driver_paths, ssl, ca_cert_path, client_cert_path, client_key_path, gbase_server, informix_server, sessionRole, driver_profile, getInit_batches());
     }
 
     @Override

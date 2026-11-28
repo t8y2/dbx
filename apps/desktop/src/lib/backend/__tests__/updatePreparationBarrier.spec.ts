@@ -32,6 +32,19 @@ describe("update preparation command barrier", () => {
     }
   });
 
+  it("lets another window read the native update state while the barrier is held", async () => {
+    const { getUpdateDownloadState } = await import("@/lib/backend/tauri");
+    const { acquireUpdateBarrier } = await import("@/lib/app/updatePreparation");
+    mocks.invoke.mockResolvedValue({ state: "installing" });
+    const release = acquireUpdateBarrier();
+    try {
+      await expect(getUpdateDownloadState()).resolves.toEqual({ state: "installing" });
+      expect(mocks.invoke).toHaveBeenCalledWith("get_update_download_state", undefined);
+    } finally {
+      release();
+    }
+  });
+
   it("still rejects non-durable commands while the barrier is held", async () => {
     const { loadOpenTabsState } = await import("@/lib/backend/tauri");
     const { acquireUpdateBarrier } = await import("@/lib/app/updatePreparation");

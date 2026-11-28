@@ -9,7 +9,7 @@ import { gaussdbConnectionMode } from "@/lib/database/jdbcDialect";
 import { exactOracleTriggerMetadata, exactOracleTriggerNodeMetadata, oracleTriggerIdentityKey, oracleTriggerReadOptions, oracleTriggerObjectReadOptions } from "@/lib/database/oracleTriggerIdentity";
 import { nativeJobAdminEngine } from "@/lib/database/nativeJobAdmin";
 import { supportsSchemaIndexManagement } from "@/lib/database/databaseObjectCapabilities";
-import { pagesTablePartitionsWithRootPage } from "@/lib/database/databaseFeatureSupport";
+import { pagesTablePartitionsWithRootPage, loadsChildTablesOnDemand } from "@/lib/database/databaseFeatureSupport";
 import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import type {
   ColumnInfo,
@@ -2722,7 +2722,8 @@ export const useConnectionStore = defineStore("connection", () => {
     // retain only a self-consistent first-page hidden group without a cursor.
     // Neither v3 nor objectCount proves completeness. Only reuse snapshots saved
     // by the reconciled page pipeline; leave other database/object keys unchanged.
-    const defaultCacheVersion = config?.db_type === "tdengine" && node.type === "group-tables" ? "objects-tdengine-v1" : config?.db_type === "oracle" ? "objects-v8" : "objects-v9";
+    // v2: the TDengine group lists only root tables; v1 snapshots embed every child table.
+    const defaultCacheVersion = config?.db_type === "tdengine" && node.type === "group-tables" ? "objects-tdengine-v2" : config?.db_type === "oracle" ? "objects-v8" : "objects-v9";
     const baseCacheVersion = objectTreeCacheVersion(config, node.database, node.schema, defaultCacheVersion);
     const cacheVersion = objectTreeProfileCacheKey ? `${baseCacheVersion}:${objectTreeProfileCacheKey}` : baseCacheVersion;
     return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, isSchemaIndexGroup(node) ? `${cacheVersion}:exact-index-v1` : cacheVersion);
@@ -3232,6 +3233,8 @@ export const useConnectionStore = defineStore("connection", () => {
     // page size and return every partition below them, so one page fully loads
     // the partition groups it shows (issue #13860).
     const rootPaged = paginate && !searchFilter && tableNameFilterIsEmpty(tableNameFilter) && pagesTablePartitionsWithRootPage(getConfig(options.node.connectionId));
+    // TDengine: list super tables and ordinary tables only; child tables load when their super table is expanded.
+    const rootsOnly = paginate && !searchFilter && tableNameFilterIsEmpty(tableNameFilter) && loadsChildTablesOnDemand(getConfig(options.node.connectionId));
     const fetchLimit = paginate ? options.pageSize + 1 : SIDEBAR_TABLE_SEARCH_RESULT_BUDGET;
     const fetchOffset = paginate ? options.offset : undefined;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
@@ -3248,7 +3251,7 @@ export const useConnectionStore = defineStore("connection", () => {
         sidebarDisplayMode: "grouped",
         extra: tableNameFilterMetadataExtra(tableNameFilter, sourceRevision),
       }),
-      () => listTablesWithOptionalTableNameFilter(options.node.connectionId!, options.node.database!, options.querySchema, searchFilter, fetchLimit, fetchOffset, options.objectTypes, options.node.catalog, tableNameFilter, rootPaged),
+      () => listTablesWithOptionalTableNameFilter(options.node.connectionId!, options.node.database!, options.querySchema, searchFilter, fetchLimit, fetchOffset, options.objectTypes, options.node.catalog, tableNameFilter, rootPaged || rootsOnly),
       { force: options.force },
     );
     const anchorTables = rootPaged ? tables.filter((table) => !table.parent_name) : tables;
@@ -3516,6 +3519,8 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     const paginate = options.pagedSearch || !searchFilter || getConfig(options.connectionId)?.db_type === "oceanbase-oracle";
     const rootPaged = paginate && !searchFilter && tableNameFilterIsEmpty(tableNameFilter) && pagesTablePartitionsWithRootPage(getConfig(options.connectionId));
+    // TDengine: list super tables and ordinary tables only; child tables load when their super table is expanded.
+    const rootsOnly = paginate && !searchFilter && tableNameFilterIsEmpty(tableNameFilter) && loadsChildTablesOnDemand(getConfig(options.connectionId));
     const fetchLimit = paginate ? options.pageSize + 1 : SIDEBAR_TABLE_SEARCH_RESULT_BUDGET;
     const fetchOffset = paginate ? options.offset : undefined;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
@@ -3531,7 +3536,7 @@ export const useConnectionStore = defineStore("connection", () => {
         sidebarDisplayMode: "simple",
         extra: tableNameFilterMetadataExtra(tableNameFilter, sourceRevision),
       }),
-      () => listTablesWithOptionalTableNameFilter(options.connectionId, options.database, options.querySchema, searchFilter, fetchLimit, fetchOffset, undefined, undefined, tableNameFilter, rootPaged),
+      () => listTablesWithOptionalTableNameFilter(options.connectionId, options.database, options.querySchema, searchFilter, fetchLimit, fetchOffset, undefined, undefined, tableNameFilter, rootPaged || rootsOnly),
       { force: options.force },
     );
     const anchorTables = rootPaged ? tables.filter((table) => !table.parent_name) : tables;
@@ -8241,6 +8246,15 @@ export const useConnectionStore = defineStore("connection", () => {
     if (node.type !== "load-more" || !node.loadMore) return;
     const loadMore = node.loadMore;
     const parent = findNode(treeNodes.value, node.loadMore.parentId);
+    if (parent && isLazyChildTableGroup(parent)) {
+      node.isLoading = true;
+      try {
+        await loadTableChildTables(parent.id, loadMore.offset, loadMore.pageSize);
+      } finally {
+        node.isLoading = false;
+      }
+      return;
+    }
     if (parent?.type === "connection" && parent.connectionId && getConfig(parent.connectionId)?.db_type === "redis") {
       // The full database list is already fetched in one cheap call, so "load
       // more" here just re-renders it without the display-limit truncation
@@ -8766,6 +8780,76 @@ export const useConnectionStore = defineStore("connection", () => {
     return normalizeSidebarObjectKind(type);
   }
 
+  // TDengine super tables load their child tables on demand (see
+  // loadsChildTablesOnDemand). A loaded group (old agents that ignore the roots-only
+  // request) already carries its children and is left alone.
+  function isLazyChildTableParent(node: TreeNode): boolean {
+    return node.type === "table" && !!node.connectionId && loadsChildTablesOnDemand(getConfig(node.connectionId)) && isTdengineStableTableType(node.tableType);
+  }
+
+  function isLazyChildTableGroup(node: TreeNode): boolean {
+    return node.type === "group-partitions" && !!node.connectionId && !!node.tableName && loadsChildTablesOnDemand(getConfig(node.connectionId));
+  }
+
+  function buildLazyChildTableGroup(parent: TreeNode): TreeNode {
+    return {
+      id: `${parent.id}:__partitions`,
+      label: "tree.childTables",
+      type: "group-partitions",
+      connectionId: parent.connectionId,
+      database: parent.database,
+      schema: parent.schema,
+      catalog: parent.catalog,
+      tableName: parent.label,
+      isExpanded: true,
+      children: [],
+    };
+  }
+
+  // Loads one page of a super table's child tables into its group node. The first
+  // page replaces the group's children; later pages (offset > 0) append to them.
+  async function loadTableChildTables(groupId: string, offset = 0, pageSize = sidebarObjectGroupPageSize()) {
+    const group = findNode(treeNodes.value, groupId);
+    if (!group || !isLazyChildTableGroup(group) || !group.connectionId || !hasTreeNodeDatabaseContext(group)) return;
+    const parentId = groupId.endsWith(":__partitions") ? groupId.slice(0, -":__partitions".length) : undefined;
+    const parent = parentId ? findNode(treeNodes.value, parentId) : null;
+    const parentName = group.tableName!;
+    // Child ids share the table-list id scheme: parent id minus its own name.
+    const childIdBase = parent && parent.id.endsWith(`:${parent.label}`) ? parent.id.slice(0, -(parent.label.length + 1)) : (parentId ?? group.id);
+    const connectionId = group.connectionId;
+    const config = getConfig(connectionId);
+    let load = beginTreeNodeLoad(group);
+    try {
+      await ensureConnected(connectionId);
+      load = reclaimTreeNodeLoad(load, group);
+      const tables = await api.listTableChildren(connectionId, group.database, connectionObjectTreeQuerySchema(config, group.database, group.schema), parentName, pageSize + 1, offset);
+      const target = treeNodeLoadTarget(load);
+      if (!target) return;
+      const hasMore = tables.length > pageSize;
+      const pageTables = hasMore ? tables.slice(0, pageSize) : tables;
+      const incoming = buildTableTreeNodes({ nodeId: childIdBase, connectionId, database: group.database, schema: group.schema, catalog: group.catalog, tables: pageTables });
+      const merged = [...(offset > 0 ? withoutLoadMoreNodes(target.children) : []), ...incoming];
+      if (!merged.length) {
+        // A super table without child tables has nothing to show under it.
+        const owner = parentId ? findNode(treeNodes.value, parentId) : null;
+        if (owner) {
+          owner.children = (owner.children ?? []).filter((child) => child.id !== group.id);
+          owner.hiddenChildren = (owner.hiddenChildren ?? []).filter((child) => child.id !== group.id);
+        }
+        return;
+      }
+      setChildren(target, hasMore ? [...merged, buildLoadMoreNode(target, offset + pageTables.length, pageSize)] : merged);
+      // A partial page has no known total; the load-more row stands in for the rest.
+      target.objectCount = hasMore ? undefined : merged.length;
+      target.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e, load);
+      throw e;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
   async function loadTableGroups(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
     const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}` : `${connectionId}:${database}:${table}`);
     const node = findTableDetailNode(parentId, connectionId, database, schema, catalog);
@@ -8773,8 +8857,10 @@ export const useConnectionStore = defineStore("connection", () => {
     let load = beginTreeNodeLoad(node);
 
     try {
+      const lazyChildGroup = isLazyChildTableParent(node) && tablePartitionGroups(node).length === 0 ? buildLazyChildTableGroup(node) : undefined;
       const children: TreeNode[] = [
         ...tablePartitionGroups(node),
+        ...(lazyChildGroup ? [lazyChildGroup] : []),
         {
           id: `${parentId}:__columns`,
           label: "tree.columns",
@@ -8907,7 +8993,10 @@ export const useConnectionStore = defineStore("connection", () => {
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       setTableDetailChildren(targetNode, children);
+      if (lazyChildGroup) syncTablePartitionGroups(targetNode);
       targetNode.isExpanded = true;
+      // Errors are recorded by the child load itself; the table's own groups stay usable.
+      if (lazyChildGroup) await loadTableChildTables(lazyChildGroup.id).catch(() => undefined);
     } finally {
       finishTreeNodeLoad(load);
     }
@@ -9337,6 +9426,7 @@ export const useConnectionStore = defineStore("connection", () => {
     } else if (objectTypesForGroupNode(node.type)) {
       await loadObjectGroupChildren(node, options);
     } else if (node.type === "group-partitions") {
+      if (isLazyChildTableGroup(node) && !node.children?.length) await loadTableChildTables(node.id);
       node.isExpanded = true;
     } else if (node.type === "group-extensions" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await loadExtensions(node.connectionId, node.database || "");

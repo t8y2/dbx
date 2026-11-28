@@ -454,7 +454,16 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     if (isVirtualCompletionTableReference(table)) return false;
     const cacheTable = { ...table, ...reference };
     const cacheKey = completionCacheKey(cacheTable, scope);
-    if (getCachedColumnsForTable(cacheTable, scope)) return true;
+    const cachedColumns = getCachedColumnsForTable(cacheTable, scope);
+    if (cachedColumns && cachedColumns.length > 0) {
+      // Diagnostics and hover read the exact cache key, so share columns found
+      // through a case-insensitive hit under that key instead of only reporting a hit.
+      if (!cachedColumnsByTable.has(cacheKey)) {
+        cachedColumnsByTable.set(cacheKey, cachedColumns);
+        loadedColumnsByTable.add(cacheKey.toLowerCase());
+      }
+      return true;
+    }
     if (!props.connectionId || props.database == null) return false;
     const target = completionMetadataTarget(table, scope);
     if (!target) return false;

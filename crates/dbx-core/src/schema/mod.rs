@@ -1089,6 +1089,7 @@ pub async fn list_tables_core(
         object_types,
         table_name_filter,
         false,
+        None,
     )
     .await
 }
@@ -1119,8 +1120,44 @@ pub async fn list_table_roots_page_core(
         object_types,
         table_name_filter,
         true,
+        None,
     )
     .await
+}
+
+/// Child tables of one parent table (TDengine: the child tables of a super
+/// table), paged by `limit`/`offset`. Lets the sidebar load a super table's
+/// children on demand instead of listing every child table up front.
+///
+/// Agents that predate this scope ignore it and answer with the unscoped list;
+/// the post-filter keeps that answer from leaking unrelated tables.
+pub async fn list_table_children_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    parent_name: &str,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<db::TableInfo>, String> {
+    let tables = list_tables_core_impl(
+        state,
+        connection_id,
+        database,
+        schema,
+        None,
+        limit,
+        offset,
+        None,
+        None,
+        false,
+        Some(parent_name),
+    )
+    .await?;
+    Ok(tables
+        .into_iter()
+        .filter(|table| table.parent_name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case(parent_name)))
+        .collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1135,6 +1172,7 @@ async fn list_tables_core_impl(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
     page_table_roots: bool,
+    parent_table: Option<&str>,
 ) -> Result<Vec<db::TableInfo>, String> {
     let db_config = connection_config(state, connection_id).await;
     if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
@@ -1162,6 +1200,7 @@ async fn list_tables_core_impl(
                 table_name_filter,
                 metadata_session.client_session_id(),
                 page_table_roots,
+                parent_table,
             )
         },
     )
@@ -2769,6 +2808,7 @@ async fn list_tables_once(
     table_name_filter: Option<&TableNameFilter>,
     client_session_id: Option<&str>,
     page_table_roots: bool,
+    parent_table: Option<&str>,
 ) -> Result<Vec<db::TableInfo>, String> {
     let pool_key =
         state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
@@ -2962,14 +3002,22 @@ async fn list_tables_once(
             } else {
                 None
             };
+            // Only the TDengine agent understands the hierarchy scope; do not leak
+            // the extra fields to agents that never defined them.
+            let agent_scope = if is_tdengine {
+                db::agent_driver::AgentTableScope { page_table_roots, parent_name: parent_table }
+            } else {
+                db::agent_driver::AgentTableScope::default()
+            };
             match client
-                .list_tables_constrained::<Vec<db::TableInfo>>(
+                .list_tables_scoped::<Vec<db::TableInfo>>(
                     database,
                     schema,
                     agent_filter,
                     agent_limit,
                     agent_offset,
                     object_types,
+                    agent_scope,
                     timeout_duration,
                 )
                 .await

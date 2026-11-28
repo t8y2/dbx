@@ -215,7 +215,7 @@ pub struct ConnectionConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     /// SQL statements executed right after the connection is established
-    /// (DuckDB only for now): INSTALL/LOAD, SET, CREATE SECRET, ATTACH, ...
+    /// (DuckDB and SQL Server): INSTALL/LOAD, SET, CREATE SECRET, ATTACH, ...
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init_script: Option<String>,
     #[serde(default)]

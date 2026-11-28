@@ -363,6 +363,37 @@ fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(MAX_ROWS).max(1)
 }
 
+/// Splits a connection init script into the batches DBX executes on a new session.
+///
+/// SQL Server executes `GO`-separated chunks as independent batches; a module body
+/// (`CREATE PROCEDURE ...`) must stay in one batch, so this uses the same batch splitter
+/// as the editor instead of splitting on semicolons.
+fn sqlserver_init_script_batches(script: &str) -> Vec<String> {
+    dbx_sql_core::sql::split_sql_batches(script)
+}
+
+/// Runs the connection init script on the just-opened physical session.
+///
+/// Every batch must succeed: a partially initialized session would silently keep the
+/// server defaults (for example `ARITHABORT OFF`), which is exactly the mismatch the init
+/// script exists to remove, so the connection fails with the failing batch number.
+async fn run_init_script(client: &mut SqlServerClient, script: &str) -> Result<(), String> {
+    for (index, batch) in sqlserver_init_script_batches(script).iter().enumerate() {
+        if batch.trim().is_empty() {
+            continue;
+        }
+        let stream = client
+            .simple_query(batch.as_str())
+            .await
+            .map_err(|error| format!("Connection init script batch {} failed: {error}", index + 1))?;
+        stream
+            .into_results()
+            .await
+            .map_err(|error| format!("Connection init script batch {} failed: {error}", index + 1))?;
+    }
+    Ok(())
+}
+
 pub async fn connect(
     host: &str,
     port: u16,
@@ -414,6 +445,31 @@ pub async fn connect_with_port_explicit(
                 .map_err(|fallback_errors| sqlserver_connect_failure_message(&encrypted_error, &fallback_errors))
         }
     }
+}
+
+/// Connect and run the connection-level init script on the new session.
+///
+/// SQL Server inherits SET options from the database unless the client sends them
+/// explicitly, so a client script is the only way to make every DBX session match the
+/// options another tool (SSMS sets `ARITHABORT ON`) uses. The script runs once per
+/// physical connection; pooled sessions each get their own copy of the settings.
+pub async fn connect_with_port_explicit_and_init_script(
+    host: &str,
+    port: u16,
+    port_explicit: bool,
+    user: &str,
+    pass: &str,
+    database: Option<&str>,
+    url_params: Option<&str>,
+    init_script: Option<&str>,
+    timeout: Duration,
+) -> Result<SqlServerClient, String> {
+    let mut client =
+        connect_with_port_explicit(host, port, port_explicit, user, pass, database, url_params, timeout).await?;
+    if let Some(script) = init_script.map(str::trim).filter(|script| !script.is_empty()) {
+        run_init_script(&mut client, script).await?;
+    }
+    Ok(client)
 }
 
 const SQLSERVER_LEGACY_TLS_HINT: &str = "This may be caused by an old SQL Server TLS/encryption configuration. \
@@ -4741,6 +4797,26 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn init_script_splits_go_batches_and_keeps_module_batches() {
+        assert_eq!(
+            super::sqlserver_init_script_batches("SET ARITHABORT ON;\nSET ANSI_NULLS ON;"),
+            vec!["SET ARITHABORT ON;\nSET ANSI_NULLS ON;".to_string()]
+        );
+        let script = "CREATE PROCEDURE dbo.p AS\nBEGIN\n SELECT 1;\n SELECT 2;\nEND\nGO\nSET ARITHABORT ON";
+        let batches = super::sqlserver_init_script_batches(script);
+        assert_eq!(batches.len(), 2, "{batches:?}");
+        assert!(batches[0].starts_with("CREATE PROCEDURE dbo.p"));
+        assert_eq!(batches[1], "SET ARITHABORT ON");
+    }
+
+    #[test]
+    fn init_script_skips_blank_and_comment_only_input() {
+        let batches = super::sqlserver_init_script_batches("-- session options\n;\n\n");
+        assert!(batches.iter().all(|batch| !batch.trim().is_empty()), "{batches:?}");
+        assert!(super::sqlserver_init_script_batches("   \n\t").is_empty());
+    }
+
     #[test]
     fn row_limit_stopping_only_accepts_single_read_queries() {
         for sql in [

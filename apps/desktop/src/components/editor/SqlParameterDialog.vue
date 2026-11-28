@@ -178,8 +178,13 @@ async function copyResolvedSql() {
 </script>
 
 <template>
-  <Dialog v-model:open="open">
-    <DialogContent class="max-h-[86vh] border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[720px]" @open-auto-focus="focusFirstParameterInputOnOpen" @close-auto-focus="onSqlParameterDialogCloseAutoFocus">
+  <!-- Modeless: no overlay/focus trap/aria-hiding, so the SQL editor behind
+       stays interactive — text can be selected and copied while the dialog is
+       open. Reka's DismissableLayer would still close a non-modal dialog on
+       outside pointerdown unless the event is prevented, hence
+       @interact-outside.prevent; Escape/Cancel/Execute still close it. -->
+  <Dialog :modal="false" v-model:open="open">
+    <DialogContent class="max-h-[86vh] border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[720px]" @open-auto-focus="focusFirstParameterInputOnOpen" @close-auto-focus="onSqlParameterDialogCloseAutoFocus" @interact-outside.prevent>
       <!-- Form wrapper so Enter in any field submits (implicit submission → Execute). -->
       <form ref="formRef" class="grid grid-cols-[minmax(0,1fr)] gap-4" @submit.prevent="execute">
         <DialogHeader>
@@ -217,7 +222,7 @@ async function copyResolvedSql() {
                 <div>{{ t("sqlParameters.value") }}</div>
               </div>
               <div v-for="parameter in activeParameters" :key="parameter.key" class="grid grid-cols-[minmax(140px,1fr)_104px_132px_minmax(180px,1.5fr)] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0">
-                <div class="min-w-0 truncate font-mono text-xs">{{ parameter.name }}</div>
+                <TruncatedTextTooltip :text="parameter.name" class="min-w-0 font-mono text-xs" tooltip-class="break-all font-mono" :delay="150" />
                 <div class="min-w-0 truncate font-mono text-[11px] text-muted-foreground">{{ syntaxLabel(parameter) }}</div>
                 <Select :model-value="values[parameter.key]?.kind || 'string'" @update:model-value="(value) => updateKind(parameter.key, value as SqlParameterValueKind)">
                   <SelectTrigger class="h-8 bg-background text-xs">
@@ -230,7 +235,18 @@ async function copyResolvedSql() {
                   </SelectContent>
                 </Select>
                 <div class="relative min-w-0">
-                  <Popover :open="activeHistoryName === parameter.key && filteredSqlParameterHistory(parameter.key).length > 0">
+                  <!-- update:open=false routes reka's dismissal (Escape etc.)
+                       back into the controlled open state; without it the
+                       popover would stay the topmost dismissable layer forever
+                       and swallow every Escape before it reaches the dialog. -->
+                  <Popover
+                    :open="activeHistoryName === parameter.key && filteredSqlParameterHistory(parameter.key).length > 0"
+                    @update:open="
+                      (value) => {
+                        if (!value) closeParameterHistory(parameter.key);
+                      }
+                    "
+                  >
                     <PopoverAnchor as-child>
                       <Input
                         :model-value="values[parameter.key]?.value || ''"

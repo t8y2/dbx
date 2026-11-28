@@ -839,6 +839,7 @@ async fn serve() -> Result<(), String> {
         .route("/schema/mysql/auto-increment", get(routes::schema::get_mysql_table_auto_increment))
         .route("/schema/schemas", get(routes::schema::list_schemas))
         .route("/schema/tables", get(routes::schema::list_tables))
+        .route("/schema/table-children", get(routes::schema::list_table_children))
         .route("/schema/table-comment", get(routes::schema::get_table_comment))
         .route("/schema/objects", get(routes::schema::list_objects))
         .route("/schema/object-statistics", get(routes::schema::list_object_statistics))

@@ -20,6 +20,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -821,6 +822,51 @@ class SqlServerLegacyAgentTest {
             baseDdl,
             SqlServerLegacyAgent.appendTableCommentDdl(baseDdl, "dbo", "Users", "   ")
         );
+    }
+
+    @Test
+    void physicalConnectionRunsConnectionInitBatches() throws Exception {
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        List<String> executed = new ArrayList<>();
+        java.sql.Statement statement = proxy(java.sql.Statement.class, (method, args) -> {
+            if ("execute".equals(method.getName())) {
+                executed.add((String) args[0]);
+                return true;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        Connection connection = proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) return statement;
+            return defaultValue(method.getReturnType());
+        });
+        ConnectParams params = new ConnectParams();
+        params.setInit_batches(Arrays.asList("SET ARITHABORT ON;", "   ", "SET ANSI_NULLS ON;"));
+
+        agent.afterPhysicalConnect(params, connection);
+
+        Assertions.assertEquals(Arrays.asList("SET ARITHABORT ON;", "SET ANSI_NULLS ON;"), executed);
+    }
+
+    @Test
+    void initBatchFailureFailsTheConnectionWithTheBatchPosition() {
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        java.sql.Statement statement = proxy(java.sql.Statement.class, (method, args) -> {
+            if ("execute".equals(method.getName())) throw new SQLException("Incorrect syntax near 'ON'");
+            return defaultValue(method.getReturnType());
+        });
+        Connection connection = proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) return statement;
+            return defaultValue(method.getReturnType());
+        });
+        ConnectParams params = new ConnectParams();
+        params.setInit_batches(Arrays.asList("SET ARITHABORT ON", "BROKEN"));
+
+        SQLException error = Assertions.assertThrows(
+            SQLException.class,
+            () -> agent.afterPhysicalConnect(params, connection)
+        );
+
+        Assertions.assertEquals("Connection init script batch 1 failed: Incorrect syntax near 'ON'", error.getMessage());
     }
 
     /**

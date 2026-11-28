@@ -149,6 +149,14 @@ pub fn agent_connect_params_with_role(
         String::new()
     };
     let (agent_host, agent_port) = if is_h2_file_connection(config) { ("", 0) } else { (host, port) };
+    // The SQL Server legacy Agent applies the connection init script to every physical
+    // JDBC connection, so session SET options (for example ARITHABORT ON) match the
+    // native driver instead of falling back to the database defaults.
+    let init_batches = if config.db_type == DatabaseType::SqlServer {
+        config.init_script.as_deref().map_or_else(Vec::new, dbx_sql_core::sql::split_sql_batches)
+    } else {
+        Vec::new()
+    };
 
     let mut params = serde_json::json!({
         "host": agent_host,
@@ -178,6 +186,7 @@ pub fn agent_connect_params_with_role(
         "driver_profile": config.driver_profile.as_deref().unwrap_or(""),
         "sessionRole": session_role.as_str(),
         "database_type": config.db_type,
+        "init_batches": init_batches,
     });
     if config.db_type == DatabaseType::ZooKeeper {
         params["connection_timeout_ms"] = serde_json::json!(
@@ -984,6 +993,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(params["sessionRole"], "metadata");
+    }
+
+    #[test]
+    fn sqlserver_agent_connect_params_split_the_connection_init_script() {
+        let mut cfg = config(DatabaseType::SqlServer, Some("master"));
+        cfg.init_script = Some("SET ARITHABORT ON;\nSET ANSI_NULLS ON;\nGO\nSET NOCOUNT ON;".to_string());
+
+        let params = agent_connect_params(&cfg, "127.0.0.1", 1433, "master").unwrap();
+
+        assert_eq!(
+            params["init_batches"],
+            serde_json::json!(["SET ARITHABORT ON;\nSET ANSI_NULLS ON;", "SET NOCOUNT ON;"])
+        );
+    }
+
+    #[test]
+    fn non_sqlserver_agent_connect_params_do_not_receive_init_batches() {
+        let mut cfg = config(DatabaseType::Mysql, Some("app"));
+        cfg.init_script = Some("SET time_zone = '+08:00';".to_string());
+
+        let params = agent_connect_params(&cfg, "127.0.0.1", 3306, "app").unwrap();
+
+        assert_eq!(params["init_batches"], serde_json::json!([]));
     }
 
     #[test]

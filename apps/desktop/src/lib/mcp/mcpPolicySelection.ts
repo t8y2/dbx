@@ -30,6 +30,7 @@ export const MCP_TOOL_OPTIONS = [
   { name: "dbx_list_routines", labelKey: "settings.mcpToolListRoutines" },
   { name: "dbx_get_routine_source", labelKey: "settings.mcpToolGetRoutineSource" },
   { name: "dbx_get_schema_context", labelKey: "settings.mcpToolGetSchemaContext" },
+  { name: "dbx_query", labelKey: "settings.mcpToolQuery" },
   { name: "dbx_execute_query", labelKey: "settings.mcpToolExecuteQuery" },
   { name: "dbx_execute_batch", labelKey: "settings.mcpToolExecuteBatch" },
   { name: "dbx_open_session", labelKey: "settings.mcpToolOpenSession" },

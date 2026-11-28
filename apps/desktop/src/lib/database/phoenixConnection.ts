@@ -2,6 +2,8 @@ import type { ConnectionConfig } from "@/types/database";
 import type { JdbcProductProfileDefinition } from "@/lib/database/jdbcProductProfile";
 import managedJdbcAssets from "@/lib/database/managedJdbcAssets.json";
 
+import { PHOENIX_COMPATIBILITY_ARTIFACT_NAMES, PHOENIX_COMPATIBILITY_COORDINATE, PHOENIX_COMPATIBILITY_LABEL_KEY, PHOENIX_COMPATIBILITY_RUNTIME_ID } from "@/lib/database/phoenixCompatibilityRuntime";
+
 export const PHOENIX_DRIVER_PROFILE = "phoenix";
 export const PHOENIX_DIRECT_JDBC_URL = "jdbc:phoenix:localhost";
 export const PHOENIX_DIRECT_JDBC_DRIVER_CLASS = "org.apache.phoenix.jdbc.PhoenixDriver";
@@ -53,6 +55,8 @@ export const PHOENIX_JDBC_PRODUCT_PROFILE: JdbcProductProfileDefinition = {
       managedCoordinates: [PHOENIX_QUERY_SERVER_MAVEN_COORDINATE],
     },
   ],
+  runtimes: [{ id: PHOENIX_COMPATIBILITY_RUNTIME_ID, modeId: "direct", labelKey: PHOENIX_COMPATIBILITY_LABEL_KEY, managedDriverId: PHOENIX_COMPATIBILITY_RUNTIME_ID, managedCoordinates: [PHOENIX_COMPATIBILITY_COORDINATE], requiredArtifactNames: PHOENIX_COMPATIBILITY_ARTIFACT_NAMES }],
+  isRuntimeDependencyPath: (path, mode) => mode === "direct" && /(?:^|[/\\])zookeeper-[^/\\]+\.jar$/i.test(path),
   detectMode: (config) => phoenixConnectionModeForConfig(config),
   isCompatibleRuntimePath: (path, mode) => isPhoenixRuntimePath(path, mode as PhoenixConnectionMode),
 };

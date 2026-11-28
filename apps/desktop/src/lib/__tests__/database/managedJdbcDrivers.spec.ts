@@ -21,7 +21,7 @@ describe("managedJdbcDrivers", () => {
   it("registers Phoenix and PrestoSQL through the same row model", () => {
     expect(managedJdbcDriverDefinition("phoenix")?.bundles.map(({ coordinate }) => coordinate)).toEqual(PHOENIX_MANAGED_MAVEN_COORDINATES);
     expect(managedJdbcDriverDefinition("prestosql")?.bundles.map(({ coordinate }) => coordinate)).toEqual([PRESTOSQL_JDBC_DRIVER_COORDINATE]);
-    expect(managedJdbcDriverRows([], pluginStatus()).map(({ db_type }) => db_type)).toEqual(["prestosql", "phoenix"]);
+    expect(managedJdbcDriverRows([], pluginStatus()).map(({ db_type }) => db_type)).toEqual(["prestosql", "phoenix", "phoenix-5.0-hbase-2.0-compat"]);
   });
 
   it("marks both managed drivers installed when the offline payload contains every bundle", () => {
@@ -39,6 +39,7 @@ describe("managedJdbcDrivers", () => {
     expect(managedJdbcDriverRows(bundles, pluginStatus()).map(({ db_type, installed }) => ({ db_type, installed }))).toEqual([
       { db_type: "prestosql", installed: true },
       { db_type: "phoenix", installed: true },
+      { db_type: "phoenix-5.0-hbase-2.0-compat", installed: false },
     ]);
   });
 

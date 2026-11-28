@@ -516,6 +516,10 @@
   display: none;
 }
 
+.tab-group-header[draggable="true"] {
+  cursor: grab;
+}
+
 .tab-group-header:focus-visible {
   box-shadow: 0 0 0 2px var(--ring);
 }

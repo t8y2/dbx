@@ -86,7 +86,7 @@ import { EDITOR_TOOLBAR_ACTIONS } from "./editorToolbarActions";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { EditorSettings } from "@/stores/settingsStore";
+import type { EditorSettings, TabGroupMode } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { TAB_WINDOW_TRANSFER } from "@/composables/useTabWindowTransfer";
 import { useTabTitleTruncation } from "@/composables/useTabTitleTruncation";
@@ -468,7 +468,7 @@ const tabGroupRowsItems = computed(() => [
   { value: "two-row", label: t("settings.tabGroupRowsTwoRow") },
 ]);
 
-type TabPreferencePatch = Partial<Pick<EditorSettings, "tabPlacement" | "tabGroupMode" | "tabSortMode" | "tabGroupCustomizations" | "tabMaxWidth" | "tabGroupRows">>;
+type TabPreferencePatch = Partial<Pick<EditorSettings, "tabPlacement" | "tabGroupMode" | "tabSortMode" | "tabGroupCustomizations" | "tabGroupOrders" | "tabMaxWidth" | "tabGroupRows">>;
 
 async function persistTabPreferences(partial: TabPreferencePatch) {
   try {
@@ -526,11 +526,80 @@ function tabGroupKey(tab: QueryTab) {
   return connection?.driver_profile || connection?.db_type || tab.connectionId || "unknown";
 }
 
+const usesManualTabGroupOrder = computed(() => settingsStore.editorSettings.tabSortMode === "manual" && settingsStore.editorSettings.tabGroupMode !== "none");
+const canReorderTabGroups = computed(() => usesManualTabGroupOrder.value && !tabSearchQuery.value.trim());
+const tabGroupOrderRanks = computed(() => {
+  const keys = usesManualTabGroupOrder.value ? (settingsStore.editorSettings.tabGroupOrders?.[settingsStore.editorSettings.tabGroupMode] ?? []) : [];
+  return new Map(keys.map((key, index) => [key, index]));
+});
+
+function compareSavedTabGroupOrder(left: string, right: string) {
+  const ranks = tabGroupOrderRanks.value;
+  return (ranks.get(left) ?? ranks.size) - (ranks.get(right) ?? ranks.size);
+}
+
 function compareTabGroupKeys(left: string, right: string) {
   if (left === right) return 0;
   const localized = left.localeCompare(right, undefined, { sensitivity: "base", numeric: true });
   // Collation may consider case-distinct identities equal; the raw tie-break keeps clusters contiguous.
-  return localized || (left < right ? -1 : 1);
+  return compareSavedTabGroupOrder(left, right) || localized || (left < right ? -1 : 1);
+}
+
+const tabGroupReorderSource = ref<{ key: string; section: string; mode: TabGroupMode } | null>(null);
+const tabGroupReorderTarget = ref<{ key: string; section: string; before: boolean } | null>(null);
+
+function startTabGroupReorder(event: DragEvent, key: string, section: string) {
+  if (!canReorderTabGroups.value || !event.dataTransfer) return;
+  tabGroupReorderSource.value = { key, section, mode: settingsStore.editorSettings.tabGroupMode };
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("application/x-dbx-tab-group", "group");
+}
+
+function resetTabGroupReorder() {
+  tabGroupReorderSource.value = null;
+  tabGroupReorderTarget.value = null;
+}
+
+function isTabGroupReorderTarget(key: string, section: string) {
+  const source = tabGroupReorderSource.value;
+  return canReorderTabGroups.value && source?.mode === settingsStore.editorSettings.tabGroupMode && source.section === section && source.key !== key;
+}
+
+function dragOverTabGroup(event: DragEvent, key: string, section: string) {
+  if (!isTabGroupReorderTarget(key, section)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  const before = isVerticalLayout.value ? event.clientY < rect.top + rect.height / 2 : event.clientX < rect.left + rect.width / 2;
+  tabGroupReorderTarget.value = { key, section, before };
+}
+
+function leaveTabGroup(event: DragEvent, key: string, section: string) {
+  if (event.relatedTarget instanceof Node && (event.currentTarget as HTMLElement).contains(event.relatedTarget)) return;
+  if (tabGroupReorderTarget.value?.key === key && tabGroupReorderTarget.value.section === section) tabGroupReorderTarget.value = null;
+}
+
+function tabGroupReorderStyle(key: string, section: string): CSSProperties | undefined {
+  const target = tabGroupReorderTarget.value;
+  if (target?.key !== key || target.section !== section) return;
+  const offset = target.before ? "2px" : "-2px";
+  return { boxShadow: isVerticalLayout.value ? `inset 0 ${offset} var(--ring)` : `inset ${offset} 0 var(--ring)` };
+}
+
+function dropTabGroup(event: DragEvent, key: string, section: string) {
+  const source = tabGroupReorderSource.value;
+  const target = tabGroupReorderTarget.value;
+  if (!source || target?.key !== key || target.section !== section || !isTabGroupReorderTarget(key, section)) return;
+  event.preventDefault();
+  resetTabGroupReorder();
+  const currentKeys = [...new Set(props.tabs.map(tabGroupKey))].sort(compareTabGroupKeys);
+  if (!currentKeys.includes(source.key) || !currentKeys.includes(key)) return;
+  const orders = settingsStore.editorSettings.tabGroupOrders;
+  const order = [...new Set([...(orders?.[source.mode] ?? []), ...currentKeys])];
+  const next = order.filter((item) => item !== source.key);
+  next.splice(next.indexOf(key) + (target.before ? 0 : 1), 0, source.key);
+  if (next.every((item, index) => item === order[index])) return;
+  void persistTabPreferences({ tabGroupOrders: { ...orders, [source.mode]: next } });
 }
 
 // Numbered across every open tab (not just this group's) so a tab keeps the
@@ -1231,17 +1300,19 @@ const twoRowGroupItems = computed<TwoRowGroupItem[]>(() => {
     if (bucket) bucket.push(tab);
     else groups.set(key, [tab]);
   }
-  return [...groups.entries()].map(([key, tabs]) => {
-    const tab = tabs[0]!;
-    return {
-      key,
-      label: tabGroupLabel(tab) || (tabs.length === 1 ? tabTitleText(tab) : t("tabs.ungroupedTabs")),
-      count: tabs.length,
-      tab,
-      tabIds: tabs.map((item) => item.id),
-      colorStyle: tabGroupStyle(tab),
-    };
-  });
+  return [...groups.entries()]
+    .sort(([left], [right]) => compareSavedTabGroupOrder(left, right))
+    .map(([key, tabs]) => {
+      const tab = tabs[0]!;
+      return {
+        key,
+        label: tabGroupLabel(tab) || (tabs.length === 1 ? tabTitleText(tab) : t("tabs.ungroupedTabs")),
+        count: tabs.length,
+        tab,
+        tabIds: tabs.map((item) => item.id),
+        colorStyle: tabGroupStyle(tab),
+      };
+    });
 });
 
 // The group last picked on the rail. Kept as the fallback while a special
@@ -2127,6 +2198,7 @@ watch(
     settingsStore.editorSettings.tabWrapMaxRows,
     settingsStore.editorSettings.tabGroupMode,
     settingsStore.editorSettings.tabGroupRows,
+    tabGroupOrderRanks.value,
     settingsStore.editorSettings.tabMaxWidth,
     compactTabTitle.value,
     Array.from(collapsedTabGroups.value).sort().join("|"),
@@ -2261,11 +2333,17 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
               type="button"
               class="tab-group-header"
               :class="{ 'tab-group-header--active': twoRowSelectedKey === group.key }"
-              :style="group.colorStyle"
+              :style="[group.colorStyle, tabGroupReorderStyle(group.key, 'rail')]"
               :title="group.label"
               :aria-pressed="twoRowSelectedKey === group.key"
+              :draggable="canReorderTabGroups"
               @click="selectTwoRowGroup(group)"
               @contextmenu="openTabGroupContextMenu($event, onContextMenu)"
+              @dragstart="startTabGroupReorder($event, group.key, 'rail')"
+              @dragover="dragOverTabGroup($event, group.key, 'rail')"
+              @dragleave="leaveTabGroup($event, group.key, 'rail')"
+              @drop="dropTabGroup($event, group.key, 'rail')"
+              @dragend="resetTabGroupReorder"
             >
               <span class="tab-group-header-content">
                 <span class="tab-group-marker" aria-hidden="true" />
@@ -2380,12 +2458,18 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                       type="button"
                       class="tab-group-header"
                       :class="{ 'tab-group-header--collapsed': isGroupCollapsed(entry.groupId), 'tab-group-header--active': isGroupActive(entry.groupId), 'tab-group-header--hidden': isEntryHidden(entry) }"
-                      :style="[tabGroupStyleForEntry(entry), tabGroupHeaderDepthStyle(entry)]"
+                      :style="[tabGroupStyleForEntry(entry), tabGroupHeaderDepthStyle(entry), entry.level === 'connection' ? tabGroupReorderStyle(tabGroupKey(entry.tab), section.key) : undefined]"
                       :data-tree-level="settingsStore.editorSettings.tabGroupMode === 'sidebar' ? entry.level : undefined"
                       :aria-expanded="!isGroupCollapsed(entry.groupId)"
                       :title="entry.label"
+                      :draggable="canReorderTabGroups && entry.level === 'connection'"
                       @click="toggleTabGroupById(entry.groupId)"
                       @contextmenu="openTabGroupContextMenu($event, onContextMenu)"
+                      @dragstart="entry.level === 'connection' && startTabGroupReorder($event, tabGroupKey(entry.tab), section.key)"
+                      @dragover="entry.level === 'connection' && dragOverTabGroup($event, tabGroupKey(entry.tab), section.key)"
+                      @dragleave="entry.level === 'connection' && leaveTabGroup($event, tabGroupKey(entry.tab), section.key)"
+                      @drop="entry.level === 'connection' && dropTabGroup($event, tabGroupKey(entry.tab), section.key)"
+                      @dragend="resetTabGroupReorder"
                     >
                       <TabGroupTreeGuides v-if="showTabTreeGuides" :guides="entry.treeGuides ?? []" :expanded="!isGroupCollapsed(entry.groupId) || !!tabSearchQuery.trim()" />
                       <span class="tab-group-header-content">

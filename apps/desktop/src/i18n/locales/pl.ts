@@ -7276,6 +7276,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    preparingReview: "Przygotowywanie planu transferu",
     log: {
       title: "Dziennik wykonywania",
       tableStarted: "Przesyłanie tabeli {table} ({index}/{total})",

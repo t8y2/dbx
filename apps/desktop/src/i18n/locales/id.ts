@@ -7256,6 +7256,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    preparingReview: "Menyiapkan rencana transfer",
     log: {
       title: "Log eksekusi",
       tableStarted: "Mentransfer tabel {table} ({index}/{total})",

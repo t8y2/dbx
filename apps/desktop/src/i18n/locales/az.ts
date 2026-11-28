@@ -6593,6 +6593,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    preparingReview: "Köçürmə planı hazırlanır",
     log: {
       title: "İcra jurnalı",
       tableStarted: "{table} cədvəli ötürülür ({index}/{total})",

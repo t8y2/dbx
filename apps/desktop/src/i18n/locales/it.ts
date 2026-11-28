@@ -7861,6 +7861,7 @@ export default withEnglishFallback({
     preserveQuotedBracedParameters: "Mantieni i segnaposto del template nelle stringhe racchiuse tra virgolette singole",
   },
   transfer: {
+    preparingReview: "Preparazione del piano di trasferimento",
     reviewBeforeStart: "Seleziona Avvia trasferimento per rivedere il piano e confermare prima di scrivere i dati.",
     log: {
       title: "Log di esecuzione",

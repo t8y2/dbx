@@ -281,6 +281,7 @@ const renameDialogOpen = ref(false);
 const renameEditingTable = ref("");
 const renameDraft = ref("");
 const isSubmitting = ref(false);
+const isPreparingReview = ref(false);
 const pendingTransferId = ref<string | null>(null);
 const showStartConfirm = ref(false);
 const confirmationRequest = shallowRef<api.TransferRequest | null>(null);
@@ -305,7 +306,14 @@ const ownershipTargetOwner = ref("");
 let resolveOwnershipConfirmation: ((policy: api.TransferOwnershipPolicy | null) => void) | undefined;
 const transferSubmission = createTransferSubmission({
   ensureWritable: (request) => ensureReadOnlyWriteAccess({ connection: store.getConfig(request.targetConnectionId), source: t("readOnlyUnlock.sourceTransfer"), treatAsMutation: true }),
-  preview: api.previewTransferOwnership,
+  async preview(request) {
+    isPreparingReview.value = true;
+    try {
+      return await api.previewTransferOwnership(request);
+    } finally {
+      if (pendingTransferId.value === request.transferId) isPreparingReview.value = false;
+    }
+  },
   confirmOwnership: requestOwnershipConfirmation,
   confirm: requestTransferConfirmation,
   execute: (request) => runTransfer(request, request.content !== "dataOnly"),
@@ -1790,6 +1798,7 @@ function cancelPendingTransfer() {
   if (packageDeployment.value) void disposeOracleRoutineDeployment(packageDeployment.value);
   const scopeId = pendingTransferId.value;
   pendingTransferId.value = null;
+  isPreparingReview.value = false;
   if (scopeId) productionSafetyStore.cancelScope(scopeId);
   resolveStartDecision(false);
   resolveOwnershipDecision(null);
@@ -2141,8 +2150,15 @@ async function saveConfigTask() {
         </div>
       </div>
 
+      <div v-if="isPreparingReview" class="shrink-0 space-y-1.5">
+        <p role="status" class="text-xs text-muted-foreground">{{ t("transfer.preparingReview") }}</p>
+        <div role="progressbar" :aria-label="t('transfer.preparingReview')" class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+          <div class="transfer-review-bar h-full w-2/5 rounded-full bg-primary" />
+        </div>
+      </div>
+
       <DialogFooter class="shrink-0">
-        <p v-if="canStart" class="mr-auto self-center text-xs text-muted-foreground">{{ t("transfer.reviewBeforeStart") }}</p>
+        <p v-if="canStart && !isPreparingReview" class="mr-auto self-center text-xs text-muted-foreground">{{ t("transfer.reviewBeforeStart") }}</p>
         <p v-if="mysqlDataCharsetEnabled(store.getConfig(sourceConnectionId)) || mysqlDataCharsetEnabled(store.getConfig(targetConnectionId))" class="text-xs text-muted-foreground">{{ t("connection.mysqlDataCharsetExportHint") }}</p>
         <Button variant="outline" size="sm" @click="open = false">
           {{ t("transfer.cancel") }}
@@ -2354,5 +2370,22 @@ async function saveConfigTask() {
 html.dbx-legacy-webview [data-slot="dialog-content"].dbx-transfer-dialog[class~="max-w-sm"] {
   /* Override the legacy default cap without pinning width, so native resize remains effective. */
   max-width: calc(100vw - 2rem) !important;
+}
+</style>
+
+<style scoped>
+@media (prefers-reduced-motion: no-preference) {
+  .transfer-review-bar {
+    animation: transfer-review-slide 1.15s ease-in-out infinite;
+  }
+}
+
+@keyframes transfer-review-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
 }
 </style>

@@ -8065,6 +8065,7 @@ export default withEnglishFallback({
     preserveQuotedBracedParameters: "Conservar los marcadores de posición de plantilla en cadenas entre comillas simples",
   },
   transfer: {
+    preparingReview: "Preparando el plan de transferencia",
     reviewBeforeStart: "Selecciona Iniciar transferencia para revisar el plan y confirmar antes de escribir datos.",
     log: {
       title: "Registro de ejecución",

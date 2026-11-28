@@ -9118,6 +9118,7 @@ export default {
     },
   },
   transfer: {
+    preparingReview: "Preparing transfer review",
     reviewBeforeStart: "Select Start Transfer to review the transfer plan and confirm before any data is written.",
     log: {
       title: "Execution log",

@@ -105,7 +105,7 @@ Errors are written to stderr and return a non-zero exit code.
 
 Use `--limit <n>` to control returned query rows and `--timeout <duration>` to control query timeout. Durations accept `ms`, `s`, or `m`, such as `500ms`, `10s`, or `1m`.
 
-Use `--allow-writes` for non-dangerous write statements. Dangerous SQL such as `DROP`, `TRUNCATE`, and `ALTER` requires both `--allow-writes` and `--allow-dangerous-sql`.
+Use `--allow-writes` for non-dangerous write statements. Dangerous SQL such as `DROP`, `TRUNCATE`, and `ALTER` requires both `--allow-writes` and `--allow-dangerous-sql`. The flags cannot widen saved permissions: the access-control tier for the connection and database, connection read-only protection, and production-database protection remain upper bounds.
 
 For SQL that starts with a dash, pass `--` before the SQL:
 

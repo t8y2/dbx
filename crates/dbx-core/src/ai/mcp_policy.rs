@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::models::connection::ConnectionConfig;
 use crate::production_safety::sql_references_disallowed_database_for_connection;
-use crate::storage::McpGlobalPolicy;
+use crate::storage::{McpDatabaseScope, McpGlobalPolicy};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -181,17 +181,50 @@ pub fn connection_allows_salesforce_dml(policy: &McpGlobalPolicy, connection_id:
         .is_some_and(|rule| rule.allow_salesforce_dml && !rule.read_only)
 }
 
-/// Reject qualified SQL references when database-specific execution rules are
-/// present and individual referenced databases have not been evaluated.
+/// Reject a database outside the connection's configured database scope,
+/// mirroring the MCP server: no rule or `All` admits every database,
+/// `Selected` admits only the listed databases, and `None` admits none. The
+/// scope applies whether or not per-database execution rules are configured.
+pub fn ensure_database_in_connection_scope(
+    policy: &McpGlobalPolicy,
+    connection_id: &str,
+    database: &str,
+) -> Result<(), String> {
+    let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == connection_id) else {
+        return Ok(());
+    };
+    match rule.database_scope {
+        McpDatabaseScope::All => Ok(()),
+        McpDatabaseScope::Selected if rule.allowed_databases.iter().any(|allowed| allowed == database) => Ok(()),
+        McpDatabaseScope::Selected | McpDatabaseScope::None => Err(format!(
+            "DATABASE_OUT_OF_SCOPE: Database \"{database}\" is not allowed by the connection access policy."
+        )),
+    }
+}
+
+/// Reject SQL outside the connection's database scope: the requested
+/// database must be in scope, a `Selected` scope also bounds qualified
+/// references to the listed databases, and qualified references are rejected
+/// when database-specific execution rules are present and individual
+/// referenced databases have not been evaluated.
 pub fn ensure_sql_database_execution_scope(
     policy: &McpGlobalPolicy,
     connection: &ConnectionConfig,
     active_database: &str,
     sql: &str,
 ) -> Result<(), String> {
+    ensure_database_in_connection_scope(policy, &connection.id, active_database)?;
     let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == connection.id) else {
         return Ok(());
     };
+    if matches!(rule.database_scope, McpDatabaseScope::Selected)
+        && sql_references_disallowed_database_for_connection(sql, connection, active_database, &rule.allowed_databases)
+    {
+        return Err(
+            "DATABASE_OUT_OF_SCOPE: SQL references a database that is not allowed by the connection access policy."
+                .to_string(),
+        );
+    }
     if rule.database_policies.is_empty()
         || !sql_references_disallowed_database_for_connection(
             sql,
@@ -267,10 +300,10 @@ pub fn ensure_mongo_database_execution_scope(
 #[cfg(test)]
 mod tests {
     use super::{
-        connection_allows_salesforce_dml, effective_database_execution_policy, resolve_database,
-        MCP_EXECUTION_POLICY_VERSION,
+        connection_allows_salesforce_dml, effective_database_execution_policy, ensure_database_in_connection_scope,
+        resolve_database, MCP_EXECUTION_POLICY_VERSION,
     };
-    use crate::storage::{McpConnectionPolicy, McpDatabasePolicy, McpGlobalPolicy};
+    use crate::storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy};
 
     fn policy(version: Option<u8>) -> McpGlobalPolicy {
         McpGlobalPolicy {
@@ -346,6 +379,24 @@ mod tests {
 
         open.connection_policies[0].allow_salesforce_dml = true;
         assert!(connection_allows_salesforce_dml(&open, "conn"));
+    }
+
+    #[test]
+    fn connection_scope_applies_without_database_policies() {
+        let mut policy = policy(Some(MCP_EXECUTION_POLICY_VERSION));
+        policy.connection_policies[0].database_policies.clear();
+
+        policy.connection_policies[0].database_scope = McpDatabaseScope::Selected;
+        policy.connection_policies[0].allowed_databases = vec!["db".to_string()];
+        assert!(ensure_database_in_connection_scope(&policy, "conn", "db").is_ok());
+        assert!(ensure_database_in_connection_scope(&policy, "conn", "other").is_err());
+
+        policy.connection_policies[0].database_scope = McpDatabaseScope::None;
+        assert!(ensure_database_in_connection_scope(&policy, "conn", "db").is_err());
+
+        policy.connection_policies[0].database_scope = McpDatabaseScope::All;
+        assert!(ensure_database_in_connection_scope(&policy, "conn", "other").is_ok());
+        assert!(ensure_database_in_connection_scope(&policy, "unruled", "other").is_ok());
     }
 
     #[test]

@@ -2756,6 +2756,11 @@ export async function loadWebCapabilities(): Promise<import("@/lib/backend/tauri
   return get("/api/app-settings/web-capabilities");
 }
 
+export async function revealSavedPassword(reference: string): Promise<string> {
+  const encoded = await post<string>("/api/connection/password/reveal", reference);
+  return new TextDecoder().decode(Uint8Array.from(atob(encoded), (byte) => byte.charCodeAt(0)));
+}
+
 export async function loadMaxAgentTurns(): Promise<number> {
   return get("/api/app-settings/max-agent-turns");
 }

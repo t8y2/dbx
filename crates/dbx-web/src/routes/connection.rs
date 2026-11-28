@@ -1168,6 +1168,14 @@ pub struct LoadConnectionsQuery {
     legacy_sidebar_show_user_admin: Option<bool>,
 }
 
+pub async fn reveal_saved_password(
+    State(state): State<Arc<WebState>>,
+    Json(reference): Json<String>,
+) -> Result<([(axum::http::header::HeaderName, &'static str); 1], Json<String>), AppError> {
+    let password = state.reveal_saved_password(&reference).await?;
+    Ok(([(axum::http::header::CACHE_CONTROL, "no-store")], Json(password)))
+}
+
 pub async fn load_connections(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,

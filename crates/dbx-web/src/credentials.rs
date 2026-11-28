@@ -302,9 +302,31 @@ pub(crate) fn restore_tunnel_from_profiles(
 }
 
 impl WebState {
+    pub async fn reveal_saved_password(&self, credential: &str) -> Result<String, AppError> {
+        if !self.password_viewer_enabled || self.demo_mode {
+            return Err(AppError::forbidden("Password viewing is disabled"));
+        }
+        let unavailable = || AppError::not_found("Saved password unavailable");
+        let encoded = credential.strip_prefix(REFERENCE_PREFIX).ok_or_else(unavailable)?;
+        let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| unavailable())?;
+        let (id, path): (String, String) = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+        if path != "/password" {
+            return Err(unavailable());
+        }
+        self.app
+            .storage
+            .load_connections()
+            .await
+            .map_err(|_| unavailable())?
+            .into_iter()
+            .find(|config| config.id == id && !config.password.is_empty())
+            .map(|config| base64::engine::general_purpose::STANDARD.encode(config.password))
+            .ok_or_else(unavailable)
+    }
+
     pub fn connection_response(&self, config: ConnectionConfig) -> ConnectionResponse {
         let jdbc_dialect = jdbc_dialect_hint(&config);
-        let response_config = if self.password_viewer_enabled { config } else { redact(&config) };
+        let response_config = redact(&config);
         ConnectionResponse::with_jdbc_dialect(response_config, jdbc_dialect)
     }
 

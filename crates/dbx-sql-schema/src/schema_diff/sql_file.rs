@@ -764,7 +764,10 @@ fn parse_default_value(cursor: &mut Cursor) -> (Option<String>, bool) {
         return (None, false);
     };
     match &token.kind {
-        TokenKind::Punct('(') => (read_parenthesized_text(cursor).map(|value| trim_expression_wrap(&value)), true),
+        TokenKind::Punct('(') => (
+            read_parenthesized_text(cursor).map(|value| escape_information_schema_default(&strip_outer_parens(&value))),
+            true,
+        ),
         TokenKind::Punct('-') | TokenKind::Punct('+') => {
             let sign = if matches!(token.kind, TokenKind::Punct('-')) { "-" } else { "" };
             match read_expression_text(cursor) {
@@ -834,19 +837,19 @@ fn strip_outer_parens(value: &str) -> String {
     inner.trim().to_string()
 }
 
-/// Strip the extra parenthesis layer SHOW CREATE TABLE adds around expression
-/// defaults, so ((1 + 1)) and (1 + 1) produce the same default text.
-fn trim_expression_wrap(value: &str) -> String {
-    let trimmed = value.trim();
-    let Some(inner) = trimmed.strip_prefix('(').and_then(|rest| rest.strip_suffix(')')) else {
-        return trimmed.to_string();
-    };
-    let inner = inner.trim();
-    if inner.starts_with('(') && inner.ends_with(')') {
-        inner.to_string()
-    } else {
-        trimmed.to_string()
+/// The server reports an expression default without the parenthesis layer
+/// mysqldump adds around it, and escapes quotes and backslashes the way a
+/// string literal is escaped, so the file default is given the same shape.
+fn escape_information_schema_default(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\'' => escaped.push_str("\\'"),
+            other => escaped.push(other),
+        }
     }
+    escaped
 }
 
 fn read_expression_text(cursor: &mut Cursor) -> Option<String> {
@@ -1462,6 +1465,9 @@ CREATE TABLE `users` (
   `status` enum('active','disabled') NOT NULL DEFAULT 'active',
   `score` decimal(10,2) NOT NULL DEFAULT '0.00',
   `payload` json DEFAULT (json_object()),
+  `note_expr` varchar(40) DEFAULT (concat(_latin1'a\\b')),
+  `quoted_expr` varchar(40) DEFAULT (concat(_latin1'it\'s')),
+  `paren_expr` int DEFAULT ((1 + 1)),
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
   `team_id` int DEFAULT NULL,
@@ -1510,7 +1516,7 @@ DELIMITER ;
         assert_eq!(snapshot.tables[1].table_type, "VIEW");
 
         let detail = snapshot.details.iter().find(|detail| detail.name == "users").expect("users detail");
-        assert_eq!(detail.columns.len(), 10);
+        assert_eq!(detail.columns.len(), 13);
 
         let id = column(&snapshot, "users", "id");
         assert_eq!(id.data_type, "int unsigned");
@@ -1534,8 +1540,21 @@ DELIMITER ;
         assert_eq!(score.data_type, "decimal(10,2)");
 
         let payload = column(&snapshot, "users", "payload");
-        assert_eq!(payload.column_default.as_deref(), Some("(json_object())"));
+        assert_eq!(payload.column_default.as_deref(), Some("json_object()"));
         assert_eq!(payload.extra.as_deref(), Some("DEFAULT_GENERATED"));
+
+        // The server drops the parenthesis layer the dump adds and escapes quotes
+        // and backslashes the way a string literal is escaped.
+        let note_expr = column(&snapshot, "users", "note_expr");
+        assert_eq!(note_expr.column_default.as_deref(), Some(r"concat(_latin1\'a\\\\b\')"));
+        assert_eq!(note_expr.extra.as_deref(), Some("DEFAULT_GENERATED"));
+
+        let quoted_expr = column(&snapshot, "users", "quoted_expr");
+        assert_eq!(quoted_expr.column_default.as_deref(), Some(r"concat(_latin1\'it\\\'s\')"));
+
+        // Only the layer mysqldump adds is removed; a parenthesised expression keeps its own.
+        let paren_expr = column(&snapshot, "users", "paren_expr");
+        assert_eq!(paren_expr.column_default.as_deref(), Some("(1 + 1)"));
 
         let created_at = column(&snapshot, "users", "created_at");
         assert_eq!(created_at.column_default.as_deref(), Some("CURRENT_TIMESTAMP"));

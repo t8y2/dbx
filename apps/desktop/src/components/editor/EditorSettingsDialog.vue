@@ -918,6 +918,7 @@ const editDataGridCrosshairRowBg = ref(settingsStore.editorSettings.dataGridCros
 const editDataGridCrosshairColBg = ref(settingsStore.editorSettings.dataGridCrosshairColBg);
 const editDataGridStripedRows = ref(settingsStore.editorSettings.dataGridStripedRows);
 const editDataGridZebraRowBg = ref(settingsStore.editorSettings.dataGridZebraRowBg);
+const editDataGridResultBackground = ref(settingsStore.editorSettings.dataGridResultBackground);
 const editPageSize = ref(settingsStore.editorSettings.pageSize);
 const editTableOpenPageSize = ref(settingsStore.editorSettings.tableOpenPageSize);
 const editTableOpenSortMode = ref(settingsStore.editorSettings.tableOpenSortMode);
@@ -1450,6 +1451,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridCrosshairColBg: editDataGridCrosshairColBg.value,
     dataGridStripedRows: editDataGridStripedRows.value,
     dataGridZebraRowBg: editDataGridZebraRowBg.value,
+    dataGridResultBackground: editDataGridResultBackground.value,
     flatteningMultiLineText: editFlatteningMultiLineText.value,
     dataGridShowWhitespace: editDataGridShowWhitespace.value,
     modelGenerationTemplates: editModelGenerationTemplates.value,
@@ -2308,6 +2310,7 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridCrosshairColBg.value = settingsStore.editorSettings.dataGridCrosshairColBg;
   editDataGridStripedRows.value = settingsStore.editorSettings.dataGridStripedRows;
   editDataGridZebraRowBg.value = settingsStore.editorSettings.dataGridZebraRowBg;
+  editDataGridResultBackground.value = settingsStore.editorSettings.dataGridResultBackground;
   editFlatteningMultiLineText.value = settingsStore.editorSettings.flatteningMultiLineText;
   editDataGridShowWhitespace.value = settingsStore.editorSettings.dataGridShowWhitespace;
   editModelGenerationTemplates.value = settingsStore.editorSettings.modelGenerationTemplates.map((template) => ({ ...template }));
@@ -2508,6 +2511,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   dataGridCrosshairColBg: editDataGridCrosshairColBg,
   dataGridStripedRows: editDataGridStripedRows,
   dataGridZebraRowBg: editDataGridZebraRowBg,
+  dataGridResultBackground: editDataGridResultBackground,
   pageSize: editPageSize,
   tableOpenPageSize: editTableOpenPageSize,
   tableOpenSortMode: editTableOpenSortMode,
@@ -3236,6 +3240,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridCrosshairColBg.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairColBg;
     editDataGridStripedRows.value = DEFAULT_EDITOR_SETTINGS.dataGridStripedRows;
     editDataGridZebraRowBg.value = DEFAULT_EDITOR_SETTINGS.dataGridZebraRowBg;
+    editDataGridResultBackground.value = DEFAULT_EDITOR_SETTINGS.dataGridResultBackground;
     editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
     editDataGridShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace;
     editModelGenerationTemplates.value = DEFAULT_EDITOR_SETTINGS.modelGenerationTemplates.map((template) => ({ ...template }));
@@ -3387,6 +3392,7 @@ function resetAllDefaults() {
   editDataGridCrosshairColBg.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairColBg;
   editDataGridStripedRows.value = DEFAULT_EDITOR_SETTINGS.dataGridStripedRows;
   editDataGridZebraRowBg.value = DEFAULT_EDITOR_SETTINGS.dataGridZebraRowBg;
+  editDataGridResultBackground.value = DEFAULT_EDITOR_SETTINGS.dataGridResultBackground;
   editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
   editDataGridShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace;
   editModelGenerationTemplates.value = DEFAULT_EDITOR_SETTINGS.modelGenerationTemplates.map((template) => ({ ...template }));
@@ -11353,6 +11359,21 @@ onUnmounted(() => {
                       </Button>
                     </div>
                     <Switch id="data-grid-striped-rows" v-model="editDataGridStripedRows" />
+                  </div>
+                </div>
+                <div data-settings-search-id="data-grid-result-background" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <Label for="data-grid-result-background">{{ t("settings.dataGridResultBackground") }}</Label>
+                  <div class="flex items-center gap-1.5">
+                    <input
+                      id="data-grid-result-background"
+                      type="color"
+                      class="h-6 w-8 shrink-0 cursor-pointer rounded border border-border bg-transparent p-0.5"
+                      :value="editDataGridResultBackground || (isDark ? '#131416' : '#ffffff')"
+                      @input="editDataGridResultBackground = ($event.target as HTMLInputElement).value"
+                    />
+                    <Button v-if="editDataGridResultBackground" type="button" variant="ghost" size="sm" class="h-6 px-1 text-[11px] text-muted-foreground hover:text-foreground" @click="editDataGridResultBackground = ''">
+                      {{ t("settings.reset") }}
+                    </Button>
                   </div>
                 </div>
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

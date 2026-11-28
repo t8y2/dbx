@@ -8056,6 +8056,7 @@ export default withEnglishFallback({
     dataGridCrosshairRowBg: "Satır vurgu rengi",
     dataGridCrosshairColBg: "Sütun vurgu rengi",
     dataGridZebraRowBg: "Çizgi Rengi",
+    dataGridResultBackground: "Sorgu sonucu arka planı",
     infiniteScroll: "Sonsuz kaydırmayla yükleme",
     autoCalculateTotalRows: "Toplam satır sayısını otomatik hesapla",
     autoCalculateTotalRowsDescription: "Eşleşen toplam satırı göstermek için her sorgunun ardından otomatik olarak COUNT(*) çalıştır. Büyük sorguların hızlı kalması için varsayılan olarak kapalıdır — sonuç alt bilgisinden istediğinizde hesaplayın.",

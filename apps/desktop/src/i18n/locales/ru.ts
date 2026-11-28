@@ -11122,6 +11122,7 @@ export default withEnglishFallback({
     dataGridCrosshairRowBg: "Цвет подсветки строки",
     dataGridCrosshairColBg: "Цвет подсветки столбца",
     dataGridZebraRowBg: "Цвет полосы",
+    dataGridResultBackground: "Фон результатов запроса",
     infiniteScroll: "Бесконечная прокрутка с подгрузкой",
     autoCalculateTotalRows: "Автоматически считать общее число строк",
     autoCalculateTotalRowsDescription: "Автоматически выполнять COUNT(*) после каждого запроса, чтобы показать общее число подходящих строк. По умолчанию выключено, чтобы большие запросы оставались быстрыми — счёт можно запустить вручную из нижней панели результатов.",

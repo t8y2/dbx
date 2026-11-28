@@ -9343,6 +9343,7 @@ export default withEnglishFallback({
     dataGridCrosshairRowBg: "Kolor podświetlenia wiersza",
     dataGridCrosshairColBg: "Kolor podświetlenia kolumny",
     dataGridZebraRowBg: "Kolor pasów",
+    dataGridResultBackground: "Tło wyników zapytania",
     infiniteScroll: "Nieskończone przewijanie (Infinite scroll)",
     autoCalculateTotalRows: "Automatycznie obliczaj całkowitą liczbę wierszy",
     autoCalculateTotalRowsDescription: "Uruchamiaj zapytanie COUNT(*) automatycznie po każdym zapytaniu, aby pokazać łączną liczbę pasujących wierszy. Domyślnie wyłączone dla zachowania szybkości dużych zapytań — obliczaj na żądanie w stopce wyników.",

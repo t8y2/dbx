@@ -10940,6 +10940,7 @@ export default withEnglishFallback({
     dataGridCrosshairRowBg: "行高亮颜色",
     dataGridCrosshairColBg: "列高亮颜色",
     dataGridZebraRowBg: "斑马纹颜色",
+    dataGridResultBackground: "查询结果背景色",
     infiniteScroll: "无限滚动加载",
     autoCalculateTotalRows: "自动统计总行数",
     autoCalculateTotalRowsDescription: "每次查询后自动执行 COUNT(*) 显示匹配的总行数。默认关闭以保证大查询速度 —— 可在结果栏按需手动统计。",

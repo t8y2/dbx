@@ -112,6 +112,7 @@ const editorSettingCategoryOverrides: Partial<Record<string, BackupSettingsCateg
   tableFontSize: "data",
   mongoViewMode: "data",
   dataGridMultiRowTranspose: "data",
+  dataGridResultBackground: "data",
   dataGridHideNullColumns: "data",
   dataGridHideEmptyColumns: "data",
   dataGridFreezeFirstColumn: "data",

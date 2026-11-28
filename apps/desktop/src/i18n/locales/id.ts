@@ -8929,6 +8929,7 @@ export default withEnglishFallback({
     dataGridStripedRows: "Garis zebra",
     dataGridStripedRowsDescription: "Jika diaktifkan, baris ganjil dan genap pada kisi data akan menampilkan warna latar belakang yang berbeda.",
     dataGridZebraRowBg: "Warna garis zebra",
+    dataGridResultBackground: "Latar belakang hasil kueri",
     flatteningMultiLineText: "Meratakan Teks Multi-baris",
     flatteningMultiLineTextDescription: "Teks multi-baris digabungkan menjadi tampilan satu baris, dengan pemutus baris ditampilkan sebagai ¶.",
     regexMaxMatchCount: "Jumlah maksimum hasil cocok pilih-semua",

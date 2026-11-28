@@ -8636,6 +8636,7 @@ export default withEnglishFallback({
     dataGridCrosshairRowBg: "橫行高亮顏色",
     dataGridCrosshairColBg: "直欄高亮顏色",
     dataGridZebraRowBg: "斑馬紋顏色",
+    dataGridResultBackground: "查詢結果背景色",
     infiniteScroll: "無限滾動載入",
     autoCalculateTotalRows: "自動統計總筆數",
     autoCalculateTotalRowsDescription: "每次查詢後自動執行 COUNT(*) 顯示符合的總筆數。預設關閉以確保大型查詢速度 —— 可在結果列按需手動統計。",

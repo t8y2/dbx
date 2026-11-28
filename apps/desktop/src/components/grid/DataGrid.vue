@@ -372,12 +372,13 @@ import {
   foreignKeyAssociationCells,
   foreignKeyAssociationCellsForSource,
   foreignKeyAssociationForRef,
+  foreignKeyDrillRouting,
   foreignKeyNavigationTarget,
   foreignKeySourceColumnName,
   type ForeignKeyAssociation,
   type ForeignKeyAssociationCell,
 } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
-import { foreignKeyDrillBackEntryMatchesTab, markForeignKeyDrillBackPendingArrival, peekForeignKeyDrillBack, popForeignKeyDrillBack } from "@/lib/dataGrid/foreignKeyDrillBack";
+import { foreignKeyDrillBackEntryMatchesTab, markForeignKeyDrillBackPendingArrival, peekForeignKeyDrillBack, popForeignKeyDrillBack, type ForeignKeyDrillBackView } from "@/lib/dataGrid/foreignKeyDrillBack";
 import {
   collectForeignKeyDisplayValues,
   createForeignKeyDisplayRequestCoordinator,
@@ -7466,24 +7467,15 @@ function captureTabSwitchViewSnapshot() {
 }
 
 /**
- * Replay a tab-switch snapshot captured from a previous instance of the same
- * logical result. Every gate must pass; any mismatch degrades to a clean start
- * rather than a partial restore.
+ * Replay a captured selection + viewport on the current grid state. Shared by
+ * the tab-switch restore and the FK drill-back "Back"; callers own the identity
+ * gates (generation/probe) so a mismatch degrades to a clean start rather than
+ * a partial restore.
  */
-function restoreTabSwitchViewSnapshot() {
-  if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;
-  const ownerKey = viewSnapshotOwnerKey.value;
-  if (!ownerKey || !props.viewGeneration) return;
-  if (showTranspose.value) return;
-  const snapshot = peekDataGridViewSnapshot(ownerKey);
-  if (!snapshot) return;
-  if (snapshot.viewGeneration !== props.viewGeneration) return;
-  if (snapshot.renderer !== (useCanvasGridRows.value ? "canvas" : "dom")) return;
-  if (snapshot.probe !== currentViewProbe()) return;
-
+function replayCapturedViewState(captured: { selection?: DataGridViewSelectionSnapshot; viewport: { top: number; left: number } }, options: { onSettled?: () => void } = {}) {
   // The selection rides along for free: indexes stay valid under a generation
   // match, and out-of-range entries simply never match any display row.
-  const capturedSelection = snapshot.selection;
+  const capturedSelection = captured.selection;
   if (capturedSelection) {
     if (capturedSelection.kind === "cells") {
       if (capturedSelection.cellKeys.length) restoreCellSelectionState({ cellKeys: new Set(capturedSelection.cellKeys) });
@@ -7513,8 +7505,8 @@ function restoreTabSwitchViewSnapshot() {
     if (!scroller) return false;
     const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
     const maxLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-    const targetTop = Math.min(Math.max(0, snapshot.viewport.top), maxTop);
-    const targetLeft = Math.min(Math.max(0, snapshot.viewport.left), maxLeft);
+    const targetTop = Math.min(Math.max(0, captured.viewport.top), maxTop);
+    const targetLeft = Math.min(Math.max(0, captured.viewport.left), maxLeft);
     scroller.scrollTop = targetTop;
     scroller.scrollLeft = targetLeft;
     if (useCanvasGridRows.value) syncCanvasViewport();
@@ -7523,21 +7515,16 @@ function restoreTabSwitchViewSnapshot() {
     // scroller must be tall enough to hold the saved position AND its measured
     // geometry must hold still — an unmeasured virtual scroller clamps the
     // target to 0 and would otherwise be mistaken for a finished restore.
-    const roomForSavedTop = maxTop >= snapshot.viewport.top;
+    const roomForSavedTop = maxTop >= captured.viewport.top;
     const stable = maxTop === previousMaxTop;
     previousMaxTop = maxTop;
-    return accepted && (snapshot.viewport.top === 0 || (roomForSavedTop && stable));
+    return accepted && (captured.viewport.top === 0 || (roomForSavedTop && stable));
   };
   const attempt = (): boolean => {
     if (settled || !applyView()) return settled;
     settled = true;
     cancelViewSnapshotRestoreFrame();
-    consumeDataGridViewSnapshot(ownerKey);
-    // Report a dropped selection only once the restore it belongs to actually
-    // happened — never while merely leaving the tab.
-    if (snapshot.selectionDropped && shouldNotifyOverBudgetSelection(ownerKey, props.viewGeneration!)) {
-      toast(t("grid.viewSnapshotSelectionNotRestored"), 4000);
-    }
+    options.onSettled?.();
     return true;
   };
   if (attempt()) return;
@@ -7553,6 +7540,48 @@ function restoreTabSwitchViewSnapshot() {
     };
     viewSnapshotRestoreFrame = requestAnimationFrame(onFrame);
   });
+}
+
+/**
+ * Replay a tab-switch snapshot captured from a previous instance of the same
+ * logical result. Every gate must pass; any mismatch degrades to a clean start
+ * rather than a partial restore.
+ */
+function restoreTabSwitchViewSnapshot() {
+  if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;
+  const ownerKey = viewSnapshotOwnerKey.value;
+  if (!ownerKey || !props.viewGeneration) return;
+  if (showTranspose.value) return;
+  const snapshot = peekDataGridViewSnapshot(ownerKey);
+  if (!snapshot) return;
+  if (snapshot.viewGeneration !== props.viewGeneration) return;
+  if (snapshot.renderer !== (useCanvasGridRows.value ? "canvas" : "dom")) return;
+  if (snapshot.probe !== currentViewProbe()) return;
+  replayCapturedViewState(
+    { selection: snapshot.selection, viewport: snapshot.viewport },
+    {
+      onSettled: () => {
+        consumeDataGridViewSnapshot(ownerKey);
+        // Report a dropped selection only once the restore it belongs to actually
+        // happened — never while merely leaving the tab.
+        if (snapshot.selectionDropped && shouldNotifyOverBudgetSelection(ownerKey, props.viewGeneration!)) {
+          toast(t("grid.viewSnapshotSelectionNotRestored"), 4000);
+        }
+      },
+    },
+  );
+}
+
+/**
+ * 跳转返回后的视口重放：probe 不匹配（数据在跳转期间变了）即整体放弃，
+ * 干净起点。与 tab 切换恢复共用 replayCapturedViewState 的选区/滚动落地逻辑。
+ */
+function replayForeignKeyDrillBackView(view: ForeignKeyDrillBackView | undefined) {
+  if (!view) return;
+  if (showTranspose.value) return;
+  if (view.renderer !== (useCanvasGridRows.value ? "canvas" : "dom")) return;
+  if (view.probe !== currentViewProbe()) return;
+  replayCapturedViewState({ selection: view.selection, viewport: view.viewport });
 }
 
 const multiRowCount = computed(() => {
@@ -15090,18 +15119,41 @@ async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number)
   });
 }
 
+/**
+ * 跳转瞬间的视口快照（滚动位置 + 选区 + probe 指纹）。返回落地后由
+ * replayForeignKeyDrillBackView 按 probe 匹配重放：数据在跳转期间变了就
+ * 整体放弃，宁可干净起点也不把旧滚动/选区套到新内容上。
+ */
+function captureForeignKeyDrillBackView(): ForeignKeyDrillBackView | undefined {
+  if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return undefined;
+  if (showTranspose.value) return undefined;
+  const scroller = useCanvasGridRows.value ? canvasScrollerElement() : gridScrollerElement();
+  if (!scroller) return undefined;
+  const { selection } = captureViewSelection();
+  return {
+    renderer: useCanvasGridRows.value ? "canvas" : "dom",
+    probe: currentViewProbe(),
+    viewport: { top: Math.max(0, scroller.scrollTop), left: Math.max(0, scroller.scrollLeft) },
+    selection,
+  };
+}
+
 async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) {
   try {
     const navigationTarget = await foreignKeyReferenceTarget(rowIndex, actualColIdx);
     if (!navigationTarget) return;
 
-    // 同面板跳转：data tab 原地换目标（不安全状态由 canReuseActiveDataTab
-    // 拒绝后回退新建），query tab 在结果面板内执行（编辑器 SQL 不动）；
-    // drillBack 让导航入口在改写面板前记录返回点
-    if (props.foreignKeyNavigationTabId && props.context === "table-data") {
-      await openTableTarget(navigationTarget, { reuseTabId: props.foreignKeyNavigationTabId, drillBack: true });
-    } else if (props.foreignKeyNavigationTabId && props.context === "results") {
-      await executeTableTargetInQueryTab(navigationTarget, { tabId: props.foreignKeyNavigationTabId, drillBack: true });
+    // 同面板跳转路由：data tab 原地换目标（不安全状态由 canReuseActiveDataTab
+    // 拒绝后回退新建），query tab 在结果面板内执行（编辑器 SQL 不动）。网格
+    // 持有未保存编辑时两种就地改写都会丢弃编辑（query tab 没有 tab 级
+    // pendingDataChangeCount 那道闸），一律回退新建 tab，编辑留在原处。
+    const owningTabId = props.foreignKeyNavigationTabId;
+    const route = foreignKeyDrillRouting({ context: props.context, owningTabId, hasPendingChanges: hasPendingChanges.value });
+    const drillBackView = route === "new-tab" ? undefined : captureForeignKeyDrillBackView();
+    if (route === "data-tab-in-place" && owningTabId) {
+      await openTableTarget(navigationTarget, { reuseTabId: owningTabId, drillBack: true, drillBackView });
+    } else if (route === "query-tab-in-place" && owningTabId) {
+      await executeTableTargetInQueryTab(navigationTarget, { tabId: owningTabId, drillBack: true, drillBackView });
     } else {
       await openTableTarget(navigationTarget);
     }
@@ -15136,11 +15188,15 @@ async function goForeignKeyDrillBack() {
     // 栈顶标记为等待落地，避免 computed 在过渡期把它当失配条目丢弃，链式
     // 返回（A→B→C 连按两次返回）才走得通。
     markForeignKeyDrillBackPendingArrival(tabId);
+    // restore: 按跳转前捕获的筛选/排序/分页重建（跳过保存的默认条件）；
+    // query 路径把捕获的页 limit/offset 一并带回
     if (popped.restore.kind === "tableTarget") {
-      await openTableTarget(popped.restore.target, { reuseTabId: tabId });
+      await openTableTarget(popped.restore.target, { reuseTabId: tabId, restore: true });
     } else {
-      await executeSqlInQueryTabResults(tabId, popped.restore.sql);
+      await executeSqlInQueryTabResults(tabId, popped.restore.sql, { pagination: popped.restore.page });
     }
+    // 结果已落地：probe 匹配时重放跳转前的滚动/选区（失配即干净起点）
+    replayForeignKeyDrillBackView(popped.view);
   } catch (e: any) {
     toast(String(e?.message || e), 5000);
   } finally {

@@ -10620,18 +10620,47 @@ async fn list_foreign_keys_with_sql(
         .collect())
 }
 
+/// Resolve the schema of an unqualified table the way PostgreSQL itself resolves
+/// the name in a query: the first schema on the session's search_path that
+/// actually holds a relation with that name ("The first matching table in the
+/// search path is taken to be the one wanted."). Falls back to `current_schema()`
+/// when no search-path schema holds the table — the schema an unqualified CREATE
+/// would target, and the same convention the information_schema metadata queries
+/// in this file use — so a custom search_path returns the table's own FKs (or
+/// none) instead of public's.
+const POSTGRES_RESOLVE_SEARCH_PATH_SCHEMA_SQL: &str = "\
+SELECT COALESCE( \
+  (SELECT n.nspname::text \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+    WHERE c.relname = $1 \
+      AND n.nspname = ANY (pg_catalog.current_schemas(false)) \
+    ORDER BY pg_catalog.array_position(pg_catalog.current_schemas(false), n.nspname) \
+    LIMIT 1), \
+  pg_catalog.current_schema()::text)";
+
+async fn resolve_unqualified_table_schema(client: &deadpool_postgres::Client, table: &str) -> Result<String, PgError> {
+    let rows = postgres_query_cached(client, POSTGRES_RESOLVE_SEARCH_PATH_SCHEMA_SQL, &[&table]).await?;
+    Ok(rows
+        .first()
+        .map(|row| pg_row_try_string(row, 0))
+        .unwrap_or_else(|| "public".to_string()))
+}
+
 pub async fn list_foreign_keys(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
     // The frontend keeps metadata requests for unqualified postgres sources
-    // schema-less (search_path resolution, see queryStore's
-    // useCurrentPostgresSchema); `n.nspname = ''` matches nothing, which
-    // silently returned zero FKs. Default to public like the other
-    // table-metadata queries in this file (get_columns, list_constraints...).
-    let schema = if schema.is_empty() { "public" } else { schema };
+    // schema-less so they follow the connection's search_path (see queryStore's
+    // useCurrentPostgresSchema); `n.nspname = ''` matches nothing. Resolve the
+    // name the way an unqualified query would instead of assuming public —
+    // with a custom search_path a public default matched the wrong same-named
+    // table or nothing at all. Behavioural coverage:
+    // tests/foreign_key_search_path.rs (DBX_TEST_POSTGRES_URL).
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let schema = if schema.is_empty() { resolve_unqualified_table_schema(&client, table).await.map_err(|e| e.to_string())? } else { schema.to_string() };
     let client = &EncodingClient::new(&client);
     let tiers = [postgres_foreign_keys_sql(), postgres_foreign_keys_compat_sql()];
     query_with_compat_fallback("list_foreign_keys", &tiers, |sql| {
-        list_foreign_keys_with_sql(client, sql, schema, table)
+        list_foreign_keys_with_sql(client, sql, &schema, table)
     })
     .await
 }

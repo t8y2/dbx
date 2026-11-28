@@ -188,3 +188,21 @@ export function foreignKeyAssociationCellsForSource(options: { association: Fore
   }
   return cells;
 }
+
+/** Same-pane FK drill routing: which pane rewrites and which entry owns the restore point. */
+export type ForeignKeyDrillRouting = "data-tab-in-place" | "query-tab-in-place" | "new-tab";
+
+/**
+ * 跳转路由决策：网格持有未保存编辑时绝不就地改写面板——data tab 的就地
+ * 路径靠 canReuseActiveDataTab 兜底（pendingDataChangeCount/hasPendingDataEditorDraft
+ * 拒绝复用即回退新建 tab），但 query tab 的结果面板就地执行没有那道闸
+ * （pendingDataChangeCount 只在 table-data 上下文同步到 tab），会静默丢弃
+ * 未保存编辑。这里对两种上下文统一拦截：有未保存编辑一律回退新建 tab，
+ * 跳转目标照常打开，用户编辑留在原处。
+ */
+export function foreignKeyDrillRouting(input: { context?: string; owningTabId?: string | null; hasPendingChanges: boolean }): ForeignKeyDrillRouting {
+  if (!input.owningTabId || input.hasPendingChanges) return "new-tab";
+  if (input.context === "table-data") return "data-tab-in-place";
+  if (input.context === "results") return "query-tab-in-place";
+  return "new-tab";
+}

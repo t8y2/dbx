@@ -1,6 +1,7 @@
 import { reactive } from "vue";
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import type { QueryTab } from "@/types/database";
+import type { DataGridViewSelectionSnapshot } from "@/lib/dataGrid/dataGridViewStateCache";
 
 /**
  * 外键跳转的返回栈。每次同面板跳转前压入"跳转前网格内容
@@ -10,7 +11,12 @@ import type { QueryTab } from "@/types/database";
  * 保证"返回"只回退一条未被打破的跳转链。
  */
 export interface ForeignKeyDrillBackEntry {
-  restore: { kind: "tableTarget"; target: NavigationTarget } | { kind: "queryResult"; sql: string };
+  restore: { kind: "tableTarget"; target: NavigationTarget } | { kind: "queryResult"; sql: string; page?: { limit?: number; offset?: number } };
+  /**
+   * 跳转前网格的视口快照（滚动位置 + 选区 + probe 完整性指纹）。返回落地后
+   * 由 DataGrid 按 probe 匹配重放：数据在跳转期间变了就整体放弃（干净起点）。
+   */
+  view?: ForeignKeyDrillBackView;
   /** table-data 到达身份（与 tableMeta 同形，matchesNavigationDataTab 的比对口径） */
   arrivedAt?: { connectionId: string; database: string; catalog?: string; schema?: string; tableName: string };
   /** query 路径到达时执行的 SQL（跳转结果落地后 resultBaseSql 应等于它） */
@@ -19,10 +25,22 @@ export interface ForeignKeyDrillBackEntry {
   label?: string;
 }
 
+/**
+ * 跳转瞬间的网格视口（只存原始类型，与 dataGridViewStateCache 的快照同一
+ * 约束）。`probe` 是跳转前数据集的指纹：返回后重放前先比对，失配即放弃——
+ * 宁可干净起点也不把滚动/选区套到换了内容的结果上。
+ */
+export interface ForeignKeyDrillBackView {
+  renderer: "dom" | "canvas";
+  probe: string;
+  viewport: { top: number; left: number };
+  selection?: DataGridViewSelectionSnapshot;
+}
+
 export const MAX_FOREIGN_KEY_DRILL_BACK = 20;
 
 /** 两个恢复辅助函数实际读取的 tab 字段（结构性子集，便于复用与测试） */
-export type ForeignKeyDrillBackTab = Pick<QueryTab, "connectionId" | "database" | "sql" | "mode" | "catalog" | "schema" | "lastExecutedSql" | "resultBaseSql" | "whereInput" | "tableMeta">;
+export type ForeignKeyDrillBackTab = Pick<QueryTab, "connectionId" | "database" | "sql" | "mode" | "catalog" | "schema" | "lastExecutedSql" | "resultBaseSql" | "whereInput" | "tableMeta" | "orderByInput" | "structuredOrderByInput" | "resultPageLimit" | "resultPageOffset">;
 
 const stacks = reactive(new Map<string, ForeignKeyDrillBackEntry[]>());
 
@@ -37,13 +55,40 @@ function stackTopEntry(tabId: string): ForeignKeyDrillBackEntry | undefined {
   return stack?.[stack.length - 1];
 }
 
-export function pushForeignKeyDrillBack(tabId: string, entry: ForeignKeyDrillBackEntry): void {
+function removeEntry(tabId: string, entry: ForeignKeyDrillBackEntry): void {
+  const stack = stacks.get(tabId);
+  if (!stack) return;
+  const index = stack.lastIndexOf(entry);
+  if (index >= 0) stack.splice(index, 1);
+  if (!stack.length) stacks.delete(tabId);
+  if (pendingArrivals.get(tabId) === entry) pendingArrivals.delete(tabId);
+}
+
+/**
+ * 压入一个返回点，返回"经栈读出的引用"。调用方在跳转失败时必须用该引用
+ * 调 removeForeignKeyDrillBackEntry 撤回——否则失败的跳转会留下永远隐藏的
+ * 死条目（pendingArrivals 会把栈顶判为未落地而永不匹配）。
+ */
+export function pushForeignKeyDrillBack(tabId: string, entry: ForeignKeyDrillBackEntry): ForeignKeyDrillBackEntry {
   const stack = stacks.get(tabId) ?? [];
   stack.push(entry);
   stacks.set(tabId, stack.slice(-MAX_FOREIGN_KEY_DRILL_BACK));
   // stacks 是 reactive Map：从栈里读出的条目是代理对象，而 entry 是原始
   // 引用——必须统一存"经栈读出的引用"，否则 peek 里的 === 恒为 false。
-  pendingArrivals.set(tabId, stackTopEntry(tabId)!);
+  const stored = stackTopEntry(tabId)!;
+  pendingArrivals.set(tabId, stored);
+  return stored;
+}
+
+/** 撤回一个已压入的返回点（跳转失败时的清理路径；按引用精确匹配） */
+export function removeForeignKeyDrillBackEntry(tabId: string, entry: ForeignKeyDrillBackEntry): void {
+  removeEntry(tabId, entry);
+}
+
+/** 丢弃某个 tab 的全部返回点（tab 关闭时调用，避免 Map 泄漏） */
+export function forgetForeignKeyDrillBack(tabId: string): void {
+  stacks.delete(tabId);
+  pendingArrivals.delete(tabId);
 }
 
 /** 返回导航发起后把（弹出后的）栈顶重新标记为等待落地：恢复途中 tab 内容被改写，期间不可把它当失配丢弃 */
@@ -79,19 +124,16 @@ export function peekForeignKeyDrillBack(tabId: string, matches: (entry: ForeignK
 
 export function popForeignKeyDrillBack(tabId: string, matches: (entry: ForeignKeyDrillBackEntry) => boolean): ForeignKeyDrillBackEntry | null {
   const entry = peekForeignKeyDrillBack(tabId, matches);
-  if (entry) {
-    const stack = stacks.get(tabId);
-    const index = stack?.lastIndexOf(entry) ?? -1;
-    if (stack && index >= 0) stack.splice(index, 1);
-    if (!stack?.length) {
-      stacks.delete(tabId);
-      pendingArrivals.delete(tabId);
-    }
-  }
+  if (entry) removeEntry(tabId, entry);
   return entry;
 }
 
-/** table-data 跳转前从 tab 捕获可恢复目标（含用户当前过滤条件；排序按默认重建） */
+/**
+ * table-data 跳转前从 tab 捕获可恢复目标：表身份 + 当时的筛选（whereInput）、
+ * 排序（orderByInput/structuredOrderByInput）与分页（resultPageLimit/Offset）。
+ * 列筛选以 whereInput 呈现（数据 tab 的条件编辑器把每列规则编译进该条件），
+ * 返回时随 SQL 一起重建；只有本地排序等网格内状态由 view 快照另行兜底。
+ */
 export function foreignKeyDrillTableTargetFromTab(tab: ForeignKeyDrillBackTab): NavigationTarget | null {
   const tableName = tab.tableMeta?.tableName;
   if (!tab.connectionId || !tab.database || !tableName) return null;
@@ -103,6 +145,9 @@ export function foreignKeyDrillTableTargetFromTab(tab: ForeignKeyDrillBackTab): 
     tableName,
     tableType: tab.tableMeta?.tableType,
     whereInput: tab.whereInput || undefined,
+    orderByInput: tab.orderByInput || undefined,
+    structuredOrderByInput: tab.structuredOrderByInput || undefined,
+    page: tab.resultPageLimit != null || tab.resultPageOffset != null ? { limit: tab.resultPageLimit, offset: tab.resultPageOffset } : undefined,
   };
 }
 

@@ -4,10 +4,12 @@ import {
   foreignKeyDrillBackEntries,
   foreignKeyDrillBackEntryMatchesTab,
   foreignKeyDrillTableTargetFromTab,
+  forgetForeignKeyDrillBack,
   markForeignKeyDrillBackPendingArrival,
   peekForeignKeyDrillBack,
   popForeignKeyDrillBack,
   pushForeignKeyDrillBack,
+  removeForeignKeyDrillBackEntry,
   type ForeignKeyDrillBackEntry,
   type ForeignKeyDrillBackTab,
 } from "@/lib/dataGrid/foreignKeyDrillBack";
@@ -57,12 +59,9 @@ function queryEntry(overrides: Partial<ForeignKeyDrillBackEntry> = {}): ForeignK
 const matchesAny = () => true;
 
 beforeEach(() => {
-  // drain the shared reactive stacks between tests
-  for (const tabId of ["t1", "t2"]) {
-    while (popForeignKeyDrillBack(tabId, matchesAny)) {
-      // pop until empty
-    }
-  }
+  // reset the shared module-level stacks between tests (also clears the
+  // hidden-pending markers that would otherwise leak into the next test)
+  for (const tabId of ["t1", "t2", "t3", "t4"]) forgetForeignKeyDrillBack(tabId);
 });
 
 describe("foreignKeyDrillBack stack", () => {
@@ -155,9 +154,53 @@ describe("foreignKeyDrillTableTargetFromTab", () => {
     expect(target).toMatchObject({ connectionId: "c1", database: "db", schema: "public", tableName: "orders", tableType: "TABLE", whereInput: '"status" = 2' });
   });
 
+  it("captures the live sort and page state so Back is not lossy (review #3)", () => {
+    const target = foreignKeyDrillTableTargetFromTab(dataTab({ whereInput: '"status" = 2', orderByInput: '"created_at" DESC', structuredOrderByInput: '"region" ASC', resultPageLimit: 200, resultPageOffset: 400 }));
+    expect(target).toMatchObject({ orderByInput: '"created_at" DESC', structuredOrderByInput: '"region" ASC', page: { limit: 200, offset: 400 } });
+  });
+
+  it("omits empty sort/page state and a page object when unset", () => {
+    const target = foreignKeyDrillTableTargetFromTab(dataTab({ orderByInput: undefined, structuredOrderByInput: undefined, resultPageLimit: undefined, resultPageOffset: undefined }));
+    expect(target?.orderByInput).toBeUndefined();
+    expect(target?.structuredOrderByInput).toBeUndefined();
+    expect(target?.page).toBeUndefined();
+  });
+
   it("omits an empty where filter and returns null without a table identity", () => {
     expect(foreignKeyDrillTableTargetFromTab(dataTab())?.whereInput).toBeUndefined();
     expect(foreignKeyDrillTableTargetFromTab(queryTab())).toBeNull();
     expect(foreignKeyDrillTableTargetFromTab(dataTab({ tableMeta: undefined }))).toBeNull();
+  });
+});
+
+describe("drill-back entry lifecycle (review #3)", () => {
+  it("pushForeignKeyDrillBack returns the stored entry reference so a failed open can withdraw it", () => {
+    const stored = pushForeignKeyDrillBack("t1", tableEntry());
+    // the stored reference must be what peek/pop later see (reactive proxy identity)
+    expect(foreignKeyDrillBackEntries("t1")).toContain(stored);
+    removeForeignKeyDrillBackEntry("t1", stored);
+    expect(foreignKeyDrillBackEntries("t1")).toHaveLength(0);
+    expect(popForeignKeyDrillBack("t1", matchesAny)).toBeNull();
+  });
+
+  it("withdrawing the top entry clears its hidden-pending marker so the stack stays usable", () => {
+    const first = pushForeignKeyDrillBack("t1", tableEntry());
+    pushForeignKeyDrillBack("t1", tableEntry({ arrivedAt: { connectionId: "c1", database: "db", schema: "public", tableName: "other" } }));
+    // the failed jump's entry is the current top; withdraw it like a failed open would
+    const top = foreignKeyDrillBackEntries("t1")[1];
+    removeForeignKeyDrillBackEntry("t1", top);
+    // the remaining entry must still be discoverable (marker must not keep it hidden forever)
+    expect(foreignKeyDrillBackEntries("t1")).toEqual([first]);
+    expect(peekForeignKeyDrillBack("t1", (entry) => entry.arrivedAt?.tableName === "customers")).toBe(first);
+  });
+
+  it("forgetForeignKeyDrillBack drops every entry and the pending marker for the tab", () => {
+    pushForeignKeyDrillBack("t2", queryEntry());
+    markForeignKeyDrillBackPendingArrival("t2");
+    forgetForeignKeyDrillBack("t2");
+    expect(foreignKeyDrillBackEntries("t2")).toHaveLength(0);
+    // a fresh push after forget must be visible again (no stale pending marker eats it)
+    const stored = pushForeignKeyDrillBack("t2", queryEntry());
+    expect(peekForeignKeyDrillBack("t2", (entry) => entry === stored)).toBe(stored);
   });
 });

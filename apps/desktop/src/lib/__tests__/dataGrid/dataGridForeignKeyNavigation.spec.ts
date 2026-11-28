@@ -6,6 +6,7 @@ import {
   foreignKeyAssociationCellsForSource,
   foreignKeyAssociationForRef,
   foreignKeyCellNavigable,
+  foreignKeyDrillRouting,
   foreignKeyMetadataRequestCurrent,
   foreignKeyNavigationTarget,
   foreignKeySourceColumnName,
@@ -358,5 +359,28 @@ describe("foreignKeyAssociationCellsForSource", () => {
   it("rechaza la navegación con valores compuestos nulos o sin sourceKey", () => {
     expect(foreignKeyAssociationCellsForSource({ association, refs, columnIndex: 0, row: [42, 999, null] })).toBeUndefined();
     expect(foreignKeyAssociationCellsForSource({ association, refs: [undefined, refs[1], refs[2]], columnIndex: 0, row: [42, 999, 7] })).toBeUndefined();
+  });
+});
+
+describe("foreignKeyDrillRouting (unsaved-edit safety)", () => {
+  it("drills in place on the owning data tab when the grid is clean", () => {
+    expect(foreignKeyDrillRouting({ context: "table-data", owningTabId: "t1", hasPendingChanges: false })).toBe("data-tab-in-place");
+  });
+
+  it("drills in place on the owning query tab when the grid is clean", () => {
+    expect(foreignKeyDrillRouting({ context: "results", owningTabId: "t1", hasPendingChanges: false })).toBe("query-tab-in-place");
+  });
+
+  it("falls back to a new tab whenever the grid has uncommitted changes (review #1)", () => {
+    // both in-place rewrites drop edits; the data-tab path already refused via
+    // canReuseActiveDataTab, the query-tab path had no gate at all
+    expect(foreignKeyDrillRouting({ context: "table-data", owningTabId: "t1", hasPendingChanges: true })).toBe("new-tab");
+    expect(foreignKeyDrillRouting({ context: "results", owningTabId: "t1", hasPendingChanges: true })).toBe("new-tab");
+  });
+
+  it("falls back to a new tab without an owning tab (embedded grids) or in other contexts", () => {
+    expect(foreignKeyDrillRouting({ context: "results", owningTabId: undefined, hasPendingChanges: false })).toBe("new-tab");
+    expect(foreignKeyDrillRouting({ context: "table-data", owningTabId: null, hasPendingChanges: false })).toBe("new-tab");
+    expect(foreignKeyDrillRouting({ context: "admin", owningTabId: "t1", hasPendingChanges: false })).toBe("new-tab");
   });
 });

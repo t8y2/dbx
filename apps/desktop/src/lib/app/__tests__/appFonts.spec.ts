@@ -1,8 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { cssFontFamilyForName, DEFAULT_MONO_FALLBACK_FONTS, DEFAULT_MONO_FONT_FAMILY, FONT_FAMILIES, LEGACY_PRESET_FONT_MAP, normalizeCustomFontFamilyInput, readableFontFamily } from "../appFonts";
+import { cssFontFamilyForName, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FALLBACK_FONTS, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, FONT_FAMILIES, LEGACY_PRESET_FONT_MAP, normalizeCustomFontFamilyInput, readableFontFamily } from "../appFonts";
 import { displayFontFamily, isPresetFontFamily } from "../fontFamilyOptions";
 
 describe("appFonts", () => {
+  it("keeps Cyrillic-capable system fonts ahead of CJK fallbacks in proportional font stacks", () => {
+    for (const stack of [DEFAULT_UI_FONT_FAMILY, DEFAULT_DATA_GRID_FONT_FAMILY]) {
+      const cjkFallbacks = ['"PingFang SC"', '"Hiragino Sans GB"', '"Microsoft YaHei"'];
+      const cjkIndexes = cjkFallbacks.map((family) => stack.indexOf(family));
+      for (const index of cjkIndexes) expect(index).toBeGreaterThan(-1);
+      const firstCjkFallback = Math.min(...cjkIndexes);
+      for (const family of ['"Segoe UI"', '"Helvetica Neue"', "Arial", '"Noto Sans"', "Roboto", '"Liberation Sans"', '"DejaVu Sans"']) {
+        const familyIndex = stack.indexOf(family);
+        expect(familyIndex, `${family} must be present in ${stack}`).toBeGreaterThan(-1);
+        expect(familyIndex, `${family} must precede the CJK fallbacks`).toBeLessThan(firstCjkFallback);
+      }
+    }
+  });
+
   it("includes CJK fallbacks in DEFAULT_MONO_FALLBACK_FONTS", () => {
     expect(DEFAULT_MONO_FALLBACK_FONTS).toContain("PingFang SC");
     expect(DEFAULT_MONO_FALLBACK_FONTS).toContain("Hiragino Sans GB");

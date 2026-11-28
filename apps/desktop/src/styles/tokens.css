@@ -38,7 +38,7 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-sans: "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --font-sans: "Geist Variable", "Segoe UI", "Helvetica Neue", Arial, "Noto Sans", Roboto, "Liberation Sans", "DejaVu Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
   --font-heading: var(--font-sans);
   /* Baseline mono token; App.vue overrides it inline with the editor font
      setting, and plugin sandboxes receive the resolved value via the bridge. */

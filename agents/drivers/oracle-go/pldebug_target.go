@@ -46,8 +46,15 @@ func (a plDebugNativeArgument) interval() bool {
 func (a plDebugNativeArgument) scalar() bool {
 	return a.Level == 0 && a.TypeOwner == nil && a.TypeName == nil && a.TypeSubname == nil
 }
+func (a plDebugNativeArgument) cursorOutput() bool {
+	if a.Type != "REF CURSOR" || a.Level != 0 || a.Position <= 0 || a.Mode != "OUT" {
+		return false
+	}
+	return a.scalar() || a.TypeOwner != nil && *a.TypeOwner == "SYS" && a.TypeName != nil && *a.TypeName == "STANDARD" && a.TypeSubname != nil && *a.TypeSubname == "SYS_REFCURSOR"
+}
+
 func (a plDebugNativeArgument) adapted() bool {
-	return a.scalar() && (a.Type == "NUMBER" || a.Type == "VARCHAR2")
+	return a.cursorOutput() || a.scalar() && (a.Type == "NUMBER" || a.Type == "VARCHAR2")
 }
 
 func (a plDebugNativeArgument) decimalCarrier() bool {

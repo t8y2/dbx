@@ -245,10 +245,11 @@ import type { DuplicateTableStructurePlan } from "@/lib/database/dbAdminSql";
 import { useOceanbaseCloneDialog } from "@/composables/useOceanbaseCloneDialog";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { redisFlushDbPreview } from "@/lib/redis/redisCommandPreview";
-import { buildRenameObjectSql, buildRenameDatabaseSql, buildRenameDatabasePreflightSql, databaseRenameMaintenanceDatabase, supportsDatabaseRename, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
+import { buildRenameObjectSql, buildRenameDatabaseSql, buildRenameDatabasePreflightSql, databaseRenameMaintenanceDatabase, isMysqlDatabaseRename, supportsDatabaseRename, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
 import { prepareOracleViewRename, executeOracleViewRename, OracleViewRenameFailure, type OracleViewRenamePlan } from "@/lib/table/oracleViewRename";
 import { prepareOracleRoutineRename, executeOracleRoutineRename, OracleRoutineRenameFailure, type OracleRoutineRenamePlan } from "@/lib/table/oracleRoutineRename";
 import { prepareOracleTableRename, executeOracleTableRename, OracleTableRenameFailure, type OracleTableRenamePlan } from "@/lib/table/oracleTableRename";
+import { executeMysqlDatabaseRename, formatMysqlDatabaseRenameBlockers, loadMysqlDatabaseInventory, MysqlDatabaseRenameBlockedError, MysqlDatabaseRenameIncompleteError, prepareMysqlDatabaseRename, type MysqlDatabaseInventory } from "@/lib/table/mysqlDatabaseRename";
 import { prepareOraclePackageSaveAsExecution, OraclePackageSaveAsFailure, prepareOraclePackageSaveAs, type OraclePackageSaveAsPlan } from "@/lib/table/oraclePackageSaveAs";
 import { buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
@@ -353,6 +354,7 @@ import {
   showRenameObjectDialog,
   renameObjectName,
   renameObjectError,
+  renameObjectWarning,
   renameObjectPreviewSql,
   dropTablePreviewSql,
   dropTableCascade,
@@ -4320,6 +4322,7 @@ function openRenameObjectDialog() {
   if (targetKey !== renameObjectDialogTargetKey) renameObjectName.value = node.objectName || node.label;
   renameObjectDialogTargetKey = targetKey;
   renameObjectError.value = "";
+  renameObjectWarning.value = "";
   renameObjectPreviewSql.value = "";
   viewRenamePlan.value = undefined;
   routineRenamePlan.value = undefined;
@@ -4353,11 +4356,45 @@ function openRenameDatabaseDialog() {
   renameObjectName.value = activeNode.value.label;
   renameObjectDialogTargetKey = "";
   renameObjectError.value = "";
+  renameObjectWarning.value = "";
   renameObjectPreviewSql.value = "";
   viewRenamePlan.value = undefined;
   viewRenameDrafts.value = {};
   routineRenamePlan.value = undefined;
+  mysqlDatabaseRenameInventory = undefined;
   showRenameObjectDialog.value = true;
+}
+
+function isMysqlDatabaseRenameNode(node: TreeNode): boolean {
+  const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
+  return node.type === "database" && !!config && isMysqlDatabaseRename(config.db_type, config.driver_profile);
+}
+
+function cachedMysqlDatabaseRenameInventory(connectionId: string, database: string): Promise<MysqlDatabaseInventory> {
+  const key = JSON.stringify([connectionId, database]);
+  if (mysqlDatabaseRenameInventory?.key !== key) {
+    const inventory = loadMysqlDatabaseInventory(connectionId, database);
+    mysqlDatabaseRenameInventory = { key, inventory };
+    inventory.catch(() => {
+      if (mysqlDatabaseRenameInventory?.inventory === inventory) mysqlDatabaseRenameInventory = undefined;
+    });
+  }
+  return mysqlDatabaseRenameInventory.inventory;
+}
+
+const MYSQL_RENAME_GRANTEE_PREVIEW_LIMIT = 5;
+
+function mysqlDatabaseRenameGrantWarning(database: string, grantees: readonly string[]): string {
+  if (grantees.length === 0) return "";
+  const shown = grantees.slice(0, MYSQL_RENAME_GRANTEE_PREVIEW_LIMIT).join(", ");
+  const hidden = grantees.length - MYSQL_RENAME_GRANTEE_PREVIEW_LIMIT;
+  return t("contextMenu.renameDatabaseMysqlGrantsNotMigrated", { name: database, grantees: hidden > 0 ? `${shown} (+${hidden})` : shown });
+}
+
+function mysqlDatabaseRenameErrorMessage(error: unknown): string {
+  if (error instanceof MysqlDatabaseRenameBlockedError) return t("contextMenu.renameDatabaseMysqlUnsupportedObjects", { name: error.database, objects: formatMysqlDatabaseRenameBlockers(error.blockers) });
+  if (error instanceof MysqlDatabaseRenameIncompleteError) return t("contextMenu.renameDatabaseMysqlIncomplete", { oldName: error.oldName, newName: error.newName, objects: formatMysqlDatabaseRenameBlockers(error.remaining) });
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function executeTreeNodeSqlWithProductionGuard(
@@ -4411,6 +4448,8 @@ const viewRenameDrafts = ref<Record<string, string>>({});
 const routineRenamePlan = ref<OracleRoutineRenamePlan>();
 const routineRenameDrafts = ref<Record<string, string>>({});
 const tableRenamePlan = ref<OracleTableRenamePlan>();
+// MySQL database rename: the source inventory does not depend on the new name, so it is loaded once per dialog.
+let mysqlDatabaseRenameInventory: { key: string; inventory: Promise<MysqlDatabaseInventory> } | undefined;
 const tableRenameDrafts = ref<Record<string, string>>({});
 const packageSaveAsOpen = ref(false);
 const packageSaveAsTarget = ref<TreeNode | null>(null);
@@ -4444,6 +4483,24 @@ async function refreshRenameObjectPreviewSql() {
     return;
   }
   // Database rename path
+  if (node.type === "database" && isMysqlDatabaseRenameNode(node) && node.connectionId) {
+    try {
+      const inventory = await cachedMysqlDatabaseRenameInventory(node.connectionId, node.label);
+      const plan = await prepareMysqlDatabaseRename({ connectionId: node.connectionId, oldName: node.label, newName }, inventory);
+      if (requestId === renameObjectPreviewRequestId) {
+        renameObjectError.value = "";
+        renameObjectWarning.value = mysqlDatabaseRenameGrantWarning(node.label, inventory.grantees);
+        renameObjectPreviewSql.value = plan.previewSql;
+      }
+    } catch (error) {
+      if (requestId === renameObjectPreviewRequestId) {
+        renameObjectPreviewSql.value = "";
+        renameObjectWarning.value = "";
+        renameObjectError.value = mysqlDatabaseRenameErrorMessage(error);
+      }
+    }
+    return;
+  }
   if (node.type === "database") {
     try {
       const sql = await buildRenameDatabaseSql({
@@ -4793,6 +4850,19 @@ async function renamePostgresSchema(node: TreeNode, newName: string) {
   }
 }
 
+function applyDatabaseRenameToTree(node: TreeNode, newName: string) {
+  toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
+  showRenameObjectDialog.value = false;
+  const previousDatabaseNode = { ...node };
+  const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
+  liveNode.label = newName;
+  liveNode.database = newName;
+  connectionStore.updateDatabaseVGroupMember(previousDatabaseNode, newName);
+  const renamedNode: TreeNode = { ...liveNode, label: newName, database: newName };
+  connectionStore.replacePinnedTreeNode(liveNode, renamedNode);
+  void connectionStore.refreshTreeNode(liveNode);
+}
+
 async function confirmRenameObject() {
   const node = sidebarFormTarget.value ?? activeNode.value;
   let newName = renameObjectName.value.trim();
@@ -4814,6 +4884,32 @@ async function confirmRenameObject() {
     await connectionStore.ensureConnected(node.connectionId);
 
     // Database rename path
+    if (node.type === "database" && isMysqlDatabaseRenameNode(node)) {
+      const connectionId = node.connectionId;
+      let moveStarted = false;
+      try {
+        // Re-inventory at execution time: the dialog preview may be stale.
+        const plan = await prepareMysqlDatabaseRename({ connectionId, oldName: node.label, newName });
+        renameObjectPreviewSql.value = plan.previewSql;
+        const executed = await executeTreeNodeSqlWithProductionGuard(node, plan.previewSql, {
+          database: "",
+          beforeExecute: () => connectionStore.closeDatabaseConnection(connectionId, node.label),
+          execute: async () => {
+            moveStarted = true;
+            await executeMysqlDatabaseRename(plan);
+            return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+          },
+        });
+        if (executed === undefined) return;
+      } catch (error) {
+        // The server state may have changed (e.g. tables moved but the source kept); resync the database list.
+        if (moveStarted) void connectionStore.loadDatabases(connectionId, { force: true }).catch(() => undefined);
+        throw new Error(mysqlDatabaseRenameErrorMessage(error));
+      }
+      renameApplied = true;
+      applyDatabaseRenameToTree(node, newName);
+      return;
+    }
     if (node.type === "database") {
       const maintenanceDatabase = databaseRenameMaintenanceDatabase(connectionStore.getConfig(node.connectionId)?.database, node.label);
       // Preflight: check permissions, prepared transactions, and active connections
@@ -4855,16 +4951,7 @@ async function confirmRenameObject() {
       });
       if (executed === undefined) return;
       renameApplied = true;
-      toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
-      showRenameObjectDialog.value = false;
-      const previousDatabaseNode = { ...node };
-      const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
-      liveNode.label = newName;
-      liveNode.database = newName;
-      connectionStore.updateDatabaseVGroupMember(previousDatabaseNode, newName);
-      const renamedNode: TreeNode = { ...liveNode, label: newName, database: newName };
-      connectionStore.replacePinnedTreeNode(liveNode, renamedNode);
-      void connectionStore.refreshTreeNode(liveNode);
+      applyDatabaseRenameToTree(node, newName);
       return;
     }
 
@@ -5555,7 +5642,7 @@ const canRenameDatabase = computed(() => {
   const node = activeNode.value;
   if (node.type !== "database" || !node.database) return false;
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
-  return !!config && !connectionIsEffectivelyReadOnly(config) && supportsDatabaseRename(config.db_type);
+  return !!config && !connectionIsEffectivelyReadOnly(config) && supportsDatabaseRename(config.db_type, config.driver_profile);
 });
 
 const renameObjectDialogTitle = computed(() => {
@@ -7448,6 +7535,7 @@ function objectDialogCapabilities() {
     renameObjectDialogTitle,
     renameObjectPreviewSql,
     renameObjectError,
+    renameObjectWarning,
     viewRenamePlan,
     viewRenameDrafts,
     routineRenamePlan,

@@ -2,6 +2,7 @@ import type { EditorView as EditorViewType } from "@codemirror/view";
 import { getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
 import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
 import { findCteColumnResolution, findCteReferenceAt } from "@/lib/sql/semantic/cteNavigation";
+import { resolveOraclePackageMemberNavigation } from "@/lib/sql/oraclePackageMemberNavigation";
 import { MAX_ALIAS_HIGHLIGHT_SQL_LENGTH, sqlAliasHighlightGroups } from "@/lib/sql/semantic/aliasHighlights";
 import { resolveSqlStatementWindow } from "@/lib/sql/sqlStatementWindow";
 import { extractIdentifierDetailsAt, isSqlKeyword, matchSqlObject, matchTable, resolveSqlObjectNavigationIdentity, sqlObjectNavigationTarget, sqlObjectNavigationTargetFromIdentity, sqlObjectNavigationTypeFromCompletionObjectType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
@@ -216,6 +217,22 @@ export function useQueryEditorObjectNavigation(options: QueryEditorObjectNavigat
             }
           } catch (error) {
             console.warn("[DBX] CTE ctrl+click resolution failed:", error);
+          }
+        }
+
+        // 0b. Oracle 包源码：包里的名字先问这个包自己。包头的 `PROCEDURE X(...);` 是声明、
+        //     包体的 `PROCEDURE X(...) IS` 是实现，都不是一个叫 X 的独立过程；拿裸名去查
+        //     数据字典只会落空，然后乐观地开出一个空的 `PROCEDURE X` 源码 tab。
+        if (props.packageSource) {
+          const packageNavigation = resolveOraclePackageMemberNavigation({ source: doc, position: pos, identity, context: props.packageSource });
+          if (packageNavigation?.kind === "document") {
+            const { nameStart, nameEnd, offset } = packageNavigation.entry;
+            if (view.value === currentView && currentView.state.doc === clickedDocument) jumpToSqlRange({ from: nameStart, to: nameEnd }, { from: offset, to: nameEnd });
+            return;
+          }
+          if (packageNavigation?.kind === "packageBody") {
+            emit("openObjectSource", packageNavigation.target, false);
+            return;
           }
         }
 

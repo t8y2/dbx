@@ -39,12 +39,40 @@ export function buildRenameObjectSql(options: BuildRenameObjectSqlOptions): Prom
   return api.buildRenameObjectSql(options);
 }
 
-// ── Database rename (PostgreSQL family) ──
+// ── Database rename ──
 
+// PostgreSQL family: native `ALTER DATABASE ... RENAME TO`.
 const DATABASE_RENAME_TYPES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"]);
 
-export function supportsDatabaseRename(databaseType?: DatabaseType): boolean {
+// MySQL/MariaDB: create the target database and move its tables with `RENAME TABLE` (see
+// `mysqlDatabaseRename.ts`). Other engines behind `db_type=mysql` (TiDB, OceanBase, Doris, ...) do
+// not share the verified cross-database `RENAME TABLE` semantics, so they stay excluded.
+const MYSQL_DATABASE_RENAME_PROFILES = new Set(["", "mysql", "mariadb"]);
+
+export function supportsDatabaseRename(databaseType?: DatabaseType, driverProfile?: string | null): boolean {
+  if (databaseType === "mysql") return isMysqlDatabaseRename(databaseType, driverProfile);
   return !!databaseType && DATABASE_RENAME_TYPES.has(databaseType);
+}
+
+export function isMysqlDatabaseRename(databaseType?: DatabaseType, driverProfile?: string | null): boolean {
+  return databaseType === "mysql" && MYSQL_DATABASE_RENAME_PROFILES.has((driverProfile ?? "").trim().toLowerCase());
+}
+
+/** Mirrors `MysqlRenameDatabaseSqlOptions` in `db_admin_sql.rs`. */
+export interface MysqlRenameDatabaseSqlOptions {
+  oldName: string;
+  newName: string;
+  tableNames: string[];
+  charset?: string;
+  collation?: string;
+}
+
+/** Mirrors `MysqlRenameDatabaseStatements` in `db_admin_sql.rs`. */
+export interface MysqlRenameDatabaseStatements {
+  createDatabase: string;
+  moveTables?: string | null;
+  dropOldDatabase: string;
+  dropNewDatabase: string;
 }
 
 export function databaseRenameMaintenanceDatabase(configuredDatabase: string | undefined, targetDatabase: string): string {

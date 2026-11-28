@@ -56,6 +56,8 @@ export const batchMysqlAutoIncrementPreviewSql = ref("");
 export const showRenameObjectDialog = ref(false);
 export const renameObjectName = ref("");
 export const renameObjectError = ref("");
+/** Non-blocking caveat shown above the rename preview (e.g. MySQL grants that will not follow the rename). */
+export const renameObjectWarning = ref("");
 export const renameObjectPreviewSql = ref("");
 export const dropTablePreviewSql = ref("");
 export const dropTableCascade = ref(false);

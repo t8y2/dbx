@@ -25,6 +25,7 @@ import {
   transitionRightSidebarPanels,
   WELCOME_PAGE_DEFAULT_VERSION,
   COMPACT_TAB_TITLE_DEFAULT_VERSION,
+  COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION,
 } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION, DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
@@ -2008,6 +2009,46 @@ describe("settingsStore persisted settings initialization", () => {
     expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ compactTabTitle: false, compactTabTitleDefaultVersion: COMPACT_TAB_TITLE_DEFAULT_VERSION }));
   });
 
+  it("migrates the legacy 500ms completion delay to the 50ms default but keeps deliberate values", () => {
+    const stamp = { completionAutoActivationDelayDefaultVersion: COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION };
+    expect(DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs).toBe(50);
+    // Fresh blobs take the new default and the marker.
+    expect(normalizeEditorSettings({})).toMatchObject({ completionAutoActivationDelayMs: 50, ...stamp });
+    // An unstamped 500 is the old default rather than a choice.
+    expect(normalizeEditorSettings({ completionAutoActivationDelayMs: 500 })).toMatchObject({ completionAutoActivationDelayMs: 50, ...stamp });
+    // Any other unstamped value was set on purpose, including 0 and values near 500.
+    for (const value of [0, 100, 499, 501, 2000]) {
+      expect(normalizeEditorSettings({ completionAutoActivationDelayMs: value })).toMatchObject({ completionAutoActivationDelayMs: value, ...stamp });
+    }
+    // A stamped 500 is an explicit choice and survives.
+    expect(normalizeEditorSettings({ completionAutoActivationDelayMs: 500, ...stamp }).completionAutoActivationDelayMs).toBe(500);
+  });
+
+  it("persists the migrated completion delay and keeps a later explicit 500", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValueOnce({
+      completionAutoActivationDelayMs: 500,
+      executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+      sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
+      dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
+    });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    expect(store.editorSettings.completionAutoActivationDelayMs).toBe(50);
+    await vi.waitFor(() => expect(saveEditorSettings).toHaveBeenCalledOnce());
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ completionAutoActivationDelayMs: 50, completionAutoActivationDelayDefaultVersion: COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION }));
+
+    // Choosing 500 again must stick now that the marker is stamped.
+    store.updateEditorSettings({ completionAutoActivationDelayMs: 500 });
+    expect(store.editorSettings.completionAutoActivationDelayMs).toBe(500);
+    await vi.waitFor(() => expect(saveEditorSettings).toHaveBeenCalledTimes(2));
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ completionAutoActivationDelayMs: 500, completionAutoActivationDelayDefaultVersion: COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION }));
+  });
+
   it("does not re-migrate an already stamped compact tab title", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValueOnce({
       compactTabTitle: false,
@@ -2481,6 +2522,7 @@ describe("settingsStore editor settings persistence", () => {
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
       compactTabTitleDefaultVersion: COMPACT_TAB_TITLE_DEFAULT_VERSION,
+      completionAutoActivationDelayDefaultVersion: COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION,
     });
     const saveEditorSettings = vi.fn().mockRejectedValueOnce(new Error("save failed")).mockResolvedValueOnce(undefined);
     vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
@@ -2531,6 +2573,7 @@ describe("settingsStore editor settings persistence", () => {
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
       compactTabTitleDefaultVersion: COMPACT_TAB_TITLE_DEFAULT_VERSION,
+      completionAutoActivationDelayDefaultVersion: COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION,
     });
     const saveEditorSettings = vi.fn().mockImplementationOnce(
       () =>
@@ -2570,6 +2613,7 @@ describe("settingsStore editor settings persistence", () => {
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
       compactTabTitleDefaultVersion: COMPACT_TAB_TITLE_DEFAULT_VERSION,
+      completionAutoActivationDelayDefaultVersion: COMPLETION_AUTO_ACTIVATION_DELAY_DEFAULT_VERSION,
     });
     const saveEditorSettings = vi.fn().mockImplementationOnce(
       () =>

@@ -5743,7 +5743,7 @@ onUnmounted(() => {
 
 <template>
   <LoginPage v-if="setupRequired || (needsAuth && !authenticated)" :setup-mode="setupRequired" @authenticated="onLoginSuccess" />
-  <div v-show="!setupRequired && (!needsAuth || authenticated)" class="dbx-app-root fixed inset-0 h-screen w-screen overflow-hidden">
+  <div v-show="!setupRequired && (!needsAuth || authenticated)" class="dbx-app-root absolute isolate inset-0 h-screen w-screen overflow-hidden">
     <div v-if="appBackgroundActive && appBackgroundObjectUrl" data-app-background class="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
       <div class="h-full w-full" :style="appBackgroundImageStyle"></div>
     </div>

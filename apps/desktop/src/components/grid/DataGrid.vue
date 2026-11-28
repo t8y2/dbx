@@ -99,6 +99,7 @@ import { formatDataGridColumnMetadataForCopy } from "@/lib/dataGrid/dataGridColu
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import DataGridFilterModeOrderDialog from "@/components/grid/DataGridFilterModeOrderDialog.vue";
+import DataGridFilterGroupControls from "@/components/grid/DataGridFilterGroupControls.vue";
 import DataGridFilterWorkbench from "@/components/grid/DataGridFilterWorkbench.vue";
 import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWorkbench.vue";
 import DataGridSortWorkbench from "@/components/grid/DataGridSortWorkbench.vue";
@@ -149,6 +150,7 @@ import {
   isSalesforceExistingRowReadonlyColumn,
   isSalesforceNewRowReadonlyColumn,
   isTdengineExistingRowReadonlyColumn,
+  isTdengineStableTableType,
   shouldIncludeSyntheticRowId,
   showsKeylessEditWarning,
   postgresTupleLocatorUnsupportedEngine,
@@ -427,7 +429,16 @@ import type { PluginDecodeRequest } from "@/lib/dataGrid/sqlPluginCodec";
 import { createDataGridFilterConditionCache, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import { DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT, useDataGridDistinctValueLoader } from "@/composables/useDataGridDistinctValueLoader";
 import { dataGridDistinctValueKey, dataGridNullSuggestionFilterMode, toggleAllDataGridDistinctValueOptions, type DataGridDistinctValueSource, type DataGridDistinctValueSuggestionState, type DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
-import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, removeDataGridStructuredFilterColumnsForTab, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
+import {
+  cloneDataGridStructuredFilterRules,
+  loadDataGridStructuredFilterState,
+  removeDataGridAppliedFilterColumns,
+  removeDataGridStructuredFilterColumnsForTab,
+  saveDataGridStructuredFilterState,
+  type DataGridCachedServerColumnFilter,
+  type DataGridStructuredFilterCacheState,
+} from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { createDataGridSearchScopeKey } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
@@ -1558,11 +1569,30 @@ function invalidateConditionalBulkEditMatchCountPreview() {
 watch([conditionalBulkEditConditionSource, conditionalBulkEditCurrentWhereInput, conditionalBulkEditWhereInput, conditionalBulkEditRules], invalidateConditionalBulkEditMatchCountPreview, { deep: true });
 
 const structuredFilterRules = filterBuilder.rules;
+// Group drafts belong to this filter scope. The applied SQL stays independent
+// so inspecting or editing another group does not silently change the result.
+const activeFilterGroupNumber = ref(1);
+const inactiveFilterGroupRules = shallowRef(new Map<number, StructuredFilterRule[]>());
+const filterGroupNumbers = computed(() => [activeFilterGroupNumber.value, ...inactiveFilterGroupRules.value.keys()].sort((a, b) => a - b));
+const allFilterRulesDisabled = computed(() => structuredFilterRules.value.every((rule) => rule.disabled));
+const filterGroupControlBindings = computed(() => ({
+  groupNumbers: filterGroupNumbers.value,
+  activeGroup: activeFilterGroupNumber.value,
+  hasRules: structuredFilterRules.value.some((rule) => !!rule.columnName),
+  allDisabled: allFilterRulesDisabled.value,
+  disabled: applyingOnlyStructuredFilter.value || isApplyingWhere.value,
+  onAddGroup: addStructuredFilterGroup,
+  onSelectGroup: selectStructuredFilterGroup,
+  onDeleteGroup: deleteStructuredFilterGroup,
+  onToggleAll: toggleAllStructuredFilterRules,
+}));
 const filterBuilderOpen = filterBuilder.open;
 const filterWorkbenchRef = ref<{ focusRuleValue: (ruleId: string) => void }>();
 const filterBuilderColumnSearch = filterBuilder.columnSearch;
 const filteredFilterBuilderColumnOptions = filterBuilder.filteredColumns;
-const appliedStructuredWhereInput = filterBuilder.appliedWhereInput;
+// Keep the applied WHERE independent from edits to the active draft.
+const appliedStructuredWhereInput = ref("");
+const appliedStructuredRules = shallowRef<StructuredFilterRule[]>();
 const filterValueSuggestionRuleId = ref<string>();
 const filterValueSuggestionTarget = ref<DataGridDistinctValueSuggestionTarget>();
 const filterValueSuggestionSearch = ref("");
@@ -1641,11 +1671,6 @@ const filterValueSuggestionState = computed<DataGridDistinctValueSuggestionState
     canUseServerFilter: canUseServerColumnFilter.value,
   };
 });
-// Structured filter rules are restored asynchronously. A tab-switch snapshot's
-// probe includes the applied condition, so restoring before this hydration
-// settles would reject an otherwise valid snapshot and never retry it.
-const structuredFilterHydrationReady = ref(true);
-let structuredFilterHydrationRequestId = 0;
 const draftStructuredWhereInput = ref("");
 const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFilterEditorView);
 const dataGridOrderByVisible = computed(() => settingsStore.editorSettings.dataGridOrderByVisible);
@@ -2028,7 +2053,12 @@ function persistStructuredFilterState() {
   saveDataGridStructuredFilterState(structuredFilterCacheKey.value, {
     scopeKey: structuredFilterScopeKey.value,
     manualWhereInput: whereFilterInput.value,
-    rules: cloneDataGridStructuredFilterRules(structuredFilterRules.value),
+    rules: structuredFilterRules.value,
+    groups: {
+      active: activeFilterGroupNumber.value,
+      inactive: [...inactiveFilterGroupRules.value].map(([number, rules]) => ({ number, rules })),
+    },
+    appliedRules: appliedStructuredWhereInput.value ? appliedStructuredRules.value : undefined,
     appliedWhereInput: appliedStructuredWhereInput.value,
     // Vue wraps ref-held objects in proxies; structuredClone cannot clone those proxies.
     serverColumnFilters: structuredClone(toRaw(serverColumnFilters.value)),
@@ -2036,35 +2066,26 @@ function persistStructuredFilterState() {
 }
 
 function loadStructuredFilterStateForScope() {
-  const requestId = ++structuredFilterHydrationRequestId;
-  structuredFilterHydrationReady.value = false;
   const cached = cachedStructuredFilterState();
+  activeFilterGroupNumber.value = cached?.groups?.active ?? 1;
+  inactiveFilterGroupRules.value = new Map(cached?.groups?.inactive.map(({ number, rules }) => [number, rules]));
+  appliedStructuredRules.value = cached?.appliedRules;
   if (cached) {
     const cacheKey = structuredFilterCacheKey.value;
     const scopeKey = structuredFilterScopeKey.value;
-    structuredFilterRules.value = cloneDataGridStructuredFilterRules(cached.rules);
+    structuredFilterRules.value = cached.rules;
+    // The active group contains drafts. Restore the last applied SQL directly.
     appliedStructuredWhereInput.value = cached.appliedWhereInput;
     serverColumnFilters.value = structuredClone(cached.serverColumnFilters ?? {});
     // Restore the applied SQL before the manual input so the whereInput watcher
     // emits the combined condition instead of a brief empty WHERE (#8831).
     whereFilterInput.value = cached.manualWhereInput;
-    void buildStructuredWhereFromRules(structuredFilterRules.value)
-      .then((whereInput) => {
-        if (requestId !== structuredFilterHydrationRequestId || structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
-        appliedStructuredWhereInput.value = whereInput;
-        nextTick(() => {
-          emit("update:whereInput", currentWhereInput() ?? "");
-          markConditionInputsApplied();
-        });
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (requestId !== structuredFilterHydrationRequestId || structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
-        structuredFilterHydrationReady.value = true;
-        // The initial mounted restore may have run while the applied condition
-        // was empty; retry exactly after the async condition is settled.
-        nextTick(restoreTabSwitchViewSnapshot);
-      });
+    nextTick(() => {
+      if (structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
+      emit("update:whereInput", currentWhereInput() ?? "");
+      markConditionInputsApplied();
+      restoreTabSwitchViewSnapshot();
+    });
     return;
   }
   appliedStructuredWhereInput.value = "";
@@ -2072,7 +2093,37 @@ function loadStructuredFilterStateForScope() {
   whereFilterInput.value = props.initialWhereInput ?? "";
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
   markConditionInputsApplied();
-  structuredFilterHydrationReady.value = true;
+}
+
+function switchStructuredFilterGroup(number: number, rules: StructuredFilterRule[], discardActive = false) {
+  closeFilterValueSuggestions();
+  const groups = new Map(inactiveFilterGroupRules.value);
+  if (!discardActive) groups.set(activeFilterGroupNumber.value, cloneDataGridStructuredFilterRules(structuredFilterRules.value));
+  groups.delete(number);
+  inactiveFilterGroupRules.value = groups;
+  activeFilterGroupNumber.value = number;
+  structuredFilterRules.value = cloneDataGridStructuredFilterRules(rules);
+  ensureStructuredFilterRule();
+}
+
+function addStructuredFilterGroup() {
+  switchStructuredFilterGroup(Math.max(...filterGroupNumbers.value) + 1, []);
+}
+
+function selectStructuredFilterGroup(number: number) {
+  const rules = inactiveFilterGroupRules.value.get(number);
+  if (rules) switchStructuredFilterGroup(number, rules);
+}
+
+function deleteStructuredFilterGroup() {
+  const next = inactiveFilterGroupRules.value.entries().next();
+  if (!next.done) switchStructuredFilterGroup(next.value[0], next.value[1], true);
+}
+
+function toggleAllStructuredFilterRules() {
+  closeFilterValueSuggestions();
+  const disabled = !allFilterRulesDisabled.value;
+  structuredFilterRules.value = structuredFilterRules.value.map((rule) => ({ ...rule, disabled }));
 }
 
 function ensureStructuredFilterRule() {
@@ -2106,8 +2157,19 @@ function resetStructuredFilters() {
   filterBuilder.reset();
 }
 
+// Structured WHERE building is async; every apply/clear entry point takes a
+// ticket so an older build resolving late cannot overwrite a newer outcome.
+let structuredFilterApplySeq = 0;
+function beginStructuredFilterApply(): () => boolean {
+  const seq = ++structuredFilterApplySeq;
+  return () => seq === structuredFilterApplySeq;
+}
+
 async function clearAllFilters() {
+  beginStructuredFilterApply();
   whereFilterInput.value = "";
+  appliedStructuredWhereInput.value = "";
+  appliedStructuredRules.value = undefined;
   resetStructuredFilters();
   clearLocalFilter(undefined, false);
   if (canUseWhereSearch.value) await applyWhereFilter();
@@ -2148,7 +2210,8 @@ function buildGroupedWhere(conditions: string[], rules: StructuredFilterRule[]):
   return result;
 }
 
-async function applyStructuredWhere(where: string) {
+async function applyStructuredWhere(where: string, rules: StructuredFilterRule[]) {
+  appliedStructuredRules.value = where ? rules : undefined;
   appliedStructuredWhereInput.value = where;
   if (filterEditorView.value === "quick") filterBuilderOpen.value = false;
   await applyWhereFilter();
@@ -2156,7 +2219,13 @@ async function applyStructuredWhere(where: string) {
 
 async function applyStructuredFilters() {
   if (!canUseWhereSearch.value) return;
-  await applyStructuredWhere(await buildStructuredWhereFromRules(structuredFilterRules.value));
+  const scopeKey = structuredFilterScopeKey.value;
+  const cacheKey = structuredFilterCacheKey.value;
+  const isLatestApply = beginStructuredFilterApply();
+  const rules = cloneDataGridStructuredFilterRules(structuredFilterRules.value);
+  const where = await buildStructuredWhereFromRules(rules);
+  if (!isLatestApply() || structuredFilterScopeKey.value !== scopeKey || structuredFilterCacheKey.value !== cacheKey) return;
+  await applyStructuredWhere(where, rules);
 }
 
 const applyingOnlyStructuredFilter = ref(false);
@@ -2172,16 +2241,18 @@ async function applyOnlyStructuredFilter(ruleId: string) {
   const scopeKey = structuredFilterScopeKey.value;
   const cacheKey = structuredFilterCacheKey.value;
   const rulesSnapshot = JSON.stringify(structuredFilterRules.value);
+  const isLatestApply = beginStructuredFilterApply();
   try {
     // Build before changing enabled states so an invalid condition cannot clear the filter.
-    const where = await buildStructuredWhereFromRules([{ ...rule, disabled: false }]);
-    if (scopeKey !== structuredFilterScopeKey.value || cacheKey !== structuredFilterCacheKey.value || rulesSnapshot !== JSON.stringify(structuredFilterRules.value)) return;
+    const rules = [{ ...rule, disabled: false }];
+    const where = await buildStructuredWhereFromRules(rules);
+    if (!isLatestApply() || scopeKey !== structuredFilterScopeKey.value || cacheKey !== structuredFilterCacheKey.value || rulesSnapshot !== JSON.stringify(structuredFilterRules.value)) return;
     if (!where) {
       toast(t("grid.filterBuilderCompleteRuleFirst"));
       return;
     }
     filterBuilder.enableOnlyRule(ruleId);
-    await applyStructuredWhere(where);
+    await applyStructuredWhere(where, rules);
   } catch (error: unknown) {
     toast(error instanceof Error ? error.message : String(error));
   } finally {
@@ -2236,7 +2307,7 @@ watch(
 );
 
 watch(
-  [structuredFilterRules, appliedStructuredWhereInput, serverColumnFilters],
+  [structuredFilterRules, activeFilterGroupNumber, inactiveFilterGroupRules, appliedStructuredRules, appliedStructuredWhereInput, serverColumnFilters],
   () => {
     const columns = filterBuilderColumnOptions.value;
     if (columns.length > 0 && structuredFilterRules.value.some((rule) => rule.columnName && !columns.includes(rule.columnName))) {
@@ -2651,6 +2722,8 @@ const {
   invertColumnVisibility,
   showColumn,
   persistColumnOrder,
+  previewColumnOrder,
+  hasTemporaryColumnOrder,
   resetColumnOrder: resetColumnOrderInLayout,
   toggleAllNullColumns,
   resetColumnVisibility,
@@ -3159,6 +3232,24 @@ function requestColumnOrderPersistence(indexes: number[]) {
   pendingColumnOrder.value = { scope: tableColumnOrderScopeKey.value, keys: [...columnOrderKeys.value], current: [...current], next: indexes };
 }
 
+function applyColumnHeaderOrder(indexes: number[]) {
+  if (props.context === "table-data" && !settingsStore.editorSettings.dataGridConfirmColumnHeaderReorder) {
+    applyColumnOrderChange(() => previewColumnOrder(indexes));
+    return;
+  }
+  requestColumnOrderPersistence(indexes);
+}
+
+const confirmColumnHeaderReorder = computed(() => (props.context === "table-data" ? settingsStore.editorSettings.dataGridConfirmColumnHeaderReorder : undefined));
+
+function setConfirmColumnHeaderReorder(value: boolean) {
+  settingsStore.updateEditorSettings({ dataGridConfirmColumnHeaderReorder: value });
+}
+
+function savePreviewColumnOrder() {
+  if (hasTemporaryColumnOrder.value) applyColumnOrderChange(() => persistColumnOrder(orderedDisplayableColumnIndexes.value));
+}
+
 function moveDisplayableColumn(fromDisplayableIndex: number, toDisplayableIndex: number) {
   const next = moveDisplayableColumnIndex({
     orderedIndexes: orderedDisplayableColumnIndexes.value,
@@ -3360,7 +3451,7 @@ const {
     if (headerRef.value) headerRef.value.scrollLeft = scroller.scrollLeft;
   },
   onRefreshMetrics: scheduleColumnLayoutRefresh,
-  onPersistColumnOrder: requestColumnOrderPersistence,
+  onPersistColumnOrder: applyColumnHeaderOrder,
   frozenColumnCount,
   columnReferenceDrag: columnHeaderReferenceDragController,
 });
@@ -6026,16 +6117,17 @@ async function forgetDroppedColumnQueryState(names: string[]): Promise<boolean> 
     whereFilterInput.value = "";
     cleared = true;
   }
-  const remainingRules = structuredFilterRules.value.filter((rule) => !rule.columnName || !dropped.has(dropColumnKey(rule.columnName)));
+  const keepRules = (rules: StructuredFilterRule[]) => rules.filter((rule) => !dropped.has(dropColumnKey(rule.columnName)));
+  const remainingRules = keepRules(structuredFilterRules.value);
   if (remainingRules.length !== structuredFilterRules.value.length) {
     structuredFilterRules.value = remainingRules.length > 0 ? remainingRules : [defaultStructuredFilterRule()];
-    try {
-      appliedStructuredWhereInput.value = await buildStructuredWhereFromRules(structuredFilterRules.value);
-    } catch {
-      appliedStructuredWhereInput.value = "";
-    }
-    cleared = true;
   }
+  inactiveFilterGroupRules.value = new Map([...inactiveFilterGroupRules.value].map(([number, rules]) => [number, keepRules(rules)]));
+  const previousAppliedWhere = appliedStructuredWhereInput.value;
+  const applied = await removeDataGridAppliedFilterColumns({ appliedWhereInput: previousAppliedWhere, appliedRules: appliedStructuredRules.value }, names, dropColumnCaseSensitive(), buildStructuredWhereFromRules, resolveSqlDialectId({ databaseType: resolvedDatabaseType.value }));
+  appliedStructuredWhereInput.value = applied.appliedWhereInput;
+  appliedStructuredRules.value = applied.appliedRules;
+  if (applied.appliedWhereInput !== previousAppliedWhere) cleared = true;
   if (sortCol.value && dropped.has(dropColumnKey(sortCol.value))) {
     clearSort();
     syncOrderByInputWithSort(null, null);
@@ -6079,6 +6171,7 @@ async function patchOpenDataTabsAfterColumnDrop(target: DropColumnTarget, names:
       names,
       dropColumnCaseSensitive(),
       buildStructuredWhereFromRules,
+      resolveSqlDialectId({ databaseType: resolvedDatabaseType.value }),
     );
     if (cached) tab.whereInput = combineWhereInputs(cached.manualWhereInput, cached.appliedWhereInput) ?? "";
     if (tab.result?.local_column_filters) {
@@ -6810,7 +6903,10 @@ const deleteRowDetails = computed(() => {
 const hasVisibleRows = computed(() => displayRowCount.value > 0);
 const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !replaceOpen.value && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value || hasServerColumnFilters.value);
 const emptyTitle = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRows") : t("grid.noRows")));
-const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription")));
+// A TDengine super table is never read without a condition (the SQL builder returns an empty
+// page), so an empty grid there means "add a condition", not "no data".
+const tdengineStableAwaitsCondition = computed(() => resolvedDatabaseType.value === "tdengine" && isTdengineStableTableType(props.tableMeta?.tableType) && !currentWhereInput()?.trim());
+const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : tdengineStableAwaitsCondition.value ? t("grid.tdengineStableNeedsCondition") : t("grid.noRowsDescription")));
 watch([hasVisibleRows, () => props.result.columns.length], scheduleScrollerMetricsRefresh, { flush: "post", immediate: true });
 const isErrorResult = computed(() => isQueryExecutionErrorResult(props.result) && props.result.rows.length > 0);
 const errorMessage = computed(() => (isErrorResult.value ? String(props.result.rows[0]?.[0] ?? "") : ""));
@@ -7357,7 +7453,6 @@ function captureTabSwitchViewSnapshot() {
  */
 function restoreTabSwitchViewSnapshot() {
   if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;
-  if (!structuredFilterHydrationReady.value) return;
   const ownerKey = viewSnapshotOwnerKey.value;
   if (!ownerKey || !props.viewGeneration) return;
   if (showTranspose.value) return;
@@ -8437,8 +8532,7 @@ function escapeCellDetails() {
     } else cancelDetailEdit();
     return true;
   }
-  if (cellDetailPanelPinned.value) return false;
-  closeCellDetails();
+  dismissCellDetailPanel();
   nextTick(() => gridRef.value?.focus({ preventScroll: true }));
   return true;
 }
@@ -15474,6 +15568,10 @@ defineExpose({
   invertColumnVisibility,
   hasCustomColumnOrder,
   moveDisplayableColumn,
+  hasTemporaryColumnOrder,
+  confirmColumnHeaderReorder,
+  setConfirmColumnHeaderReorder,
+  savePreviewColumnOrder,
   resetColumnOrder,
   autoFitAllColumns,
   resetColumnWidths,
@@ -16336,7 +16434,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
                   @apply-value-suggestions="applyFilterValueSuggestions"
                   @custom-mode-order="openFilterModeOrderDialog"
-                />
+                >
+                  <template #filter-group-controls><DataGridFilterGroupControls v-bind="filterGroupControlBindings" /></template>
+                </DataGridQueryControls>
                 <div class="flex shrink-0 items-center border-r px-1">
                   <Tooltip>
                     <TooltipTrigger as-child>
@@ -16495,7 +16595,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
           @apply-value-suggestions="applyFilterValueSuggestions"
           @custom-mode-order="openFilterModeOrderDialog"
-        />
+        >
+          <template #filter-group-controls><DataGridFilterGroupControls v-bind="filterGroupControlBindings" /></template>
+        </DataGridFilterWorkbench>
         <DataGridTextFilterWorkbench
           v-if="canUseWhereSearch && filterEditorView === 'text' && filterBuilderOpen"
           :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
@@ -16533,7 +16635,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
           @apply-value-suggestions="applyFilterValueSuggestions"
           @custom-mode-order="openFilterModeOrderDialog"
-        />
+        >
+          <template #filter-group-controls><DataGridFilterGroupControls v-bind="filterGroupControlBindings" /></template>
+        </DataGridTextFilterWorkbench>
         <DataGridSortWorkbench
           v-if="canUseWhereSearch && dataGridOrderByVisible && filterEditorView === 'conditions' && sortBuilderOpen"
           :sql-preview="sortSqlPreview"

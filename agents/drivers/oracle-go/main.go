@@ -6517,6 +6517,9 @@ func trimStatementSQL(sqlText string) string {
 	if isOraclePlSQLBlock(trimmed) {
 		return trimmed
 	}
+	if block, ok := rewriteSQLPlusExecute(trimmed); ok {
+		return block
+	}
 	return strings.TrimRight(trimmed, "; \t\r\n")
 }
 

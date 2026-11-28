@@ -105,6 +105,13 @@ pub struct MetadataListConstraints {
     pub offset: usize,
     #[serde(default)]
     pub object_types: Vec<String>,
+    /// 只返回根表（超级表和不属于任何超级表的普通表），不展开子表。
+    /// 侧栏按「根表 → 展开超级表再取子表」两级加载，避免一次读出所有子表。
+    #[serde(default)]
+    pub page_table_roots: bool,
+    /// 只返回该超级表的子表。
+    #[serde(default)]
+    pub parent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

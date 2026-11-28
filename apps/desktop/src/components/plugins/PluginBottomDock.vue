@@ -115,30 +115,18 @@ onScopeDispose(() => window.removeEventListener("dbx:plugins-changed", onPlugins
 
 async function loadPluginData() {
   try {
+    // Deliberately no ui warm here. A panel plugin's ui build is tens of MB
+    // (io.dbx.ssh ships a ~25 MB single-file html) and the read → decode →
+    // inline pipeline keeps several full-size copies alive while it runs, which
+    // WebKit does not hand back promptly. Warming every panel plugin at startup
+    // (and again on each dbx:plugins-changed) cost hundreds of MB of WebContent
+    // memory for users who never open those panels. The html is loaded when a
+    // panel mounts, or ahead of that by the "+" picker (warmActivePluginPanelHtml).
     plugins.value = await api.listPlugins();
-    schedulePanelUiWarm(plugins.value);
   } catch {
     // Keep the previous list: clearing it flips every panel's
     // `v-if="definitionFor(...)"` false and unmounts live terminal webviews.
   }
-}
-
-// Generic first-open warm (any plugin, any entry point): plugins that declare
-// an open-workbench command with presentation:"panel" get their multi-megabyte
-// ui html read/inlined at idle time, so the FIRST panel the user opens — from
-// the "+" picker, a command menu, or a toolbar placement — mounts on a warm
-// cache instead of paying the pipeline after the click. Idle-scheduled so it
-// never competes with startup traffic; the module LRU bounds memory and
-// getOrLoadPluginUiHtml coalesces with real opens racing the warm.
-function schedulePanelUiWarm(definitions: InstalledPlugin[]) {
-  const candidates = definitions.filter((plugin) => (plugin.manifest.contributions || []).some((contribution) => contribution.type === "command" && contribution.action.type === "open-workbench" && contribution.action.presentation === "panel"));
-  if (!candidates.length) return;
-  const idle: (callback: () => void) => void = typeof window.requestIdleCallback === "function" ? window.requestIdleCallback : (callback) => void window.setTimeout(callback, 2000);
-  idle(() => {
-    for (const plugin of candidates) {
-      void getOrLoadPluginUiHtml(`${plugin.manifest.id}:${plugin.manifest.version}`, plugin.manifest.id).catch(() => undefined);
-    }
-  });
 }
 
 function definitionFor(pluginId: string): InstalledPlugin | undefined {

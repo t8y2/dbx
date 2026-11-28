@@ -241,7 +241,7 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { OracleTriggerSqlInput, PreparedOracleTriggerSql } from "@/lib/database/oracleTriggerSql";
 import type { OracleTableReferenceRewriteInput, OracleViewRenameSource, OracleViewRenameSourceInput, OracleViewRenameSourceReview } from "@/types/database";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
-import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
+import type { BuildRenameObjectSqlOptions, MysqlRenameDatabaseSqlOptions, MysqlRenameDatabaseStatements } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
 import type {
   DatabaseNameSqlOptions,
@@ -2018,6 +2018,11 @@ export async function listTables(
   });
 }
 
+/** Child tables of one parent table (TDengine super table), paged on demand. */
+export async function listTableChildren(connectionId: string, database: string, schema: string, parentName: string, limit?: number, offset?: number): Promise<TableInfo[]> {
+  return invoke("list_table_children", { connectionId, database, schema, parentName, limit, offset });
+}
+
 export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<string | null> {
   return invoke("get_table_comment", {
     connectionId,
@@ -2638,6 +2643,10 @@ export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseT
     terminateConnections: options.terminateConnections,
     identifierQuote: options.identifierQuote,
   });
+}
+
+export async function buildMysqlRenameDatabaseSql(options: MysqlRenameDatabaseSqlOptions): Promise<MysqlRenameDatabaseStatements> {
+  return invoke("build_mysql_rename_database_sql", { options });
 }
 
 export async function buildRenameDatabasePreflightSql(options: { databaseType?: DatabaseType; databaseName: string }): Promise<string> {

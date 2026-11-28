@@ -155,6 +155,12 @@ export interface PlDebugResultReference {
   errorPath?: string;
 }
 
+export interface PlDebugCursorPreview {
+  columns: string[];
+  rows: (string | null)[][];
+  complete: boolean;
+}
+
 export interface PlDebugOutParam {
   name: string;
   /** `OUT` | `IN OUT` */
@@ -162,6 +168,8 @@ export interface PlDebugOutParam {
   type: string;
   value: string | null;
   resultRef?: PlDebugResultReference;
+  cursorPreview?: PlDebugCursorPreview;
+  error?: string;
   state?: string;
 }
 

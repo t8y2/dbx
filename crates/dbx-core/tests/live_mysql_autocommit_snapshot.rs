@@ -511,6 +511,114 @@ async fn live_mysql_cancel_cannot_commit_an_old_transaction_on_a_new_session() {
     cleanup(&state, &config, &table, storage_path).await;
 }
 
+#[tokio::test]
+#[ignore = "requires an isolated writable MySQL 8.0 database and access to performance_schema.data_lock_waits"]
+async fn live_mysql_cancelled_batch_does_not_dispatch_later_writes() {
+    use mysql_async::prelude::Queryable;
+    use std::time::Duration;
+
+    let config = live_config("DBX_LIVE_AUTOCOMMIT_MYSQL");
+    let database = config.database.clone().unwrap();
+    let (state, storage_path, table) = setup_probe(&config, "mysql-cancel-batch").await;
+    let tab = "mysql-cancel-batch";
+    let connection = run_in_tab(&state, &config, &database, tab, "SELECT CONNECTION_ID()").await;
+    let connection_id = session_number(&connection.rows[0][0]);
+
+    let mut locker = mysql_async::Conn::new(
+        mysql_async::OptsBuilder::default()
+            .ip_or_hostname(config.host.clone())
+            .tcp_port(config.port)
+            .user(Some(config.username.clone()))
+            .pass(Some(config.password.clone()))
+            .db_name(Some(database.clone()))
+            .prefer_socket(false),
+    )
+    .await
+    .unwrap();
+    locker.query_drop(format!("INSERT INTO {table} VALUES (2, 0)")).await.unwrap();
+    locker.query_drop("START TRANSACTION").await.unwrap();
+    locker.query_drop(format!("SELECT v FROM {table} WHERE id = 2 FOR UPDATE")).await.unwrap();
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let batch_sql = format!(
+        "UPDATE {table} SET v = 1 WHERE id = 1; UPDATE {table} SET v = 2 WHERE id = 2; INSERT INTO {table} VALUES (3, 3)"
+    );
+    let mut execution = tokio::spawn({
+        let state = state.clone();
+        let config = config.clone();
+        let database = database.clone();
+        let cancel = cancel.clone();
+        async move { try_run_batch_in_tab(&state, &config, &database, tab, &batch_sql, false, Some(cancel)).await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: Option<u64> = locker
+                .exec_first(
+                    "SELECT COUNT(*) FROM performance_schema.data_lock_waits w JOIN performance_schema.threads t ON t.THREAD_ID = w.REQUESTING_THREAD_ID WHERE t.PROCESSLIST_ID = ?",
+                    (connection_id,),
+                )
+                .await
+                .unwrap();
+            if waiting == Some(1) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the second statement is waiting on the independently held row lock");
+
+    cancel.cancel();
+    let while_locked = tokio::time::timeout(Duration::from_secs(3), &mut execution).await;
+    locker.query_drop("ROLLBACK").await.unwrap();
+    let returned_while_locked = while_locked.is_ok();
+    let result = match while_locked {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(10), execution)
+            .await
+            .expect("batch returns after releasing the lock"),
+    }
+    .expect("batch task returned");
+    let rows: Vec<(u64, u64)> = locker.query(format!("SELECT id, v FROM {table} ORDER BY id")).await.unwrap();
+    let next = run_in_tab(&state, &config, &database, tab, "SELECT CONNECTION_ID()").await;
+    let next_connection_id = session_number(&next.rows[0][0]);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let sessions: Option<u64> = locker
+                .exec_first(
+                    "SELECT COUNT(*) FROM performance_schema.threads WHERE PROCESSLIST_ID = ?",
+                    (connection_id,),
+                )
+                .await
+                .unwrap();
+            if sessions == Some(0) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the interrupted physical connection has closed on the server");
+    locker.disconnect().await.expect("close the independent observer before dropping the probe table");
+    cleanup(&state, &config, &table, storage_path).await;
+
+    println!(
+        "cancel returned with lock held: {returned_while_locked}; committed rows: {rows:?}; physical connection {connection_id} -> {next_connection_id}"
+    );
+    assert_eq!(rows, vec![(1, 1), (2, 0)]);
+    assert!(returned_while_locked, "cancel should finish while the lock is still held");
+    assert_ne!(connection_id, next_connection_id, "the interrupted connection must not be reused");
+    let results = result.expect("return partial execution results after cancellation");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].statement_index, Some(0));
+    assert!(!results[0].execution_error);
+    assert_eq!(results[0].result.affected_rows, 1);
+    assert_eq!(results[1].statement_index, Some(1));
+    let error = results[1].error.as_ref().unwrap();
+    assert_eq!(error.code(), "DBX-JDBC-2003");
+    assert_eq!(error.operation_outcome(), dbx_core::backend_error::BackendOperationOutcome::Unknown);
+}
+
 /// Reads `v` through a separate auto-commit connection, so uncommitted changes
 /// on the tab connection stay invisible.
 async fn committed_value(state: &AppState, config: &ConnectionConfig, database: &str, table: &str) -> i64 {

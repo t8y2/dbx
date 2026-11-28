@@ -24,6 +24,12 @@ export function isQueryExecutionErrorResult(result: QueryResult): boolean {
   return result.execution_error === true;
 }
 
+export function isQueryCancellationResult(result: QueryResult): boolean {
+  if (!isQueryExecutionErrorResult(result)) return false;
+  // The desktop cancel-ack fallback predates the structured backend cancellation error.
+  return result.error?.code === "DBX-JDBC-2003" || (!result.error && result.rows[0]?.[0] === "Query canceled");
+}
+
 export function isNoSnapshotErrorResult(result: QueryResult | undefined | null): boolean {
   if (!result || !isQueryExecutionErrorResult(result) || result.rows.length === 0) return false;
   return NO_SNAPSHOT_ERROR_PATTERN.test(String(result.rows[0]?.[0] ?? ""));

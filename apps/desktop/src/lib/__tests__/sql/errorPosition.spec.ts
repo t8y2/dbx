@@ -34,6 +34,30 @@ function errorResult(options: { editorStatement?: string; sourceFrom?: number; s
   };
 }
 
+describe("MySQL 1064 at end of input", () => {
+  it.each([
+    { prefix: "", sql: "SELECT 1 +", suffix: "", line: 1, column: 10 },
+    { prefix: "", sql: "SELECT\n  1 +", suffix: "", line: 2, column: 5 },
+    { prefix: "SELECT 0;\n", sql: "SELECT\n  1 +", suffix: ";\nSELECT 2;", line: 2, column: 5 },
+    { prefix: "SELECT 0;\n", sql: "SELECT 1 +", suffix: "", line: 1, column: 10 },
+  ])("anchors the error in the failing statement ($prefix$sql$suffix)", ({ prefix, sql, suffix, line, column }) => {
+    const editorSql = prefix + sql + suffix;
+    const from = prefix.length;
+    const result = errorResult({
+      editorStatement: sql,
+      executedStatement: sql + "\n  ",
+      sourceFrom: from,
+      sourceTo: from + sql.length,
+      message: `ERROR 1064 (42000): You have an error in your SQL syntax near '' at line ${line}`,
+    });
+    const options = { editorSql, result, databaseType: "mysql" as const };
+    const anchor = from + sql.length - 1;
+    expect(sqlErrorEditorRange(options)).toEqual({ from: anchor, to: anchor + 1 });
+    expect(sqlErrorEditorOffset(options)).toEqual({ offset: anchor, line, column });
+    expect(sqlErrorDisplayPosition(options)).toEqual({ line, column });
+  });
+});
+
 describe("sqlErrorEditorOffset", () => {
   it("maps a first-line column to an absolute editor offset", () => {
     const sql = "SELECT * FROM no_such_table";

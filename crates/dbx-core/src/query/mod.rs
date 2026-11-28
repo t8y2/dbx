@@ -5184,6 +5184,9 @@ fn mysql_batch_pool_error_action(db_type: Option<DatabaseType>, error: &str) -> 
 }
 
 fn mysql_batch_backend_error(action: PoolErrorAction, error: &str) -> crate::backend_error::BackendError {
+    if error == QUERY_CANCELED {
+        return canceled_query_execution_error().into_backend_error();
+    }
     if action == PoolErrorAction::Keep {
         crate::backend_error::BackendError::from_sql_detail(error)
     } else {
@@ -5556,8 +5559,10 @@ async fn execute_multi_mysql(
     let bare = mode == crate::connection::MysqlMode::Bare;
     let max_rows = options.max_rows;
     let max_result_bytes = options.max_result_bytes.filter(|value| *value > 0);
+    // A single COM_QUERY dispatches every statement at once, so cancellation
+    // cannot put a boundary between writes after the packet has been sent.
     let pipeline_non_result_statements =
-        mysql_non_result_pipeline_enabled(statements.len(), options.continue_on_error, mode);
+        cancel_token.is_none() && mysql_non_result_pipeline_enabled(statements.len(), options.continue_on_error, mode);
     let checkout_started_at = std::time::Instant::now();
     let mut conn = match db::mysql::get_conn_with_health_check_with_cancel(
         pool,
@@ -5625,7 +5630,7 @@ async fn execute_multi_mysql(
         statements,
         db_type,
         dialect,
-        cancel_token,
+        cancel_token.clone(),
         options.continue_on_error,
         pipeline_non_result_max_bytes,
         progress,
@@ -5633,6 +5638,22 @@ async fn execute_multi_mysql(
     .await;
     let statements_ms = statements_started_at.elapsed().as_millis();
     drop(executor);
+
+    if is_canceled(&cancel_token) && error_action == Some(PoolErrorAction::Discard) {
+        // The in-flight statement may already have committed. Keep its
+        // outcome unknown and interrupt it before releasing this connection.
+        let connection_id = conn.id();
+        if let Err(error) =
+            db::mysql::kill_query_with_opts(conn.opts().clone(), connection_id, operation_budget.checkout_timeout).await
+        {
+            log::warn!("Failed to cancel MySQL batch query {connection_id}: {error}");
+        }
+        // A canceled response can leave unread packets. Close the connection
+        // instead of trying to ROLLBACK on that same protocol stream.
+        let _ = tokio::time::timeout(operation_budget.cleanup_timeout, conn.disconnect()).await;
+        state.remove_pool_by_key(pool_key).await;
+        return Ok(results);
+    }
 
     // Tab-scoped single-connection pools disable COM_RESET_CONNECTION on return
     // (to preserve session state like temporary tables), so an open transaction

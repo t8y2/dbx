@@ -1,7 +1,7 @@
 import { type RoutineCompletionTarget } from "./useQueryEditorCompletionMetadata";
 import { computed } from "vue";
 import { pickedCompletion, type CompletionContext } from "@codemirror/autocomplete";
-import { EditorSelection, StateEffect, Transaction, type ChangeSet } from "@codemirror/state";
+import { EditorSelection, StateEffect, Transaction, type ChangeSet, type Text } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { type QueryCompletionItem, type BatchColumnSelectionActionItem } from "./useQueryEditorBatchSelection";
 import type { CompletionMetadataScope } from "./queryEditorTypes";
@@ -913,7 +913,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     try {
       activeCompletionOrigin = originForSqlCompletionProvider(activeCompletionOrigin, context.explicit);
       const origin = activeCompletionOrigin;
-      if (origin !== "explicit" && settingsStore.editorSettings.completionTriggerMode === "manual") return null;
+      if (origin !== "explicit" && (settingsStore.editorSettings.completionTriggerMode === "manual" || isSqlIndentation(currentState.doc, position))) return null;
       const analysis = await getEditorSqlCompletionAnalysis(fullDoc, position, currentState);
       if (!analysis || context.aborted || epoch !== completionEpoch) return null;
       const localSchema = analysis.localSchema;
@@ -1269,6 +1269,10 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     });
   }
 
+  function isSqlIndentation(doc: Text, position: number): boolean {
+    return /^[ \t]+$/.test(doc.sliceString(doc.lineAt(position).from, position));
+  }
+
   async function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: string, currentView: EditorViewType): Promise<boolean> {
     const position = currentView.state.selection.main.head;
     const fullDoc = currentView.state.doc.toString();
@@ -1297,7 +1301,10 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       return isTableNameCompletionContext(completionContext) || shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
     }
 
-    // SQL providers: use unified trigger mode policy.
+    // Indenting a blank SQL line should leave the caret ready for input,
+    // even when the parser identifies a valid completion position there.
+    if (!isGraphQueryDatabase(props.databaseType) && /^[ \t]+$/.test(insertedText) && isSqlIndentation(currentView.state.doc, position)) return false;
+
     return shouldTriggerSqlCompletionForPosition(fullDoc, position);
   }
 

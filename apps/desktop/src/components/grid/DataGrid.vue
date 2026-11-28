@@ -149,6 +149,7 @@ import {
   isSalesforceExistingRowReadonlyColumn,
   isSalesforceNewRowReadonlyColumn,
   isTdengineExistingRowReadonlyColumn,
+  isTdengineStableTableType,
   shouldIncludeSyntheticRowId,
   showsKeylessEditWarning,
   postgresTupleLocatorUnsupportedEngine,
@@ -6830,7 +6831,10 @@ const deleteRowDetails = computed(() => {
 const hasVisibleRows = computed(() => displayRowCount.value > 0);
 const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !replaceOpen.value && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value || hasServerColumnFilters.value);
 const emptyTitle = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRows") : t("grid.noRows")));
-const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription")));
+// A TDengine super table is never read without a condition (the SQL builder returns an empty
+// page), so an empty grid there means "add a condition", not "no data".
+const tdengineStableAwaitsCondition = computed(() => resolvedDatabaseType.value === "tdengine" && isTdengineStableTableType(props.tableMeta?.tableType) && !currentWhereInput()?.trim());
+const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : tdengineStableAwaitsCondition.value ? t("grid.tdengineStableNeedsCondition") : t("grid.noRowsDescription")));
 watch([hasVisibleRows, () => props.result.columns.length], scheduleScrollerMetricsRefresh, { flush: "post", immediate: true });
 const isErrorResult = computed(() => isQueryExecutionErrorResult(props.result) && props.result.rows.length > 0);
 const errorMessage = computed(() => (isErrorResult.value ? String(props.result.rows[0]?.[0] ?? "") : ""));

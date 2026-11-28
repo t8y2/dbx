@@ -27,7 +27,6 @@ use super::{execute_sql_statement_with_options, QueryExecutionOptions};
 use crate::connection::AppState;
 use crate::db::QueryResult;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
-use crate::sql_risk::SqlRisk;
 
 pub const PLUGIN_DATA_READ_PERMISSION: &str = "host.data:read";
 /// Error code prefix for a missing (or revoked) user grant, so the host UI can
@@ -103,7 +102,8 @@ pub async fn query_plugin_data(
         return Err("Connection is not open".to_string());
     }
     require_sql_connection(&config)?;
-    require_single_read_only_statement(&request.sql, config.db_type)?;
+    super::read_only_gate::require_single_read_only_statement(&request.sql, config.db_type)
+        .map_err(|error| error.to_string())?;
 
     let max_rows = request.max_rows.unwrap_or(DEFAULT_PLUGIN_DATA_MAX_ROWS).clamp(1, MAX_PLUGIN_DATA_MAX_ROWS);
     let started = Instant::now();
@@ -230,22 +230,6 @@ fn require_sql_connection(config: &ConnectionConfig) -> Result<(), String> {
     Err(format!("Plugin data queries are not available for '{}' connections", config.db_type.as_str()))
 }
 
-fn require_single_read_only_statement(sql: &str, db_type: DatabaseType) -> Result<(), String> {
-    if crate::sql::split_sql_statements_for_database(sql, db_type).len() != 1 {
-        return Err("Plugin data queries accept exactly one SQL statement".to_string());
-    }
-    // Messages stay generic so a plugin cannot use them to probe the gate.
-    match crate::sql_risk::classify_sql_risk_for_database(sql, db_type) {
-        Ok(SqlRisk::ReadOnly) => {}
-        Ok(_) => return Err("Plugin data queries are read-only; the statement was rejected".to_string()),
-        Err(_) => return Err("The statement could not be verified as read-only".to_string()),
-    }
-    if crate::sql_risk::mcp_sql_has_forbidden_database_switch(sql, db_type) {
-        return Err("Plugin data queries cannot switch the session database; pass `database` instead".to_string());
-    }
-    Ok(())
-}
-
 fn shape_result(db_type: DatabaseType, result: QueryResult, max_rows: usize, elapsed_ms: u64) -> PluginDataQueryResult {
     let columns = result
         .columns
@@ -297,23 +281,6 @@ mod tests {
             validate_request(PluginDataQueryRequest { connection_id: " ".to_string(), ..request("SELECT 1") }).is_err()
         );
         assert!(validate_request(request(&"x".repeat(MAX_PLUGIN_DATA_SQL_CHARS + 1))).is_err());
-    }
-
-    #[test]
-    fn only_a_single_read_only_statement_passes() {
-        assert!(require_single_read_only_statement("SELECT * FROM users WHERE id = 1", DatabaseType::Postgres).is_ok());
-        assert!(require_single_read_only_statement("WITH t AS (SELECT 1) SELECT * FROM t", DatabaseType::Mysql).is_ok());
-        for rejected in [
-            "DELETE FROM users",
-            "UPDATE users SET name = 'x' WHERE id = 1",
-            "DROP TABLE users",
-            "SELECT * FROM users FOR UPDATE",
-            "SELECT 1; SELECT 2",
-            "SELECT 1; DELETE FROM users",
-        ] {
-            assert!(require_single_read_only_statement(rejected, DatabaseType::Postgres).is_err(), "{rejected}");
-        }
-        assert!(require_single_read_only_statement("USE other_db", DatabaseType::Mysql).is_err());
     }
 
     #[test]

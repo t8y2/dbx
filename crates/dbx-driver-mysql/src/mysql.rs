@@ -3222,8 +3222,9 @@ fn is_safe_mysql_charset_name(value: &str) -> bool {
 
 fn mysql_connection_time_zone(url: &str) -> Option<String> {
     let (_, query) = url.split_once('?')?;
+    let query = query.split('#').next().unwrap_or(query);
     let mut jdbc_time_zone: Option<String> = None;
-    let mut go_location: Option<String> = None;
+    let mut force_jdbc_time_zone_to_session = false;
 
     for segment in query.split('&') {
         let Some((raw_key, raw_value)) = segment.split_once('=') else {
@@ -3243,15 +3244,22 @@ fn mysql_connection_time_zone(url: &str) -> Option<String> {
                 return Some(value);
             }
         } else if key.eq_ignore_ascii_case("connectionTimeZone") || key.eq_ignore_ascii_case("serverTimezone") {
-            if jdbc_time_zone.is_none() {
+            // Connector/J treats `connectionTimeZone` / `serverTimezone` as
+            // client-side mapping unless `forceConnectionTimeZoneToSession=true`,
+            // and `SERVER` means keep the MySQL server's own session time zone.
+            if jdbc_time_zone.is_none() && !value.eq_ignore_ascii_case("server") {
                 jdbc_time_zone = normalize_mysql_time_zone_value(&value);
             }
-        } else if key.eq_ignore_ascii_case("loc") && go_location.is_none() {
-            go_location = normalize_mysql_time_zone_value(&value);
+        } else if key.eq_ignore_ascii_case("forceConnectionTimeZoneToSession") {
+            force_jdbc_time_zone_to_session = mysql_url_param_value_is_true(&value);
         }
+        // Go's `loc` parameter (e.g. `loc=Local`) only sets client-side
+        // `time.Time` parsing in go-sql-driver/mysql and must not emit
+        // `SET time_zone`, which would shift `SELECT NOW()` to local OS time
+        // instead of the database's time zone (#15827).
     }
 
-    jdbc_time_zone.or(go_location)
+    force_jdbc_time_zone_to_session.then_some(jdbc_time_zone).flatten()
 }
 
 fn normalize_mysql_time_zone_value(value: &str) -> Option<String> {
@@ -13687,9 +13695,43 @@ mod tests {
     }
 
     #[test]
-    fn mysql_setup_queries_apply_jdbc_time_zone_aliases() {
+    fn mysql_setup_queries_do_not_force_jdbc_time_zone_without_session_flag() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?serverTimezone=GMT%2B8", &[]),
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?connectionTimeZone=LOCAL", &[]),
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
+        assert_eq!(
+            mysql_setup_queries(
+                "mysql://host:3306/db?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=false",
+                &[]
+            ),
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_apply_jdbc_time_zone_when_forced_to_session() {
+        assert_eq!(
+            mysql_setup_queries(
+                "mysql://host:3306/db?serverTimezone=GMT%2B8&forceConnectionTimeZoneToSession=true",
+                &[]
+            ),
             vec![
                 "USE `db`",
                 "SET time_zone = '+08:00'",
@@ -13698,7 +13740,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?connectionTimeZone=UTC", &[]),
+            mysql_setup_queries(
+                "mysql://host:3306/db?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true",
+                &[]
+            ),
             vec![
                 "USE `db`",
                 "SET time_zone = '+00:00'",
@@ -13706,15 +13751,33 @@ mod tests {
                 "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
+        assert_eq!(
+            mysql_setup_queries(
+                "mysql://host:3306/db?connectionTimeZone=SERVER&forceConnectionTimeZoneToSession=true",
+                &[]
+            ),
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
     }
 
     #[test]
-    fn mysql_setup_queries_apply_go_loc_when_no_explicit_time_zone_exists() {
+    fn mysql_setup_queries_do_not_apply_go_loc_to_session_time_zone() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?parseTime=True&loc=Local", &[]),
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?loc=Asia%2FShanghai", &[]),
             vec![
                 "USE `db`",
-                "SET time_zone = 'Asia/Shanghai'",
                 "SET NAMES utf8mb4",
                 "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]

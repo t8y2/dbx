@@ -2018,6 +2018,11 @@ export async function listTables(
   });
 }
 
+/** Child tables of one parent table (TDengine super table), paged on demand. */
+export async function listTableChildren(connectionId: string, database: string, schema: string, parentName: string, limit?: number, offset?: number): Promise<TableInfo[]> {
+  return invoke("list_table_children", { connectionId, database, schema, parentName, limit, offset });
+}
+
 export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<string | null> {
   return invoke("get_table_comment", {
     connectionId,

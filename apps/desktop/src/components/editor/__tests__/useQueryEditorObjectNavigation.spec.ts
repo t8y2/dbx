@@ -245,3 +245,53 @@ describe("QueryEditor object navigation ownership", () => {
     expect(host.classList.contains("query-editor--table-navigation-hover")).toBe(true);
   });
 });
+
+describe("Oracle package source navigation", () => {
+  const PACKAGE_SPEC = `CREATE OR REPLACE PACKAGE LLMES.BZ_EM_PRO AS
+  PROCEDURE BZ_EM_CLEAN_REC_E(V0 STR_ARY_TYPE, IRET OUT VARCHAR2, SRET OUT VARCHAR2);
+END BZ_EM_PRO;`;
+  const PACKAGE_BODY = `CREATE OR REPLACE PACKAGE BODY LLMES.BZ_EM_PRO AS
+  PROCEDURE BZ_EM_CLEAN_REC_S(V0 STR_ARY_TYPE) IS
+  BEGIN
+    BZ_EM_CLEAN_REC_E(V0);
+  END BZ_EM_CLEAN_REC_S;
+
+  PROCEDURE BZ_EM_CLEAN_REC_E(V0 STR_ARY_TYPE) IS
+  BEGIN
+    NULL;
+  END BZ_EM_CLEAN_REC_E;
+END BZ_EM_PRO;`;
+  const oracleProps = (modelValue: string, objectType: "PACKAGE" | "PACKAGE_BODY") => ({
+    modelValue,
+    databaseType: "oracle" as const,
+    dialect: undefined,
+    schema: "LLMES",
+    packageSource: { name: "BZ_EM_PRO", schema: "LLMES", objectType },
+  });
+
+  it("opens the package body for a spec declaration instead of a missing standalone procedure", async () => {
+    const { position, store, emit, click } = await createHarness(oracleProps(PACKAGE_SPEC, "PACKAGE"));
+    position.mockReturnValue(PACKAGE_SPEC.indexOf("BZ_EM_CLEAN_REC_E") + 2);
+    expect((await click()).handled).toBe(true);
+    expect(emit).toHaveBeenCalledWith("openObjectSource", expect.objectContaining({ name: "BZ_EM_CLEAN_REC_E", type: "procedure", parentName: "BZ_EM_PRO", parentSchema: "LLMES" }), false);
+    expect(store.listCompletionObjects).not.toHaveBeenCalled();
+    expect(store.listCompletionTables).not.toHaveBeenCalled();
+  });
+
+  it("jumps to the implementation inside the body without opening another tab", async () => {
+    const { position, currentView, emit, click } = await createHarness(oracleProps(PACKAGE_BODY, "PACKAGE_BODY"));
+    const call = PACKAGE_BODY.indexOf("BZ_EM_CLEAN_REC_E(V0);");
+    position.mockReturnValue(call + 2);
+    expect((await click()).handled).toBe(true);
+    expect(emit).not.toHaveBeenCalled();
+    expect(currentView.state.selection.main.from).toBe(PACKAGE_BODY.indexOf("BZ_EM_CLEAN_REC_E(V0 STR_ARY_TYPE) IS"));
+  });
+
+  it("still resolves unrelated identifiers through metadata", async () => {
+    const { position, store, emit, click } = await createHarness(oracleProps(PACKAGE_BODY, "PACKAGE_BODY"));
+    position.mockReturnValue(PACKAGE_BODY.indexOf("STR_ARY_TYPE") + 2);
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "STR_ARY_TYPE", schema: "LLMES", type: "table" }]);
+    await click();
+    expect(emit).toHaveBeenCalledWith("clickTable", expect.objectContaining({ name: "STR_ARY_TYPE" }));
+  });
+});

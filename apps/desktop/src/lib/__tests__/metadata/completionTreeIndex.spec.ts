@@ -71,7 +71,7 @@ describe("completionTreeIndex", () => {
 
     expect(completionSchemasFromTree(tree, "conn", "hive")).toEqual(["sales_analytics"]);
     const expected = [
-      { name: "daily_revenue", schema: "sales_analytics", type: "table", detail: "→ Daily revenue summary" },
+      { name: "daily_revenue", schema: "sales_analytics", type: "table", detail: "→ Daily revenue summary", comment: "Daily revenue summary" },
       { name: "daily_revenue_view", schema: "sales_analytics", type: "view" },
       { name: "daily_revenue_mv", schema: "sales_analytics", type: "materialized_view" },
     ];

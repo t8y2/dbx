@@ -140,6 +140,17 @@ describe("QueryEditor hover resolution", () => {
     expect(loadDdl).not.toHaveBeenCalled();
   });
 
+  it("shows the cached table comment when persisted DDL loads successfully", async () => {
+    const { store, resolve, createHoverDom } = createHarness();
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users", schema: "public", comment: "Account directory" }]);
+
+    const tooltip = await resolve();
+    tooltip!.create();
+
+    expect(createHoverDom).toHaveBeenCalledWith("users", "table in public\nAccount directory", expect.stringContaining("create table"), undefined);
+    expect(getTableComment).not.toHaveBeenCalled();
+  });
+
   it("prefers local tables and preserves catalog scope for persisted DDL", async () => {
     const { store, metadata, resolve, createHoverDom } = createHarness({ catalog: "catalog" });
     store.lookupLocalCompletionTables.mockReturnValue([{ name: "users", schema: "public", database: "demo", catalog: "catalog" }]);

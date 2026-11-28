@@ -11667,6 +11667,7 @@ export default withEnglishFallback({
     clearColumns: "クリア",
     selectAtLeastOneColumn: "エクスポートする列を1つ以上選択してください。",
     includeObjects: "ビュー / プロシージャ / 関数 / シーケンス",
+    splitSqlByTable: "テーブルごとに SQL を分割 (ZIP)",
     splitSqlOutput: "SQLエクスポートをZIPアーカイブに分割",
     splitSqlPartMaxMb: "SQLパートあたりの最大サイズ（MB）",
     splitSqlOutputDescription: "番号付きSQLパートとマニフェストを含むZIPアーカイブを作成します。パートは完全なSQL文の間で分割されます（{min}～{max} MB）。",

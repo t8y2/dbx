@@ -6883,7 +6883,7 @@ export interface DatabaseExportRequest {
   preserveOriginalLanguage?: boolean;
   failOnError?: boolean;
   preventOverwrite?: boolean;
-  outputCompression?: "none" | "gzip" | "nb3";
+  outputCompression?: "none" | "gzip" | "nb3" | "zipByTable";
   insertDialect?: SqlInsertDialect;
   insertMode?: "batch" | "single";
   snapshotSessionId?: string;

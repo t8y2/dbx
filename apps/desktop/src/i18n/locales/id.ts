@@ -10566,6 +10566,7 @@ export default withEnglishFallback({
     standardSqlInsert: "Gunakan Standard SQL INSERT untuk data tabel",
     standardSqlInsertDescription: "Menggunakan identifier bertanda kutip ganda ANSI dan literal skalar yang portabel. DDL dan objek lainnya tetap mengikuti dialek database sumber.",
     includeObjects: "Tampilan / Prosedur / Fungsi / Sequence",
+    splitSqlByTable: "Pisahkan SQL per tabel (ZIP)",
     splitSqlOutput: "Pecah ekspor SQL menjadi arsip ZIP",
     splitSqlPartMaxMb: "Ukuran maksimum per bagian SQL (MB)",
     splitSqlOutputDescription: "Membuat arsip ZIP berisi bagian-bagian SQL bernomor dan sebuah manifest. Bagian dipecah di antara pernyataan SQL yang lengkap ({min}–{max} MB).",

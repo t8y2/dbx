@@ -13206,6 +13206,7 @@ export default withEnglishFallback({
     standardSqlInsert: "ใช้ Standard SQL INSERT สำหรับข้อมูลตาราง",
     standardSqlInsertDescription: "ใช้ Identifier ที่ครอบด้วยเครื่องหมายคำพูดคู่แบบ ANSI และ Scalar Literal ที่ใช้ได้กับฐานข้อมูลหลายระบบ ส่วน DDL และออบเจ็กต์อื่นยังใช้ Dialect ของฐานข้อมูลต้นทาง",
     includeObjects: "View / Procedure / Function / Sequence",
+    splitSqlByTable: "แยก SQL ตามตาราง (ZIP)",
     splitSqlOutput: "แยกการส่งออก SQL เป็นไฟล์ ZIP",
     splitSqlPartMaxMb: "ขนาดสูงสุดต่อส่วน SQL (MB)",
     splitSqlOutputDescription: "สร้างไฟล์ ZIP ที่มีส่วน SQL พร้อมหมายเลขและ Manifest โดยแบ่งส่วนระหว่าง Statement SQL ที่สมบูรณ์ ({min}–{max} MB)",

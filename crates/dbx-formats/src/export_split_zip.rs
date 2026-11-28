@@ -43,7 +43,8 @@ struct SplitExportManifest<'a> {
     format: &'static str,
     generated_at: String,
     source_file_name: &'a str,
-    part_max_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    part_max_bytes: Option<u64>,
     total_parts: u32,
     parts: &'a [String],
 }
@@ -55,12 +56,13 @@ struct SplitExportManifest<'a> {
 pub struct SplitZipExportWriter {
     zip: ZipWriter<std::fs::File>,
     options: SimpleFileOptions,
-    part_max_bytes: u64,
+    part_max_bytes: Option<u64>,
     current_part_bytes: u64,
     part_index: u32,
     part_stem: String,
     part_extension: String,
     part_names: Vec<String>,
+    pending_named_part: Option<String>,
 }
 
 impl SplitZipExportWriter {
@@ -82,6 +84,25 @@ impl SplitZipExportWriter {
         part_extension: &str,
         prevent_overwrite: bool,
     ) -> Result<Self, String> {
+        let mut writer =
+            Self::open(zip_path, Some(split_part_max_bytes(max_mb)), part_stem, part_extension, prevent_overwrite)?;
+        writer.start_next_part()?;
+        Ok(writer)
+    }
+
+    pub fn create_by_table(zip_path: &std::path::Path, prevent_overwrite: bool) -> Result<Self, String> {
+        let mut writer = Self::open(zip_path, None, "", "sql", prevent_overwrite)?;
+        writer.begin_named_sql_part("setup");
+        Ok(writer)
+    }
+
+    fn open(
+        zip_path: &std::path::Path,
+        part_max_bytes: Option<u64>,
+        part_stem: &str,
+        part_extension: &str,
+        prevent_overwrite: bool,
+    ) -> Result<Self, String> {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -96,27 +117,41 @@ impl SplitZipExportWriter {
                 }
             })?;
         let zip = ZipWriter::new(file);
-        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-        let mut writer = Self {
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .large_file(part_max_bytes.is_none());
+        Ok(Self {
             zip,
             options,
-            part_max_bytes: split_part_max_bytes(max_mb),
+            part_max_bytes,
             current_part_bytes: 0,
             part_index: 0,
             part_stem: sanitize_zip_entry_component(part_stem),
             part_extension: sanitize_zip_entry_component(part_extension),
             part_names: Vec::new(),
-        };
-        writer.start_next_part()?;
-        Ok(writer)
+            pending_named_part: None,
+        })
+    }
+
+    /// In table mode, the next nonempty write starts the named section.
+    pub fn begin_named_sql_part(&mut self, title: &str) {
+        if self.part_max_bytes.is_some() {
+            return;
+        }
+        let short_title: String = title.chars().take(48).collect();
+        let stem = sanitize_zip_component(&short_title, char::is_alphanumeric);
+        self.pending_named_part = Some(format!("{:06}-{stem}.sql", self.part_index + 1));
     }
 
     fn start_next_part(&mut self) -> Result<(), String> {
-        self.part_index += 1;
-        let name = format!("{}-part-{}.{}", self.part_stem, self.part_index, self.part_extension);
+        self.start_part(format!("{}-part-{}.{}", self.part_stem, self.part_index + 1, self.part_extension))
+    }
+
+    fn start_part(&mut self, name: String) -> Result<(), String> {
         self.zip
             .start_file(&name, self.options)
             .map_err(|error| format!("Failed to start zip entry {name}: {error}"))?;
+        self.part_index += 1;
         self.part_names.push(name);
         self.current_part_bytes = 0;
         Ok(())
@@ -129,7 +164,14 @@ impl SplitZipExportWriter {
     /// exceed the configured size; an oversized individual unit remains whole
     /// as the only unavoidable exception.
     pub fn write_sql_unit(&mut self, unit: &[u8]) -> std::io::Result<()> {
-        if self.current_part_bytes > 0 && self.current_part_bytes + unit.len() as u64 > self.part_max_bytes {
+        if unit.is_empty() {
+            return Ok(());
+        }
+        if let Some(name) = self.pending_named_part.take() {
+            self.start_part(name).map_err(std::io::Error::other)?;
+        } else if self.current_part_bytes > 0
+            && self.part_max_bytes.is_some_and(|limit| self.current_part_bytes + unit.len() as u64 > limit)
+        {
             self.start_next_part().map_err(std::io::Error::other)?;
         }
         self.zip.write_all(unit)?;
@@ -182,10 +224,12 @@ impl Write for SplitZipExportWriter {
 /// could be misread as a directory traversal; export file stems come from
 /// user-controlled database/table names, so sanitize defensively.
 fn sanitize_zip_entry_component(value: &str) -> String {
-    let sanitized: String = value
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
-        .collect();
+    sanitize_zip_component(value, |character| character.is_ascii_alphanumeric())
+}
+
+fn sanitize_zip_component(value: &str, is_alphanumeric: impl Fn(char) -> bool) -> String {
+    let sanitized: String =
+        value.chars().map(|c| if is_alphanumeric(c) || matches!(c, '-' | '_' | '.') { c } else { '_' }).collect();
     let trimmed = sanitized.trim_matches('_').to_string();
     if trimmed.is_empty() {
         "export".to_string()

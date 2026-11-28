@@ -82,6 +82,8 @@ pub enum DatabaseExportOutputCompression {
     Gzip,
     /// Navicat `.nb3` backup archive (MySQL and PostgreSQL only).
     Nb3,
+    /// ZIP archive with independently named SQL parts in replay order.
+    ZipByTable,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +357,12 @@ enum DatabaseExportWriter {
 }
 
 impl DatabaseExportWriter {
+    fn begin_named_sql_part(&mut self, title: &str) {
+        if let Self::SplitZip(writer) = self {
+            writer.begin_named_sql_part(title);
+        }
+    }
+
     fn write_sql_unit(&mut self, unit: &[u8]) -> std::io::Result<()> {
         match self {
             Self::Plain(writer) => writer.write_all(unit),
@@ -4545,6 +4553,14 @@ pub async fn export_database_sql_core(
         .get(&request.connection_id)
         .map(|config| config.db_type)
         .ok_or_else(|| format!("Connection config not found: {}", request.connection_id))?;
+    if request.output_compression == DatabaseExportOutputCompression::ZipByTable {
+        if request.split_max_mb.is_some() {
+            return Err("Choose either size-based splitting or table-based splitting".to_string());
+        }
+        if request.schema.trim().is_empty() && matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) {
+            return Err("Choose one schema to split SQL by table".to_string());
+        }
+    }
     // Keep the large export state machine on the heap. Besides making the
     // caller future small, this prevents the metadata-prefetch locals from
     // exhausting the bounded stack used by test and runtime worker threads.
@@ -4616,16 +4632,22 @@ async fn create_database_export_writer(
     if let Some(parent) = export_destination_parent_dir(&request.file_path) {
         expected_destination_identity = ensure_export_destination_dir(state, parent).await?;
     }
-    if let Some(max_mb) = request.split_max_mb {
-        let zip_path = std::path::Path::new(&request.file_path);
+    let zip_path = std::path::Path::new(&request.file_path);
+    let zip_writer = if request.output_compression == DatabaseExportOutputCompression::ZipByTable {
+        Some(crate::export_split_zip::SplitZipExportWriter::create_by_table(zip_path, request.prevent_overwrite)?)
+    } else if let Some(max_mb) = request.split_max_mb {
         let stem = zip_path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("export");
-        let writer = crate::export_split_zip::SplitZipExportWriter::create_with_overwrite(
+        Some(crate::export_split_zip::SplitZipExportWriter::create_with_overwrite(
             zip_path,
             max_mb,
             stem,
             "sql",
             request.prevent_overwrite,
-        )?;
+        )?)
+    } else {
+        None
+    };
+    if let Some(writer) = zip_writer {
         let opened_destination_identity =
             std::fs::File::open(&request.file_path).ok().as_ref().and_then(export_destination_identity_for_file);
         if export_destination_identity_mismatch(
@@ -4697,6 +4719,7 @@ async fn create_database_export_writer(
     }
     Ok(match request.output_compression {
         DatabaseExportOutputCompression::None => DatabaseExportWriter::Plain(BufWriter::new(file)),
+        DatabaseExportOutputCompression::ZipByTable => unreachable!("ZIP was opened above"),
         DatabaseExportOutputCompression::Gzip => {
             DatabaseExportWriter::Gzip(Box::new(GzEncoder::new(BufWriter::new(file), Compression::default())))
         }
@@ -5897,6 +5920,7 @@ async fn export_database_sql_core_inner_with_phases(
         }
 
         let table_name = &table_info.name;
+        file.begin_named_sql_part(table_name);
 
         // Emit Running progress
         on_progress(ExportProgress {
@@ -6412,6 +6436,7 @@ async fn export_database_sql_core_inner_with_phases(
         object_index += 1;
     }
 
+    file.begin_named_sql_part("postamble");
     // Only listed for the table structure or for picked standalone sequences.
     if !postgres_sequences.is_empty() {
         for sequence in &postgres_sequences {

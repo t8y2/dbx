@@ -11237,6 +11237,7 @@ export default withEnglishFallback({
     clearColumns: "Cancella",
     selectAtLeastOneColumn: "Seleziona almeno una colonna da esportare.",
     includeObjects: "Viste / Procedure / Funzioni / Sequenze",
+    splitSqlByTable: "Dividi SQL per tabella (ZIP)",
     splitSqlOutput: "Dividere l'esportazione SQL in un archivio ZIP",
     splitSqlPartMaxMb: "Dimensione massima per parte SQL (MB)",
     splitSqlOutputDescription: "Crea un archivio ZIP con parti SQL numerate e un manifest. Le parti vengono divise tra istruzioni SQL complete ({min}–{max} MB).",

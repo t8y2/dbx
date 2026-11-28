@@ -10347,6 +10347,7 @@ export default withEnglishFallback({
     standardSqlInsert: "資料表資料使用標準 SQL INSERT",
     standardSqlInsertDescription: "使用 ANSI 雙引號識別碼和通用純量常值；DDL 與其他物件仍保留來源資料庫方言。",
     includeObjects: "檢視 / 預存程序 / 函式 / 序列",
+    splitSqlByTable: "依資料表拆分 SQL 檔案（ZIP）",
     splitSqlOutput: "將 SQL 匯出分割為 ZIP 壓縮檔",
     splitSqlPartMaxMb: "每個 SQL 分片的最大大小（MB）",
     splitSqlOutputDescription: "建立包含編號 SQL 分片與資訊清單的 ZIP 壓縮檔。分片只會在完整 SQL 陳述式之間分割（{min}–{max} MB）。",

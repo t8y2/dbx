@@ -10627,6 +10627,7 @@ export default withEnglishFallback({
     standardSqlInsert: "Użyj standardowego SQL INSERT dla danych tabel",
     standardSqlInsertDescription: "Używa podwójnych cudzysłowów ANSI dla identyfikatorów i przenośnych literałów. DDL i pozostałe obiekty zachowują dialekt źródłowy.",
     includeObjects: "Widoki / Procedury / Funkcje / Sekwencje",
+    splitSqlByTable: "Podziel SQL według tabel (ZIP)",
     splitSqlOutput: "Podziel eksport SQL na archiwum ZIP",
     splitSqlPartMaxMb: "Maksymalny rozmiar części SQL (MB)",
     splitSqlOutputDescription: "Tworzy archiwum ZIP zawierające ponumerowane części SQL oraz manifest. Części są dzielone pomiędzy kompletnymi instrukcjami SQL ({min}–{max} MB).",

@@ -2744,6 +2744,7 @@ export default withEnglishFallback({
     showLabels: "값 표시",
   },
   grid: {
+    savingBulkChanges: "변경 사항 {count}개 저장 중",
     setTablePageSizeDefault: "이 테이블의 기본값으로 설정",
     resetTablePageSizeDefault: "전역 기본값 사용",
     exportSelectedRowsScope: "선택한 행",

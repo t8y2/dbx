@@ -3129,6 +3129,7 @@ export default {
     showLabels: "Show Values",
   },
   grid: {
+    savingBulkChanges: "Saving {count} changes",
     setTablePageSizeDefault: "Set default for this table",
     resetTablePageSizeDefault: "Use global default",
     exportSelectedRowsScope: "Selected rows",

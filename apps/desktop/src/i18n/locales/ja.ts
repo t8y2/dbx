@@ -3013,6 +3013,7 @@ export default withEnglishFallback({
     showLabels: "値を表示",
   },
   grid: {
+    savingBulkChanges: "{count} 件の変更を保存中",
     setTablePageSizeDefault: "このテーブルの既定値に設定",
     resetTablePageSizeDefault: "全体の既定値を使用",
     exportSelectedRowsScope: "選択行",

@@ -2210,6 +2210,7 @@ export default withEnglishFallback({
     showLabels: "Tampilkan Nilai",
   },
   grid: {
+    savingBulkChanges: "Menyimpan {count} perubahan",
     showStatusSql: "Tampilkan SQL di Bagian Bawah",
     showStatusSqlHint: "Tampilkan SQL di bagian bawah semua hasil kueri dan data tabel.",
     rows: "{count} baris",

@@ -2984,6 +2984,7 @@ export default withEnglishFallback({
     showLabels: "แสดงค่า",
   },
   grid: {
+    savingBulkChanges: "กำลังบันทึกการเปลี่ยนแปลง {count} รายการ",
     setTablePageSizeDefault: "ตั้งค่าเริ่มต้นสำหรับตารางนี้",
     resetTablePageSizeDefault: "ใช้ค่าเริ่มต้นส่วนกลาง",
     exportSelectedRowsScope: "แถวที่เลือก",

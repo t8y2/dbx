@@ -710,6 +710,8 @@ export default withEnglishFallback({
     initScript: "Başlanğıc skripti",
     initScriptPlaceholder: "INSTALL quack;\nLOAD quack;\nATTACH 'quack:host' AS remote (TOKEN '...');",
     initScriptHint: "SQL əmrləri əlaqə hər dəfə açıldıqda icra edilir (INSTALL/LOAD, SET, CREATE SECRET, ATTACH ...). Burada qoşulan verilənlər bazaları yan paneldə görünür.",
+    initScriptPlaceholderSqlServer: "SET ARITHABORT ON;",
+    initScriptHintSqlServer: "SQL əmrləri hər dəfə əlaqə açıldıqda icra edilir; SET ARITHABORT ON kimi sessiya parametrləri üçün istifadə edin.",
     sqliteExtensionBrowse: "SQLite genişlənməsi seçin",
     user: "İstifadəçi",
     password: "Parol",

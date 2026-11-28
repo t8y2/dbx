@@ -8313,17 +8313,17 @@ function openExternalUrl(url: string) {
                         </p>
                       </div>
                     </div>
-                    <div v-if="form.db_type === 'duckdb'" class="grid grid-cols-4 items-start gap-4">
+                    <div v-if="form.db_type === 'duckdb' || form.db_type === 'sqlserver'" class="grid grid-cols-4 items-start gap-4">
                       <Label :class="connectionLabelTopClass">{{ t("connection.initScript") }}</Label>
                       <div class="col-span-3 space-y-1">
                         <textarea
                           v-model="form.init_script"
                           class="flex min-h-[76px] w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                          :placeholder="t('connection.initScriptPlaceholder')"
+                          :placeholder="form.db_type === 'sqlserver' ? t('connection.initScriptPlaceholderSqlServer') : t('connection.initScriptPlaceholder')"
                           spellcheck="false"
                         />
                         <p class="text-xs text-muted-foreground">
-                          {{ t("connection.initScriptHint") }}
+                          {{ form.db_type === "sqlserver" ? t("connection.initScriptHintSqlServer") : t("connection.initScriptHint") }}
                         </p>
                       </div>
                     </div>

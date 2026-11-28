@@ -1491,6 +1491,8 @@ export default withEnglishFallback({
     initScript: "สคริปต์เริ่มต้น",
     initScriptPlaceholder: "INSTALL quack;\nLOAD quack;\nATTACH 'quack:host' AS remote (TOKEN '...');",
     initScriptHint: "เรียกใช้ Statement SQL ทุกครั้งที่เปิดการเชื่อมต่อ (INSTALL/LOAD, SET, CREATE SECRET, ATTACH ...) ฐานข้อมูลที่ Attach ที่นี่จะแสดงในแถบด้านข้าง",
+    initScriptPlaceholderSqlServer: "SET ARITHABORT ON;",
+    initScriptHintSqlServer: "คำสั่ง SQL ที่เรียกใช้ทุกครั้งที่เปิดการเชื่อมต่อ ใช้สำหรับการตั้งค่าเซสชัน เช่น SET ARITHABORT ON",
     sqliteExtensionBrowse: "เลือกส่วนขยาย SQLite",
     user: "ผู้ใช้",
     password: "รหัสผ่าน",

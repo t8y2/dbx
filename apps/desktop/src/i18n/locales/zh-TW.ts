@@ -1395,6 +1395,8 @@ export default withEnglishFallback({
     initScript: "初始化指令碼",
     initScriptPlaceholder: "INSTALL quack;\nLOAD quack;\nATTACH 'quack:host' AS remote (TOKEN '...');",
     initScriptHint: "每次建立連線後執行的 SQL 語句（INSTALL/LOAD、SET、CREATE SECRET、ATTACH 等）。指令碼中 ATTACH 的資料庫會顯示在側邊欄。",
+    initScriptPlaceholderSqlServer: "SET ARITHABORT ON;",
+    initScriptHintSqlServer: "每次建立連線後執行的 SQL 語句，可用於工作階段設定，例如 SET ARITHABORT ON。",
     sqliteExtensionBrowse: "選擇 SQLite 擴充庫",
     user: "使用者名稱",
     password: "密碼",

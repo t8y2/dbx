@@ -710,6 +710,8 @@ export default withEnglishFallback({
     initScript: "Başlangıç Betiği",
     initScriptPlaceholder: "INSTALL quack;\nLOAD quack;\nATTACH 'quack:host' AS remote (TOKEN '...');",
     initScriptHint: "Bağlantı her açıldığında çalıştırılan SQL ifadeleri (INSTALL/LOAD, SET, CREATE SECRET, ATTACH ...). Burada eklenen veritabanları kenar çubuğunda görünür.",
+    initScriptPlaceholderSqlServer: "SET ARITHABORT ON;",
+    initScriptHintSqlServer: "Bağlantı her açıldığında çalıştırılan SQL ifadeleri; SET ARITHABORT ON gibi oturum ayarları için kullanın.",
     sqliteExtensionBrowse: "SQLite uzantısı seçin",
     user: "Kullanıcı",
     password: "Parola",

@@ -906,6 +906,8 @@ export default withEnglishFallback({
     initScript: "Skrip Inisialisasi",
     initScriptPlaceholder: "INSTALL quack;\nLOAD quack;\nATTACH 'quack:host' AS remote (TOKEN '...');",
     initScriptHint: "Pernyataan SQL yang dijalankan setiap kali koneksi dibuka (INSTALL/LOAD, SET, CREATE SECRET, ATTACH ...). Database yang di-attach di sini akan muncul di bilah sisi.",
+    initScriptPlaceholderSqlServer: "SET ARITHABORT ON;",
+    initScriptHintSqlServer: "Pernyataan SQL yang dijalankan setiap kali koneksi dibuka; gunakan untuk pengaturan sesi seperti SET ARITHABORT ON.",
     sqliteExtensionBrowse: "Pilih ekstensi SQLite",
     user: "Pengguna",
     password: "Kata Sandi",

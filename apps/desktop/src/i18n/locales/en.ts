@@ -1674,6 +1674,8 @@ export default {
     initScript: "Init Script",
     initScriptPlaceholder: "INSTALL quack;\nLOAD quack;\nATTACH 'quack:host' AS remote (TOKEN '...');",
     initScriptHint: "SQL statements run each time the connection is opened (INSTALL/LOAD, SET, CREATE SECRET, ATTACH ...). Databases attached here appear in the sidebar.",
+    initScriptPlaceholderSqlServer: "SET ARITHABORT ON;",
+    initScriptHintSqlServer: "SQL statements run each time the connection is opened; use them for session settings such as SET ARITHABORT ON.",
     sqliteExtensionBrowse: "Select SQLite extension",
     user: "User",
     password: "Password",

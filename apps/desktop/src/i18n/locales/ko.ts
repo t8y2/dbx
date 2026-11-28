@@ -1416,6 +1416,8 @@ export default withEnglishFallback({
     initScript: "초기화 스크립트",
     initScriptPlaceholder: "INSTALL quack;\nLOAD quack;\nATTACH 'quack:host' AS remote (TOKEN '...');",
     initScriptHint: "연결이 열릴 때마다 실행되는 SQL 구문 (INSTALL/LOAD, SET, CREATE SECRET, ATTACH ...). 여기서 연결한 데이터베이스는 사이드바에 나타납니다.",
+    initScriptPlaceholderSqlServer: "SET ARITHABORT ON;",
+    initScriptHintSqlServer: "연결이 열릴 때마다 실행되는 SQL 구문입니다. SET ARITHABORT ON 과 같은 세션 설정에 사용할 수 있습니다.",
     sqliteExtensionBrowse: "SQLite 확장 선택",
     user: "사용자",
     password: "비밀번호",

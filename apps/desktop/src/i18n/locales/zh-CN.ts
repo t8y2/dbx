@@ -1608,6 +1608,8 @@ export default withEnglishFallback({
     initScript: "初始化脚本",
     initScriptPlaceholder: "INSTALL quack;\nLOAD quack;\nATTACH 'quack:host' AS remote (TOKEN '...');",
     initScriptHint: "每次建立连接后执行的 SQL 语句（INSTALL/LOAD、SET、CREATE SECRET、ATTACH 等）。脚本中 ATTACH 的数据库会显示在侧边栏。",
+    initScriptPlaceholderSqlServer: "SET ARITHABORT ON;",
+    initScriptHintSqlServer: "每次建立连接后执行的 SQL 语句，可用于会话设置，例如 SET ARITHABORT ON。",
     sqliteExtensionBrowse: "选择 SQLite 扩展库",
     user: "用户名",
     password: "密码",

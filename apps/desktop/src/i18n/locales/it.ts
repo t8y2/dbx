@@ -1409,6 +1409,8 @@ export default withEnglishFallback({
     initScript: "Script di inizializzazione",
     initScriptPlaceholder: "INSTALL quack;\nLOAD quack;\nATTACH 'quack:host' AS remote (TOKEN '...');",
     initScriptHint: "Istruzioni SQL eseguite a ogni apertura della connessione (INSTALL/LOAD, SET, CREATE SECRET, ATTACH ...). I database collegati qui appaiono nella barra laterale.",
+    initScriptPlaceholderSqlServer: "SET ARITHABORT ON;",
+    initScriptHintSqlServer: "Istruzioni SQL eseguite a ogni apertura della connessione; usale per impostazioni di sessione come SET ARITHABORT ON.",
     sqliteExtensionBrowse: "Seleziona estensione SQLite",
     user: "Utente",
     password: "Password",

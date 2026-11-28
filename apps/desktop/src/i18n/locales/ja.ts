@@ -1590,6 +1590,8 @@ export default withEnglishFallback({
     initScript: "初期化スクリプト",
     initScriptPlaceholder: "INSTALL quack;\nLOAD quack;\nATTACH 'quack:host' AS remote (TOKEN '...');",
     initScriptHint: "接続確立時に毎回実行されるSQL文（INSTALL/LOAD、SET、CREATE SECRET、ATTACHなど）。スクリプト内でATTACHしたデータベースはサイドバーに表示されます。",
+    initScriptPlaceholderSqlServer: "SET ARITHABORT ON;",
+    initScriptHintSqlServer: "接続を開くたびに実行される SQL 文です。SET ARITHABORT ON などのセッション設定に使用できます。",
     sqliteExtensionBrowse: "SQLite拡張を選択",
     user: "ユーザー",
     password: "パスワード",

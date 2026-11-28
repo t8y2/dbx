@@ -7930,6 +7930,11 @@ export default withEnglishFallback({
     dependencyGraph: "依賴圖",
     copySourceDdl: "複製來源 DDL",
     copyTargetDdl: "複製目標 DDL",
+    sourceKindConnection: "連線",
+    sourceKindSqlFile: "SQL 檔案",
+    sourceSqlFile: "結構檔案",
+    chooseSqlFile: "選擇檔案",
+    sourceSqlFileHint: "使用僅含結構的匯出檔案（mysqldump --no-data）。會比較資料表、檢視表、索引與外鍵，常式不參與比較。",
   },
   rollbackComparison: {
     title: "回溯對比",

@@ -9217,6 +9217,11 @@ export default withEnglishFallback({
     renameApplied: "名前変更を適用しました",
     renameCount: "名前変更: {count}",
     addHost: "ホストを追加",
+    sourceKindConnection: "接続",
+    sourceKindSqlFile: "SQL ファイル",
+    sourceSqlFile: "構造ファイル",
+    chooseSqlFile: "ファイルを選択",
+    sourceSqlFileHint: "構造のみを含むエクスポートファイル（mysqldump --no-data）を使用します。テーブル、ビュー、インデックス、外部キーを比較します。ルーチンは比較対象外です。",
   },
   rollbackComparison: {
     title: "ロールバック比較",

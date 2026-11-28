@@ -10788,6 +10788,11 @@ export default withEnglishFallback({
     deployMixedTitle: "Deploy บางส่วน",
     deployRolledBackTitle: "Rollback แล้ว",
     deployMixedWarning: "อาจใช้บาง statement แล้วขณะที่รายการอื่นล้มเหลว ฐานข้อมูลอาจอยู่ในสถานะไม่สอดคล้อง ตรวจสอบ transaction log และแก้ไขด้วยตนเองก่อนลองอีกครั้ง",
+    sourceKindConnection: "การเชื่อมต่อ",
+    sourceKindSqlFile: "ไฟล์ SQL",
+    sourceSqlFile: "ไฟล์โครงสร้าง",
+    chooseSqlFile: "เลือกไฟล์",
+    sourceSqlFileHint: "ใช้ไฟล์ส่งออกที่มีเฉพาะโครงสร้าง (mysqldump --no-data) จะเปรียบเทียบตาราง มุมมอง ดัชนี และคีย์นอก โดยไม่เปรียบเทียบรูทีน",
   },
   rollbackComparison: {
     title: "เปรียบเทียบ Rollback",

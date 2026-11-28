@@ -1039,6 +1039,7 @@ export interface EditorSettings {
   welcomePageMode: WelcomePageMode;
   welcomePageModeDefaultVersion: number;
   compactTabTitle: boolean;
+  hideProcedureTabSignatures: boolean;
   compactTabTitleDefaultVersion: number;
   crossWindowTabDragPreviewEnabled: boolean;
   /** 重名标签页的区分方式：序号或连接名。见 {@link DuplicateTabTitleMode}。 */
@@ -1502,6 +1503,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   welcomePageMode: "workspace",
   welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
   compactTabTitle: true,
+  hideProcedureTabSignatures: false,
   compactTabTitleDefaultVersion: COMPACT_TAB_TITLE_DEFAULT_VERSION,
   crossWindowTabDragPreviewEnabled: true,
   duplicateTabTitleMode: "ordinal",
@@ -2295,6 +2297,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     welcomePageMode: hasCurrentWelcomePageDefault && (settings.welcomePageMode === "intro" || settings.welcomePageMode === "workspace") ? settings.welcomePageMode : DEFAULT_EDITOR_SETTINGS.welcomePageMode,
     welcomePageModeDefaultVersion,
     compactTabTitle: hasCurrentCompactTabTitleDefault ? settings.compactTabTitle === true : DEFAULT_EDITOR_SETTINGS.compactTabTitle,
+    hideProcedureTabSignatures: settings.hideProcedureTabSignatures === true,
     compactTabTitleDefaultVersion,
     crossWindowTabDragPreviewEnabled: typeof settings.crossWindowTabDragPreviewEnabled === "boolean" ? settings.crossWindowTabDragPreviewEnabled : DEFAULT_EDITOR_SETTINGS.crossWindowTabDragPreviewEnabled,
     tabLayout: normalizeTabLayout(settings.tabLayout),
@@ -3329,6 +3332,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.savedSqlOpenTargetMode !== undefined) editorSettings.value.savedSqlOpenTargetMode = partial.savedSqlOpenTargetMode === "current" ? "current" : "saved";
     if (partial.aiSqlApplyTargetMode !== undefined) editorSettings.value.aiSqlApplyTargetMode = normalizeAiSqlApplyTargetMode(partial.aiSqlApplyTargetMode, DEFAULT_EDITOR_SETTINGS.aiSqlApplyTargetMode);
     if (partial.welcomePageMode !== undefined) editorSettings.value.welcomePageMode = partial.welcomePageMode === "intro" || partial.welcomePageMode === "workspace" ? partial.welcomePageMode : DEFAULT_EDITOR_SETTINGS.welcomePageMode;
+    if (partial.hideProcedureTabSignatures !== undefined) editorSettings.value.hideProcedureTabSignatures = partial.hideProcedureTabSignatures === true;
     if (partial.compactTabTitle !== undefined) {
       editorSettings.value.compactTabTitle = partial.compactTabTitle;
       // Stamping the current version marks this as a deliberate choice, so a

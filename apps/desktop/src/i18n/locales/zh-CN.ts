@@ -5371,6 +5371,8 @@ export default withEnglishFallback({
     unsplit: "取消拆分",
     compactTabTitle: "缩短标签标题",
     fullTabTitle: "完整标签标题",
+    hideProcedureTabSignatures: "在标签标题中隐藏存储过程参数",
+    showProcedureTabSignatures: "在标签标题中显示存储过程参数",
     closeTab: "关闭标签页",
     reopenClosedTab: "恢复关闭标签页",
     editTabGroup: "编辑标签分组",

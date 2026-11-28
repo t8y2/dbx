@@ -5333,6 +5333,8 @@ export default withEnglishFallback({
       optimizeSuccess: "테이블 '{name}' OPTIMIZE TABLE: {message}",
       repairSuccess: "테이블 '{name}' REPAIR TABLE: {message}",
     },
+    hideProcedureTabSignatures: "탭 제목에서 저장 프로시저 매개변수 숨기기",
+    showProcedureTabSignatures: "탭 제목에 저장 프로시저 매개변수 표시",
     ddlCopyOptions: "DDL 복사 옵션",
     copyDdlWithoutAutoIncrement: "DDL 복사 및 AUTO_INCREMENT 초기값 생략",
   },

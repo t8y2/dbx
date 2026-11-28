@@ -5565,6 +5565,8 @@ export default withEnglishFallback({
       optimizeSuccess: 'Tabela "{name}" OPTIMIZE TABLE: {message}',
       repairSuccess: 'Tabela "{name}" REPAIR TABLE: {message}',
     },
+    hideProcedureTabSignatures: "Ocultar parâmetros do procedimento armazenado no título da aba",
+    showProcedureTabSignatures: "Mostrar parâmetros do procedimento armazenado no título da aba",
     xuguUserPermissions: "Usuários e privilégios do Xugu",
     openXuguUserPermissions: "Abrir usuários e privilégios do Xugu",
     standardSqlInsert: "SQL INSERT padrão",

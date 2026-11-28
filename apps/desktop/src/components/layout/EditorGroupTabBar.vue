@@ -1712,6 +1712,8 @@ async function openTabContextMenu(event: MouseEvent, open: (event: MouseEvent) =
 }
 
 function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
+  const source = tab.objectSource ?? tab.sourceLoad?.request;
+  const hideProcedureTabSignatures = settingsStore.editorSettings.hideProcedureTabSignatures;
   const items: ContextMenuItem[] = [
     ...createRenameDuplicateTabItems({
       tab,
@@ -1867,6 +1869,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       label: compactTabTitle.value ? t("contextMenu.fullTabTitle") : t("contextMenu.compactTabTitle"),
       action: toggleCompactTabTitle,
       icon: compactTabTitle.value ? Maximize2 : Minimize2,
+    },
+    {
+      label: hideProcedureTabSignatures ? t("contextMenu.showProcedureTabSignatures") : t("contextMenu.hideProcedureTabSignatures"),
+      action: () => settingsStore.updateEditorSettings({ hideProcedureTabSignatures: !hideProcedureTabSignatures }),
+      icon: hideProcedureTabSignatures ? Maximize2 : Minimize2,
+      visible: source?.objectType === "PROCEDURE" && !!source.signature,
     },
     createLocateTabMenuItem({
       t,
@@ -2129,6 +2137,7 @@ watch(
     settingsStore.editorSettings.tabGroupRows,
     settingsStore.editorSettings.tabMaxWidth,
     compactTabTitle.value,
+    settingsStore.editorSettings.hideProcedureTabSignatures,
     Array.from(collapsedTabGroups.value).sort().join("|"),
   ],
   () => {

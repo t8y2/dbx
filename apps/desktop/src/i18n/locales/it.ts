@@ -5395,6 +5395,8 @@ export default withEnglishFallback({
       optimizeSuccess: "Tabella «{name}» OPTIMIZE TABLE: {message}",
       repairSuccess: "Tabella «{name}» REPAIR TABLE: {message}",
     },
+    hideProcedureTabSignatures: "Nascondi i parametri delle stored procedure nel titolo della scheda",
+    showProcedureTabSignatures: "Mostra i parametri delle stored procedure nel titolo della scheda",
     ddlCopyOptions: "Opzioni di copia DDL",
     copyDdlWithoutAutoIncrement: "Copia DDL e ometti il valore iniziale di AUTO_INCREMENT",
   },

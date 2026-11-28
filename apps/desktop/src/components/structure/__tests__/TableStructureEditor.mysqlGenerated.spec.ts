@@ -1,4 +1,4 @@
-﻿// @vitest-environment happy-dom
+// @vitest-environment happy-dom
 
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,36 +29,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string) => key }) }));
 
-vi.mock("@lucide/vue", async () => {
+vi.mock("@lucide/vue", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@lucide/vue")>();
   const { defineComponent, h } = await import("vue");
   const Icon = defineComponent({ name: "Icon", setup: () => () => h("span") });
-  return {
-    AlertTriangle: Icon,
-    Check: Icon,
-    ChevronDown: Icon,
-    ChevronUp: Icon,
-    ClipboardList: Icon,
-    Copy: Icon,
-    Database: Icon,
-    Info: Icon,
-    Keyboard: Icon,
-    KeyRound: Icon,
-    ListChevronsUpDown: Icon,
-    Loader2: Icon,
-    Maximize2: Icon,
-    Pencil: Icon,
-    Plus: Icon,
-    RefreshCw: Icon,
-    Rows3: Icon,
-    Save: Icon,
-    Search: Icon,
-    Settings: Icon,
-    SlidersHorizontal: Icon,
-    SquareFunction: Icon,
-    Trash2: Icon,
-    UserRound: Icon,
-    X: Icon,
-  };
+  return new Proxy(actual as Record<string, unknown>, { get: (target, key) => target[key as string] ?? Icon });
 });
 
 vi.mock("@/components/ui/button", async () => {

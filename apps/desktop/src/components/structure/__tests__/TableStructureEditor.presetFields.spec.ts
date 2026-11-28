@@ -61,37 +61,11 @@ vi.mock("vue-virtual-scroller", async () => {
   };
 });
 
-vi.mock("@lucide/vue", async () => {
+vi.mock("@lucide/vue", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@lucide/vue")>();
   const { defineComponent, h } = await import("vue");
   const Icon = defineComponent({ name: "Icon", setup: () => () => h("span") });
-  return {
-    AlertTriangle: Icon,
-    Check: Icon,
-    ChevronDown: Icon,
-    ChevronUp: Icon,
-    ClipboardList: Icon,
-    Copy: Icon,
-    Database: Icon,
-    Filter: Icon,
-    Info: Icon,
-    Keyboard: Icon,
-    KeyRound: Icon,
-    ListChevronsUpDown: Icon,
-    Loader2: Icon,
-    Maximize2: Icon,
-    Pencil: Icon,
-    Plus: Icon,
-    RefreshCw: Icon,
-    RotateCcw: Icon,
-    Rows3: Icon,
-    Save: Icon,
-    Search: Icon,
-    Settings: Icon,
-    SlidersHorizontal: Icon,
-    Trash2: Icon,
-    UserRound: Icon,
-    X: Icon,
-  };
+  return new Proxy(actual as Record<string, unknown>, { get: (target, key) => target[key as string] ?? Icon });
 });
 
 vi.mock("@/components/ui/button", async () => {

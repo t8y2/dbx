@@ -12612,7 +12612,7 @@ async function handleGridActionKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
-  // Alt+←：外键跳转返回（mod 43）。仅在网格持有可返回条目时消费；未命中时
+  // Alt+←：外键跳转返回。仅在网格持有可返回条目时消费；未命中时
   // 不拦截——箭头键的单元格移动与全局标签历史快捷键保持原行为。
   if (!targetAllowsNativeClipboard && event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.key === "ArrowLeft" && foreignKeyDrillBackTarget.value) {
     event.preventDefault();
@@ -15046,8 +15046,8 @@ function foreignKeyColumnInfo(actualColIdx: number, foreignKey: ForeignKeyInfo):
   return props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase());
 }
 
-// 引用行目标（upstream：导航与单元格详情"引用行"预览共用的构造路径）：
-// cells/列信息走 fork 的多源感知 helper，跨库外键参数保留（mod 43）
+// 引用行目标：导航与单元格详情"引用行"预览共用的构造路径。
+// cells/列信息走多源感知 helper，跨库外键参数保留。
 /** Referenced table and the WHERE condition that selects the row a foreign-key cell points to. */
 async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number) {
   const association = cellForeignKeyAssociation(actualColIdx);
@@ -15083,7 +15083,7 @@ async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number)
     currentSchema: props.tableMeta?.schema || props.schema,
     fk: association.foreignKey,
     whereInput: condition,
-    // 跨库外键（mod 43 合并 upstream v0.6.46+）：连接配置 + 实际库类型
+    // 跨库外键：连接配置 + 实际库类型
     // 让目标判定数据库树层级（ref_schema 承载目标库名）还是模式感知
     connection: connectionStore.getConfig(props.connectionId),
     databaseType: resolvedDatabaseType.value,
@@ -15097,7 +15097,7 @@ async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) 
 
     // 同面板跳转：data tab 原地换目标（不安全状态由 canReuseActiveDataTab
     // 拒绝后回退新建），query tab 在结果面板内执行（编辑器 SQL 不动）；
-    // drillBack 让导航入口在改写面板前记录返回点（mod 43）
+    // drillBack 让导航入口在改写面板前记录返回点
     if (props.foreignKeyNavigationTabId && props.context === "table-data") {
       await openTableTarget(navigationTarget, { reuseTabId: props.foreignKeyNavigationTabId, drillBack: true });
     } else if (props.foreignKeyNavigationTabId && props.context === "results") {
@@ -15110,7 +15110,7 @@ async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) 
   }
 }
 
-// ---- 外键跳转返回（mod 43）----
+// ---- 外键跳转返回 ----
 
 const foreignKeyDrillBackBusy = ref(false);
 

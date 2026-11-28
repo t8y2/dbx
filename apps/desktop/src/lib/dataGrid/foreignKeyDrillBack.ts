@@ -3,7 +3,7 @@ import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import type { QueryTab } from "@/types/database";
 
 /**
- * 外键跳转（mod 4）的返回栈（mod 43）。每次同面板跳转前压入"跳转前网格内容
+ * 外键跳转的返回栈。每次同面板跳转前压入"跳转前网格内容
  * 如何恢复"；返回时从栈顶向下找到仍与当前 tab 状态匹配的条目——table-data 条目
  * 比对到达表身份（tab 被侧边栏等其它导航改指别处即作废），query 条目比对当前
  * 显示结果的 SQL（用户重跑过其它查询即作废）——之上的失配条目视为过期丢弃，
@@ -26,7 +26,7 @@ export type ForeignKeyDrillBackTab = Pick<QueryTab, "connectionId" | "database" 
 
 const stacks = reactive(new Map<string, ForeignKeyDrillBackEntry[]>());
 
-// 跳转"落地前"标记（mod 43 修正）：push 之后、新表元数据/新查询结果就位
+// 跳转"落地前"标记：push 之后、新表元数据/新查询结果就位
 // 之前，返回按钮的 computed 会立即重算——此刻 tab 仍显示跳转前内容，若无
 // 此标记 peek 会把刚压入（或返回后重新等待匹配）的栈顶当失配条目丢掉，
 // 按钮永远不出现。标记在条目首次匹配成功时清除；被更新的跳转覆盖时自愈。

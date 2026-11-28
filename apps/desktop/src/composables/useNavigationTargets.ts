@@ -97,7 +97,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
   // 状态由 canReuseActiveDataTab 拒绝，回退到原新建 tab 流程）
   const reuseTab = options.reuseTabId ? queryStore.tabs.find((tab) => tab.id === options.reuseTabId) : undefined;
   const canReuse = !!reuseTab && canReuseActiveDataTab(reuseTab, { connectionId: target.connectionId, database: target.database, schema: tableSchema, catalog: target.catalog, tableName: target.tableName });
-  // mod 43：外键跳转记录返回点——仅在真正复用当前 tab 时（回退新建 tab 的
+  // 外键跳转记录返回点——仅在真正复用当前 tab 时（回退新建 tab 的
   // 场景旧内容仍在原 tab，返回交给全局 Alt+← 标签历史）；必须在下方改写
   // tab 目标之前捕获跳转前状态（含用户过滤条件）
   if (options.drillBack && canReuse && reuseTab) {
@@ -528,7 +528,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
     const tab = findTab();
     if (!tab || tab.mode !== "query") return;
     connectionStore.activeConnectionId = target.connectionId;
-    // mod 43：跳转改写结果面板前捕获当前显示结果的 SQL——作废/取消在途
+    // 跳转改写结果面板前捕获当前显示结果的 SQL——作废/取消在途
     // 执行可能让新结果落地，必须先取
     const previousDisplayedSql = options.drillBack ? (tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql) : undefined;
     if (tab.isExecuting && tab.executionId) {
@@ -595,7 +595,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
         limit: pageLimit,
       });
       if (!navigationAlive()) return;
-      // mod 43：记录返回点——重跑 previousDisplayedSql 即回到跳转前结果
+      // 记录返回点——重跑 previousDisplayedSql 即回到跳转前结果
       if (options.drillBack && previousDisplayedSql) {
         pushForeignKeyDrillBack(options.tabId, { restore: { kind: "queryResult", sql: previousDisplayedSql }, arrivedSql: sql, label: target.tableName });
       }
@@ -617,7 +617,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
   }
 
   /**
-   * mod 43：外键跳转返回（query tab）——在结果面板内重跑跳转前的 SQL，
+   * 外键跳转返回（query tab）——在结果面板内重跑跳转前的 SQL，
    * 编辑器 SQL 依旧不动；作废/取消在途执行等语义与 executeTableTargetInQueryTab 一致。
    */
   async function executeSqlInQueryTabResults(tabId: string, sql: string) {

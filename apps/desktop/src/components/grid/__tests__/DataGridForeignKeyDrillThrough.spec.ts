@@ -31,7 +31,7 @@ describe("DataGrid foreign-key drill-through (same pane, both render modes)", ()
     expect(dataGridSource).toContain("await openTableTarget(navigationTarget);");
   });
 
-  it("records a restore point before rewriting the pane and offers a back control (mod 43)", () => {
+  it("records a restore point before rewriting the pane and offers a back control", () => {
     // navigation entries push the drill-back stack only on the in-place drill paths
     expect(navigationTargetsSource).toContain("if (options.drillBack && canReuse && reuseTab) {");
     expect(navigationTargetsSource).toContain("pushForeignKeyDrillBack(reuseTab.id, {");

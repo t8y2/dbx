@@ -555,7 +555,7 @@ pub async fn connect_and_authenticate(
 
             let passphrase = if ssh_key_passphrase.is_empty() { None } else { Some(ssh_key_passphrase) };
             let key_pair =
-                load_ssh_private_key(ssh_key_path, passphrase).map_err(|e| format!("Failed to load SSH key: {e}"))?;
+                load_ssh_private_key_with_prompt(ssh_key_path, passphrase, host_key_host, host_key_port).await?;
             let auth_res = tokio::time::timeout(
                 connect_timeout,
                 session.authenticate_publickey(
@@ -649,7 +649,7 @@ pub async fn connect_and_authenticate(
 
         let passphrase = if ssh_key_passphrase.is_empty() { None } else { Some(ssh_key_passphrase) };
         let key_pair =
-            load_ssh_private_key(ssh_key_path, passphrase).map_err(|e| format!("Failed to load SSH key: {e}"))?;
+            load_ssh_private_key_with_prompt(ssh_key_path, passphrase, host_key_host, host_key_port).await?;
         let auth_res = tokio::time::timeout(
             connect_timeout,
             session.authenticate_publickey(
@@ -1165,6 +1165,42 @@ fn load_ssh_private_key(path: &str, passphrase: Option<&str>) -> Result<PrivateK
             decode_secret_key(&sanitized, passphrase).map_err(|retry_err| retry_err.to_string())
         }
         Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Like [`load_ssh_private_key`], but prompts for a passphrase via the SSH
+/// prompt gateway when the key is encrypted and no passphrase was supplied.
+/// The passphrase is used only for this call and is never persisted.
+async fn load_ssh_private_key_with_prompt(
+    path: &str,
+    passphrase: Option<&str>,
+    host: &str,
+    port: u16,
+) -> Result<PrivateKey, String> {
+    match load_ssh_private_key(path, passphrase) {
+        Ok(key) => Ok(key),
+        Err(ref e) if e == "The key is encrypted" => {
+            let prompt = format!("Enter passphrase for SSH key: {path}");
+            let request = ssh_prompt::secret_input_request(host, port, prompt, false);
+            let Some(responder_rx) = ssh_prompt::request_ssh_prompt(request) else {
+                return Err("Failed to load SSH key: The key is encrypted (no prompt UI available)".to_string());
+            };
+            match tokio::time::timeout(KEYBOARD_INTERACTIVE_PROMPT_TIMEOUT, responder_rx).await {
+                Ok(Ok(ssh_prompt::SshPromptAnswer::Secret(pass))) => {
+                    load_ssh_private_key(path, Some(&pass))
+                        .map_err(|e| format!("Failed to load SSH key: {e}"))
+                }
+                Ok(Ok(ssh_prompt::SshPromptAnswer::Reject)) => {
+                    Err("SSH key passphrase entry was cancelled".to_string())
+                }
+                Ok(Ok(ssh_prompt::SshPromptAnswer::Accept { .. })) => {
+                    Err("SSH key passphrase prompt received an invalid response".to_string())
+                }
+                Ok(Err(_)) => Err("SSH key passphrase prompt was dismissed".to_string()),
+                Err(_) => Err("SSH key passphrase prompt timed out".to_string()),
+            }
+        }
+        Err(e) => Err(format!("Failed to load SSH key: {e}")),
     }
 }
 

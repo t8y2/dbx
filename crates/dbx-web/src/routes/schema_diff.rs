@@ -76,6 +76,26 @@ pub async fn prepare_schema_diff(
     Json(dbx_core::schema_diff::prepare_schema_diff(options))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParseSchemaDiffSqlFileRequest {
+    pub sql: String,
+    pub database: Option<String>,
+    pub db_type: Option<String>,
+}
+
+pub async fn parse_schema_diff_sql_file(
+    Json(req): Json<ParseSchemaDiffSqlFileRequest>,
+) -> Result<Json<dbx_core::schema_diff::SchemaDiffSqlFileSnapshot>, AppError> {
+    if let Some(db_type) = req.db_type.as_deref() {
+        let supported = ["mysql", "mariadb", "tidb", "goldendb"].iter().any(|name| db_type.eq_ignore_ascii_case(name));
+        if !supported {
+            return Err(AppError::from(format!("Schema files are not supported for {db_type} comparisons yet")));
+        }
+    }
+    Ok(Json(dbx_core::schema_diff::parse_mysql_schema_sql_file(&req.sql, req.database.as_deref())))
+}
+
 pub async fn generate_schema_sync_sql(Json(req): Json<GenerateSchemaSyncSqlRequest>) -> Json<String> {
     Json(
         dbx_core::schema_diff::generate_schema_sync_sql_plan_with_charset(

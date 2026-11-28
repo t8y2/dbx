@@ -26,12 +26,15 @@ import {
 import { createSchemaDiffTableListCoordinator, reconcileSchemaDiffSelectedTables, shouldLoadSchemaDiffTableList, type SchemaDiffTableIdentity, type SchemaDiffTableListLoader, type SchemaDiffTableSide } from "@/lib/schema/schemaDiffTableList";
 import { schemaDiffRoutineObjectTypes, schemaDiffRoutineObjectTypesIntersection, supportsSchemaDiffRoutines, schemaDiffRoutineProductType } from "@/lib/database/databaseObjectCapabilities";
 import { schemaDiffEngineDatabaseType } from "@/lib/schema/schemaDiff";
+import { rememberSchemaDiffSqlFileContents, SCHEMA_DIFF_SQL_FILE_MAX_BYTES } from "@/lib/schema/schemaDiffSqlFileSource";
+import { readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { ArrowLeftRight, GitCompareArrows, Save, FolderOpen, Settings, Trash2, X } from "@lucide/vue";
+import { ArrowLeftRight, FileCode2, GitCompareArrows, Save, FolderOpen, Settings, Trash2, X } from "@lucide/vue";
 import type { SchemaDiffConfig, SchemaDiffCompareOptions, FieldMappingEntry, SchemaDiffTableMapping, SchemaDiffRoutineMapping, OracleRoutineKind, OracleRoutineIdentity } from "@/types/schemaDiff";
 import type { DatabaseType } from "@/types/database";
 
@@ -44,6 +47,10 @@ const props = defineProps<{
   sourceConnectionId: string;
   sourceDatabase: string;
   sourceSchema: string;
+  sourceKind?: "connection" | "sqlFile";
+  sourceSqlFilePath?: string;
+  /** The target product can be compared against a mysqldump-style schema file. */
+  sqlFileSourceAvailable?: boolean;
   targetConnectionId: string;
   targetDatabase: string;
   targetSchema: string;
@@ -61,6 +68,8 @@ const emit = defineEmits<{
   (e: "update:sourceConnectionId", value: string): void;
   (e: "update:sourceDatabase", value: string): void;
   (e: "update:sourceSchema", value: string): void;
+  (e: "update:sourceKind", value: "connection" | "sqlFile"): void;
+  (e: "update:sourceSqlFilePath", value: string): void;
   (e: "update:targetConnectionId", value: string): void;
   (e: "update:targetDatabase", value: string): void;
   (e: "update:targetSchema", value: string): void;
@@ -122,7 +131,54 @@ function metadataRequestIsCurrent(side: "source" | "target", scope: MetadataScop
 const sourceConfig = computed(() => store.getConfig(props.sourceConnectionId));
 const targetConfig = computed(() => store.getConfig(props.targetConnectionId));
 
-const sourceDbType = computed(() => sourceConfig.value?.db_type || "");
+const sourceDbType = computed(() => (isSqlFileSource.value ? "mysql" : sourceConfig.value?.db_type || ""));
+const isSqlFileSource = computed(() => props.sourceKind === "sqlFile");
+const sqlFilePicking = ref(false);
+const sqlFileError = ref("");
+
+async function pickSqlFile(): Promise<string | null> {
+  if (isTauriRuntime(globalThis)) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selection = await open({ multiple: false, directory: false, filters: [{ name: "SQL", extensions: ["sql", "ddl", "txt"] }] });
+    const path = Array.isArray(selection) ? selection[0] : selection;
+    if (!path) return null;
+    const snapshot = await api.readExternalSqlFileSnapshot(path, SCHEMA_DIFF_SQL_FILE_MAX_BYTES, "auto");
+    rememberSchemaDiffSqlFileContents(path, snapshot.content, snapshot.encoding);
+    return path;
+  }
+  const file = await new Promise<File | null>((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".sql,.ddl,.txt,text/plain";
+    input.onchange = () => resolve(input.files?.[0] ?? null);
+    input.oncancel = () => resolve(null);
+    input.click();
+  });
+  if (!file) return null;
+  const sql = await readBrowserSqlFile(file, SCHEMA_DIFF_SQL_FILE_MAX_BYTES);
+  // A browser cannot expose a real path, so the file name keys the cached contents.
+  const name = "browser:" + file.name;
+  rememberSchemaDiffSqlFileContents(name, sql);
+  return name;
+}
+
+async function handlePickSqlFile(): Promise<void> {
+  if (sqlFilePicking.value) return;
+  sqlFilePicking.value = true;
+  sqlFileError.value = "";
+  try {
+    const path = await pickSqlFile();
+    if (path) emit("update:sourceSqlFilePath", path);
+  } catch (error) {
+    sqlFileError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    sqlFilePicking.value = false;
+  }
+}
+
+function schemaFileName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
 const targetDbType = computed(() => targetConfig.value?.db_type || "");
 const showFieldMapping = computed(() => sourceDbType.value && targetDbType.value && sourceDbType.value !== targetDbType.value);
 const activeFieldMappings = computed(() => props.options?.fieldMappings ?? []);
@@ -224,10 +280,12 @@ function clearUnavailableTableSelection() {
 }
 
 function getTableIdentity(side: SchemaDiffTableSide): SchemaDiffTableIdentity {
-  return side === "source" ? { connectionId: props.sourceConnectionId, database: props.sourceDatabase, schema: props.sourceSchema } : { connectionId: props.targetConnectionId, database: props.targetDatabase, schema: props.targetSchema };
+  if (side === "source") return { connectionId: props.sourceConnectionId, database: props.sourceDatabase, schema: props.sourceSchema, ...(isSqlFileSource.value ? { sqlFilePath: props.sourceSqlFilePath } : {}) };
+  return { connectionId: props.targetConnectionId, database: props.targetDatabase, schema: props.targetSchema };
 }
 
 function isTableIdentityReady(side: SchemaDiffTableSide): boolean {
+  if (side === "source" && isSqlFileSource.value) return !!props.sourceSqlFilePath;
   const identity = getTableIdentity(side);
   const config = side === "source" ? sourceConfig.value : targetConfig.value;
   return supportsDatabaseCompare(config, "schema") && !!identity.connectionId && !!identity.database && (!isSchemaAware(config?.db_type) || !!identity.schema);
@@ -276,12 +334,13 @@ const targetRoutineType = computed(() => schemaDiffRoutineProductType(targetDbTy
 const availableRoutineKinds = computed(() => schemaDiffRoutineObjectTypesIntersection(sourceRoutineType.value, targetRoutineType.value, ["PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"]));
 const routineKinds = computed(() => props.options.routineObjectKinds ?? schemaDiffRoutineObjectTypesIntersection(sourceRoutineType.value, targetRoutineType.value));
 const typedRoutines = computed(() => props.options.routineObjectKinds !== undefined);
-const canEnableRoutinesCompare = computed(() => availableRoutineKinds.value.length > 0);
+// A dump carries no routine definitions, so comparing them would report every target routine as removed.
+const canEnableRoutinesCompare = computed(() => availableRoutineKinds.value.length > 0 && !isSqlFileSource.value);
 /** User preference AND supported pair — drives compare/canCompare/Switch display. */
 const effectiveRoutinesEnabled = computed(() => routinesCompareEnabled.value && canEnableRoutinesCompare.value);
 
 watch(
-  () => [tablesCompareEnabled.value, restrictTables.value, props.sourceConnectionId, props.sourceDatabase, props.sourceSchema, sourceDbType.value],
+  () => [tablesCompareEnabled.value, restrictTables.value, props.sourceConnectionId, props.sourceDatabase, props.sourceSchema, props.sourceSqlFilePath, sourceDbType.value],
   () => {
     const shouldLoad = tablesCompareEnabled.value && shouldLoadSchemaDiffTableList("source", restrictTables.value, localSelectedTables.value.length, isTableIdentityReady("source"));
     tableListCoordinator.refresh("source", shouldLoad).catch(() => {});
@@ -590,20 +649,8 @@ const canCompare = computed(() => {
   // source-only tables (CREATE TABLE in the target), matching the pre-mapping behavior.
   const hasValidTableMappings = !tablesEnabled || !restrictTables.value || localSelectedTables.value.length === 0 || isTableIdentityReady("target");
   const hasValidRoutineMappings = !routinesEnabled || !restrictRoutines.value || localSelectedRoutines.value.length === 0 || isTableIdentityReady("target");
-  return (
-    supportsDatabaseCompare(sourceConfig.value, "schema") &&
-    supportsDatabaseCompare(targetConfig.value, "schema") &&
-    props.sourceConnectionId &&
-    props.targetConnectionId &&
-    props.sourceDatabase &&
-    props.targetDatabase &&
-    hasSelectedTables &&
-    hasSelectedRoutines &&
-    hasValidTableMappings &&
-    hasValidRoutineMappings &&
-    (!isSchemaAware(sourceConfig.value?.db_type) || props.sourceSchema) &&
-    (!isSchemaAware(targetConfig.value?.db_type) || props.targetSchema)
-  );
+  const sourceReady = isSqlFileSource.value ? !!props.sourceSqlFilePath : !!(supportsDatabaseCompare(sourceConfig.value, "schema") && props.sourceConnectionId && props.sourceDatabase && (!isSchemaAware(sourceConfig.value?.db_type) || props.sourceSchema));
+  return sourceReady && supportsDatabaseCompare(targetConfig.value, "schema") && props.targetConnectionId && props.targetDatabase && hasSelectedTables && hasSelectedRoutines && hasValidTableMappings && hasValidRoutineMappings && (!isSchemaAware(targetConfig.value?.db_type) || props.targetSchema);
 });
 
 async function loadDatabases(connectionId: string, side: "source" | "target") {
@@ -817,11 +864,12 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
     <!-- Header -->
     <div class="flex items-center justify-center gap-4 py-2">
       <div class="text-center">
-        <div class="text-xs text-muted-foreground">{{ sourceConfig?.name || t("diff.source") }}</div>
-        <div class="text-xs font-medium">{{ sourceDatabase }}{{ sourceSchema ? `.${sourceSchema}` : "" }}</div>
+        <div class="text-xs text-muted-foreground">{{ isSqlFileSource ? schemaFileName(sourceSqlFilePath || "") : sourceConfig?.name || t("diff.source") }}</div>
+        <div class="text-xs font-medium">{{ isSqlFileSource ? t("diff.sourceSqlFile") : sourceDatabase }}{{ !isSqlFileSource && sourceSchema ? `.${sourceSchema}` : "" }}</div>
       </div>
       <div class="flex items-center gap-2">
-        <DatabaseIcon v-if="sourceConnectionId" :db-type="connectionIconType(sourceConnectionId)" class="w-5 h-5" />
+        <FileCode2 v-if="isSqlFileSource" class="w-5 h-5 text-blue-500" />
+        <DatabaseIcon v-else-if="sourceConnectionId" :db-type="connectionIconType(sourceConnectionId)" class="w-5 h-5" />
         <ArrowLeftRight class="w-4 h-4 text-muted-foreground" />
         <DatabaseIcon v-if="targetConnectionId" :db-type="connectionIconType(targetConnectionId)" class="w-5 h-5" />
       </div>
@@ -837,12 +885,17 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
       <div class="space-y-3">
         <div class="text-sm font-medium text-blue-500">{{ t("diff.source") }}</div>
 
-        <div class="space-y-1.5">
+        <div v-if="sqlFileSourceAvailable" class="inline-flex rounded-md border p-0.5">
+          <button type="button" class="rounded px-2 py-1 text-xs" :class="!isSqlFileSource ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'" :disabled="loading" @click="$emit('update:sourceKind', 'connection')">{{ t("diff.sourceKindConnection") }}</button>
+          <button type="button" class="rounded px-2 py-1 text-xs" :class="isSqlFileSource ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'" :disabled="loading" @click="$emit('update:sourceKind', 'sqlFile')">{{ t("diff.sourceKindSqlFile") }}</button>
+        </div>
+
+        <div v-if="!isSqlFileSource" class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.connection") }}</Label>
           <CompareConnectionSelect :model-value="sourceConnectionId" @update:model-value="(v: string) => $emit('update:sourceConnectionId', v)" :connections="compareConnections" :layout="store.sidebarLayout" :disabled="loading" />
         </div>
 
-        <div class="space-y-1.5">
+        <div v-if="!isSqlFileSource" class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.database") }}</Label>
           <SearchableSelect
             :model-value="sourceDatabase"
@@ -858,7 +911,7 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
           />
         </div>
 
-        <div v-if="isSchemaAware(sourceConfig?.db_type)" class="space-y-1.5">
+        <div v-if="!isSqlFileSource && isSchemaAware(sourceConfig?.db_type)" class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.schema") }}</Label>
           <SearchableSelect
             :model-value="sourceSchema"
@@ -874,8 +927,21 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
           />
         </div>
 
+        <div v-if="isSqlFileSource" class="space-y-1.5">
+          <Label class="text-xs">{{ t("diff.sourceSqlFile") }}</Label>
+          <div class="flex items-center gap-2">
+            <Button variant="outline" size="sm" class="h-8 text-xs" :disabled="loading || sqlFilePicking" @click="handlePickSqlFile">{{ t("diff.chooseSqlFile") }}</Button>
+            <Button v-if="sourceSqlFilePath" variant="ghost" size="icon" class="h-8 w-8" :disabled="loading" @click="$emit('update:sourceSqlFilePath', '')">
+              <X class="w-4 h-4" />
+            </Button>
+          </div>
+          <div v-if="sourceSqlFilePath" class="break-all rounded border bg-muted/30 px-2 py-1 text-xs">{{ schemaFileName(sourceSqlFilePath) }}</div>
+          <p class="text-[11px] text-muted-foreground">{{ t("diff.sourceSqlFileHint") }}</p>
+          <p v-if="sqlFileError" class="text-[11px] text-destructive">{{ sqlFileError }}</p>
+        </div>
+
         <!-- Source Info -->
-        <div v-if="getConnectionInfo(sourceConnectionId)" class="mt-4 p-3 rounded-lg bg-muted/30 border space-y-1.5">
+        <div v-if="!isSqlFileSource && getConnectionInfo(sourceConnectionId)" class="mt-4 p-3 rounded-lg bg-muted/30 border space-y-1.5">
           <div class="text-xs font-medium text-blue-500">{{ t("diff.info") }}</div>
           <div class="grid grid-cols-[80px_1fr] gap-x-2 gap-y-0.5 text-xs">
             <span class="text-muted-foreground">{{ t("diff.connType") }}</span>
@@ -894,7 +960,7 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
 
       <!-- Swap Button -->
       <div class="pt-8">
-        <Button variant="ghost" size="icon" class="h-8 w-8" @click="$emit('swap')">
+        <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="isSqlFileSource" @click="$emit('swap')">
           <ArrowLeftRight class="w-4 h-4" />
         </Button>
       </div>

@@ -9192,6 +9192,11 @@ export default withEnglishFallback({
     dependencyGraph: "Grafo de dependências",
     copySourceDdl: "Copiar DDL de origem",
     copyTargetDdl: "Copiar DDL de destino",
+    sourceKindConnection: "Conexão",
+    sourceKindSqlFile: "Arquivo SQL",
+    sourceSqlFile: "Arquivo de estrutura",
+    chooseSqlFile: "Escolher arquivo",
+    sourceSqlFileHint: "Use um arquivo de exportação somente com a estrutura (mysqldump --no-data). Serão comparados tabelas, views, índices e chaves estrangeiras; rotinas não são comparadas.",
   },
   rollbackComparison: {
     title: "Comparação de Reversão",

@@ -29,6 +29,8 @@ mod mysql_defaults;
 pub use mysql_charset::{MysqlTableCharset, TableCharsetDiff};
 mod oracle_indexes;
 mod oracle_routines;
+mod sql_file;
+pub use sql_file::{parse_mysql_schema_sql_file, SchemaDiffSqlFileSnapshot};
 mod sqlserver_dependencies;
 pub use oracle_indexes::{
     OracleSchemaSyncDdlOptions, OracleSchemaSyncDdlSources, OracleSchemaSyncEndpoint, OracleSchemaSyncTableDdl,

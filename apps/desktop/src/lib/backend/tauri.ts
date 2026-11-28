@@ -3092,6 +3092,18 @@ export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): 
   return schemaDiffPreparationFromWire(await invoke<SchemaDiffPreparationWire>("prepare_schema_diff", { options: schemaDiffPreparationToWire(options) }));
 }
 
+export interface SchemaDiffSqlFileParseResult {
+  tables: TableInfo[];
+  details: import("@/lib/schema/schemaDiff").TableSchemaDetail[];
+  functions: FunctionInfo[];
+  warnings?: string[];
+}
+
+/** Parse a mysqldump-style schema file into the same snapshot a live connection would produce. */
+export async function parseSchemaDiffSqlFile(sql: string, database?: string, dbType?: string): Promise<SchemaDiffSqlFileParseResult> {
+  return invoke("parse_schema_diff_sql_file", { sql, database, dbType });
+}
+
 export async function listDialectDataTypes(dialectName: string): Promise<string[]> {
   return invoke("list_dialect_data_types", { dialectName });
 }

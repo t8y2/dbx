@@ -10,6 +10,23 @@ pub fn prepare_schema_diff(
 }
 
 #[tauri::command]
+pub fn parse_schema_diff_sql_file(
+    sql: String,
+    database: Option<String>,
+    db_type: Option<String>,
+) -> Result<dbx_core::schema_diff::SchemaDiffSqlFileSnapshot, String> {
+    // Only MySQL dumps are understood so far; fail loudly instead of silently
+    // comparing an empty source snapshot.
+    if let Some(db_type) = db_type.as_deref() {
+        let supported = ["mysql", "mariadb", "tidb", "goldendb"].iter().any(|name| db_type.eq_ignore_ascii_case(name));
+        if !supported {
+            return Err(format!("Schema files are not supported for {db_type} comparisons yet"));
+        }
+    }
+    Ok(dbx_core::schema_diff::parse_mysql_schema_sql_file(&sql, database.as_deref()))
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn generate_schema_sync_sql(
     diffs: Vec<dbx_core::schema_diff::TableDiff>,

@@ -902,6 +902,7 @@ async fn serve() -> Result<(), String> {
         .route("/docs/export", post(routes::docs::export_html))
         .route("/dialect/data-types", get(routes::dialect::list_data_types))
         .route("/schema-diff/prepare", post(routes::schema_diff::prepare_schema_diff))
+        .route("/schema-diff/sql-file-parse", post(routes::schema_diff::parse_schema_diff_sql_file))
         .route("/schema-diff/generate-sync-sql", post(routes::schema_diff::generate_schema_sync_sql))
         .route("/schema-diff/generate-sync-plan", post(routes::schema_diff::generate_schema_sync_plan))
         .route(

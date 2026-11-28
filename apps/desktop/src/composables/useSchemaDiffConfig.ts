@@ -194,13 +194,22 @@ export function useSchemaDiffConfig() {
     if (updates.targetConnectionId !== undefined) filtered.targetConnectionId = updates.targetConnectionId;
     if (updates.targetDatabase !== undefined) filtered.targetDatabase = updates.targetDatabase;
     if (updates.targetSchema !== undefined) filtered.targetSchema = updates.targetSchema;
+    if (updates.sourceKind !== undefined) filtered.sourceKind = updates.sourceKind;
+    if (updates.sourceSqlFilePath !== undefined) filtered.sourceSqlFilePath = updates.sourceSqlFilePath;
     updateConfig(activeConfig.value.id, filtered);
   }
 
   function saveToHistory(config: SchemaDiffConfig) {
     // Check if same config already exists (same connection/db/schema)
     const existingIndex = recentConfigs.value.findIndex(
-      (c) => c.sourceConnectionId === config.sourceConnectionId && c.sourceDatabase === config.sourceDatabase && c.sourceSchema === config.sourceSchema && c.targetConnectionId === config.targetConnectionId && c.targetDatabase === config.targetDatabase && c.targetSchema === config.targetSchema,
+      (c) =>
+        c.sourceConnectionId === config.sourceConnectionId &&
+        c.sourceDatabase === config.sourceDatabase &&
+        c.sourceSchema === config.sourceSchema &&
+        (c.sourceSqlFilePath ?? "") === (config.sourceSqlFilePath ?? "") &&
+        c.targetConnectionId === config.targetConnectionId &&
+        c.targetDatabase === config.targetDatabase &&
+        c.targetSchema === config.targetSchema,
     );
 
     if (existingIndex !== -1) {

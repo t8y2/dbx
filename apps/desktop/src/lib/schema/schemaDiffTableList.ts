@@ -6,6 +6,8 @@ export interface SchemaDiffTableIdentity {
   connectionId: string;
   database: string;
   schema: string;
+  /** Set when the side is a schema-only SQL file instead of a live connection. */
+  sqlFilePath?: string;
 }
 
 export interface SchemaDiffTableListLoader {
@@ -15,6 +17,7 @@ export interface SchemaDiffTableListLoader {
 interface SchemaDiffTableListLoaderDependencies {
   ensureConnected(connectionId: string): Promise<unknown>;
   listTables(connectionId: string, database: string, schema: string): Promise<TableInfo[]>;
+  loadSqlFileTables?(identity: SchemaDiffTableIdentity): Promise<TableInfo[]>;
 }
 
 interface SchemaDiffTableListCoordinatorOptions {
@@ -26,11 +29,11 @@ interface SchemaDiffTableListCoordinatorOptions {
 }
 
 function identityKey(identity: SchemaDiffTableIdentity): string {
-  return JSON.stringify([identity.connectionId, identity.database, identity.schema]);
+  return JSON.stringify([identity.connectionId, identity.database, identity.schema, identity.sqlFilePath ?? ""]);
 }
 
 export function sameSchemaDiffTableIdentity(left: SchemaDiffTableIdentity, right: SchemaDiffTableIdentity): boolean {
-  return left.connectionId === right.connectionId && left.database === right.database && left.schema === right.schema;
+  return left.connectionId === right.connectionId && left.database === right.database && left.schema === right.schema && (left.sqlFilePath ?? "") === (right.sqlFilePath ?? "");
 }
 
 export function shouldLoadSchemaDiffTableList(side: SchemaDiffTableSide, restricted: boolean, selectedTableCount: number, identityReady: boolean): boolean {
@@ -40,6 +43,15 @@ export function shouldLoadSchemaDiffTableList(side: SchemaDiffTableSide, restric
 export function reconcileSchemaDiffSelectedTables(selectedTables: string[], availableTables: string[]): string[] {
   const available = new Set(availableTables);
   return selectedTables.filter((table) => available.has(table));
+}
+
+function loadTables(dependencies: SchemaDiffTableListLoaderDependencies, identity: SchemaDiffTableIdentity): Promise<TableInfo[]> {
+  if (identity.sqlFilePath) {
+    const loader = dependencies.loadSqlFileTables;
+    if (!loader) return Promise.reject(new Error("SQL file sources are not configured for table lists"));
+    return loader(identity);
+  }
+  return dependencies.ensureConnected(identity.connectionId).then(() => dependencies.listTables(identity.connectionId, identity.database, identity.schema));
 }
 
 export function createSchemaDiffTableListLoader(dependencies: SchemaDiffTableListLoaderDependencies): SchemaDiffTableListLoader {
@@ -54,13 +66,11 @@ export function createSchemaDiffTableListLoader(dependencies: SchemaDiffTableLis
 
       const cached = options?.refresh ? undefined : successful.get(key);
       if (cached) {
-        await dependencies.ensureConnected(identity.connectionId);
+        if (!identity.sqlFilePath) await dependencies.ensureConnected(identity.connectionId);
         return cached;
       }
 
-      const request = dependencies
-        .ensureConnected(identity.connectionId)
-        .then(() => dependencies.listTables(identity.connectionId, identity.database, identity.schema))
+      const request = loadTables(dependencies, identity)
         .then((tables) => {
           const normalized = Array.isArray(tables) ? tables : [];
           successful.set(key, normalized);

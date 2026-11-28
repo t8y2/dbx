@@ -8962,6 +8962,11 @@ export default withEnglishFallback({
     routineCallers: "영향받는 호출자",
     copySourceDdl: "소스 DDL 복사",
     copyTargetDdl: "대상 DDL 복사",
+    sourceKindConnection: "연결",
+    sourceKindSqlFile: "SQL 파일",
+    sourceSqlFile: "구조 파일",
+    chooseSqlFile: "파일 선택",
+    sourceSqlFileHint: "구조만 포함된 내보내기 파일(mysqldump --no-data)을 사용합니다. 테이블, 뷰, 인덱스, 외래 키를 비교하며 루틴은 비교에 포함되지 않습니다.",
   },
   rollbackComparison: {
     title: "롤백 비교",

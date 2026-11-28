@@ -2814,6 +2814,7 @@ pub fn run() {
             commands::plugins::install_jdbc_plugin_local,
             commands::plugins::uninstall_jdbc_plugin,
             commands::schema_diff::prepare_schema_diff,
+            commands::schema_diff::parse_schema_diff_sql_file,
             commands::schema_diff::generate_schema_sync_sql,
             commands::schema_diff::generate_schema_sync_plan,
             commands::dialect_cmd::list_dialect_data_types,
